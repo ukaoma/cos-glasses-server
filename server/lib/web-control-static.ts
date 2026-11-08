@@ -25,6 +25,7 @@ import fs from 'fs'
 import path from 'path'
 import zlib from 'zlib'
 import type { NextFunction, Request, RequestHandler, Response } from 'express'
+import { INTEGRITY_ERROR_PAGE, WEB_CONTROL_INTEGRITY_RECHECK_MS, type WebControlIntegrity } from './web-control-integrity.js'
 
 /** A versioned URL's lifetime. Safe because the hash changes whenever the bytes do. */
 export const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
@@ -114,11 +115,18 @@ export function rewriteReferences(text: string, mount: string, hashes: Map<strin
  * them and hashed, then HTML is rewritten against everything. So a font change gives its CSS a
  * new hash, and that gives index.html new references.
  */
-export function buildWebAssetTable(dir: string, mount = '/control'): WebAssetTable {
-  const files = walk(dir)
+export function buildWebAssetTable(dir: string, mount = '/control', source?: ReadonlyMap<string, Buffer>): WebAssetTable {
+  // 6.99.31: with `source` (integrity mode), the table is built ONLY from those verified bytes; the
+  // disk is not read at all.
+  const files = source
+    ? [...source.keys()].sort().filter(urlPath => TYPES[path.extname(urlPath).toLowerCase()] && !urlPath.split('/').some(part => part.startsWith('.'))).map(urlPath => ({ urlPath, file: urlPath }))
+    : walk(dir)
   const hashes = new Map<string, string>()
   const table: WebAssetTable = new Map()
-  const read = (file: string): Buffer | null => { try { return fs.readFileSync(file) } catch { return null } }
+  const read = (file: string): Buffer | null => {
+    if (source) return source.get(file) ?? null
+    try { return fs.readFileSync(file) } catch { return null }
+  }
   const add = (urlPath: string, ext: string, body: Buffer): void => {
     const hash = sha(body)
     hashes.set(urlPath, hash)
@@ -168,20 +176,45 @@ function compressed(asset: WebAsset, encoding: 'br' | 'gzip'): Promise<Buffer> {
 
 export interface WebControlStaticOptions {
   mount?: string
-  /** How often the tree is re-checked for edits. 0 checks on every request. */
+  /** How often the tree is re-checked for edits. 0 checks on every request. Ignored in integrity mode. */
   recheckMs?: number
   now?: () => number
+  /**
+   * 6.99.31 (Phase 6): serve only bytes that matched the pack-time manifest, from memory. The disk is
+   * never re-read per request; the integrity check re-runs every `integrityRecheckMs` (default 60 s,
+   * 0: never on a timer, tests call `integrity.check()`). While it fails, every GET or HEAD under the
+   * mount answers the plain integrity-error page (503), and nothing falls through to a disk server.
+   */
+  integrity?: WebControlIntegrity
+  integrityRecheckMs?: number
 }
 
-export function createWebControlStatic(dir: string, opts: WebControlStaticOptions = {}): RequestHandler & { table: () => WebAssetTable } {
+export function createWebControlStatic(dir: string, opts: WebControlStaticOptions = {}): RequestHandler & { table: () => WebAssetTable; stop: () => void } {
   const mount = opts.mount ?? '/control'
   const recheckMs = opts.recheckMs ?? 1000
   const now = opts.now ?? Date.now
-  let signature = treeSignature(dir)
-  let table = buildWebAssetTable(dir, mount)
+  const integrity = opts.integrity ?? null
+  let signature = integrity ? '' : treeSignature(dir)
+  let table: WebAssetTable = integrity ? new Map() : buildWebAssetTable(dir, mount)
+  let builtFrom = -1
   let checkedAt = now()
+  let timer: ReturnType<typeof setInterval> | null = null
+  if (integrity) {
+    const every = opts.integrityRecheckMs ?? WEB_CONTROL_INTEGRITY_RECHECK_MS
+    if (every > 0) { timer = setInterval(() => { try { integrity.check() } catch { /* the next tick retries */ } }, every); timer.unref?.() }
+  }
+
+  /** Integrity mode: the table of verified bytes, or null while the check fails. */
+  const verified = (): WebAssetTable | null => {
+    if (!integrity) return null
+    const snap = integrity.snapshot()
+    if (!snap) return null
+    if (integrity.generation !== builtFrom) { table = buildWebAssetTable(dir, mount, snap); builtFrom = integrity.generation }
+    return table
+  }
 
   const current = (): WebAssetTable => {
+    if (integrity) return verified() ?? new Map()
     if (now() - checkedAt >= recheckMs) {
       checkedAt = now()
       const next = treeSignature(dir)
@@ -194,8 +227,19 @@ export function createWebControlStatic(dir: string, opts: WebControlStaticOption
     if (req.method !== 'GET' && req.method !== 'HEAD') { next(); return }
     let urlPath = req.path || '/'
     if (urlPath.endsWith('/')) urlPath += 'index.html'
+    if (integrity && verified() === null) {
+      res.status(503)
+      res.setHeader('Content-Type', 'text/html; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-store')
+      if (req.method === 'HEAD') res.end(); else res.end(INTEGRITY_ERROR_PAGE)
+      return
+    }
     const asset = current().get(urlPath)
-    if (!asset) { next(); return }
+    if (!asset) {
+      // Integrity mode serves nothing it did not verify: no fall-through to a disk server.
+      if (integrity) { res.status(404).type('text').send('Not found'); return }
+      next(); return
+    }
 
     const versioned = VERSIONABLE.has(asset.ext) && req.query.v === asset.hash
     const encoding = COMPRESSIBLE.has(asset.ext) ? pickEncoding(req.headers['accept-encoding'] as string | undefined) : null
@@ -222,5 +266,5 @@ export function createWebControlStatic(dir: string, opts: WebControlStaticOption
       if (req.method === 'HEAD') res.end(); else res.end(asset.body)
     })
   }
-  return Object.assign(handler, { table: current })
+  return Object.assign(handler, { table: current, stop: () => { if (timer) clearInterval(timer); timer = null } })
 }

@@ -20,3 +20,7 @@ server/models/*.onnx
 __pycache__/
 *.pyc
 *.bak*
+
+# 6.99.31: written by the prepack step (server/scripts/write-web-control-manifest.mjs), shipped in the tarball
+server/web-control/.manifest.json
+server/web-signer/.manifest.json

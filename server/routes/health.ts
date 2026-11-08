@@ -10,6 +10,7 @@ import { customInstructionsCapability, learnedStyleCapability, polishOptionsCapa
 import { PAIRING_PROTOCOL_VERSION } from '../lib/glasses-pairing.js'
 import { taskBridgeAvailable } from '../lib/task-bridge.js'
 import { Router } from 'express'
+import { webKeyAuthorityEnabled } from '../lib/web-key-authority.js'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { claudeSessionsEnabled } from './claude-sessions.js'
 import { statSync } from 'node:fs'
@@ -460,6 +461,9 @@ healthRouter.get('/health', async (_req, res) => {
     // 6.99.27: a session turn also takes ANY file up to this size (lib/turn-file-store.ts), sent to /api/media/file with
     // X-COS-Purpose: session-turn. 0 with attach off; absent on an older server, which takes only what the media store reads.
     threadTurnFileBytes: threadAttach.enabled ? TURN_FILE_MAX_BYTES : 0,
+    // 6.99.31 (Phase 3): the phone key signer exists (COS_WEB_KEY_AUTHORITY on), so Control Web may offer
+    // "Approve on this phone". Absent with the flag off: the composer is exactly 6.99.29's.
+    ...(webKeyAuthorityEnabled() ? { webKeySigner: 1 } : {}),
     ...sessionHooksHealthFields(),
     // 6.52.0: counts, the mode and two timestamps; never an id, a question, a command, or
     // how many are held (that is on the authenticated questions route).
