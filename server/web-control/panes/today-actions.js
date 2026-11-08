@@ -1146,8 +1146,9 @@
     if (!O.last) { box.innerHTML = ''; return; }
     var at = W.toDate(O.last.at), long = O.last.text.length > 700;
     box.innerHTML = '<section class="ta-last" aria-label="Last reply"><p class="ta-last-head">' + esc('Last reply' + (at ? ', ' + W.clock(at) : '')) + '</p>' +
+      (K.imageHtml ? K.imageHtml(O.last, { part: 'before' }) : '') +
       '<div class="sx-md ta-last-text' + (long ? ' clamped' : '') + '" id="ta-last-text">' + K.markdown(O.last.text.slice(0, 12000)) + '</div>' +
-      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + (K.imageHtml ? K.imageHtml(O.last) : '') + '<p id="ta-last-refresh" class="ta-sub" role="status"></p></section>';
+      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + (K.imageHtml ? K.imageHtml(O.last, { part: 'after' }) : '') + '<p id="ta-last-refresh" class="ta-sub" role="status"></p></section>';
     if (K.imagesMount) K.imagesMount(box, O.r);
   }
 

@@ -382,7 +382,7 @@ export class AgentSessionOutputImages {
     // window waits for the next assistant turn and is marked `before`. A user turn ends a step that never got words.
     const toolSources = new Map<string, ToolSource>()
     const uses = new Map<string, ToolUseMeta>()
-    const groups = new WeakMap<SessionTurn, { before: number; after: number }>()
+    let groups = new WeakMap<SessionTurn, { before: number; after: number }>()
     let last: SessionTurn | null = null
     let pending: SessionToolImage[] = [], pendingExtra = 0
     const recordKeyOf = (row: Record<string, unknown>) => typeof row.uuid === 'string' && row.uuid ? 'u:' + row.uuid : digest(JSON.stringify(row))
@@ -457,6 +457,13 @@ export class AgentSessionOutputImages {
         last = result
       }
       return result
+    }
+    withTools.reset = () => {
+      // readRecentSessionTurns may grow from 2 to 8 to 24 MiB. Each pass must project
+      // only its own records, not attach early images to a turn discarded with the smaller window.
+      sources.clear(); files.clear(); toolSources.clear(); uses.clear()
+      groups = new WeakMap()
+      last = null; pending = []; pendingExtra = 0
     }
     return { project: withTools, sources, files, toolSources }
   }

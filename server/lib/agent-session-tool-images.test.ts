@@ -123,6 +123,17 @@ describe('finding the images in the record shapes', () => {
 })
 
 describe('the reader shows them at the step where they happened', () => {
+  it('growing transcript windows keep an opening tool image on the first reply and authorize its content', async () => {
+    const f = fixture(() => [use('opening-read', 'Read'), readResult('opening-read', PNG), said('First reply.'),
+      { type: 'progress', padding: 'x'.repeat(2 * 1024 * 1024 + 1024) }, said('Last reply.')])
+    const { turns } = await f.turns()
+    expect(turns.map(t => t.text)).toEqual(['First reply.', 'Last reply.'])
+    expect(turns[0].toolImages, 'the small pass must not retain Last reply as the image target').toHaveLength(1)
+    expect(turns[0].toolImages![0].before).toBe(true)
+    expect(turns[1].toolImages).toBeUndefined()
+    const id = turns[0].toolImages![0].id
+    expect(await f.service.toolImageContent('claude', 'session', id)).toMatchObject({ status: 'ok' })
+  })
   it('a step of a Read and a screenshot rides on the words before it: Read 1 of 2, Screenshot 2 of 2; no path or bytes travel', async () => {
     const f = fixture(ws => [prompt('Check the render', []), said('Looking at it.'), use('t1', 'Read', { file_path: join(ws, 'out', 'shot.png') }), readResult('t1', PNG),
       use('t2', 'mcp__Claude_Browser__computer'), shotResult('t2', JPEG), said('It looks right.')])

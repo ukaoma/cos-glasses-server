@@ -55,7 +55,11 @@ export interface SessionTurn {
   previewsOff?: true
 }
 
-export type SessionTurnProjection = (provider: AgentProvider, record: Record<string, unknown>, turn: SessionTurn | null) => SessionTurn | null
+export type SessionTurnProjection = {
+  (provider: AgentProvider, record: Record<string, unknown>, turn: SessionTurn | null): SessionTurn | null
+  /** A growing read reparses its window from scratch; discard state from the previous pass. */
+  reset?: () => void
+}
 
 /** What a client may ask for in one read. Forty messages is ~10 lens pages of words. */
 export const SESSION_TURNS_MAX = 40
@@ -146,6 +150,7 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
 
 /** The newest `limit` messages among these lines (file order in, file order out). */
 export function recentSessionTurns(provider: AgentProvider, lines: readonly string[], limit: number, project?: SessionTurnProjection): SessionTurn[] {
+  project?.reset?.()
   const out: SessionTurn[] = []
   for (const line of lines) {
     const obj = parseJsonLine(line)

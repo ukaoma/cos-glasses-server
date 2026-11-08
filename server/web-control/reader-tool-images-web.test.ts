@@ -30,8 +30,15 @@ class El {
   get textContent(): string { return [this.words, ...this.children.map(c => c.textContent)].filter(Boolean).join(' ') }
   set innerHTML(v: string) {
     this.markup = v; this.children = []; this.words = ''
-    for (const m of v.matchAll(/<(\w+)\b[^>]*\bid="([^"]+)"[^>]*>/g)) { const e = new El(m[1], this.doc); e.id = m[2]; this.doc.ids.set(e.id, e); this.appendChild(e) }
-    for (const m of v.matchAll(/<div (data-reader-(?:images|files|tools))="([^"]*)">/g)) { const e = new El('div', this.doc); e.attrs[m[1]] = decode(m[2]); this.appendChild(e) }
+    // Keep the relevant nodes in markup order so ordering assertions exercise the rendered sheet.
+    for (const m of v.matchAll(/<(\w+)\b([^>]*)>/g)) {
+      const id = /\bid="([^"]+)"/.exec(m[2]), slot = /\b(data-reader-(?:images|files|tools))="([^"]*)"/.exec(m[2])
+      if (!id && !slot) continue
+      const e = new El(m[1], this.doc)
+      if (id) { e.id = id[1]; this.doc.ids.set(e.id, e) }
+      if (slot) e.attrs[slot[1]] = decode(slot[2])
+      this.appendChild(e)
+    }
   }
   get innerHTML() { return this.markup + this.children.map(c => c.dump()).join('') }
   dump(): string { return '<' + this.tag + ' ' + JSON.stringify(this.attrs) + ' ' + this.className + ' ' + this.alt + ' ' + this.src + ' ' + this.title + '>' + this.words + this.children.map(c => c.dump()).join('') + '</' + this.tag + '>' }
@@ -232,7 +239,29 @@ describe('enlarge, then Back or Escape: the same session, the same scroll spot, 
   })
 })
 
-describe("Today's session sheet shows the step under its last reply", () => {
+describe("Today's session sheet orders tool steps around its last reply", () => {
+  it.each(['Looked at it.', ''])('keeps before and after image nodes on the correct side of prose %j', async text => {
+    const t = load(), box = t.document.createElement('section'); t.document.ids.set('ta-last', box); t.document.body.appendChild(box)
+    const O: any = { r: { provider: 'claude', id: SID }, row: {}, open: { kind: 'run' } }
+    const K = { answer: async () => ({ status: 200, body: { recent_turns: [
+      { role: 'assistant', text: 'Previous reply' },
+      { role: 'assistant', text, toolImages: [readImg('a', { before: true }), shot('b')] },
+    ] } }), path: () => '/session', markdown: esc, imageHtml: t.hooks.html, imagesMount: t.hooks.mount, imagesStop: t.hooks.stop }
+    await new Function('deps', 'with(deps){' + region(TODAY, '  function loadLast(r)', '  // Running: the same live stream') + 'return loadLast(O.r);}')({
+      O, K, W: t.W, esc, lower: (s: string) => s.toLowerCase(), $: t.document.getElementById, paintMeta() {}, setHead() {},
+    })
+    await flush()
+    expect(O.last.text).toBe(text)
+    const slots = box.children.filter((e: El) => e.getAttribute('data-reader-tools') !== null)
+    expect(slots).toHaveLength(2)
+    expect(JSON.parse(slots[0].getAttribute('data-reader-tools')!)).toMatchObject({ before: true, items: [{ id: tid('a') }] })
+    expect(JSON.parse(slots[1].getAttribute('data-reader-tools')!)).toMatchObject({ before: false, items: [{ id: tid('b') }] })
+    const prose = t.document.getElementById('ta-last-text')
+    expect(box.children.indexOf(slots[0])).toBeLessThan(box.children.indexOf(prose))
+    expect(box.children.indexOf(slots[1])).toBeGreaterThan(box.children.indexOf(prose))
+    expect(thumbs(box)).toHaveLength(2)
+    expect(t.calls).toEqual([])
+  })
   it('loadLast keeps the tool images and the count of more; the sheet mounts them lazily', async () => {
     const t = load(), box = t.document.createElement('section'); t.document.ids.set('ta-last', box); t.document.body.appendChild(box)
     const O: any = { r: { provider: 'claude', id: SID }, row: {}, open: { kind: 'run' } }
