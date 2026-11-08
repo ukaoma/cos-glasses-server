@@ -874,8 +874,9 @@
   }
   function quote(text) { return '<blockquote class="mm-quote">' + esc(text) + '</blockquote>'; }
   function readerHead(title, facts, actions) {
+    var full = SPLIT_KIT.fullButton(SPLIT.key, SPLIT.controls);
     return '<div class="mm-reader-head"><h2 class="mm-title">' + esc(title) + '</h2>' + (facts ? '<p class="mm-sub">' + facts + '</p>' : '') +
-      (actions ? '<div class="mm-actions">' + actions + '</div>' : '') + '</div>';
+      (actions || full ? '<div class="mm-actions">' + (actions || '') + full + '</div>' : '') + '</div>';
   }
   function eventReader(id) {
     var base = findRow(id);
@@ -1979,8 +1980,15 @@
   }
 
   // ── painting ─────────────────────────────────────────────
+  // Duo tables: the divider between the list and the reader from 760 px (app.js splitKit; the same limits as Sessions),
+  // with its own remembered width, and Full width in a reader's header.
+  var SPLIT = { key: 'cos_web_memories_split', label: 'Memories list', controls: 'mm-list-col', media: '(min-width: 760px)', listMin: 240, readerMin: 380, handleW: 18 };
+  // A page without the kit (a test's stand-in W) draws no divider and keeps working.
+  var SPLIT_KIT = W.splitKit || { handle: function () { return ''; }, mount: function () { return null; }, fullButton: function () { return ''; } };
+  var SPLIT_HANDLE = SPLIT_KIT.handle({ id: 'mm-handle', controls: SPLIT.controls, label: SPLIT.label });
   var SKELETON = '<div class="cx mm" data-tint="memories" id="mm-root"><div id="mm-hero"></div><div class="mm-controls" id="mm-views"></div><p class="mm-counts" id="mm-counts"></p>' +
-    '<div class="split mm-split" id="mm-split"><div class="split-list mm-list" id="mm-list-col"><div id="mm-tools"></div><div id="mm-list"></div></div><div class="reader mm-reader" id="mm-reader"></div></div>' +
+    '<div class="split mm-split" id="mm-split"><div class="split-list mm-list" id="mm-list-col"><div id="mm-tools"></div><div id="mm-list"></div></div>' +
+    SPLIT_HANDLE + '<div class="reader mm-reader" id="mm-reader"></div></div>' +
     '<p class="mm-foot" id="mm-foot"></p></div><div id="mm-modal-host"></div>';
   function write(node, html) { if (!node || node.__mm === html) return false; node.innerHTML = html; node.__mm = html; return true; }
   var paintTimer = null;
@@ -1989,6 +1997,7 @@
     var r = W.parseRoute(); if (r.pane !== 'memories') return;
     if (!el('mm-root')) pane.innerHTML = SKELETON;
     var reading = readerArgs(r).length > 0, split = el('mm-split');
+    SPLIT_KIT.mount(split, el('mm-handle'), SPLIT);
     pane.classList.toggle('reading', reading); if (split) split.classList.toggle('reading', reading);
     // The cue views are one column at every width, like Control's cue review (a card, not a list beside a reader).
     if (split) split.classList.toggle('solo', !reading && (S.view === 'cues' || S.view === 'rated'));
@@ -2014,6 +2023,9 @@
     var html = readerHtml(r);
     if (readerArgs(r).length && W.crumb && W.crumb() !== S.crumbText) W.setCrumb(S.crumbText);
     if (write(node, html) && el('mm-graph-host')) mountGraph();
+    // Full width hides the list only while a reader with the button is open, so the list is never hidden behind a
+    // placeholder with no way back.
+    var split = el('mm-split'); if (split) split.classList.toggle('mm-fullable', !!(node.querySelector && node.querySelector('[data-split-full]')));
     document.body.classList.toggle('mm-graph-open', S.graphFull && !!el('mm-graph-host'));
   }
   function crumb(t) { S.crumbText = String(t || ''); }

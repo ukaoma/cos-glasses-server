@@ -1250,7 +1250,9 @@
     else if (!d) body = '<p class="cx-note mt-wait">Loading meeting…</p>' + W.skeletonRows(5);
     else {
       var sessions = detailSessions();
-      body = detailBarHtml(row, d) + '<div class="mt-dbody">' +
+      // Duo tables: the line between the notes and the Ask panel drags where both show (860 px and up).
+      var divider = sessions.length ? SPLIT_KIT.handle({ id: 'mt-dhandle', controls: 'mt-ask-' + safeId(sessions[0]), label: SPLIT.label }) : '';
+      body = detailBarHtml(row, d) + '<div class="mt-dbody' + (divider ? ' split-side' : '') + '" id="mt-dbody">' + divider +
         (row.sourceSessionId && sessions.length ? '<p class="mt-note-line">Ask history covers the whole original capture, including its other split pieces.</p>' : '') +
         sessions.map(function (sid, i) {
           A(sid).ctx = { saved: true, meeting: row, captureLabel: 'Original recording ' + (i + 1) + '. Questions use its saved cutoff; each recording keeps its own history.' };
@@ -1260,7 +1262,14 @@
         '<article class="mt-doc">' + documentHtml(d) + '</article></div>';
     }
     pane.innerHTML = '<div class="cx mt mt-detail" data-tint="meetings">' + head + body + '</div>';
+    SPLIT_KIT.mount($('mt-dbody'), $('mt-dhandle'), SPLIT);
   }
+  // Duo tables: the divider between a meeting's notes or live transcript and its Ask panel (app.js splitKit, 860 px and
+  // up), one width for both views. The Ask panel is the column on the right, so it grows as the line moves left; it keeps
+  // 280 px and the notes 380 px, past a 24 px divider that is the old gap.
+  // A page without the kit (a test's stand-in W) draws no divider and keeps working.
+  var SPLIT_KIT = W.splitKit || { handle: function () { return ''; }, mount: function () { return null; } };
+  var SPLIT = { key: 'cos_web_meetings_split', label: 'Ask panel', side: 'end', sized: '.mt-side-panel', cssVar: '--split-side-share', media: '(min-width: 860px)', listMin: 280, readerMin: 380, handleW: 24 };
   // ── Prep in a saved meeting (6.99.19) ─────────────────
   // GET /api/prep/by-session/:sessionId for each of the meeting's recordings: what the prep focused on and its files,
   // each opening from the Prep store. Nothing shows when there is no prep, or on a server without Prep.
@@ -2006,12 +2015,14 @@
     // 6.99.14: the transcript scrolls inside its own box, as Control's does, so a new line never moves the page: the
     // title, the recording bar, the files and the Ask panel stay where the reader left them. Everything that changes
     // height while it records (the stop line, the files, the confirm card) sits under the box, never above it.
-    pane.innerHTML = '<div class="cx mt mt-livev" data-tint="meetings"><div id="mt-lhead"></div><div class="mt-lgrid"><div class="mt-lmain" id="mt-lmain">' +
+    var divider = SPLIT_KIT.handle({ id: 'mt-lhandle', controls: 'mt-ask-' + safeId(sid), label: SPLIT.label });
+    pane.innerHTML = '<div class="cx mt mt-livev" data-tint="meetings"><div id="mt-lhead"></div><div class="mt-lgrid' + (divider ? ' split-side' : '') + '" id="mt-lgrid"><div class="mt-lmain" id="mt-lmain">' +
       '<div class="mt-tbox"><div id="mt-turns" class="mt-turns" tabindex="0" role="log" aria-live="polite" aria-label="Live transcript"></div>' +
       '<button type="button" class="cx-btn quiet mt-jump" id="mt-jump" data-mt="jump" hidden>Jump to live</button></div>' +
       '<div id="mt-lbar" class="mt-lbarslot"></div><div id="mt-lfiles"></div><div id="mt-lprep"></div><div id="mt-lfoot"></div>' +
-      '<input type="file" id="mt-lpick" class="mt-pick" multiple accept="' + esc(LIVE_ACCEPT) + '" tabindex="-1" aria-hidden="true"></div>' +
+      '<input type="file" id="mt-lpick" class="mt-pick" multiple accept="' + esc(LIVE_ACCEPT) + '" tabindex="-1" aria-hidden="true"></div>' + divider +
       '<aside class="mt-side-panel" id="mt-ask-' + safeId(sid) + '" data-sid="' + esc(sid) + '">' + sidePanelHtml(sid) + '</aside></div></div>';
+    SPLIT_KIT.mount($('mt-lgrid'), $('mt-lhandle'), SPLIT);
     S.headHtml = S.footHtml = S.barHtml = S.filesHtml = S.prepHtml = null;
     paintLiveHead(); paintTurns(true); paintLiveFoot();
     clearInterval(S.liveTimer); clearInterval(S.clockTimer);

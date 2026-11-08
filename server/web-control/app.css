@@ -507,6 +507,28 @@ select.field {
   .pane.reading .pane-head.with-ask { display: flex; }
 }
 
+/* Duo tables: the divider between a list and its reader (app.js splitKit, W.splitKit), for Memories and Messages.
+   Hidden everywhere; each pane shows it only inside its own two-column breakpoint (panes/memories.css 760 px,
+   panes/cos-chat.css 860 px), so a phone never sees it. Sessions keeps its own copy of these rules (panes/sessions.css). */
+.split-handle, .split-full-btn { display: none; }
+.split-handle {
+  justify-content: center; align-items: center; position: sticky; top: calc(var(--safe-top) + 12px); align-self: start;
+  height: calc(100dvh - var(--safe-top) - 24px); cursor: col-resize; touch-action: none; user-select: none; -webkit-user-select: none;
+  -webkit-touch-callout: none; outline: none; z-index: 2;
+}
+/* The line is the split's own gap; the grip shows where to take it. */
+.split-handle::after { content: ''; width: 4px; height: 36px; border-radius: 2px; background: var(--panel-border); transition: background 120ms ease, height 120ms ease; }
+.split-handle:hover::after, .split-handle:focus-visible::after, .split-dragging > .split-handle::after { background: var(--accent); height: 52px; }
+.split-handle:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 6px; }
+/* A finger gets at least a 44 px target, 13 px over each pane's edge; a mouse keeps the divider's own column. */
+@media (pointer: coarse) { .split-handle::before { content: ''; position: absolute; top: 0; bottom: 0; left: -13px; right: -13px; } }
+/* While dragging, nothing in the panes selects or takes the pointer. */
+.split-dragging { user-select: none; -webkit-user-select: none; cursor: col-resize; }
+.split-dragging > :not(.split-handle) { pointer-events: none; }
+.split-full-btn { margin-left: auto; flex: none; }
+@media (pointer: coarse) { .split-full-btn { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .split-handle::after { transition: none; } }
+
 /* ── Desktop ─────────────────────────────────────────────── */
 @media (min-width: 1100px) and (min-height: 721px) {
   :root { --gutter: 40px; }
