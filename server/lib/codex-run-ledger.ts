@@ -215,8 +215,37 @@ export function redactForCodexLedger(value: string, maxChars = ERROR_PREVIEW_CHA
     .slice(0, maxChars)
 }
 
+/** Only a validated provider retry date may cross the terminal error boundary. */
+export function safeCodexUsageLimitMessage(message: string): string {
+  const fallback = 'Codex usage limit reached. Try again later or choose another model.'
+  // Bound work on untrusted terminal text; do not preserve links, identifiers or prose.
+  const retry = /(?:try again|resets?) at (Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(20\d{2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\b/i.exec(message.slice(0, 8_000))
+  if (!retry) return fallback
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const month = months.findIndex(value => value.toLowerCase() === retry[1].slice(0, 3).toLowerCase())
+  const day = Number(retry[2]), year = Number(retry[3]), hour = Number(retry[4]), minute = Number(retry[5])
+  const date = new Date(Date.UTC(year, month, day))
+  if (date.getUTCMonth() !== month || date.getUTCDate() !== day || hour < 1 || hour > 12 || minute > 59) return fallback
+  return `Codex usage limit reached. Try again at ${months[month]} ${day}, ${year} ${hour}:${retry[5]} ${retry[6].toUpperCase()} (provider time), or choose another model.`
+}
+
+/** Codex JSON terminal errors carry the quota code separately from their message. */
+export function codexTerminalUsageLimitError(event: unknown): string | undefined {
+  if (!event || typeof event !== 'object') return undefined
+  const value = event as Record<string, unknown>
+  if (value.type !== 'error' && value.type !== 'turn.failed') return undefined
+  const error = value.error && typeof value.error === 'object' ? value.error as Record<string, unknown> : undefined
+  const code = error?.codex_error_info ?? value.codex_error_info
+  if (code !== 'usage_limit_exceeded') return undefined
+  const message = typeof error?.message === 'string' ? error.message
+    : typeof value.message === 'string' ? value.message
+      : typeof value.error === 'string' ? value.error : ''
+  return safeCodexUsageLimitMessage(message)
+}
+
 export function classifyCodexError(message: string): string {
   const text = message.toLowerCase()
+  if (/\busage_limit_exceeded\b|^codex usage limit reached\./.test(text)) return 'provider_limit'
   if (/command not found|enoent|not found/.test(text)) return 'codex.cli_unavailable'
   if (/permission|denied|sandbox|read-only|operation not permitted/.test(text)) return 'codex.permission_denied'
   if (/auth|login|sign in|unauthorized|forbidden|token/.test(text)) return 'codex.auth_error'

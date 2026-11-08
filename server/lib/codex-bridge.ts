@@ -60,6 +60,8 @@ import {
 } from './claude-tool-access.js'
 import {
   classifyCodexError,
+  codexTerminalUsageLimitError,
+  safeCodexUsageLimitMessage,
   extractCodexThreadId,
   finishCodexRun,
   getCodexExecutionCwd,
@@ -382,6 +384,7 @@ export function runCodexKeyProfileTurn(
 
 function safeCodexUserError(message: string): string {
   const code = classifyCodexError(message)
+  if (code === 'provider_limit') return safeCodexUsageLimitMessage(message)
   if (code === 'codex.cli_unavailable') return 'Codex CLI unavailable. Check server Settings.'
   if (code === 'codex.auth_error') return 'Codex auth failed. Run codex login on the Mac.'
   if (code === 'codex.timeout') return 'Codex timed out. Retry or start a new chat.'
@@ -1021,7 +1024,7 @@ export async function callCodexStreaming(
         rawProviderError,
         structuredProviderError,
       )
-      finalizeError(authenticationError ?? `codex-bridge: ${rawProviderError}`)
+      finalizeError(authenticationError ?? codexTerminalUsageLimitError(event) ?? `codex-bridge: ${rawProviderError}`)
     }
   }
 

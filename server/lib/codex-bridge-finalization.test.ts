@@ -75,8 +75,8 @@ vi.mock('./codex-model-catalog.js', () => ({
   resolveCodexEffortForModel: () => 'high',
   resolveCodexServiceTier: () => undefined,
 }))
-vi.mock('./codex-run-ledger.js', () => ({
-  classifyCodexError: (message: string) => message.includes('authentication required') ? 'codex.auth_error' : 'codex.error',
+vi.mock('./codex-run-ledger.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./codex-run-ledger.js')>(),
   extractCodexThreadId: () => undefined,
   finishCodexRun: vi.fn(),
   getCodexExecutionCwd: () => '/tmp',
@@ -95,6 +95,7 @@ vi.mock('./provider-process-lifecycle.js', () => ({
 }))
 
 import { callCodexStreaming } from './codex-bridge.js'
+import { classifyCodexError, finishCodexRun } from './codex-run-ledger.js'
 
 function callbacks(overrides: Record<string, unknown> = {}) {
   return {
@@ -127,6 +128,7 @@ beforeEach(() => {
   state.addExchange.mockClear()
   state.startCodexRun.mockClear()
   state.getCodexEngineSession.mockClear()
+  vi.mocked(finishCodexRun).mockClear()
   state.terminateProviderProcess.mockResolvedValue({
     closed: true,
     escalated: false,
@@ -148,6 +150,64 @@ afterEach(() => {
 })
 
 describe('Codex detached finalization', () => {
+  it.each([
+    { type: 'error', codex_error_info: 'usage_limit_exceeded', message: 'Provider refused this turn.' },
+    { type: 'turn.failed', error: { codex_error_info: 'usage_limit_exceeded', message: 'Provider refused this turn.' } },
+  ])('preserves structured quota identity from a $type terminal event', async event => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    state.child.stdout.emit('data', Buffer.from(`${JSON.stringify(event)}\n`))
+    await vi.waitFor(() => expect(callbackSet.onError).toHaveBeenCalledTimes(1))
+    expect(callbackSet.onError).toHaveBeenCalledWith('Codex usage limit reached. Try again later or choose another model.')
+    const diagnostic = vi.mocked(finishCodexRun).mock.calls[0]?.[1]
+    expect(classifyCodexError(diagnostic?.error ?? '')).toBe('provider_limit')
+    expect(diagnostic?.status).toBe('failed')
+    expect(callbackSet.onDone).not.toHaveBeenCalled()
+    expect(callbackSet.onAnswerReady).not.toHaveBeenCalled()
+    state.child.emit('close', 1)
+    expect(callbackSet.onError).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains only the validated retry date from quota terminal detail', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    state.child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'turn.failed',
+      error: {
+        codex_error_info: 'usage_limit_exceeded',
+        message: 'Try again at November 10th, 2026 9:28 AM. Bearer sk-supersecret /Users/private/file https://untrusted.invalid/reset',
+      },
+    })}\n`))
+    await vi.waitFor(() => expect(callbackSet.onError).toHaveBeenCalledTimes(1))
+    const expected = 'Codex usage limit reached. Try again at Nov 10, 2026 9:28 AM (provider time), or choose another model.'
+    expect(callbackSet.onError).toHaveBeenCalledWith(expected)
+    expect(vi.mocked(finishCodexRun).mock.calls[0]?.[1]?.error).toBe(expected)
+    expect(callbackSet.onChunk).not.toHaveBeenCalled()
+  })
+
+  it('keeps authentication failure precedence over a conflicting quota field', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    state.child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'error', codex_error_info: 'usage_limit_exceeded',
+      error: { status: 403, message: 'Forbidden Bearer sk-private' },
+    })}\n`))
+    await vi.waitFor(() => expect(callbackSet.onError).toHaveBeenCalledTimes(1))
+    expect(callbackSet.onError).toHaveBeenCalledWith('Codex auth failed. Run codex login on the Mac.')
+  })
+
+  it('keeps ordinary permission failures distinct from quota failures', async () => {
+    const callbackSet = callbacks()
+    await start(callbackSet)
+    state.child.stdout.emit('data', Buffer.from(`${JSON.stringify({
+      type: 'turn.failed', error: { message: 'Sandbox permission denied at /Users/private/file' },
+    })}\n`))
+    await vi.waitFor(() => expect(callbackSet.onError).toHaveBeenCalledTimes(1))
+    expect(classifyCodexError(vi.mocked(finishCodexRun).mock.calls[0]?.[1]?.error ?? '')).toBe('codex.permission_denied')
+    expect(String(callbackSet.onError.mock.calls[0]?.[0])).not.toContain('/Users/private')
+    expect(String(callbackSet.onError.mock.calls[0]?.[0])).not.toContain('usage limit')
+  })
+
   it('turns exit-zero auth output into one typed provider failure', async () => {
     const callbackSet = callbacks()
     await start(callbackSet)
