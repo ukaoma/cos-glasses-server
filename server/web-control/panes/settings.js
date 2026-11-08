@@ -91,9 +91,10 @@
     Promise.all([
       soft(api('/api/decision-provider')), soft(api('/api/live-cues/v2/settings')), soft(api('/api/morning-brief')),
       soft(api('/api/domains')), soft(api('/api/agent-sessions/fences')), soft(api('/api/meeting-import/fireflies/status')),
-      soft(api('/api/health')), soft(api('/api/drops/settings/p2')), soft(api('/api/today/brief/settings'))
+      soft(api('/api/health')), soft(api('/api/drops/settings/p2')), soft(api('/api/today/brief/settings')),
+      soft(api('/api/session-files/settings'))
     ]).then(function (r) {
-      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8] };
+      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8], sf: r[9] };
       S.state = 'ready';
       render();
     });
@@ -215,11 +216,24 @@
     if (st.kind === 'failed') return 'The last try failed at ' + at(st.at) + (st.code === 'timeout' ? ' (it took too long).' : st.code === 'unavailable' ? ' (Claude Code was not found on your Mac).' : '.');
     return '';
   }
+  // 6.99.35: "Show files and images your sessions make" (GET/POST /api/session-files/settings, lib/session-files-setting.ts).
+  // On by default. COS_WEB_SESSION_FILES=0 on the Mac forces it off; the row then says so and cannot be changed here.
+  function sessionFilesGroup(d) {
+    var sf = d && d.sf;
+    if (!sf || typeof sf.enabled !== 'boolean') return '';
+    var env = sf.source === 'env';
+    return group('Session files', '',
+      row('Show files and images your sessions make',
+        env ? 'Turned off on the Mac by the server environment (COS_WEB_SESSION_FILES=0).'
+          : 'Lets this page show images and files your sessions save in their project folder. Files stay on your Mac.',
+        toggle(sf.enabled, 'data-set="session-files"' + (env ? ' disabled' : ''), 'Show files and images your sessions make')));
+  }
   function categoryBody(cat) {
     var d = S.data || {};
     var out = '';
     if (cat.id === 'reach') return reachBody();
     if (cat.id === 'pet') return petBody() + onMac(cat.mac);
+    if (cat.id === 'privacy') out += sessionFilesGroup(d);
     // The Today summary (routes/today-brief.ts): Haiku on the Mac writes Today's top lines. Off unless switched on here or
     // by COS_TODAY_BRIEF_LLM on the Mac, which wins when set.
     if (cat.id === 'general' && d.tb && typeof d.tb.enabled === 'boolean') {
@@ -344,6 +358,17 @@
       t.setAttribute('aria-checked', String(!on));
       api('/api/live-cues/v2/settings', { method: 'POST', body: { enabled: !on } })
         .then(function () { W.toast(!on ? 'Live cues on' : 'Live cues off'); }, function (err) { t.setAttribute('aria-checked', String(on)); say(err.message, true); });
+      return;
+    }
+    if (act === 'session-files') {
+      var son = t.getAttribute('aria-checked') === 'true';
+      t.setAttribute('aria-checked', String(!son));
+      api('/api/session-files/settings', { method: 'POST', body: { enabled: !son } })
+        .then(function (v) {
+          if (S.data && v) S.data.sf = v;
+          W.toast(!son ? 'Session files and images on' : 'Session files and images off');
+          render();
+        }, function (err) { t.setAttribute('aria-checked', String(son)); say(err.message, true); });
       return;
     }
     if (act === 'today-brief') {

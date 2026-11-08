@@ -2784,6 +2784,8 @@
 
   // Output previews are separate from composer attachments. Only the DTO fields reach the lazy viewer.
   function readerImagesHtml(turn) {
+    // 6.99.35: "Show files and images your sessions make" is off (Settings, Privacy). The server sent no names, only this mark.
+    if (turn && turn.previewsOff === true) return '<p class="rm-status rm-off">Previews are off. Turn them on in Settings, Privacy.</p>';
     var images = turn && Array.isArray(turn.outputImages) ? turn.outputImages.filter(function (x) {
       return x && /^ai_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
     }).map(function (x) { return { id: x.id, label: String(x.label || 'Output image').slice(0, 180), state: x.state, reason: x.reason }; }) : [];

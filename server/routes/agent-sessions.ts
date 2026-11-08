@@ -84,6 +84,7 @@ import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 
 import { agentSessionOutputImages, sharedFileHeaders } from '../lib/agent-session-output-images.js'
+import { sessionFilesSetting, withoutPreviews } from '../lib/session-files-setting.js'
 
 export const agentSessionsRouter = Router()
 
@@ -646,6 +647,8 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
 agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:imageId/content', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   res.set('X-Content-Type-Options', 'nosniff')
+  // 6.99.35: "Show files and images your sessions make" off answers before anything is read.
+  if (!sessionFilesSetting.read().enabled) { res.status(403).json({ error: 'previews_off' }); return }
   const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
   if (!provider || (req.query.variant !== undefined && req.query.variant !== 'thumb' && req.query.variant !== 'phone')) {
     res.status(404).json({ error: 'image_not_found' }); return
@@ -672,12 +675,27 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:ima
   }
 })
 
+// 6.99.35: "Show files and images your sessions make" (lib/session-files-setting.ts), Control Web Settings, Privacy.
+// Default on; COS_WEB_SESSION_FILES=0 on the Mac forces it off and the answer says so (source: 'env').
+agentSessionsRouter.get('/session-files/settings', (_req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  try { res.json(sessionFilesSetting.read()) } catch { res.status(500).json({ error: 'session_files_settings_unavailable' }) }
+})
+agentSessionsRouter.post('/session-files/settings', (req, res) => {
+  const body = req.body
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'enabled') || typeof body.enabled !== 'boolean') {
+    res.status(400).json({ error: { code: 'invalid_session_files_settings', message: 'Send { enabled: true } or { enabled: false }.' } }); return
+  }
+  try { res.json(sessionFilesSetting.set(body.enabled)) } catch { res.status(500).json({ error: 'session_files_settings_unavailable' }) }
+})
+
 // 6.99.35: a file a Claude session sent with SendUserFile. Same gate, same re-authorization, no path
 // in the request or the response. HTML is an attachment of type octet-stream with a sandbox CSP, never
 // same-origin HTML; a PDF may open inline.
 agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-files/:fileId/content', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   res.set('X-Content-Type-Options', 'nosniff')
+  if (!sessionFilesSetting.read().enabled) { res.status(403).json({ error: 'previews_off' }); return }
   const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
   if (!provider) { res.status(404).json({ error: 'file_not_found' }); return }
   try {
@@ -739,6 +757,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       try {
         const images = await agentSessionOutputImages.context(provider, sessionId, found)
         recentTurns = await readRecentSessionTurns(provider, found, turnsWanted, undefined, images.project)
+        // 6.99.35: previews off sends one mark per message instead of image and file names.
+        if (recentTurns && !sessionFilesSetting.read().enabled) recentTurns = { ...recentTurns, turns: withoutPreviews(recentTurns.turns) }
       } catch (error) {
         console.warn(`[agent-sessions] recent turns failed provider=${provider}: ${error instanceof Error ? error.message : error}`)
       }
