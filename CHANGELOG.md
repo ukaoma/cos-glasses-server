@@ -1,3 +1,37 @@
+## 7.0.0 - Steer a busy session mid-turn, see the files your sessions send, Duo tables, resizable panes, and calendars from macOS Calendar
+
+2026-11-07. On 6.99.35 (61424472) plus the calendar attendee fix (d7558c7). The first public build after 6.99.33: npm goes from 6.99.33 straight to 7.0.0, and 6.99.34 and 6.99.35 (private builds, below) reach everyone here. Miles chose the major number for this release. No route or response field was removed and every client reads the server version by number, so nothing that works with 6.99.33 needs a change for 7.0.0.
+
+**Works with COS Control 0.5.377 and later.** Server and Control Web only; no glasses, phone or Control update is needed. Calendars need a COS Control that writes the calendar snapshot (0.5.378 and later); with 0.5.377 there is no snapshot, and every calendar read behaves as in 6.99.33.
+
+**Default-on changes (everything a 6.99.33 user gets without touching a setting):**
+
+*Steering a busy Claude session (`COS_STEER_MIDTURN=0` turns the steering off):*
+- **A message sent to a busy Claude session lands inside its running turn, at its next tool step.** Before, a message from Control Web, the phone or the glasses waited for the turn to end. Now it goes in through the session's peer inbox and is read at its next tool step; the row reads "Sent into the running turn." Same for Claude Code in the desktop app and in a terminal, and for glasses messages. Codex and Cursor sessions, a message with files, and a Claude session that is held (a COS child on the thread, a permission prompt, a fence, a cancel hold, no peer inbox) still wait for the turn end, as before.
+- **Control Web says where a message lands.** With the switch on, the composer reads "Working right now. Your message lands at its next step." and, after a send, "The session is busy. Yours lands at its next step." With it off, the old turn-end lines. The busy answer gains `midTurn` and the park answer gains `landsAt`, only with the switch on; the park answer is still 202 `queued: true`.
+- **A queued message COS cannot confirm reads "May have been sent", not "Not sent"** (no switch). In the Sessions reader's queue, Today's sheet and the Sessions row chip, a row whose delivery is unknown (a steer it could not confirm, a delivery cut off by a restart) says "May not have been sent. Read it, then say it again." A message refused for tampering still reads "Not sent".
+
+*Files and images your sessions make (Settings, Privacy, "Show files and images your sessions make"; `COS_WEB_SESSION_FILES=0` forces it off):*
+- **Files a Claude session sent with its SendUserFile tool show in the Sessions reader and Today's session sheet**, where they happened in the conversation. Images show as thumbnails. A PDF opens in a new tab; text, Markdown, CSV, JSON, YAML, XML and SVG open as words; an HTML page shows in a sandboxed frame with scripts off; anything else downloads as a plain file. Only a file's base name reaches the browser, never a Mac path. A file outside the session's workspace, or gone from disk, reads "Not available on this Mac".
+- **The new switch is on by default** and also covers the images sessions make (6.99.28). Off, the image and file routes answer 403 `previews_off` before reading anything, and each message with images or files shows one line saying previews are off, with no names sent.
+- **New read-only route** `GET /api/agent-sessions/:provider/:sessionId/output-files/:fileId/content`, behind the same token gate, re-checked against the session's newest 40 turns and its workspace on every read, 32 MB at most.
+
+*Tables and panes in Control Web (no switch):*
+- **Table words stay whole.** Cells wrap at spaces only, so a column is never narrower than its longest word; only a token of 25 or more characters (a URL, a hash) may break inside. A short first column stays on one line. A table too wide for its box scrolls inside the box with the first column held, and the page never scrolls sideways. This applies to every markdown table in Control Web: the Sessions reader, Today's session sheet, Meetings notes and Ask, and Memories answers.
+- **Drag the line between two columns** in Sessions and Memories (760 px and up), Messages and Meetings (860 px and up) and Work (900 px and up), with finger, mouse, pen or arrow keys. A double tap resets it, and each width is remembered on that device. Sessions and Memories also get **Full width / Show list** in the reader's header. Default layouts are unchanged, and below each breakpoint (phones, the folded Duo) nothing changes.
+
+*Calendars from macOS Calendar (no change until COS Control writes a snapshot; `COS_CALENDAR_SNAPSHOT=0` ignores it):*
+- **Control Web Today asks `GET /api/calendar/today` once per paint.** With no snapshot it answers "not connected" and Today shows nothing new.
+- **`/api/models` gains a `calendar` field** (source, age, access, counts; never titles). Not on public `/api/health`.
+- With a snapshot from COS Control 0.5.378 or later: one calendar source for Next up, prep and Today, selected calendars only, declined, all-day, holiday, birthday and attendee-less shared events skipped, and prep tied to the meeting's occurrence (see 6.99.34 below).
+- **An attendee name that is an email address is dropped and the domain kept.** macOS fills a participant's name with the address when there is no display name (124 such names on Miles's Mac). Names and domains only, as the calendar contract says. Same rule as COS Control's own reader.
+
+**Upgrading from 6.99.33:** nothing to do. To keep the 6.99.33 behavior for one part, set `COS_STEER_MIDTURN=0` (steering), `COS_WEB_SESSION_FILES=0` or the Settings switch (session files and images), or `COS_CALENDAR_SNAPSHOT=0` (calendars). The table, divider and "May have been sent" changes have no switch.
+
+**Known limits:** not yet accepted on a physical iPhone Duo (the table and divider checks are headless renders at Duo sizes). COS Control's own Sessions pane on the Mac does not show session files yet. The full limits of each part are in the 6.99.34 and 6.99.35 sections below.
+
+**Tests:** the 6.99.34 and 6.99.35 suites below, plus calendar-source (an email-shaped attendee name is dropped, its mutation killed) and package-manifest (7.0.0 as the newest heading). The server version compare in every client was checked for a 7.x major before the bump (COS Control helper and app, the glasses app, the site's drift check): all compare by number.
+
 ## 6.99.35 - Steer a busy session mid-turn, files your sessions send, Duo tables and resizable panes
 
 2026-11-07. On 6.99.34 (afc7cb2, installed privately). Private build for Miles's Mac; npm stays on 6.99.33. Server and Control Web only; COS Control stays on 0.5.378, and no glasses, phone or Control update is needed. Miles approved the default-on steering change.
