@@ -12,6 +12,7 @@ import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './attached-
 import { readComposerFacts } from './cursor-session-model.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
 import { getMediaStore, STAGED_TTL_MS, type MediaStore } from './media-store.js'
+import { isDeniedSecretPath, SECRET_FILE_NOTICE } from './secret-path-guard.js'
 import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn, type SessionTurnProjection } from './agent-session-turns.js'
 import {
   decodeToolImage, estimateBytes, MAX_TOOL_IMAGE_BYTES, promptImages, SESSION_TOOL_IMAGE_ID, TOOL_IMAGES_PER_TURN, toolResultImages, toolUsesOf,
@@ -25,9 +26,12 @@ export interface SessionOutputImage {
   /**
    * `outside_workspace`: permanent (the path leaves the workspace, or the workspace is a broad
    * root that is never eligible). `unavailable`: the workspace lookup failed this time; the
-   * content route re-resolves it, so a retry can succeed.
+   * content route re-resolves it, so a retry can succeed. `secret_file` (7.0.4): the file's name (or
+   * the name it canonically resolves to) says it may hold secrets; never served (403 secret_file_denied).
    */
-  reason?: 'outside_workspace' | 'unavailable' | 'missing'
+  reason?: 'outside_workspace' | 'unavailable' | 'missing' | 'secret_file'
+  /** 7.0.4: the words the card shows instead, set only with `secret_file`. */
+  notice?: string
 }
 /**
  * A file a Claude session sent to the person with its SendUserFile tool (6.99.35), when it is not
@@ -43,7 +47,9 @@ export interface SessionOutputFile {
   type: string
   size?: number
   state: 'available' | 'unavailable'
-  reason?: 'outside_workspace' | 'unavailable' | 'missing'
+  reason?: 'outside_workspace' | 'unavailable' | 'missing' | 'secret_file'
+  /** 7.0.4: the words the card shows instead, set only with `secret_file`. */
+  notice?: string
 }
 export type SharedFileKind = 'pdf' | 'text' | 'html' | 'image' | 'file'
 export const SESSION_OUTPUT_FILE_ID = /^af_[a-f0-9]{64}$/
@@ -189,6 +195,15 @@ function canonicalRoot(path: string | null, home: string): string | 'broad' | nu
   } catch { return null }
 }
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex') }
+/**
+ * 7.0.4 S2: whether a path a session named may hold secrets. Resolved against the workspace when there is one,
+ * otherwise judged by its own segments only (anchored at '/', never the server's directory). The guard checks the
+ * path as written AND its canonical file, so an innocently named link to a secret is refused too.
+ */
+function secretSource(root: string | null, written: string): boolean {
+  return isDeniedSecretPath(root !== null ? resolve(root, written) : resolve('/', written))
+}
+const SECRET = { state: 'unavailable' as const, reason: 'secret_file' as const, notice: SECRET_FILE_NOTICE }
 
 // ── Files a Claude session sent with SendUserFile (6.99.35) ──────────────────────────────
 // Its input is { files: [paths], caption?, status, display? }; paths are absolute or relative to the
@@ -295,8 +310,12 @@ export class AgentSessionOutputImages {
       const recordKey = digest(JSON.stringify(row))
       const refs = candidates.slice(0, OUTPUT_IMAGES_PER_TURN).map((c, ordinal) => {
         const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, ordinal, c.source])).digest('hex')
-        const allowed = root !== null && inside(root, resolve(root, c.source))
-        const descriptor: SessionOutputImage = { id, label: c.label, state: allowed ? 'available' : 'unavailable', ...(!allowed ? { reason: lookupFailed ? 'unavailable' as const : 'outside_workspace' as const } : {}) }
+        // 7.0.4 S2: a secret by name is refused before containment, and its card carries the base name only.
+        const descriptor: SessionOutputImage = secretSource(root, c.source)
+          ? { id, label: displayName(c.source), ...SECRET }
+          : root !== null && inside(root, resolve(root, c.source))
+            ? { id, label: c.label, state: 'available' }
+            : { id, label: c.label, state: 'unavailable', reason: lookupFailed ? 'unavailable' : 'outside_workspace' }
         sources.delete(id); sources.set(id, { candidate: c, root, descriptor })
         while (sources.size > SOURCES_MAX) sources.delete(sources.keys().next().value!)
         return descriptor
@@ -331,7 +350,9 @@ export class AgentSessionOutputImages {
         if (lexical && root !== null) { try { canonical = realpathSync(lexical) } catch { canonical = null } }
         let reason: SessionOutputFile['reason'] | undefined
         let size: number | undefined
-        if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
+        // 7.0.4 S2: refused by name (as written or as it canonically resolves) before anything else is asked.
+        if (secretSource(cwd, written)) reason = 'secret_file'
+        else if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
         else if (!lexical) reason = 'outside_workspace'
         // The canonical file decides: a link that leaves the workspace is outside it.
         else if (canonical !== null && !inside(root, canonical)) reason = 'outside_workspace'
@@ -346,7 +367,7 @@ export class AgentSessionOutputImages {
         const allowed = reason === undefined
         if (NORMALIZED_IMAGE.test(name)) {
           const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'sent', ordinal, written])).digest('hex')
-          const descriptor: SessionOutputImage = { id, label: name, state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
+          const descriptor: SessionOutputImage = reason === 'secret_file' ? { id, label: name, ...SECRET } : { id, label: name, state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
           // The canonical path is the source, so the content route's no-symlink check holds for it.
           sources.delete(id); sources.set(id, { candidate: { source: allowed ? canonical! : written, label: name }, root, descriptor })
           while (sources.size > SOURCES_MAX) sources.delete(sources.keys().next().value!)
@@ -355,7 +376,7 @@ export class AgentSessionOutputImages {
         }
         const id = 'af_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'file', ordinal, written])).digest('hex')
         const { kind, type } = sharedFileKind(name)
-        const file: SessionOutputFile = { id, name, kind, type, ...(size !== undefined ? { size } : {}), state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
+        const file: SessionOutputFile = reason === 'secret_file' ? { id, name, kind, type, ...SECRET } : { id, name, kind, type, ...(size !== undefined ? { size } : {}), state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
         files.delete(id); files.set(id, { path: allowed ? canonical : null, root, file })
         while (files.size > SOURCES_MAX) files.delete(files.keys().next().value!)
         out.push(file)
@@ -395,7 +416,9 @@ export class AgentSessionOutputImages {
         else if (id === want) toolSources.set(id, { kind: 'embedded', mediaType: ref.mediaType, data: ref.data })
       } else if (ref.kind === 'path') {
         // A Read that names a path and carries no bytes: the output-image rule, the session's exact workspace only.
-        if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
+        // 7.0.4 S2: a secret by name is refused first. Embedded bytes have no path and are exempt.
+        if (secretSource(root, ref.path)) reason = 'secret_file'
+        else if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
         else if (!inside(root, resolve(root, ref.path))) reason = 'outside_workspace'
         else {
           // The canonical file decides, as for sent files: a link that leaves the workspace is outside it.
@@ -410,7 +433,7 @@ export class AgentSessionOutputImages {
           while (toolSources.size > SOURCES_MAX) toolSources.delete(toolSources.keys().next().value!)
         }
       } else reason = 'missing'
-      return { id, tool: found.tool, index: 0, total: 0, state: reason ? 'unavailable' : 'available', ...(reason ? { reason } : {}) }
+      return { id, tool: found.tool, index: 0, total: 0, state: reason ? 'unavailable' : 'available', ...(reason ? { reason } : {}), ...(reason === 'secret_file' ? { notice: SECRET_FILE_NOTICE } : {}) }
     }
     // The turn is already in the reader's list, so it is extended in place. Past the cap an image is counted, never listed.
     const attach = (turn: SessionTurn, images: SessionToolImage[], extra: number, before: boolean) => {
@@ -480,6 +503,8 @@ export class AgentSessionOutputImages {
       const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
       if (!recent.turns.some(t => t.outputImages?.some(i => i.id === imageId))) return { status: 'not_found' as const }
       const source = context.sources.get(imageId)
+      // 7.0.4 S2: after the id is authorized from the transcript, a secret by name answers 403, never bytes.
+      if (source?.descriptor.reason === 'secret_file') return { status: 'secret' as const }
       if (!source?.root || source.descriptor.state !== 'available') return { status: 'unavailable' as const }
       return await this.workspaceImage(imageId, source.root, source.candidate.source, source.candidate.label, variant)
     } catch { return { status: 'unavailable' as const } }
@@ -492,7 +517,7 @@ export class AgentSessionOutputImages {
    * through the same workspace read and normalizer as an output image.
    */
   async toolImageContent(provider: AgentProvider, sessionId: string, imageId: string): Promise<
-    { status: 'ok'; bytes: Buffer; type: string } | { status: 'ok'; path: string; mime: string; bytes: number } | { status: 'not_found' | 'unavailable' | 'too_large' }> {
+    { status: 'ok'; bytes: Buffer; type: string } | { status: 'ok'; path: string; mime: string; bytes: number } | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' }> {
     if (!SESSION_TOOL_IMAGE_ID.test(imageId)) return { status: 'not_found' }
     if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
     this.readers++
@@ -504,6 +529,7 @@ export class AgentSessionOutputImages {
       const descriptor = recent.turns.flatMap(t => t.toolImages ?? []).find(i => i.id === imageId)
       if (!descriptor) return { status: 'not_found' }
       if (descriptor.reason === 'too_large') return { status: 'too_large' }
+      if (descriptor.reason === 'secret_file') return { status: 'secret' }
       const source = context.toolSources.get(imageId)
       if (descriptor.state !== 'available' || !source) return { status: 'unavailable' }
       if (source.kind === 'embedded') return decodeToolImage(source)
@@ -563,7 +589,7 @@ export class AgentSessionOutputImages {
    * no component may be a link, and the file must be the same one before and after the read.
    */
   async fileContent(provider: AgentProvider, sessionId: string, fileId: string): Promise<
-    { status: 'ok'; bytes: Buffer; name: string; kind: SharedFileKind } | { status: 'not_found' | 'unavailable' | 'too_large' }> {
+    { status: 'ok'; bytes: Buffer; name: string; kind: SharedFileKind } | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' }> {
     if (!SESSION_OUTPUT_FILE_ID.test(fileId)) return { status: 'not_found' }
     if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
     this.readers++
@@ -574,6 +600,7 @@ export class AgentSessionOutputImages {
       const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
       if (!recent.turns.some(t => t.outputFiles?.some(f => f.id === fileId))) return { status: 'not_found' }
       const source = context.files.get(fileId)
+      if (source?.file.reason === 'secret_file') return { status: 'secret' }
       if (!source?.root || !source.path || source.file.state !== 'available') return { status: 'unavailable' }
       const path = source.path
       if (!inside(source.root, path) || realpathSync(path) !== path) return { status: 'unavailable' }

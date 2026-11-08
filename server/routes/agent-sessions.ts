@@ -79,6 +79,7 @@ import {
 } from '../lib/occupancy-probes.js'
 import type { OccupancyDirs } from '../lib/thread-occupancy.js'
 import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead } from '../lib/agent-session-turns.js'
+import { redactLocalPathsDeep } from '../lib/local-path-redact.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
@@ -568,7 +569,8 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     const queuedOf = await allQueuedWaitingLookup(now)
     const codexRoots = codexSessionRootsOf(roots)
     const subagents = await readCodexSubagentsAcross(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), codexRoots, now, codexRoots.length > 1 ? keyedCodexRootOf() : undefined)
-    res.json({
+    // 7.0.4 S1: no absolute Mac path in any string a list row carries (titles, first prompts, summaries).
+    res.json(redactLocalPathsDeep({
       sessions: sessions.map((row, index) => {
         const derived = derivedById.get(row.session_id)
         const signal = signalFor(row.session_id)
@@ -593,7 +595,7 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       // client ignores this key. Zero means the walk found nothing to hide, not
       // that the caps are off.
       dropped,
-    })
+    }))
   } catch (error) {
     console.error(`[agent-sessions] list failed: ${error instanceof Error ? error.message : error}`)
     res.status(500).json({ error: 'Failed to read agent sessions', reason: 'agent_sessions_read_failed' })
@@ -632,15 +634,19 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
         remember: false,
       })
     }
-    res.json({
+    // 7.0.4 S1: search hits carry snippets of the same words.
+    res.json(redactLocalPathsDeep({
       ...result,
       hits: result.hits.map(hit => toSearchHit(hit, queuedOf(hit.provider, hit.session_id), derivedFor(hit))),
-    })
+    }))
   } catch (error) {
     console.error(`[agent-sessions] search failed: ${error instanceof Error ? error.message : error}`)
     res.status(500).json({ error: 'Failed to search agent sessions', reason: 'agent_sessions_search_failed' })
   }
 })
+
+/** 7.0.4 S2: the 403 every local-file route answers for a file whose name says it may hold secrets. */
+export const SECRET_FILE_DENIED = 'secret_file_denied'
 
 // Authenticated by index.ts's shared /api gate. Neither the request nor the response
 // carries a filesystem path; the resolver reauthorizes exact transcript membership.
@@ -655,6 +661,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:ima
   }
   try {
     const content = await agentSessionOutputImages.content(provider, String(req.params.sessionId), String(req.params.imageId), req.query.variant === 'thumb' ? 'thumb' : 'phone')
+    // 7.0.4 S2: the id was authorized, and the file's name says it may hold secrets (lib/secret-path-guard.ts).
+    if (content.status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
     if (content.status !== 'ok') {
       res.status(content.status === 'not_found' ? 404 : 503).json({ error: content.status === 'not_found' ? 'image_not_found' : 'image_unavailable' }); return
     }
@@ -700,6 +708,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-files/:file
   if (!provider) { res.status(404).json({ error: 'file_not_found' }); return }
   try {
     const content = await agentSessionOutputImages.fileContent(provider, String(req.params.sessionId), String(req.params.fileId))
+    if (content.status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
     if (content.status !== 'ok') {
       const code = content.status === 'not_found' ? 404 : content.status === 'too_large' ? 413 : 503
       res.status(code).json({ error: content.status === 'not_found' ? 'file_not_found' : content.status === 'too_large' ? 'file_too_large' : 'file_unavailable' }); return
@@ -725,6 +734,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/tool-images/:image
   if (!provider) { res.status(404).json({ error: 'image_not_found' }); return }
   try {
     const content = await agentSessionOutputImages.toolImageContent(provider, String(req.params.sessionId), String(req.params.imageId))
+    if (content.status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
     if (content.status !== 'ok') {
       const code = content.status === 'not_found' ? 404 : content.status === 'too_large' ? 413 : 503
       res.status(code).json({ error: content.status === 'not_found' ? 'image_not_found' : content.status === 'too_large' ? 'image_too_large' : 'image_unavailable' }); return
@@ -834,7 +844,10 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     }
     const signal = signalFor(parsed.session_id)
     const hint = runningHintFor(provider, derived, hintClock(signal, derived, rollout), now, activityClockMs(st.mtimeMs, activity))
-    res.json({
+    // 7.0.4 S1: every string the detail sends (the reply, the digest, the first prompt, each turn's words, tool
+    // labels, file and image names) has its absolute local paths turned into base names (lib/local-path-redact.ts).
+    // A walk over the whole value rather than a field list, so a field added later is covered too.
+    res.json(redactLocalPathsDeep({
       ...withRunning({ session_id: parsed.session_id }, running, hint),
       ...derivedRowFields(derived),
       ...queuedTurnsFields((await allQueuedWaitingLookup(Date.now()))(provider, parsed.session_id)),
@@ -895,7 +908,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       ...sessionActFields((await sessionActFactsFor([{ provider, session_id: parsed.session_id, file: found }], {
         noteAck: continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]),
       }))[0]),
-    })
+    }))
   } catch (error) {
     console.error(`[agent-sessions] detail failed: ${error instanceof Error ? error.message : error}`)
     res.status(500).json({ error: 'Failed to read agent session', reason: 'agent_sessions_read_failed' })

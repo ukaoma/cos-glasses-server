@@ -39,8 +39,11 @@ export interface SessionToolImage {
   /**
    * `too_large`: the embedded image is over MAX_TOOL_IMAGE_BYTES. `outside_workspace` and
    * `unavailable`: a path-only Read, under the output-image rules. `missing`: no bytes and no path.
+   * `secret_file` (7.0.4): a path-only Read of a file whose name says it may hold secrets (lib/secret-path-guard.ts).
    */
-  reason?: 'outside_workspace' | 'unavailable' | 'too_large' | 'missing'
+  reason?: 'outside_workspace' | 'unavailable' | 'too_large' | 'missing' | 'secret_file'
+  /** 7.0.4: the words the card shows instead, set only with `secret_file`. */
+  notice?: string
   /** The step came before the turn's words (a reply that opened with tool calls). */
   before?: true
 }
