@@ -1165,7 +1165,7 @@
       '<span class="btn small">Live view</span></button>';
   }
   // ── The Today summary (6.99.26 candidate) ───────────────
-  // "The orchestrator's eyes" (Miles, 11/07): two or three sentences on what the sessions add up to, written by Haiku on
+  // "The orchestrator's eyes" (Miles, 11/07): two or three sentences on what the sessions add up to, written by Sonnet on
   // the server (lib/today-brief.ts). Today sends what it already read: session titles, states, how long, each session's
   // latest line and what needs you. The server decides whether a new one is written (off unless switched on, only when
   // the inputs changed, 10 minutes apart, 60 a day, a breaker). Today never waits for it: the counts line paints at once

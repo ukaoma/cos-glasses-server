@@ -234,12 +234,12 @@
     if (cat.id === 'reach') return reachBody();
     if (cat.id === 'pet') return petBody() + onMac(cat.mac);
     if (cat.id === 'privacy') out += sessionFilesGroup(d);
-    // The Today summary (routes/today-brief.ts): Haiku on the Mac writes Today's top lines. Off unless switched on here or
+    // The Today summary (routes/today-brief.ts): Sonnet on the Mac writes Today's top lines (7.0.1; Haiku before). Off unless switched on here or
     // by COS_TODAY_BRIEF_LLM on the Mac, which wins when set.
     if (cat.id === 'general' && d.tb && typeof d.tb.enabled === 'boolean') {
       out += group('Today summary', '',
         row('Write the Today summary with a model', d.tb.source === 'env' ? 'Set on the Mac by the server environment.' :
-          'Haiku writes two or three sentences after the count of what needs you. It reads what Today shows (session titles and states, each session\u2019s latest reply, the questions sessions ask you, what needs you) and, on your Mac, each session\u2019s sub-agents and the Work cards in progress. It runs only while Today is open, only when something changed, never during a recording, at most every 10 minutes and 60 times a day.',
+          'Sonnet writes two or three sentences after the count of what needs you. It reads what Today shows (session titles and states, each session\u2019s latest reply, the questions sessions ask you, what needs you) and, on your Mac, each session\u2019s sub-agents and the Work cards in progress. It runs only while Today is open, only when something changed, never during a recording, at most every 10 minutes and 60 times a day. Refresh on Today asks for a new one at once, at most every 30 seconds.',
           toggle(d.tb.enabled, 'data-set="today-brief"' + (d.tb.source === 'env' ? ' disabled' : ''), 'Write the Today summary with a model')) +
         (briefStatus(d.tb) ? '<p class="cx-set-blurb" id="today-brief-status">' + esc(briefStatus(d.tb)) + '</p>' : ''));
     }

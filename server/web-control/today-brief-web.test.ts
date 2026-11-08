@@ -60,7 +60,7 @@ const WAITING = { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', provider: 
 const WORKING = { session_id: 'bbbbbbbb-2222-4222-8222-222222222222', provider: 'codex', display_label: 'Today summary build', running: true, running_active: true,
   state_since: '2026-11-04T19:35:00Z', discussion_summary: 'Writing the route', project: '-Users-ukaoma-Documents-GitHub-secret',
   subagent_activity: { active: 2, completed: 1, unknown: 0, total: 3, checked_at: 1, partial: false } }
-const FRESH = { text: 'You are shipping the Today summary. Release QA waits on you to approve a publish.', at: '2026-11-04T19:54:00Z', state: 'fresh', basis: '2 sessions', model: 'haiku' }
+const FRESH = { text: 'You are shipping the Today summary. Release QA waits on you to approve a publish.', at: '2026-11-04T19:54:00Z', state: 'fresh', basis: '2 sessions', model: 'sonnet' }
 
 describe('the Today summary on the web', () => {
   it('paints the counts line at once, asks with what Today read, then swaps in the summary with a quiet age line', async () => {
