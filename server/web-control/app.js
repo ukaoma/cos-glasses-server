@@ -26,6 +26,49 @@
     }).join('\n');
   }
   function plain(text) { return String(text == null ? '' : text).replace(/\*\*|`/g, '').replace(/^#{1,4}\s+/, ''); }
+  // Markdown pipe tables (Duo tables). Every pane that draws one asks tableFit how far each column may shrink. Cells
+  // wrap only at spaces (CSS: overflow-wrap break-word, so a column is never narrower than its longest word), a column
+  // whose text is longer than TF_MIN_CH keeps at least that many characters, a first column of short labels stays on
+  // one line, and a long first column gets a fixed width and wraps at words. Only a token of TF_LONG or more characters
+  // (a URL, a hash) may break inside. A table wider than its box scrolls inside it (CSS .tf-wrap), first column sticky.
+  var TF_LONG = 25, TF_MIN_CH = 10, TF_KEY_WORDS = 3, TF_KEY_CHARS = 28, TF_FIRST_MIN = 14, TF_FIRST_MAX = 26;
+  var TF_LONG_RE = new RegExp('[^\\s<>]{' + TF_LONG + ',}', 'g');
+  function tfText(cell) {
+    return String(cell == null ? '' : cell).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|quot|#39);/g, '_')
+      .replace(/\[([^\]\n]*)\]\([^)\s]*\)/g, '$1').replace(/\*\*|__|~~|`/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function tfLong(html) {
+    return String(html).split(/(<[^>]*>)/).map(function (part) {
+      return part.charAt(0) === '<' ? part : part.replace(TF_LONG_RE, function (t) { return '<span class="tf-long">' + t + '</span>'; });
+    }).join('');
+  }
+  // rows: every row of raw cell text, the header row first when there is one.
+  function tableFit(rows) {
+    rows = (rows || []).filter(Array.isArray);
+    var n = rows.reduce(function (m, r) { return Math.max(m, r.length); }, 0);
+    var key = n > 1 && rows.length > 0 && rows.every(function (r) {
+      var t = tfText(r[0]);
+      return t.length <= TF_KEY_CHARS && (t ? t.split(' ').length : 0) <= TF_KEY_WORDS;
+    });
+    var cols = [];
+    for (var k = 0; k < n; k++) {
+      var len = rows.reduce(function (m, r) { return Math.max(m, tfText(r[k]).length); }, 0);
+      if (k === 0 && key) cols.push({ min: 0, width: 0 });
+      else if (k === 0 && n > 1) cols.push({ min: Math.min(len, TF_FIRST_MIN), width: Math.min(len, TF_FIRST_MAX) });
+      else cols.push({ min: Math.min(len, TF_MIN_CH), width: 0 });
+    }
+    return {
+      key: key, cols: cols,
+      tableClass: 'tf' + (key ? ' tf-key' : ''),
+      // The first row's cells carry each column's floor (an inner block's min-width counts in every engine's table
+      // sizing) and the first column's width; later rows only get their long tokens marked.
+      width: function (k, first) { var c = cols[k]; return first && c && c.width ? 'width:' + c.width + 'ch' : ''; },
+      cell: function (k, html, first) {
+        var c = cols[k], body = tfLong(html);
+        return first && c && c.min >= 3 ? '<span class="tf-min" style="min-width:' + c.min + 'ch">' + body + '</span>' : body;
+      }
+    };
+  }
   var WORDS = ['No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
   function countWord(n, lower) { var w = n >= 0 && n <= 10 ? WORDS[n] : String(n); return lower ? w.toLowerCase() : w; }
   function plural(n, one, many) { return n === 1 ? one : many; }
@@ -2722,12 +2765,16 @@
       if (line.indexOf('|') >= 0 && i + 1 < lines.length && SX_TABLE_SEP.test(lines[i + 1])) {
         flush();
         var head = sxCells(line), aligns = sxCells(lines[i + 1]).map(function (a) { return /^:-+:$/.test(a) ? 'center' : /-:$/.test(a) ? 'right' : ''; });
-        var cell = function (tag, c, k) { return '<' + tag + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + sxInline(c) + '</' + tag + '>'; };
         i += 2;
         var body = [];
         while (i < lines.length && lines[i].indexOf('|') >= 0 && lines[i].trim()) { body.push(sxCells(lines[i])); i += 1; }
-        out.push('<div class="sx-table"><table><thead><tr>' + head.map(function (c, k) { return cell('th', c, k); }).join('') + '</tr></thead><tbody>' +
-          body.map(function (row) { return '<tr>' + head.map(function (_c, k) { return cell('td', row[k] || '', k); }).join('') + '</tr>'; }).join('') + '</tbody></table></div>');
+        var fit = tableFit([head].concat(body));
+        var cell = function (tag, c, k, first) {
+          var st = [aligns[k] ? 'text-align:' + aligns[k] : '', fit.width(k, first)].filter(Boolean).join(';');
+          return '<' + tag + (st ? ' style="' + st + '"' : '') + '>' + fit.cell(k, sxInline(c), first) + '</' + tag + '>';
+        };
+        out.push('<div class="sx-table tf-wrap"><table class="' + fit.tableClass + ' tf-grid"><thead><tr>' + head.map(function (c, k) { return cell('th', c, k, true); }).join('') + '</tr></thead><tbody>' +
+          body.map(function (row) { return '<tr>' + head.map(function (_c, k) { return cell('td', row[k] || '', k, false); }).join('') + '</tr>'; }).join('') + '</tbody></table></div>');
         continue;
       }
       if (/^\s*&gt;/.test(line)) {
@@ -4944,7 +4991,7 @@
 
   // ── the shared kit for pane modules (panes/*.js) ───────
   window.COSWeb = {
-    $: $, esc: esc, md: md, plain: plain, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
+    $: $, esc: esc, md: md, plain: plain, tableFit: tableFit, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
     plural: plural, countWord: countWord, dayWord: dayWord, plainDay: plainDay, providerLabel: providerLabel, domainLabel: domainLabel,
     skeletonRows: skeletonRows, emptyBox: emptyBox, setStatus: setStatus, autoGrow: autoGrow,
     readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,

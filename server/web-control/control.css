@@ -329,3 +329,20 @@ html, body { overscroll-behavior-y: none; }
    their content stops at 720 px instead of running lines to 137 characters; prose lines stop at about 68 characters. */
 #pane-settings, #pane-dictation { max-width: 720px; }
 .cx-set-desc, .cx-set-blurb, .wk-fine { max-width: 68ch; }
+
+/* Duo tables: every markdown pipe table (Sessions reader, Today's session sheet, Meetings notes and Ask, Memories
+   answers). app.js tableFit sets each column's floor; this keeps words whole. The panes' own text sets
+   overflow-wrap:anywhere, which lets a table squeeze a column to one letter, so cells go back to break-word: a column is
+   never narrower than its longest word, and only a .tf-long token (a URL, a hash) breaks inside. A table wider than its
+   box scrolls inside it, never the page, with the first column held at the left edge. */
+.tf-wrap { overflow-x: auto; max-width: 100%; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+table.tf th, table.tf td { overflow-wrap: break-word; word-break: normal; hyphens: manual; }
+table.tf .tf-min { display: block; }
+table.tf .tf-long { overflow-wrap: anywhere; }
+table.tf.tf-key tr > :first-child { white-space: nowrap; }
+table.tf tr > :first-child { position: sticky; left: 0; z-index: 1; background: var(--tf-bg, var(--panel)); }
+/* A held cell keeps its own borders only in the separated model; in a collapsed table the lines stay behind. */
+table.tf-grid { border-collapse: separate; border-spacing: 0; }
+table.tf-grid th, table.tf-grid td { border: 0; border-right: 1px solid var(--tf-line, var(--hairline)); border-bottom: 1px solid var(--tf-line, var(--hairline)); }
+table.tf-grid tr > :first-child { border-left: 1px solid var(--tf-line, var(--hairline)); }
+table.tf-grid > :first-child > tr:first-child > * { border-top: 1px solid var(--tf-line, var(--hairline)); }
