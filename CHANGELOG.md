@@ -1,3 +1,32 @@
+## Unreleased (steer mid-turn)
+
+2026-11-07. On 6.99.33 (02dd4a7). Server and Control Web. No client update is needed: the park answer is still 202 `queued: true`, so the glasses companion, the phone and COS Control read it exactly as before. Miles, 2026-11-07: "Yes I want to take that approach. Should land in about a min versus the whole [turn]. That way we can provide steer to our sessions." Findings, per provider: `MU-Chief-Staff/operations/personal/wk45_2026/steer_midturn_findings.md`.
+
+**Default-on changes:**
+- **A message sent to a busy Claude session lands inside its running turn, at its next tool step (`COS_STEER_MIDTURN`, default on; `0` restores 6.99.33).** Before, a message from Control Web, the phone or the glasses to a session that was working waited for the turn to end, and a session kept busy by background-task notifications almost never had a gap, so it could wait a long time. Now the park answer asks the drain to run at once, and the drain puts the words into the session through its peer inbox (the transport the live hop and 6.78.0 Session steer already use). Claude Code takes the message immediately (its `enqueue` row is the proof) and reads it at its next tool step. The row settles `delivered` with "Sent into the running turn." Same for Claude Code in the desktop app and the CLI in a terminal. Glasses messages get the same treatment.
+- **Control Web says which one applies.** Attachability gains `midTurn` (`{available, mode}` or `{available: false, reason}`) on a busy answer, and the park answer gains `landsAt` (`next_step` or `turn_end`), both only with the switch on. The composer reads "Working right now. Your message lands at its next step." and, after a send, "The session is busy. Yours lands at its next step." only when the server says so; otherwise the old turn-end lines.
+
+**What keeps the old behaviour, and why:**
+- Codex: `turn/steer` exists in the app-server protocol, but the running turn lives in ChatGPT.app's own app-server process and COS holds no handle on it (it spawns its own short-lived app-server for queue edits only). A busy Codex thread still takes the message into the app's own queue, which runs it after the turn.
+- Cursor: the IDE composer's only door is its Stop hook; an Agent CLI chat has no input channel. Unchanged.
+- Claude, when a COS child holds the thread (a Continue's resume child), the session is held on a permission prompt (hooks on), the thread is fenced, a cancel hold is on, or no peer inbox is open: queued for the turn end, as before.
+- A message with files waits for the turn end (the peer inbox carries words only), and so does every message parked behind it.
+
+**How it decides (and never sends twice):**
+- FIFO per thread: the drain walks rows in order and stops steering at the first row that cannot go in, or at a row still being delivered.
+- Only a row never attempted is steered (`attempts === 0`): a row with a spent front-door attempt or a restart requeue waits for the turn end.
+- The intent row (`delivering`, `mode: steer`, `journal: 1`, the boot) and the attempt (`pending`) are written durably before the frame, in the 6.78.0 Session steer order. Unverified, a failed write or a throw settles `refused` / `steer_unverified` / `deliveryState: unknown` ("May not have been sent"), never resent. Nothing reached the session: back to waiting with the attempt given back, and the front door sends it at the turn end. A steer row a dead boot left is unknown at the next boot unless the journal says sent.
+- Provenance at the steer is the front door's: footer-shaped words refused (`footer_line_refused`), the parked origin carried on a single-use carry spent in process, its seal checked (provider, thread, no files; `queued_turn_tampered`, "Not sent: its words, files or session changed."), a turn id held for another turn refused (`turn_id_in_use`), the footer written only by the server, the ledger record continued as `via: drain-steer` (or `drain-steer-unverified`). Words changed in the queue file after parking go in unvouched, with no footer, as the front door does.
+- The park kicks the shared drain (one pass in flight, ever), so a park never starts a second concurrent pass.
+
+**Known limits:**
+- "Next tool step" means the session's next tool boundary: a long single tool call (a build, a long test) delays it until that call returns. A turn with no further tool call reads it after its answer.
+- With hooks off, a session held on a permission prompt cannot be seen, so the message goes in and lands when the prompt is answered (the 6.78.0 limit).
+- The glasses companion still shows its own parked-row line at park time; the row then reads "Sent into the running turn." on its next queue read.
+- In Control Web's queue list, a row that settled "May not have been sent" is shown under "Not sent" with that reason (unchanged list rendering).
+
+**Tests:** steer-midturn (the switch and its docs; steered through the peer inbox and never through the front door; intent row and attempt before the frame; switch off and live hop off hold; only a busy gate is steered, not a COS child, a fence, a held prompt, no inbox or a cancel hold; Codex and Cursor untouched; FIFO in order, files ahead hold the row behind, a delivering row ahead holds; never twice: spent attempt, unverified, write failure, throw, not sent then once at turn end, journal refusal, dead boot reconcile; provenance: G2 footer and ledger, changed words unvouched, sealed files removed, forged footer line, reused turn id, park refusal; the park answer's `landsAt` and kick, switch off byte-identical), today-actions (the composer lines), pi-durable-flags-off (the mid-turn switch off with the other P3 switches).
+
 ## 6.99.33 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
 
 2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). 6.99.32 (98f3cde) was the same work installed privately at 18:09 without the small-frames keyboard fix below; 6.99.33 replaces it. Server only (Control Web); no route changed, so it works with any COS Control that runs 6.99.29. The first public build with the 6.99.30 Duo layout work below; npm goes from 6.99.29 straight to 6.99.33.

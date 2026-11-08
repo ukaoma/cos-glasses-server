@@ -459,6 +459,13 @@ export interface AgentSessionBindingsDeps {
    */
   sessionSteer?: (provider: string, nativeThreadId: string, gateReason: string) => SessionSteerAvailability | null
 
+  /**
+   * Steer mid-turn (COS_STEER_MIDTURN): would a message parked at this busy thread go into its
+   * running turn at the next tool step? Added to a busy attachability answer as `midTurn`, so the
+   * composer says which line is true. Null (field absent) with the switch off.
+   */
+  sessionMidTurn?: (provider: string, nativeThreadId: string, gateReason: string) => SessionSteerAvailability | null
+
   ownership?: {
     record: (pid: number, startMs: number) => string
     release: (pid: number) => boolean
@@ -2164,8 +2171,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     const detected = routeOccupancy(provider, threadId)
     const verdictBody = projectAttachability(detected)
     const cancelReason = detected.busyHolder === true ? 'native_thread_working' : verdictBody.reason
+    // Steer mid-turn: only on a busy answer a turn may queue behind, and only with the switch on.
+    let midTurn: SessionSteerAvailability | null = null
+    if (verdictBody.attachable === false && typeof verdictBody.reason === 'string' && queueableRefusal(verdictBody.reason) && typeof deps.sessionMidTurn === 'function') {
+      try { midTurn = deps.sessionMidTurn(provider, threadId, verdictBody.reason) } catch { midTurn = null }
+    }
     res.json({
       ...verdictBody,
+      ...(midTurn ? { midTurn } : {}),
       cancel: cancelFieldFor(provider, threadId, cancelReason),
       ...(await continueNoteFor(provider, threadId, continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]))),
     })

@@ -356,6 +356,23 @@ describe('the attach refusal: `steer` (COS_SESSION_STEER) and the dead-boot copy
     expect(codex.body).toEqual(CONTRACT.attach_refusal_codex)
   })
 
+  it('steer mid-turn: a busy attachability answer carries `midTurn` from the wired rule; free, or the rule null, has no key', async () => {
+    let midTurn: ReturnType<typeof sessionSteerAvailability> | null = { available: true, mode: 'peer_inbox' }
+    let occupancy: Occupancy = working
+    const asked: string[] = []
+    await start(deps(wire(open()), { occupancy: () => occupancy, sessionMidTurn: (p, _t, reason) => { asked.push(`${p}:${reason}`); return midTurn } }))
+    const read = async () => (await fetch(`${base}/api/agent-sessions/claude/${SID}/attachability`)).json() as Promise<Record<string, unknown>>
+    expect((await read()).midTurn).toEqual({ available: true, mode: 'peer_inbox' })
+    expect(asked).toEqual(['claude:native_thread_working'])
+    midTurn = { available: false, reason: 'permission_pending' }
+    expect((await read()).midTurn).toEqual({ available: false, reason: 'permission_pending' })
+    midTurn = null
+    expect('midTurn' in (await read())).toBe(false)
+    occupancy = free
+    midTurn = { available: true, mode: 'peer_inbox' }
+    expect('midTurn' in (await read())).toBe(false)
+  })
+
   it('flag off: no `steer` key at all, whatever is wired (the contract flag-off body)', async () => {
     await start(deps(wire(open()), { occupancy: () => working, sessionSteer: steer }))
     const res = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })

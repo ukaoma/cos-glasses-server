@@ -1275,7 +1275,7 @@
         '</div></div>';
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
       // 6.99.29: "Working right now" only while the card's one state says so.
-      if (K.feed.parkNoteShows(r)) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider)) + '</p>';
+      if (K.feed.parkNoteShows(r)) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider, r)) + '</p>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = '<div class="sx-box refusal" role="status"><p>' + esc(v.reasonCopy) + '</p></div>';
     } else if (v && v.caution) {

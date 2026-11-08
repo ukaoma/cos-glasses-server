@@ -45,8 +45,11 @@ describe('server/index.ts wires the 6.78.0 Sessions durability pieces', () => {
     expect(queue).toContain('attempt: queueAttempt,')
     expect(queue).toContain('transcriptLines: queueEvidenceLines,')
     expect(queue).toContain('...steerDeps,')
-    expect(queue).toContain('agentSessionBindingRegistry.beginAttempt(provider, threadId, clientTurnId, mode, now)')
-    expect(queue).toContain('agentSessionBindingRegistry.settleAttempt(provider, threadId, clientTurnId, exit, now)')
+    // Steer mid-turn (11/07): one attempt journal object, shared with the attachability `midTurn` rule.
+    expect(queue).toContain('attempts: queueAttemptJournal,')
+    const journal = between(index, 'const queueAttemptJournal = {', '/** The bounded transcript tail the reconcile and the receipts read evidence from. */')
+    expect(journal).toContain('agentSessionBindingRegistry.beginAttempt(provider, threadId, clientTurnId, mode, now)')
+    expect(journal).toContain('agentSessionBindingRegistry.settleAttempt(provider, threadId, clientTurnId, exit, now)')
   })
 
   it('one live-turn transport for the turns route and Sessions steer', () => {

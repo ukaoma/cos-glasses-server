@@ -3220,6 +3220,45 @@ describe('one state for the session card: the freshest signal wins, and every pi
     consistent(card(h), 'Working')
   })
 
+  it('steer mid-turn: the server says the session takes it mid-turn, so the note and the send line say next step', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const midTurn: Routes = {
+      ...busyGate,
+      ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0, midTurn: { available: true, mode: 'peer_inbox' } } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0, landsAt: 'next_step' } },
+    }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: midTurn })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ago(5_000) }) })
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Working right now. Your message lands at its next step.')
+    expect(h.els['ta-verdict']!.innerHTML).not.toContain('lands when this turn ends')
+    h.els['ta-input']!.value = 'also check the footer'
+    h.tap('send')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session is busy. Yours lands at its next step.')
+  })
+
+  it('steer mid-turn: not available (a held prompt, Codex, the switch off) keeps the turn-end lines', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const noMidTurn: Routes = {
+      ...busyGate,
+      ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0, midTurn: { available: false, reason: 'permission_pending' } } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0, landsAt: 'turn_end' } },
+    }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: noMidTurn })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ago(5_000) }) })
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Working right now. A message you send waits and lands when this turn ends.')
+    h.els['ta-input']!.value = 'also check the footer'
+    h.tap('send')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session is busy. Yours sends next, on its own.')
+  })
+
   it('a fresher idle beats an older busy answer: Idle everywhere, and the prompt line says what was last asked', async () => {
     const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: ago(300_000), last_activity_at: ago(60_000), alive: true }
     const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: busyGate })

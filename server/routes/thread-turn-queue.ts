@@ -24,13 +24,13 @@ import {
   admitToQueue, drainDecision, queueableRefusal, queuePosition,
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
   queueReconcileEnabled, queueResendEnabled, queuedTurnReasonCopy, sessionSteerAvailability, sessionSteerEnabled,
-  type SessionSteerAvailability,
+  steerMidturnEnabled, type SessionSteerAvailability,
 } from '../lib/thread-turn-queue.js'
 import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queue-store.js'
 import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
 import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
-import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, stripG2TurnFooter, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
+import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, sealMatches, stripG2TurnFooter, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
 import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 
 /**
@@ -115,6 +115,23 @@ export interface ThreadTurnQueueDeps {
     begin: (provider: string, threadId: string, clientTurnId: string, mode: 'turn' | 'steer', now: number) => boolean
     settle: (provider: string, threadId: string, clientTurnId: string, exit: 'sent' | 'not_sent' | 'unknown', now: number) => boolean
   }
+  /**
+   * Steer mid-turn (COS_STEER_MIDTURN), optional: ask for a drain pass for this thread now, so a
+   * turn parked at a busy session that can take it mid-turn goes in within seconds instead of at
+   * the next 20 s sweep. Production: the shared drain kick (one pass in flight, ever). Absent: the
+   * sweep still delivers it, only later.
+   */
+  kickDrain?: (threadId: string) => void
+}
+
+/**
+ * Can this thread take a parked turn mid-turn right now (COS_STEER_MIDTURN)? The same shared rule
+ * as Session steer, plus the switch and the two members the drain's steer needs. Never throws.
+ */
+export function midTurnAvailabilityFor(deps: Pick<ThreadTurnQueueDeps, 'steerProbe' | 'deliverLiveTurn' | 'continueLive' | 'attempts'>, provider: string, threadId: string, gateReason: string | null): SessionSteerAvailability | null {
+  if (!steerMidturnEnabled()) return null
+  if (typeof deps.deliverLiveTurn !== 'function' || !deps.attempts) return { available: false, reason: 'no_outside_channel' }
+  return steerAvailabilityFor(deps, provider, threadId, gateReason)
 }
 
 /**
@@ -211,6 +228,159 @@ function isRetryableDelivery(outcome: { reason?: string; serverRetryable?: boole
 }
 
 /**
+ * The verdict a drain hop with no parked origin is judged by: the loopback call it is. The front
+ * door reaches the same verdict through `originOf` on the drainer's own request (local socket,
+ * token shown), so a steered turn and a front-door turn are ledgered alike. Never footed.
+ */
+function localDrainVerdict(at: number): OriginVerdict {
+  return {
+    origin: { remote: '127.0.0.1', loopback: true, ownAddress: true, clientInstance: null, client: 'local', tokenPresented: true, webSession: false },
+    verifiedOrigin: false,
+    reason: 'local_socket',
+    judgedAt: at,
+  }
+}
+
+/** What one mid-turn attempt did to its row: delivered, settled some other way, or left waiting. */
+type MidTurnOutcome = 'delivered' | 'settled' | 'held'
+
+/**
+ * Steer mid-turn (COS_STEER_MIDTURN, Miles 2026-11-07): put ONE waiting row into the running turn
+ * of a busy Claude desk session through its peer inbox. Claude Code takes the frame at once (its
+ * `enqueue` row is the proof `deliverLiveTurn` waits for) and folds it in at its next tool step.
+ *
+ * Called only by `drainThread`, only for a row the drain would otherwise hold behind a busy gate,
+ * and only in FIFO order (the caller stops at the first row that holds).
+ *
+ * WHO MAY BE STEERED: a row never attempted (`attempts === 0`: no front-door attempt, no earlier
+ * steer, no restart requeue, so nothing about it is unknown), with no files (the peer inbox
+ * carries words only), on a thread the shared steer rule says can take it now.
+ *
+ * PROVENANCE IS CHECKED HERE AS THE TURNS ROUTE CHECKS IT, because this hop does not go through
+ * that front door: footer-shaped words are refused, the parked origin is carried (a single-use
+ * carry token, spent in this process), its seal must name this provider, thread and no files,
+ * a turn id held for another turn is refused, and only the server writes the footer. A refusal
+ * settles the row `refused` with its own reason, so it reads "Not sent" with the reason line.
+ *
+ * NEVER TWICE, in the same order as `steerTurn`: the intent row (`delivering`, `mode: 'steer'`,
+ * `journal: 1`, this boot) durably, then the attempt `pending`, then the frame, then the
+ * verdict, journal first. Unverified, a failed write or a throw: `refused`, `steer_unverified`,
+ * `deliveryState: 'unknown'`, never resent. Nothing reached the session: back to waiting, the
+ * attempt given back, so the turn-end front door sends it as before.
+ *
+ * NO AWAIT BEFORE THE INTENT ROW IS WRITTEN: the caller read this row as `waiting` in the same
+ * synchronous step, so a cancel cannot slip between that read and the `delivering` write.
+ */
+async function steerHeldTurn(
+  provider: string,
+  threadId: string,
+  turn: QueuedThreadTurn,
+  gateReason: string | null,
+  deps: ThreadTurnQueueDeps,
+): Promise<MidTurnOutcome> {
+  if (turn.status !== 'waiting' || turn.attempts !== 0) return 'held'
+  if (Array.isArray(turn.attachmentIds) && turn.attachmentIds.length > 0) return 'held'
+  const availability = midTurnAvailabilityFor(deps, provider, threadId, gateReason)
+  if (!availability || !availability.available) return 'held'
+  const { clientTurnId, prompt } = turn
+
+  const rewrite = (apply: (row: QueuedThreadTurn) => void): QueuedThreadTurn | null => {
+    const latest = readQueue(provider, threadId, deps.now())
+    const row = latest.find(t => t.clientTurnId === clientTurnId)
+    if (!row) return null
+    apply(row)
+    writeQueue(provider, threadId, latest, { durable: true })
+    return row
+  }
+  const refuse = (reason: string): MidTurnOutcome => {
+    const at = deps.now()
+    rewrite(row => { row.status = 'refused'; row.reason = reason; row.settledAt = at })
+    deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
+    console.warn(`[thread-turn-queue] mid-turn refused provider=${provider} clientTurnId=${clientTurnId} reason=${reason}`)
+    return 'settled'
+  }
+
+  // The front door's provenance gates, in its order.
+  let verdict: OriginVerdict | null = null
+  if (deps.provenance) {
+    if (hasFooterShapedLine(prompt)) return refuse('footer_line_refused')
+    const token = deps.provenance.issueCarry({ provider, threadId, clientTurnId, prompt })
+    const carried = token ? deps.provenance.takeCarry(token, clientTurnId, prompt) : null
+    // No carry could be made: leave it for the front door, which decides with its own carry.
+    if (carried === null) return 'held'
+    if (carried.seal !== null && !sealMatches(carried.seal, { provider, threadId, attachments: '' })) return refuse('queued_turn_tampered')
+    verdict = carried.verdict ?? localDrainVerdict(deps.now())
+    if (deps.provenance.reusesTurnId(clientTurnId, { prompt, verdict, provider, sessionId: threadId }, { continues: true })) return refuse('turn_id_in_use')
+  }
+  const sent = deps.provenance && verdict ? deps.provenance.footed(prompt, clientTurnId, verdict, provider) : prompt
+  const ledger = (via: string): void => {
+    if (deps.provenance && verdict) deps.provenance.record({ turnId: clientTurnId, prompt, verdict, provider, sessionId: threadId, via, continues: true })
+  }
+
+  // 1. The intent row, durably.
+  const intent = rewrite(row => {
+    row.status = 'delivering'
+    row.attempts = 1
+    row.mode = 'steer'
+    row.journal = 1
+    if (typeof deps.bootId === 'string' && deps.bootId.length > 0) row.deliveringBootId = deps.bootId
+    else delete row.deliveringBootId
+  })
+  if (!intent) return 'held'
+  const backToWaiting = (row: QueuedThreadTurn): void => {
+    row.status = 'waiting'
+    row.attempts = 0
+    delete row.mode
+    delete row.journal
+    delete row.deliveringBootId
+  }
+
+  // 2. The attempt `pending`, durably, before any frame.
+  let begun = false
+  try { begun = deps.attempts!.begin(provider, threadId, clientTurnId, 'steer', deps.now()) === true } catch { begun = false }
+  if (!begun) {
+    rewrite(backToWaiting)
+    console.warn(`[thread-turn-queue] mid-turn not attempted provider=${provider} clientTurnId=${clientTurnId}: the attempt journal could not record it`)
+    return 'held'
+  }
+
+  // 3. The frame.
+  const startedAt = deps.now()
+  let live: { ok: boolean; reason: string } | null = null
+  try {
+    live = await deps.deliverLiveTurn!({ provider, sessionId: threadId, prompt: sent, verifyTimeoutMs: PEER_VERIFY_TIMEOUT_MS, clientTurnId })
+  } catch (error) {
+    console.error(`[thread-turn-queue] mid-turn delivery threw: ${error instanceof Error ? error.message : error}`)
+    live = null
+  }
+  const at = deps.now()
+  const journal = (exit: 'sent' | 'not_sent' | 'unknown'): void => {
+    try { deps.attempts!.settle(provider, threadId, clientTurnId, exit, at) } catch { /* the reconcile reads `pending` as unknown */ }
+  }
+  console.log(`[thread-turn-queue] mid-turn provider=${provider} clientTurnId=${clientTurnId} hop=${live?.reason ?? 'threw'} ms=${Math.max(0, at - startedAt)} waitedMs=${Math.max(0, at - turn.queuedAt)}`)
+
+  // 4. The verdict, journal first, then the row.
+  if (live?.ok === true) {
+    journal('sent')
+    ledger('drain-steer')
+    rewrite(row => { row.status = 'delivered'; row.reason = 'steered'; row.settledAt = at })
+    deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
+    return 'delivered'
+  }
+  if (live === null || live.reason === 'unverified' || live.reason === 'write_failed') {
+    journal('unknown')
+    ledger('drain-steer-unverified')
+    rewrite(row => { row.status = 'refused'; row.reason = 'steer_unverified'; row.deliveryState = 'unknown'; row.settledAt = at })
+    deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
+    return 'settled'
+  }
+  // The transport's own word that nothing reached a session: the row waits for the turn end.
+  journal('not_sent')
+  rewrite(backToWaiting)
+  return 'held'
+}
+
+/**
  * One drain pass over one thread.
  *
  * Exported for the test and for the sweep. Sequential by design: two turns to the same
@@ -243,9 +413,14 @@ export async function drainThread(
     if (turn.status !== 'waiting') deps.provenance?.forgetQueued(provider, threadId, turn.clientTurnId)
   }
 
+  // Steer mid-turn (COS_STEER_MIDTURN): FIFO per thread. Once a row ahead cannot go in mid-turn
+  // (or is still being delivered), nothing behind it may jump it; it waits for the turn end too.
+  let midTurnOrderHeld = false
+
   for (const snapshot of queue) {
     const turn = readQueue(provider, threadId, deps.now()).find(t => t.clientTurnId === snapshot.clientTurnId)
     if (!turn) continue
+    if (turn.status === 'delivering') midTurnOrderHeld = true
     if (turn.status !== 'waiting') continue
 
     // Reuse only refusal within this synchronous pass. Rechecking a busy thread
@@ -284,7 +459,21 @@ export async function drainThread(
         }
     const decision = drainDecision(turn, seen, deps.now())
 
-    if (decision === 'hold') { held += 1; continue }
+    if (decision === 'hold') {
+      // Steer mid-turn: never during a cancel hold (the person said stop), only for the first
+      // rows in order, and only where the shared steer rule says this session can take it now,
+      // which also means the hold is the busy GATE: the rule answers only for a refusal that
+      // names a desk run (an attachable thread has no reason). Anything else holds as before.
+      const cancelHeld = typeof seen.cancelHoldUntil === 'number' && Number.isFinite(seen.cancelHoldUntil) && deps.now() < seen.cancelHoldUntil
+      if (!midTurnOrderHeld && !cancelHeld) {
+        const outcome = await steerHeldTurn(provider, threadId, turn, gate.reason, deps)
+        if (outcome === 'delivered') { delivered += 1; continue }
+        if (outcome === 'settled') { retired += 1; continue }
+      }
+      midTurnOrderHeld = true
+      held += 1
+      continue
+    }
     if (decision === 'expire' || decision === 'give_up') {
       turn.status = decision === 'expire' ? 'expired' : 'refused'
       turn.reason = decision === 'expire' ? 'queued_turn_expired' : 'delivery_attempts_exhausted'
@@ -710,12 +899,27 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
 
     writeQueue(provider, threadId, admitted.queue)
     if (deps.provenance && verdict) deps.provenance.record({ turnId: clientTurnId, prompt, verdict, provider, sessionId: threadId, via: 'queue' })
+    // Steer mid-turn (COS_STEER_MIDTURN): the park answer stays the 202 every client reads (a
+    // lens that sees anything else says "could not queue"); the drain is asked to run now, and it
+    // puts the words into the running turn. `landsAt` (additive, only with the switch on) tells a
+    // client which line to show: `next_step` only when this row is first in line, has no files,
+    // and the session can take it now; `turn_end` otherwise.
+    const midTurn = midTurnAvailabilityFor(deps, provider, threadId, gate.reason)
+    let landsAt: 'next_step' | 'turn_end' | null = null
+    if (midTurn) {
+      const firstInLine = queuePosition(admitted.queue, clientTurnId) === 0 && !admitted.queue.some(t => t.status === 'delivering')
+      landsAt = midTurn.available && firstInLine && attach.ids.length === 0 ? 'next_step' : 'turn_end'
+      if (landsAt === 'next_step') {
+        try { deps.kickDrain?.(threadId) } catch { /* the 20 s sweep still delivers it */ }
+      }
+    }
     return res.status(202).json({
       queued: true,
       clientTurnId,
       position: queuePosition(admitted.queue, clientTurnId),
       waitingOn: gate.reason,
       ...(steerFallback !== null ? { steerFallback } : {}),
+      ...(landsAt !== null ? { landsAt } : {}),
     })
   })
 
