@@ -1565,9 +1565,7 @@ describe('Next up: Prep me and Open meeting (parity gap 9)', () => {
     const start = APP.indexOf('  function renderNext(w) {'), end = APP.indexOf("  // From today's meetings: Work's suggestions")
     const els: Record<string, El> = {}
     const deps = { $: (id: string) => (els[id] ??= new El()), esc, toDate: (v: unknown) => (v ? new Date(String(v)) : null), clock: () => '3:00 PM', dayWord: () => 'today',
-      TODAY: { offline: false, welcome: {} }, window: { COSWeb: { cosChat: { prepFor: () => Promise.resolve('prep') } } }, go: () => {}, toast: () => {},
-      // PH plan P1: renderNext also asks GET /api/calendar/today for the rest of today (today-calendar-web.test.ts).
-      api: () => Promise.resolve({ connected: false, next: [] }) }
+      TODAY: { offline: false, welcome: {} }, window: { COSWeb: { cosChat: { prepFor: () => Promise.resolve('prep') } } }, go: () => {}, toast: () => {} }
     // eslint-disable-next-line no-new-func
     const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { renderNext: renderNext, prepNext: prepNext };\n}')(deps)
     fns.renderNext({ nextEvent: { title: 'Quilt leadership sync', time: '2026-11-07T21:00:00Z' } })

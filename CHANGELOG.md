@@ -1,6 +1,6 @@
 ## 6.99.34 - Calendars from macOS Calendar (PH plan P1)
 
-2026-11-07. On 6.99.33 (02dd4a7, installed privately). Private build for Miles's Mac with COS Control 0.5.378, which writes the calendar snapshot. Not published.
+2026-11-07. On 6.99.33 (02dd4a7, installed privately). Private build for Miles's Mac with COS Control 0.5.378, which writes the calendar snapshot. npm stays on 6.99.33.
 
 **Default-on changes:** none for anyone who has not turned on Calendars in COS Control (Settings, Activity home, Calendars: off until Connect, nothing picked after the grant). With no snapshot file, every calendar read works exactly as in 6.99.33. Control Web Today asks `GET /api/calendar/today` once per paint and shows nothing new when it answers "not connected".
 

@@ -710,6 +710,9 @@
       paintNeeds();
       renderWeather(welcome);
       renderNext(welcome);
+      // PH plan P1: the rest of today under Next up. Kept out of renderNext so that stays a pure render.
+      var nx = welcome && welcome.nextEvent;
+      loadCalendarLater(nx, nx && toDate(nx.time));
       loadTodayIntake();
       setBadge('sessions', working.length > 0);
       liveSession(recent).then(function (rec) {
@@ -1069,12 +1072,12 @@
     $('next-actions').innerHTML = (prep ? '<button type="button" class="btn small primary" data-today-next="prep">Prep me</button>' : '') +
       '<button type="button" class="link-btn" data-goto="meetings">Open meeting</button>';
     card.classList.remove('hidden');
-    loadCalendarLater(n, d);
   }
   // PH plan P1: the rest of today from GET /api/calendar/today (selected calendars, next 3), under Next up.
   // An aging snapshot says when it was read. Not connected or nothing more: the block stays hidden.
   function loadCalendarLater(n, d) {
     var box = $('next-later'); if (!box) return;
+    if (!n || !n.title || !d) { box.classList.add('hidden'); box.innerHTML = ''; return; }
     var gen = TODAY.gen;
     api('/api/calendar/today').then(function (c) {
       if (gen !== TODAY.gen) return;

@@ -57,6 +57,20 @@ describe('Today: later today under Next up', () => {
     expect(t.box.innerHTML).toContain('Calendar as of 14:40')
   })
 
+  it('no Next up event: hidden, and the calendar is not asked', async () => {
+    const t = load({ connected: true, stale: false, next: [row('Standup', '2026-11-09T17:00:00Z')] })
+    t.box.hidden = false
+    await t.run(null, null)
+    expect(t.box.hidden).toBe(true)
+    expect(t.calls).toEqual([])
+  })
+
+  it('Today load asks for it right after renderNext, never inside it', () => {
+    const render = APP.slice(APP.indexOf('  function renderNext(w) {'), APP.indexOf('  function prepNext()'))
+    expect(render.slice(0, render.indexOf('  // PH plan P1: the rest of today'))).not.toContain('loadCalendarLater(')
+    expect(APP).toMatch(/renderNext\(welcome\);\n[^\n]*\n\s+var nx = welcome && welcome\.nextEvent;\n\s+loadCalendarLater\(nx, nx && toDate\(nx\.time\)\);/)
+  })
+
   it('not connected, a failed read, or nothing more keeps it hidden', async () => {
     for (const answer of [{ connected: false, next: [] }, new Error('down'), { connected: true, stale: false, next: [row('Pipeline review', NEXT.time)] }]) {
       const t = load(answer)
