@@ -57,6 +57,9 @@ import {
   isOllamaProviderReady,
 } from '../lib/ollama-catalog.js'
 import { isMediaProcessingReady } from '../lib/image-safety.js'
+import { DEFAULT_MODEL, type ModelPreference } from '../../shared/model-preference.js'
+import { closedEnvDefaultModel } from '../lib/key-profile-routing.js'
+import { getSessionModel } from '../lib/conversation.js'
 import {
   MAX_OTHER_MEDIA_BYTES,
   MAX_VIDEO_MEDIA_BYTES,
@@ -626,6 +629,27 @@ function crashLoopParkingHealth(): { enabled: boolean; parked: number } {
   }
 }
 
+/**
+ * 7.0.2 (A7): what "Default" in a model picker resolves to, in model-router's own order
+ * (lib/model-router.ts, the resolvedModel line): the request's model, then the session's
+ * preference, then COS_G2_DEFAULT_MODEL, then DEFAULT_MODEL. A picker on "Default" sends no
+ * model, so the request step only names a model a caller passes in. `source` says which step won.
+ * A slot name only: never a key profile (closedEnvDefaultModel and getSessionModel are closed).
+ */
+export type DefaultModelSource = 'request' | 'session' | 'env' | 'built-in'
+export function resolveDefaultModel(input: { requested?: ModelPreference | null; sessionModel?: ModelPreference | null; env?: string | undefined }): { preference: ModelPreference; source: DefaultModelSource } {
+  if (input.requested) return { preference: input.requested, source: 'request' }
+  if (input.sessionModel) return { preference: input.sessionModel, source: 'session' }
+  const env = closedEnvDefaultModel(input.env)
+  if (env) return { preference: env, source: 'env' }
+  return { preference: DEFAULT_MODEL, source: 'built-in' }
+}
+// A session id is only looked up in the in-memory session map (an unknown id reads null), so nothing else is checked.
+function defaultModelField(sessionQuery: unknown): { preference: ModelPreference; source: DefaultModelSource } {
+  const sessionModel = typeof sessionQuery === 'string' && sessionQuery.length <= 128 ? getSessionModel(sessionQuery) : null
+  return resolveDefaultModel({ sessionModel, env: process.env.COS_G2_DEFAULT_MODEL })
+}
+
 // Stable app slots backed by Codex + Cursor live catalogs. Authenticated by
 // global /api middleware; ?refresh=1 forces discovery.
 healthRouter.get('/models', async (req, res) => {
@@ -657,6 +681,8 @@ healthRouter.get('/models', async (req, res) => {
   res.json({
     ...catalog,
     ...threadAttachHealthFields(threadAttach),
+    // 7.0.2 (A7): what a picker's "Default" resolves to (?sessionId= adds that session's preference).
+    defaultModel: defaultModelField(req.query.sessionId),
     // 6.62.0 (plans 3.5, 3.11): the phone reads THIS surface, so the live-Continue counters
     // and the per-provider action contract are published here too, same helpers as health.
     ...continueLiveHealthFields(),
