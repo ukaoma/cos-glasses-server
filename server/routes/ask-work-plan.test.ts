@@ -146,6 +146,30 @@ it('retains admission and maintenance if the runner cannot confirm process termi
   expect(s.release).not.toHaveBeenCalled()
   expect((await s.post()).status).toBe(409)
 })
+it('recovers admission only on later runner termination proof, releasing the held lease once', async () => {
+  let prove!: () => void
+  const proof = new Promise<void>(resolve => { prove = resolve })
+  const run = vi.fn().mockRejectedValueOnce(new AskProcessError('child_exit_unconfirmed', true, proof)).mockResolvedValue(output())
+  const s = await setup({ run })
+  expect((await s.post()).status).toBe(503)
+  expect((await s.post()).status).toBe(409)
+  expect(s.release).not.toHaveBeenCalled(); expect(run).toHaveBeenCalledOnce()
+  prove(); prove()
+  await vi.waitFor(() => expect(s.release).toHaveBeenCalledOnce())
+  expect((await s.post()).status).toBe(200)
+  expect(run).toHaveBeenCalledTimes(2); expect(s.release).toHaveBeenCalledTimes(2)
+})
+it('keeps admission and maintenance held when a later proof fails', async () => {
+  let failProof!: (error: Error) => void
+  const proof = new Promise<void>((_resolve, reject) => { failProof = reject })
+  const run = vi.fn(async () => { throw new AskProcessError('child_exit_unconfirmed', true, proof) })
+  const s = await setup({ run })
+  expect((await s.post()).status).toBe(503)
+  failProof(new Error('proof unavailable'))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect((await s.post()).status).toBe(409)
+  expect(s.release).not.toHaveBeenCalled(); expect(run).toHaveBeenCalledOnce()
+})
 it('holds admission through a disconnected evidence read, then releases without running inference', async () => {
   let started!: () => void, finishInput!: (data: OrchestratorInput) => void
   const entered = new Promise<void>(resolve => { started = resolve })

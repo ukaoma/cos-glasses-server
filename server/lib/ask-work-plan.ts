@@ -82,7 +82,9 @@ export function prepareAskWorkPlan(request: AskWorkPlanRequest, task: TaskBoardR
   const evidenceStatus = { snapshotAgeSec: evidence.snapshotAgeSec, liveListAgeSec: evidence.liveListAgeSec,
     logScanComplete: evidence.logScanComplete, fresh, usageMode: 'cached',
     scope: 'Canonical task and server session evidence only; no local attachments, local link context, or chat history. Meeting references do not include transcripts.',
-    disabledTargets: evidence.rows.filter((_, index) => !sessions[index]!.automatic || !sessions[index]!.forkable).map(row => ({ id: row.id,
+    // A row is wholly disabled only when neither Continue nor Fork is eligible. The
+    // individual automatic/forkable fields still constrain each assignment mode.
+    disabledTargets: evidence.rows.filter((_, index) => !sessions[index]!.automatic && !sessions[index]!.forkable).map(row => ({ id: row.id,
       reasons: [!fresh && 'stale_or_missing_evidence', !evidence.logScanComplete && 'incomplete_session_scan',
         !row.member && 'not_card_member', !['claude', 'codex'].includes(row.id.split(':')[0]!) && 'unsupported_provider',
         !providerAllowed(row.id.split(':')[0]!) && 'provider_usage_unavailable', row.busy && 'busy', !row.live && 'not_live',

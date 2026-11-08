@@ -74,7 +74,11 @@ describe('Ask Work preparation', () => {
       const status = JSON.parse(prepared.input.context).evidenceStatus
       expect(status).toMatchObject({ snapshotAgeSec: data.snapshotAgeSec, liveListAgeSec: data.liveListAgeSec,
         logScanComplete: data.logScanComplete, scope: expect.stringContaining('no local attachments') })
-      expect(status.disabledTargets[0].reasons.length).toBeGreaterThan(0)
+      if (kind === 'busy' || kind === 'notLive') {
+        // The live Continue is refused, but a retained log still supports a Fork.
+        expect(prepared.input.sessions[0]!.forkable).toBe(true)
+        expect(status.disabledTargets).toEqual([])
+      } else expect(status.disabledTargets[0].reasons.length).toBeGreaterThan(0)
       expect(() => parseWorkChatAnswer(JSON.stringify({ answer: 'Plan', assignments: [{ sessionID: sid, prompt: 'Do work' }] }), prepared.input)).toThrow()
     })
   it('rejects future usage evidence and never silently truncates task context', () => {
@@ -82,6 +86,15 @@ describe('Ask Work preparation', () => {
     expect(() => prepareAskWorkPlan(request, task, data, now)).toThrow('orchestrator_input_unavailable')
     expect(() => prepareAskWorkPlan(request, { ...task, text: 'a'.repeat(16000) }, data, now)).toThrow('task_context_too_large')
     expect(() => prepareAskWorkPlan(request, task, { ...data, workID: 'other' }, now)).toThrow('orchestrator_input_unavailable')
+  })
+  it('does not describe a valid Continue as disabled when only Fork lacks a local log', () => {
+    const data = evidence(); data.rows[0]!.forkable = false
+    const prepared = prepareAskWorkPlan(request, task, data, now)
+    expect(prepared.evidence.eligibleContinueSessionIDs).toEqual([sid])
+    expect(prepared.evidence.eligibleForkSessionIDs).toEqual([])
+    expect(JSON.parse(prepared.input.context).evidenceStatus.disabledTargets).toEqual([])
+    expect(parseWorkChatAnswer(JSON.stringify({ answer: 'Continue the review', assignments: [{ sessionID: sid, prompt: 'Review' }] }), prepared.input).assignments).toHaveLength(1)
+    expect(() => parseWorkChatAnswer(JSON.stringify({ answer: 'Fork the review', assignments: [{ mode: 'fork', sessionID: sid, prompt: 'Review' }] }), prepared.input)).toThrow()
   })
   it('refuses a fork whose prioritized reason can hide another exclusion', () => {
     const data = evidence(); data.rows[0]!.reason = 'on_another_card'; data.rows[0]!.forkable = true

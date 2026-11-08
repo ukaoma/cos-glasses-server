@@ -21,6 +21,8 @@ export interface MeetingAskRunBudget {
     deadlineMs?: number;
 }
 export const MEETING_ASK_DEFAULT_BUDGET = { maxOutputTokens: 1400, maxThinkingTokens: 0, deadlineMs: 45000 } as const;
+export const MEETING_ASK_TERMINATION_PROOF_MS = 4500;
+export const MEETING_ASK_LATE_PROOF_POLL_MS = 250;
 /** The child environment's token limits for a budget; the default is exactly '1400' and '0'. */
 export function meetingAskTokenEnv(budget?: MeetingAskRunBudget): { CLAUDE_CODE_MAX_OUTPUT_TOKENS: string; MAX_THINKING_TOKENS: string } {
     const output = budget?.maxOutputTokens ?? MEETING_ASK_DEFAULT_BUDGET.maxOutputTokens;
@@ -28,7 +30,9 @@ export function meetingAskTokenEnv(budget?: MeetingAskRunBudget): { CLAUDE_CODE_
     return { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(output + thinking), MAX_THINKING_TOKENS: String(thinking) };
 }
 export class AskProcessError extends Error {
-    constructor(message: string, readonly terminationUnconfirmed = false) { super(message); }
+    constructor(message: string, readonly terminationUnconfirmed = false,
+        /** Runner-issued proof: resolves only after the original child closed and its group is absent. Never an expiry. */
+        readonly terminationConfirmed?: Promise<void>) { super(message); }
 }
 export function runMeetingAskModel(model: MeetingAskModel, prompt: string, system: string, signal?: AbortSignal, adapter?: {
     workspace: string;
@@ -57,16 +61,17 @@ budget?: MeetingAskRunBudget): Promise<{
     const stdin = adapter?.stdin ?? (provider === 'claude' ? prompt : `${system}\n\n${prompt}`);
     return new Promise((resolve, reject) => {
         const child = spawn(binary.path, args, { cwd: workspace, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...lensGistChildEnv(binary.path), ...meetingAskTokenEnv(budget) } });
+        const processGroupId = child.pid;
         let stdout = '', failure: string | null = null, done = false, closeSeen = false, code: number | null = null;
         let killTimer: NodeJS.Timeout | undefined, proofTimer: NodeJS.Timeout | undefined;
-        const kill = (sig: NodeJS.Signals) => { if (child.pid)
+        const kill = (sig: NodeJS.Signals) => { if (processGroupId)
             try {
-                process.kill(-child.pid, sig);
+                process.kill(-processGroupId, sig);
             }
             catch { } };
-        const alive = () => { if (!child.pid)
+        const alive = () => { if (!processGroupId)
             return false; try {
-            process.kill(-child.pid, 0);
+            process.kill(-processGroupId, 0);
             return true;
         }
         catch (e) {
@@ -99,8 +104,23 @@ budget?: MeetingAskRunBudget): Promise<{
             signal?.removeEventListener('abort', abort);
             if (!unconfirmed && !adapter)
                 rmSync(workspace, { recursive: true, force: true });
-            if (unconfirmed)
-                return reject(new AskProcessError('child_exit_unconfirmed', true));
+            if (unconfirmed) {
+                // Answer the request within its shutdown budget, but keep observing the
+                // original child. An unconfirmed exit is not permission to admit another
+                // provider. This watcher is passive: no later signal can hit a reused PID.
+                let prove!: () => void;
+                const terminationConfirmed = new Promise<void>(resolve => { prove = resolve; });
+                const proof = setInterval(() => {
+                    // A missing/reused/permission-denied group alone is not enough: the
+                    // close event belongs to this original child, and ESRCH proves absence.
+                    if (!closeSeen || !processGroupId || alive()) return;
+                    clearInterval(proof);
+                    if (!adapter) try { rmSync(workspace, { recursive: true, force: true }); } catch { /* proof does not depend on scratch cleanup */ }
+                    prove();
+                }, MEETING_ASK_LATE_PROOF_POLL_MS);
+                proof.unref();
+                return reject(new AskProcessError('child_exit_unconfirmed', true, terminationConfirmed));
+            }
             if (failure || code !== 0)
                 return reject(new AskProcessError(failure ?? 'provider_failed'));
             try {
@@ -135,7 +155,7 @@ budget?: MeetingAskRunBudget): Promise<{
             const start = Date.now();
             proofTimer = setInterval(() => { if (closeSeen && !alive())
                 finish();
-            else if (Date.now() - start > 4500)
+            else if (Date.now() - start > MEETING_ASK_TERMINATION_PROOF_MS)
                 finish(true); }, 50);
         };
         const abort = () => stop('cancelled');
@@ -143,11 +163,11 @@ budget?: MeetingAskRunBudget): Promise<{
         signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted)
             abort();
-        child.stdout.on('data', (b: Buffer) => { stdout += b.toString(); if (stdout.length > 1000000)
+        child.stdout.on('data', (b: Buffer) => { if (done) return; stdout += b.toString(); if (stdout.length > 1000000)
             stop('output_limit'); });
         child.stderr.on('data', () => { }); // Never surface provider credentials/raw errors.
         child.stdin.on('error', () => stop('provider_input_failed'));
-        child.on('error', () => { failure = 'provider_unavailable'; closeSeen = true; finish(); });
+        child.on('error', () => { failure = 'provider_unavailable'; finish(); });
         child.on('close', exit => { closeSeen = true; code = exit; if (failure) {
             if (!alive())
                 finish();

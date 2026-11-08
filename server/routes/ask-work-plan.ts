@@ -99,8 +99,11 @@ export function createAskWorkPlanRouter(given: Partial<AskWorkPlanDeps> = {}) {
         model: output.model ?? `claude:${planner} (requested)`, effort })
     } catch (error) {
       if (error instanceof AskProcessError && error.terminationUnconfirmed) {
-        // Match Meeting Ask's orphan policy: no second process or maintenance drain until recovery.
+        // No second process or maintenance drain until the runner proves that the
+        // original child and group have terminated. Missing/failed proof stays held.
         release = false
+        const heldLease = lease
+        void error.terminationConfirmed?.then(() => { heldLease?.release(); running = false }).catch(() => { /* remain fail-closed */ })
         console.warn('[ask-work-plan] provider termination unconfirmed; admission and maintenance lease retained')
         fail(new AskWorkPlanError('provider_termination_unconfirmed', 503))
       } else fail(error)
