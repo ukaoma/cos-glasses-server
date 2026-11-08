@@ -38,6 +38,7 @@ const SECRET_NAME: readonly RegExp[] = [
   /^secrets?\.ya?ml$/, // secrets.yaml, secrets.yml
   /^\.netrc$/, /^\.npmrc$/, /^\.pypirc$/, /^\.pgpass$/, /^\.htpasswd$/, // package, network and database credentials
   /\.keychain/, // login.keychain-db and friends
+  /^hook-token$/, // 7.0.5 (preview engine, PLAN 6): the COS hook token beside the glasses data
 ]
 /** Folders whose whole subtree is refused, matched exactly as a folder name. Lower-cased. */
 const SECRET_DIRECTORY = new Set(['.ssh', '.gnupg', 'secrets'])

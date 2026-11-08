@@ -16,7 +16,7 @@ import { sessionFilesSetting } from '../lib/session-files-setting.js'
 import { previewFoldersSetting, folderDisplay, type PreviewFoldersStore } from '../lib/preview-folders-setting.js'
 import { previewThumbnailer } from '../lib/preview-thumbs.js'
 import {
-  HTML_PREVIEW_MAX, looksBinary, PREVIEW_PARTS, previewHeaders, tablePage, TEXT_WINDOW_MAX, textWindow, type PreviewPart,
+  HTML_PREVIEW_MAX, looksBinary, PREVIEW_PARTS, previewHeaders, tablePage, TEXT_WINDOW_MAX, textWindow, withCspMeta, type PreviewPart,
 } from '../lib/preview-content.js'
 import type { PreviewKind } from '../lib/session-links.js'
 
@@ -121,16 +121,17 @@ export function createSessionPreviewRouter(deps: SessionPreviewDeps = {}): Route
       if (looksBinary(bytes)) { res.status(415).json({ error: 'preview_binary' }); return }
       if (part === 'html' || part === 'html-run') {
         if (bytes.length > HTML_PREVIEW_MAX) { refuse(res, 'too_large'); return }
-        res.set(previewHeaders(part, found.name)); res.status(200).end(bytes); return
+        // PLAN 6: the policy is in the page itself too, before anything in it can load.
+        res.set(previewHeaders(part, found.name)); res.status(200).end(withCspMeta(bytes, part)); return
       }
       if (part === 'table') {
         res.set(previewHeaders('table', found.name))
         res.json(tablePage(bytes, found.name, Number(req.query.offset ?? 0)))
         return
       }
-      const max = found.kind === 'html' ? HTML_PREVIEW_MAX : TEXT_WINDOW_MAX
+      // Every text window, an HTML page's source included, is 512 KiB a call with "load more".
       res.set(previewHeaders('text', found.name))
-      res.json({ ...textWindow(bytes, Number(req.query.offset ?? 0), Number(req.query.limit ?? max), max), ...(found.line ? { line: found.line } : {}) })
+      res.json({ ...textWindow(bytes, Number(req.query.offset ?? 0), Number(req.query.limit ?? TEXT_WINDOW_MAX), TEXT_WINDOW_MAX), ...(found.line ? { line: found.line } : {}) })
     } catch {
       console.warn('[preview] content unavailable')
       refuse(res, 'unavailable')

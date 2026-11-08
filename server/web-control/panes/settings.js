@@ -92,9 +92,9 @@
       soft(api('/api/decision-provider')), soft(api('/api/live-cues/v2/settings')), soft(api('/api/morning-brief')),
       soft(api('/api/domains')), soft(api('/api/agent-sessions/fences')), soft(api('/api/meeting-import/fireflies/status')),
       soft(api('/api/health')), soft(api('/api/drops/settings/p2')), soft(api('/api/today/brief/settings')),
-      soft(api('/api/session-files/settings'))
+      soft(api('/api/session-files/settings')), soft(api('/api/preview-folders/settings'))
     ]).then(function (r) {
-      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8], sf: r[9] };
+      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8], sf: r[9], pf: r[10] };
       S.state = 'ready';
       render();
     });
@@ -229,7 +229,33 @@
         env ? 'Turned off on the Mac by the server environment (COS_WEB_SESSION_FILES=0).'
           : sf.source === 'damaged' ? 'Couldn’t read the saved setting, so previews are off. Turn it on to save it again.'
           : 'Lets this page show the files and images your sessions send you, the screenshots and images they open, and images attached to your prompts. Files stay on your Mac.',
-        toggle(sf.enabled, 'data-set="session-files"' + (env ? ' disabled' : ''), 'Show session files, screenshots and images')));
+        toggle(sf.enabled, 'data-set="session-files"' + (env ? ' disabled' : ''), 'Show session files, screenshots and images')) +
+      previewFoldersRows(d.pf));
+  }
+  // 7.0.5 (preview engine, Miles decision 2b): extra folders a session's linked or sent files may open from, besides its
+  // own project folder (GET/POST /api/preview-folders/settings). Empty by default; each folder is listed by name and
+  // removed one at a time. The server refuses broad folders (home, Documents, Library, /) and says why.
+  function previewFoldersRows(pf) {
+    if (!pf || !Array.isArray(pf.folders)) return '';
+    var list = pf.folders.slice(0, 20);
+    var blurb = pf.source === 'damaged' ? 'Couldn’t read the saved list, so no extra folder counts. Add a folder to save it again.'
+      : list.length ? 'Sessions can also open files from these folders.' : 'None. Sessions open files only from their own project folder.';
+    return '<div class="cx-set-row cx-set-folders"><div class="cx-set-text"><span class="cx-set-name">Extra folders</span><span class="cx-set-desc" id="pf-blurb">' + esc(blurb) + '</span></div></div>' +
+      list.map(function (f, i) {
+        return '<div class="cx-set-row cx-set-folder"><div class="cx-set-text"><span class="cx-set-name pf-name">' + esc(f) + '</span></div>' +
+          '<button type="button" class="cx-btn quiet" data-set="pf-remove" data-index="' + i + '" aria-label="' + esc('Remove ' + f) + '">Remove</button></div>';
+      }).join('') +
+      (list.length < 20 ? '<form class="cx-set-row pf-add" id="pf-add"><label class="cx-set-text" for="pf-input"><span class="cx-set-desc">Add a project folder, like ~/cos-worktrees. Not your whole home or Documents folder.</span></label>' +
+        '<span class="pf-add-line"><input id="pf-input" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="~/cos-worktrees" aria-label="Folder to add">' +
+        '<button type="submit" class="cx-btn" data-set="pf-add">Add</button></span></form>' : '');
+  }
+  function savePreviewFolders(next, done) {
+    api('/api/preview-folders/settings', { method: 'POST', body: { folders: next } }).then(function (v) {
+      if (S.data && v && Array.isArray(v.folders)) S.data.pf = v;
+      W.toast('Saved');
+      render();
+      if (done) done(true);
+    }, function (err) { say((err && err.message) || 'That folder was not saved.', true); if (done) done(false); });
   }
   function categoryBody(cat) {
     var d = S.data || {};
@@ -374,6 +400,14 @@
         }, function (err) { t.setAttribute('aria-checked', String(son)); say(err.message, true); });
       return;
     }
+    if (act === 'pf-remove') {
+      var cur = (S.data && S.data.pf && S.data.pf.folders) || [], idx = Number(t.getAttribute('data-index'));
+      if (!(idx >= 0 && idx < cur.length)) return;
+      t.disabled = true;
+      savePreviewFolders(cur.filter(function (_f, i) { return i !== idx; }), function (ok) { if (!ok) t.disabled = false; });
+      return;
+    }
+    if (act === 'pf-add') return; // the form's submit handler saves
     if (act === 'today-brief') {
       var ton = t.getAttribute('aria-checked') === 'true';
       t.setAttribute('aria-checked', String(!ton));
@@ -406,6 +440,15 @@
       api('/api/agent-sessions/fences/release', { method: 'POST', body: { target: t.getAttribute('data-target'), confirm: true } })
         .then(function () { W.toast('Released'); S.data = null; S.state = 'idle'; load(true); }, function (err) { say(err.message, true); });
     }
+  });
+
+  pane.addEventListener('submit', function (e) {
+    if (!e.target || e.target.id !== 'pf-add') return;
+    e.preventDefault();
+    var input = $('pf-input'), v = input ? input.value.trim() : '';
+    if (!v) { say('Type a folder, like ~/cos-worktrees.', true); return; }
+    var cur = (S.data && S.data.pf && S.data.pf.folders) || [];
+    savePreviewFolders(cur.concat([v]));
   });
 
   // A gallery picture that will not load shows the pet's name alone, never a broken image.

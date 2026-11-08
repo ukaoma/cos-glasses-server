@@ -7,13 +7,16 @@
  *   inline   a PDF for the browser's viewer (images go through the normalizer instead)
  *   text     JSON: a UTF-8 window, 512 KiB per call, `more` for "load more" (HTML: up to 8 MiB, one call)
  *   table    JSON: CSV or TSV rows, 200 a page, 50 columns, 5,000 rows in all
- *   html     the page as text/html under `CSP: sandbox` (no scripts, opaque origin, no network)
- *   html-run the page under `CSP: sandbox allow-scripts` and `connect-src 'none'`: scripts run, nothing leaves
+ *   html     the page as text/html under `CSP: sandbox` (no scripts, opaque origin, no network), full length (32 MiB)
+ *   html-run the page under `CSP: sandbox allow-scripts` and `connect-src 'none'`: scripts run, nothing is fetched
+ *            Both HTML parts also carry a CSP <meta> injected at the top of the document (PLAN 6), so the policy holds
+ *            even where a response header is lost on the way (a proxy, a saved copy, a future srcdoc frame).
  *   thumb    PNG from Quick Look (`qlmanage -t`), see preview-thumbs.ts
  */
 
 export const TEXT_WINDOW_MAX = 512 * 1024
-export const HTML_PREVIEW_MAX = 8 * 1024 * 1024
+/** HTML is shown full length (PLAN 5: the 512 KiB cut is gone), up to the raw-file cap. */
+export const HTML_PREVIEW_MAX = 32 * 1024 * 1024
 export const TABLE_PAGE_ROWS = 200
 export const TABLE_COLUMNS_MAX = 50
 export const TABLE_ROWS_MAX = 5000
@@ -32,6 +35,41 @@ export const HTML_SAFE_CSP = "sandbox; default-src 'none'; img-src data:; style-
  */
 export const HTML_RUN_CSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
 export const DERIVED_CSP = "sandbox; default-src 'none'"
+/**
+ * The policies injected as a <meta> (a meta CSP cannot carry `sandbox` or `frame-ancestors`; the header and the frame's
+ * own sandbox attribute carry those). Two policies are both enforced, so a page's own looser meta never widens these.
+ */
+export const HTML_SAFE_META_CSP = "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
+export const HTML_RUN_META_CSP = "default-src 'none'; script-src 'unsafe-inline'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+
+/**
+ * The page with a CSP <meta> as the first thing the parser sees after any BOM, leading whitespace, comments and the
+ * doctype (a tag before the doctype would put the page in quirks mode). Nothing before that point can load anything.
+ * Bytes are spliced, never re-encoded, so a page in another charset is not changed beyond the inserted tag.
+ */
+export function withCspMeta(bytes: Buffer, part: 'html' | 'html-run'): Buffer {
+  const policy = part === 'html-run' ? HTML_RUN_META_CSP : HTML_SAFE_META_CSP
+  const tag = Buffer.from(`<meta http-equiv="Content-Security-Policy" content="${policy}">`, 'utf8')
+  // The prefix is ASCII in every case that matters; latin1 keeps one char per byte so offsets are byte offsets.
+  const head = bytes.subarray(0, 64 * 1024).toString('latin1')
+  let at = head.charCodeAt(0) === 0xef && head.charCodeAt(1) === 0xbb && head.charCodeAt(2) === 0xbf ? 3 : 0
+  for (let guard = 0; guard < 64; guard++) {
+    const ws = /^[\t\n\f\r ]*/.exec(head.slice(at))![0].length
+    at += ws
+    if (head.startsWith('<!--', at)) {
+      const end = head.indexOf('-->', at + 4)
+      if (end < 0) break
+      at = end + 3; continue
+    }
+    if (/^<!doctype[\s>]/i.test(head.slice(at, at + 10))) {
+      const end = head.indexOf('>', at)
+      if (end < 0) break
+      at = end + 1; continue
+    }
+    break
+  }
+  return Buffer.concat([bytes.subarray(0, at), tag, bytes.subarray(at)])
+}
 
 function asciiName(name: string): string { return name.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[ .]+/, '') || 'file' }
 

@@ -78,7 +78,15 @@ interface FileSource { path: string | null; root: string | null; file: SessionOu
 interface LinkSource { path: string; root: string; link: SessionOutputLink }
 /** Where a tool-result image's bytes are. Embedded bytes are kept only for the one id a content request names. */
 type ToolSource = { kind: 'embedded'; mediaType: string; data: string } | { kind: 'path'; source: string; root: string; label: string }
-interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource>; toolSources: Map<string, ToolSource>; links: Map<string, LinkSource> }
+interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource>; toolSources: Map<string, ToolSource>; links: Map<string, LinkSource>; workspace: string | null }
+/**
+ * PLAN 7 load: a reader with 20 cards asks for 20 thumbnails. The preview routes keep one projection of a transcript for
+ * 30 s while its size and mtime stand, so that is one transcript parse, not 20. Only ids, names and canonical sources are
+ * kept, and every content call still re-checks the file (containment, links, the deny list, identity) and the root.
+ */
+export const PREVIEW_PROJECTION_TTL_MS = 30_000
+const PREVIEW_PROJECTIONS_MAX = 8
+interface PreviewProjection { at: number; size: number; mtimeMs: number; read: Promise<{ context: PreviewContext; turns: SessionTurn[] }> }
 /** Tool calls remembered per read, so a result row can be labelled by the call that asked for it. */
 const TOOL_USES_MAX = 4096
 interface MediaCache { id: string; at: number }
@@ -294,7 +302,31 @@ export class AgentSessionOutputImages {
   private pending = new Map<string, Promise<string>>()
   private active = 0
   private readers = 0
+  private projections = new Map<string, PreviewProjection>()
+  /** Transcript parses the preview routes made (the load gate counts them). */
+  previewParses = 0
   constructor(private readonly deps: OutputImageDeps) {}
+
+  /** The preview routes' projection of a transcript, reused for PREVIEW_PROJECTION_TTL_MS while the file is unchanged. */
+  private previewProjection(provider: AgentProvider, sessionId: string, transcript: string) {
+    const st = statSync(transcript)
+    const key = JSON.stringify([provider, sessionId, transcript])
+    const now = this.deps.now()
+    const hit = this.projections.get(key)
+    if (hit && now - hit.at < PREVIEW_PROJECTION_TTL_MS && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.read
+    this.previewParses++
+    const read = (async () => {
+      const context = await this.context(provider, sessionId, transcript)
+      const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
+      return { context, turns: recent.turns }
+    })()
+    this.projections.delete(key)
+    this.projections.set(key, { at: now, size: st.size, mtimeMs: st.mtimeMs, read })
+    while (this.projections.size > PREVIEW_PROJECTIONS_MAX) this.projections.delete(this.projections.keys().next().value!)
+    // A failed parse is never reused.
+    read.catch(() => { if (this.projections.get(key)?.read === read) this.projections.delete(key) })
+    return read
+  }
 
   /**
    * `want`: the one tool-image id a content request is for. Only its embedded bytes are kept; a detail read
@@ -553,7 +585,7 @@ export class AgentSessionOutputImages {
       groups = new WeakMap()
       last = null; pending = []; pendingExtra = 0
     }
-    return { project: withTools, sources, files, toolSources, links }
+    return { project: withTools, sources, files, toolSources, links, workspace: root }
   }
 
   /** One link card's descriptor; an available card's canonical source is remembered for the preview route. */
@@ -594,11 +626,10 @@ export class AgentSessionOutputImages {
     try {
       const transcript = await this.deps.findSession(provider, sessionId)
       if (!transcript) return { status: 'not_found' }
-      const context = await this.context(provider, sessionId, transcript)
-      const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
+      const { context, turns } = await this.previewProjection(provider, sessionId, transcript)
       const descriptor = isLink
-        ? recent.turns.flatMap(t => t.outputLinks ?? []).find(l => l.id === id)
-        : recent.turns.flatMap(t => t.outputFiles ?? []).find(f => f.id === id)
+        ? turns.flatMap(t => t.outputLinks ?? []).find(l => l.id === id)
+        : turns.flatMap(t => t.outputFiles ?? []).find(f => f.id === id)
       if (!descriptor) return { status: 'not_found' }
       // 7.0.4 S2: an id that names a secret answers 403 secret_file_denied, never bytes.
       if (descriptor.reason === 'secret_file') return { status: 'secret' }
@@ -606,6 +637,12 @@ export class AgentSessionOutputImages {
       if (isLink) { const s = context.links.get(id); path = s?.path ?? null; root = s?.root ?? null }
       else { const s = context.files.get(id); path = s?.path ?? null; root = s?.root ?? null }
       if (descriptor.state !== 'available' || !path || !root) return { status: 'unavailable' }
+      // The root must still be allowed NOW: a Settings extra folder removed since the projection no longer counts.
+      if (root !== context.workspace) {
+        let extra: readonly string[] = []
+        try { extra = this.deps.extraRoots?.() ?? [] } catch { extra = [] }
+        if (!extra.includes(root)) return { status: 'unavailable' }
+      }
       // The shared deny list, before any byte is read (and for a file sent before the list existed).
       if (isDeniedSecretPath(path)) return { status: 'secret' }
       if ((descriptor as SessionOutputLink).kind === 'folder') return { status: 'folder' }

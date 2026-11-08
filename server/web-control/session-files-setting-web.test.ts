@@ -34,7 +34,8 @@ describe('the reader and Today when previews are off', () => {
 
 describe('Settings, Privacy: the toggle', () => {
   function settings(sf: any) {
-    const src = region(SETTINGS, '  function row(name, desc, control)', '  function onMac(names)') + region(SETTINGS, '  function sessionFilesGroup(d)', '\n  }\n') + '\n  }\n'
+    // 7.0.5: the group also draws the extra-folders rows (previewFoldersRows), which follow it in the file.
+    const src = region(SETTINGS, '  function row(name, desc, control)', '  function onMac(names)') + region(SETTINGS, '  function sessionFilesGroup(d)', '  function savePreviewFolders(')
     const ctx: any = vm.createContext({ esc })
     vm.runInContext(src + ';this.g = sessionFilesGroup;', ctx)
     return ctx.g({ sf })

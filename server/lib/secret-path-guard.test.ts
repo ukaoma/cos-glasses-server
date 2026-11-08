@@ -25,6 +25,7 @@ describe('isDeniedSecretPath: names', () => {
     ['credentials*', 'credentials'], ['credentials*', 'credentials.json'],
     ['.netrc', '.netrc'], ['.npmrc', '.npmrc'], ['.pypirc', '.pypirc'],
     ['*.keychain*', 'login.keychain-db'], ['*.keychain*', 'build.keychain'],
+    ['hook-token (7.0.5)', 'hook-token'],
   ]
   for (const [pattern, name] of denied) {
     it(`${pattern}: ${name} is denied`, () => { expect(isDeniedSecretPath(at('config', name))).toBe(true) })
@@ -34,6 +35,12 @@ describe('isDeniedSecretPath: names', () => {
     expect(isDeniedSecretPath(at('.ssh', 'known_hosts'))).toBe(true)
     expect(isDeniedSecretPath(at('.gnupg', 'private-keys-v1.d', 'A1.png'))).toBe(true)
     expect(isDeniedSecretPath(at('.aws', 'credentials'))).toBe(true)
+  })
+  it('7.0.5: anything under a `secrets` folder; a name that only starts with it is not a secret', () => {
+    expect(isDeniedSecretPath(at('secrets', 'notes.md'))).toBe(true)
+    expect(isDeniedSecretPath(at('Secrets', 'deep', 'a.png'))).toBe(true)
+    expect(isDeniedSecretPath(at('secrets-plan.md'))).toBe(false)
+    expect(isDeniedSecretPath(at('hook-token.md'))).toBe(false)
   })
   it('case-insensitively', () => {
     for (const name of ['.ENV', '.Env.Local', '.ENVRC', '.Env_Backup', 'GCP-KEY.JSON', '.COS-PROFILE.json', 'ID_RSA', 'ID_DSA', 'Id_Xmss', 'Server.PEM', 'A.P12', 'B.PFX', 'C.KEY', 'Credentials.CSV', '.NETRC', '.NpmRc', '.PYPIRC', 'Login.KEYCHAIN-db']) {

@@ -303,6 +303,14 @@ button.cx-set-row:hover { background: var(--qopen); }
 .cx-set-row .cx-set-time { width: 148px; }
 .cx-set-row .cx-set-day { width: 150px; padding-right: 36px; background-position: calc(100% - 20px) 17px, calc(100% - 15px) 17px; }
 .cx-set-row .cx-set-steer { flex: none; width: 46%; min-width: 180px; min-height: 64px; }
+/* 7.0.5 extra folders for previews: a folder name wraps, never pushes the row sideways; 16px input keeps iOS from zooming. */
+.cx-set-folder .pf-name { font: 400 14px/1.35 var(--mono); overflow-wrap: anywhere; }
+.cx-set-folder .cx-btn { flex: none; min-height: 44px; }
+.pf-add { flex-wrap: wrap; }
+.pf-add .cx-set-text { flex-basis: 100%; }
+.pf-add-line { display: flex; gap: 8px; width: 100%; min-width: 0; }
+.pf-add-line input { flex: 1; min-width: 0; min-height: 44px; padding: 0 12px; font-size: 16px; border: 1px solid var(--hairline); border-radius: 10px; background: var(--panel, transparent); color: var(--ink); box-sizing: border-box; }
+.pf-add-line .cx-btn { flex: none; min-height: 44px; }
 @media (max-width: 599px) {
   .cx-set-row:has(.cx-set-steer) { flex-wrap: wrap; }
   .cx-set-row .cx-set-steer { width: 100%; min-width: 0; }

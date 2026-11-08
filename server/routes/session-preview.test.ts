@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createSessionPreviewRouter, partsFor } from './session-preview.js'
-import { HTML_RUN_CSP, HTML_SAFE_CSP } from '../lib/preview-content.js'
+import { HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_SAFE_CSP, HTML_SAFE_META_CSP } from '../lib/preview-content.js'
 
 const ID = 'al_' + 'a'.repeat(64)
 const made: string[] = []
@@ -83,18 +83,29 @@ describe('preview routes', () => {
     const safe = await fetch(s.base + url('html'))
     expect(safe.headers.get('content-type')).toBe('text/html; charset=utf-8')
     expect(safe.headers.get('content-security-policy')).toBe(HTML_SAFE_CSP)
-    expect(await safe.text()).toBe('<h1>r</h1><script>1</script>')
+    // PLAN 6: the policy is also the first tag in the page, before anything in it can load.
+    expect(await safe.text()).toBe(`<meta http-equiv="Content-Security-Policy" content="${HTML_SAFE_META_CSP}"><h1>r</h1><script>1</script>`)
     const run = await fetch(s.base + url('html-run'))
     expect(run.headers.get('content-security-policy')).toBe(HTML_RUN_CSP)
     expect(run.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(await run.text()).toBe(`<meta http-equiv="Content-Security-Policy" content="${HTML_RUN_META_CSP}"><h1>r</h1><script>1</script>`)
     s.close()
   })
-  it('HTML is shown full length: past 512 KiB, up to 8 MiB', async () => {
-    const big = '<p>' + 'x'.repeat(700 * 1024) + '</p>'
+  it('HTML is shown full length: past 8 MiB in one page; its source is windowed at 512 KiB like any text', async () => {
+    const big = '<!doctype html><p>' + 'x'.repeat(9 * 1024 * 1024) + '</p>'
     const s = await serve({ file: () => ok('big.html', 'html', big) })
-    expect((await (await fetch(s.base + url('html'))).text()).length).toBe(big.length)
+    const page = await (await fetch(s.base + url('html'))).text()
+    expect(page.length).toBe(big.length + `<meta http-equiv="Content-Security-Policy" content="${HTML_SAFE_META_CSP}">`.length)
+    expect(page.endsWith('x</p>')).toBe(true)
     const t = await (await fetch(s.base + url('text', '&limit=99999999'))).json()
-    expect(t.text.length).toBe(big.length)
+    expect(t.text.length).toBe(512 * 1024)
+    expect(t.more).toBe(true)
+    s.close()
+  })
+  it('an HTML page over 32 MiB is refused, never cut', async () => {
+    const s = await serve({ file: () => ok('huge.html', 'html', Buffer.alloc(32 * 1024 * 1024 + 1, 0x78)) })
+    const r = await fetch(s.base + url('html'))
+    expect(r.status).toBe(413)
     s.close()
   })
   it('text windows with line; table pages; a binary file is refused as words', async () => {

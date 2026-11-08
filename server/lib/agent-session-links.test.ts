@@ -4,7 +4,7 @@
  * Codex shapes), the real projection, a fake media store. The fixture root has a space and a dot component.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentSessionOutputImages, sentUserFiles } from './agent-session-output-images.js'
@@ -38,9 +38,10 @@ function fixture(rows: (t: { repo: string; home: string; extra: string; sub: str
   const normalized = join(top, 'normalized.jpg'); writeFileSync(normalized, 'jpeg')
   const store = { ingestOutputImage: vi.fn(async () => ({ id: 'm_' + 'b'.repeat(24) })), getContent: vi.fn(() => ({ status: 'ok' as const, path: normalized, mime: 'image/jpeg' as const, bytes: 4 })) }
   let extraRoots: string[] = opts.extra ? [extra] : []
+  let clock = 1
   const service = new AgentSessionOutputImages({
     findSession: async (_p: AgentProvider, id: string) => (id === 'session' ? transcript : null),
-    workspace: async () => repo, secret: Buffer.alloc(32, 7), now: () => 1,
+    workspace: async () => repo, secret: Buffer.alloc(32, 7), now: () => clock,
     store: () => store as unknown as ReturnType<typeof import('./media-store.js').getMediaStore>,
     home: () => home,
     extraRoots: () => extraRoots,
@@ -49,7 +50,7 @@ function fixture(rows: (t: { repo: string; home: string; extra: string; sub: str
     const ctx = await service.context(provider, 'session', transcript)
     return (await readRecentSessionTurns(provider, transcript, 10, undefined, ctx.project)).turns
   }
-  return { top, home, repo, sub, extra, transcript, service, turns, setExtra: (r: string[]) => { extraRoots = r } }
+  return { top, home, repo, sub, extra, transcript, service, turns, setExtra: (r: string[]) => { extraRoots = r }, setNow: (n: number) => { clock = n } }
 }
 
 /** No absolute path of the fixture, and no Mac path shape, anywhere in what the browser would get. */
@@ -166,6 +167,39 @@ describe('previewFile re-authorizes every id', () => {
     const [turn] = await f.turns()
     expect(turn.outputLinks![0]).toMatchObject({ kind: 'folder', type: 'Folder', state: 'available', name: 'wk45_2026' })
     expect((await f.service.previewFile('claude', 'session', turn.outputLinks![0].id)).status).toBe('folder')
+  })
+})
+
+describe('load (PLAN 7, section 11): 20 cards in one reader', () => {
+  it('one transcript parse per 30 s while the transcript stands; a changed transcript or an old projection parses again', async () => {
+    const f = fixture(t => [claudeSaid(Array.from({ length: 20 }, (_, i) => `[f${i}](f${i}.md)`).join(' '), t.sub)])
+    for (let i = 0; i < 20; i++) writeFileSync(join(f.sub, `f${i}.md`), '# ' + i)
+    const [turn] = await f.turns()
+    const ids = turn.outputLinks!.map(l => l.id)
+    expect(ids).toHaveLength(20)
+    // The web asks two at a time (reader-media.js's shared request budget).
+    for (let i = 0; i < ids.length; i += 2) {
+      const pair = await Promise.all([f.service.previewFile('claude', 'session', ids[i], true), f.service.previewFile('claude', 'session', ids[i + 1], true)])
+      expect(pair.map(p => p.status)).toEqual(['ok', 'ok'])
+    }
+    expect(f.service.previewParses).toBe(1)
+    f.setNow(1 + 29_999)
+    await f.service.previewFile('claude', 'session', ids[0], true)
+    expect(f.service.previewParses).toBe(1)
+    f.setNow(1 + 30_000)
+    await f.service.previewFile('claude', 'session', ids[0], true)
+    expect(f.service.previewParses).toBe(2)
+    appendFileSync(f.transcript, JSON.stringify(claudeSaid('more words')) + '\n')
+    await f.service.previewFile('claude', 'session', ids[0], true)
+    expect(f.service.previewParses).toBe(3)
+  })
+  it('never more than 2 preview reads at once: a third is told to come back, nothing queues unbounded', async () => {
+    const f = fixture(t => [claudeSaid('[a](a.md) [b](b.md) [c](c.md)', t.sub)])
+    for (const n of ['a', 'b', 'c']) writeFileSync(join(f.sub, n + '.md'), n)
+    const [turn] = await f.turns()
+    const ids = turn.outputLinks!.map(l => l.id)
+    const all = await Promise.all(ids.map(id => f.service.previewFile('claude', 'session', id)))
+    expect(all.map(r => r.status).sort()).toEqual(['ok', 'ok', 'unavailable'])
   })
 })
 

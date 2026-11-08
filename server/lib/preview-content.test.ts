@@ -1,7 +1,7 @@
 /** Preview engine phase 1: text windows, the CSV/TSV table and its caps, and the header contract for every part. */
 import { describe, expect, it } from 'vitest'
 import {
-  HTML_RUN_CSP, HTML_SAFE_CSP, looksBinary, PREVIEW_PARTS, previewHeaders, TABLE_CELL_CHARS, TABLE_COLUMNS_MAX, TABLE_PAGE_ROWS, TABLE_ROWS_MAX,
+  HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_SAFE_CSP, HTML_SAFE_META_CSP, looksBinary, withCspMeta, PREVIEW_PARTS, previewHeaders, TABLE_CELL_CHARS, TABLE_COLUMNS_MAX, TABLE_PAGE_ROWS, TABLE_ROWS_MAX,
   tablePage, tableRows, textWindow,
 } from './preview-content.js'
 
@@ -80,5 +80,31 @@ describe('the header contract for every part', () => {
     expect(run).toContain("default-src 'none'")
     expect(run).toContain("form-action 'none'")
     expect(run).not.toMatch(/https?:|\*/)
+  })
+})
+
+describe('the injected CSP meta (PLAN 6)', () => {
+  const META = (p: string) => `<meta http-equiv="Content-Security-Policy" content="${p}">`
+  const at = (html: string | Buffer, part: 'html' | 'html-run' = 'html') => withCspMeta(Buffer.isBuffer(html) ? html : Buffer.from(html), part).toString('utf8')
+  it('goes first, after any BOM, whitespace, comments and the doctype, and never before the doctype (quirks mode)', () => {
+    expect(at('<h1>x</h1>')).toBe(META(HTML_SAFE_META_CSP) + '<h1>x</h1>')
+    expect(at('<!DOCTYPE html>\n<html><head><link rel=stylesheet href="https://e.x/a.css">')).toBe('<!DOCTYPE html>\n' + META(HTML_SAFE_META_CSP) + '<html><head><link rel=stylesheet href="https://e.x/a.css">')
+    expect(at('\ufeff  <!-- built --> <!doctype html><img src="https://t.x/p.gif">')).toBe('\ufeff  <!-- built --> <!doctype html>' + META(HTML_SAFE_META_CSP) + '<img src="https://t.x/p.gif">')
+    expect(at('<script>1</script>', 'html-run')).toBe(META(HTML_RUN_META_CSP) + '<script>1</script>')
+  })
+  it('the policies: scripts off fetches nothing; scripts on runs inline script with no network', () => {
+    for (const p of [HTML_SAFE_META_CSP, HTML_RUN_META_CSP]) {
+      expect(p).toContain("default-src 'none'")
+      expect(p).not.toMatch(/https?:|\*|'self'/)
+      expect(p, 'a meta CSP ignores sandbox and frame-ancestors; they live in the header').not.toMatch(/sandbox|frame-ancestors/)
+    }
+    expect(HTML_SAFE_META_CSP).not.toContain('script-src')
+    expect(HTML_RUN_META_CSP).toContain("connect-src 'none'")
+    expect(HTML_RUN_META_CSP).toContain("script-src 'unsafe-inline'")
+  })
+  it('splices bytes: a page in another charset is unchanged apart from the tag', () => {
+    const latin1 = Buffer.from([0x3c, 0x70, 0x3e, 0xe9, 0x3c, 0x2f, 0x70, 0x3e]) // <p>é</p> in Latin-1
+    const out = withCspMeta(latin1, 'html')
+    expect(out.subarray(out.length - latin1.length).equals(latin1)).toBe(true)
   })
 })

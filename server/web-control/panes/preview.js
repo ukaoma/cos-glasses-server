@@ -211,7 +211,8 @@
     load(0).catch(fail(v));
   }
 
-  // HTML is served by the server under its own sandbox CSP (scripts off, no network). The frame is sandboxed too.
+  // HTML is served by the server under its own sandbox CSP (scripts off, no network), with the same policy injected as a
+  // <meta> at the top of the page. The frame is sandboxed too and never gets allow-same-origin. Full length.
   function renderHtml(v, scope, f) {
     var bar = element('div', 'pv-bar'), note = element('span', 'rm-status'), toggle = null, frame = null, on = false;
     function show() {
@@ -222,7 +223,9 @@
       frame.title = 'Preview of ' + f.name + (on ? ' (scripts on, no network)' : ' (scripts off)');
       frame.src = url(scope, f.id, on ? 'html-run' : 'html');
       v.body.appendChild(frame);
-      note.textContent = on ? 'Scripts are on for this view only. The page cannot reach the internet or this Mac.' : 'Scripts are off. Nothing on this page can reach the internet.';
+      // Honest words: with scripts on, the page still cannot fetch anything or read COS, but a script can move its own
+      // frame to another address (no browser can stop that), so "cannot reach the internet" would overclaim.
+      note.textContent = on ? 'Scripts are on for this view only. They cannot fetch data or read COS.' : 'Scripts are off. Nothing on this page loads from the internet.';
       toggle.textContent = on ? 'Turn scripts off' : 'Run scripts';
       toggle.setAttribute('aria-pressed', String(on));
     }
@@ -232,7 +235,14 @@
     show();
   }
 
-  function isPhone() { try { return typeof W.isPhone === 'function' ? !!W.isPhone() : false; } catch (_e) { return false; } }
+  // Decision 4a: a PDF opens inline on a desktop and in its own tab on a phone. "Phone" here is any touch-first screen,
+  // the unfolded Duo (703 wide) included: iOS Safari draws only part of a PDF inside a frame (plan canary 17, unrun).
+  function isPhone() {
+    try {
+      if (typeof W.isPhone === 'function' && W.isPhone()) return true;
+      return !!(window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches);
+    } catch (_e) { return false; }
+  }
   function renderPdf(v, scope, f) {
     v.body.textContent = '';
     if (isPhone()) {
