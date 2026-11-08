@@ -4154,6 +4154,28 @@ describe('QA 6.99.29 final: the Sessions reader', () => {
     expect(mark).toMatchObject({ n: 2, line: 'Not sent: the thread stayed busy too long.' })
   })
 
+  it('steer mid-turn: a row COS cannot tell went in has its own label, never "Not sent"', async () => {
+    const pg = readerPage({ ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [
+      { clientTurnId: 'ctRef0000003', status: 'refused', position: -1, preview: 'tampered', owner: 'cos', reason: 'queued_turn_tampered', reasonCopy: 'Not sent: its words, files or session changed.' },
+      { clientTurnId: 'ctUnk0000001', status: 'refused', position: -1, preview: 'steer this', owner: 'cos', reason: 'steer_unverified', deliveryState: 'unknown', reasonCopy: 'May not have been sent. Read it, then say it again.' },
+    ] } } })
+    session(pg)
+    pg.kit.loadQueue('claude', SID)
+    await flush()
+    const rows = pg.els['session-queue']!.innerHTML.split('sx-queue-row').slice(1)
+    const unknown = rows.find(r => r.includes('steer this'))!
+    expect(unknown).toContain('<span class="sx-queue-state">May have been sent</span>')
+    expect(unknown).toContain('May not have been sent. Read it, then say it again.')
+    expect(unknown).not.toMatch(/Not sent/)
+    // A message refused for tampering still reads "Not sent".
+    const refused = rows.find(r => r.includes('tampered'))!
+    expect(refused).toContain('<span class="sx-queue-state">Not sent</span>')
+    expect(refused).toContain('Not sent: its words, files or session changed.')
+    // The Sessions row chip takes the last row's label and line.
+    const mark = JSON.parse(pg.store.get('cos_web_not_sent') || '{}')['claude|' + SID]
+    expect(mark).toMatchObject({ n: 2, label: 'May have been sent', line: 'May not have been sent. Read it, then say it again.' })
+  })
+
   it('only refused rows: they still show, with no "queued" head', async () => {
     const pg = readerPage({ ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [{ clientTurnId: 'ctRef0000002', status: 'refused', position: -1, preview: 'gone?', owner: 'cos', reason: 'turn_id_in_use', reasonCopy: 'Not sent: its id belongs to another message.' }] } } })
     session(pg)

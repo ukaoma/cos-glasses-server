@@ -1371,7 +1371,7 @@
     var meta = sxBadge(key.provider) +
       (s.pinned ? '<span class="sx-pinned">PINNED</span>' : '') +
       (label ? '<span class="sx-chip ' + st + '">' + esc(label) + '</span>' : '') +
-      (notSentFor(key.provider, key.id) ? '<span class="sx-chip refused" title="' + esc(notSentFor(key.provider, key.id).line) + '">Not sent</span>' : '') +
+      (notSentFor(key.provider, key.id) ? '<span class="sx-chip refused" title="' + esc(notSentFor(key.provider, key.id).line) + '">' + esc(notSentFor(key.provider, key.id).label || 'Not sent') + '</span>' : '') +
       (upd ? '<span class="sx-when">Updated ' + esc(sxShortDate(upd)) + '</span>' : '') +
       (ambiguous[title] && opened ? '<span class="sx-opened" title="Another session on screen has the same name. This one was opened ' + esc(sxShortDate(opened)) + '.">Opened ' + esc(sxShortDate(opened)) + '</span>' : '') +
       (s.project && String(s.project) !== title ? '<span class="sx-ws">' + esc(s.project) + '</span>' : '');
@@ -1654,14 +1654,19 @@
   // queue replaces it, so a row the server drops clears the mark.
   var NOT_SENT_KEY = 'cos_web_not_sent', NOT_SENT_KEEP_MS = 86400000;
   function notSentRows(rows) { return (rows || []).filter(function (t) { return t && (t.status === 'refused' || t.status === 'expired'); }); }
+  // A row COS cannot tell went in or not (deliveryState unknown, e.g. a steer it could not confirm) is not "Not sent":
+  // it may be in the session already, so it has its own label and its own line, never a "Not sent:" prefix.
+  function maybeSent(t) { return !!(t && t.deliveryState === 'unknown'); }
+  function notSentLabel(t) { return maybeSent(t) ? 'May have been sent' : 'Not sent'; }
   function notSentLine(t) {
+    if (maybeSent(t)) return String(t.reasonCopy || 'May not have been sent. Read it, then say it again.').trim();
     var why = String((t && t.reasonCopy) || (t && t.status === 'expired' ? 'the thread stayed busy too long.' : 'the session refused it.')).trim();
     return /^not sent\b/i.test(why) ? why : 'Not sent: ' + why.charAt(0).toLowerCase() + why.slice(1);
   }
   function noteNotSent(provider, id, rows) {
     var all = readStore(NOT_SENT_KEY), k = provider + '|' + id, now = Date.now(), list = notSentRows(rows);
     Object.keys(all).forEach(function (x) { if (!all[x] || now - (Number(all[x].at) || 0) > NOT_SENT_KEEP_MS) delete all[x]; });
-    if (list.length) all[k] = { n: list.length, line: notSentLine(list[list.length - 1]).slice(0, 240), at: now }; else delete all[k];
+    if (list.length) all[k] = { n: list.length, line: notSentLine(list[list.length - 1]).slice(0, 240), label: notSentLabel(list[list.length - 1]), at: now }; else delete all[k];
     writeStore(NOT_SENT_KEY, all);
   }
   function notSentFor(provider, id) {
@@ -2122,7 +2127,7 @@
             (mine ? '<button type="button" class="cx-btn quiet" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '" title="Cancel this queued message. It will not be sent.">Cancel</button>' : '') + '</div>';
         }).join('') +
         notSent.map(function (t) {
-          return '<div class="sx-queue-row sx-queue-refused"><span class="sx-queue-state">Not sent</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
+          return '<div class="sx-queue-row sx-queue-refused"><span class="sx-queue-state">' + esc(notSentLabel(t)) + '</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
             '<span class="sx-queue-reason">' + esc(notSentLine(t)) + '</span></span></div>';
         }).join('') + '</div>';
     }).catch(function () {});
@@ -5015,7 +5020,7 @@
     newKey: newTurnKey,
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
-    notSent: { rows: notSentRows, line: notSentLine, note: noteNotSent, get: notSentFor },
+    notSent: { rows: notSentRows, line: notSentLine, label: notSentLabel, note: noteNotSent, get: notSentFor },
     imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop,
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
