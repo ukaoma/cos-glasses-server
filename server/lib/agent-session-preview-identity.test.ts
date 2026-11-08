@@ -11,13 +11,14 @@ import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const hook: { onRead: null | (() => void) } = { onRead: null }
+const hook: { onRead: null | (() => void); opened: string[] } = { onRead: null, opened: [] }
 vi.mock('node:fs/promises', async (original) => {
   const real = await original<typeof import('node:fs/promises')>()
   return {
     ...real,
     open: async (...args: Parameters<typeof real.open>) => {
       const handle = await real.open(...args)
+      hook.opened.push(String(args[0]))
       const read = handle.read.bind(handle)
       // The first read of the previewed file (not the transcript) is where a writer can slip in between the stat and the bytes.
       if (!String(args[0]).endsWith('PLAN.md')) return handle
@@ -31,7 +32,7 @@ const { AgentSessionOutputImages } = await import('./agent-session-output-images
 const { readRecentSessionTurns } = await import('./agent-session-turns.js')
 
 const made: string[] = []
-afterEach(() => { hook.onRead = null; for (const p of made.splice(0)) rmSync(p, { recursive: true, force: true }) })
+afterEach(() => { hook.onRead = null; hook.opened = []; for (const p of made.splice(0)) rmSync(p, { recursive: true, force: true }) })
 
 function fixture(text: string) {
   const top = realpathSync(mkdtempSync(join(tmpdir(), 'cos identity-'))); made.push(top)
@@ -82,7 +83,10 @@ describe('preview reads: no link anywhere on the path', () => {
     const id = await f.firstId()
     expect((await f.service.previewFile('claude', 'session', id)).status).toBe('ok')
     rmSync(f.sub, { recursive: true }); symlinkSync(f.elsewhere, f.sub)
+    hook.opened = []
     const got = await f.service.previewFile('claude', 'session', id)
     expect(got.status).toBe('unavailable')
+    // Refused before the file is even opened: not one byte of the other folder's file is read.
+    expect(hook.opened.filter(p => p.endsWith('PLAN.md'))).toEqual([])
   })
 })
