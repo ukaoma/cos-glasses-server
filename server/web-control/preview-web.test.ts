@@ -302,3 +302,12 @@ describe('Settings, Privacy: the extra folders list (decision 2b)', () => {
     expect(save).toContain("say((err && err.message) || 'That folder was not saved.', true)")
   })
 })
+
+describe('the viewer is readable on its dark overlay (7.0.5 render finding)', () => {
+  it('every panel names its own ink; no undefined --text; the line field is 16 px so iOS does not zoom', () => {
+    expect(PREVIEW).not.toContain('var(--text')
+    expect(PREVIEW).toMatch(/\.pv-scroll\{[^}]*color:var\(--ink\)/)
+    expect(PREVIEW).toMatch(/\.pv-jump input\{[^}]*color:var\(--ink\)[^}]*font:16px/)
+    expect(read('./panes/reader-media.js')).toMatch(/\.rm-text\{[^}]*color:var\(--ink\)/)
+  })
+})
