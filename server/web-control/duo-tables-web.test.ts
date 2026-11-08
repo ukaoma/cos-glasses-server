@@ -153,3 +153,176 @@ describe('Duo tables: the stylesheet', () => {
     expect(rule(noComments(read('panes/meetings.css')), '.md-table')).toMatch(/border-collapse:\s*separate/)
   })
 })
+
+// ── The divider between the Sessions list and the reader (sxSplitKit), run from app.js on fake elements ──────────────
+const SPLIT_SRC = slice(APP, '  var SX_SPLIT_KEY = ', '  var SX_SPLIT = null;')
+function splitKit(opts: { total?: number; stored?: string | null; throwing?: boolean; now?: () => number } = {}) {
+  const total = opts.total ?? 1000
+  const classes = new Set<string>(), props = new Map<string, string>(), attrs = new Map<string, string>()
+  const listeners = new Map<string, Array<(e: any) => void>>()
+  const writes: string[] = []
+  const split: any = {
+    classList: { toggle: (c: string, on: boolean) => { if (on) classes.add(c); else classes.delete(c) }, add: (c: string) => classes.add(c), remove: (c: string) => classes.delete(c) },
+    style: { setProperty: (k: string, v: string) => props.set(k, v), removeProperty: (k: string) => props.delete(k) },
+    getBoundingClientRect: () => ({ width: total }),
+    // The list as the stylesheet sizes it: 300 px by default, else the share clamped like the CSS clamp().
+    querySelector: () => ({ getBoundingClientRect: () => {
+      const s = props.get('--sx-list-share')
+      return { width: classes.has('sx-sized') && s ? Math.min(total - 398, Math.max(240, parseFloat(s) / 100 * total)) : 300 }
+    } }),
+  }
+  const captured: number[] = []
+  const handle: any = {
+    setAttribute: (k: string, v: string) => attrs.set(k, v),
+    addEventListener: (t: string, fn: any) => { (listeners.get(t) ?? listeners.set(t, []).get(t)!).push(fn) },
+    removeEventListener: (t: string, fn: any) => { const l = listeners.get(t); if (l) l.splice(l.indexOf(fn) >>> 0, 1) },
+    setPointerCapture: (id: number) => captured.push(id),
+  }
+  const buttons = [{ attrs: new Map<string, string>(), textContent: '', setAttribute(k: string, v: string) { this.attrs.set(k, v) } }]
+  const storage = opts.throwing
+    ? { getItem: () => { throw new Error('SecurityError') }, setItem: () => { throw new Error('QuotaExceededError') } }
+    : { getItem: () => opts.stored ?? null, setItem: (_k: string, v: string) => { writes.push(v) } }
+  let clock = 1000
+  const ctx: any = vm.createContext({ JSON, Math, String, Date: { now: opts.now ?? (() => clock) },
+    document: { querySelectorAll: () => ({ forEach: (f: any) => buttons.forEach(f) }) } })
+  vm.runInContext(SPLIT_SRC + ';this.kit = sxSplitKit;', ctx)
+  const kit = ctx.kit(split, handle, storage)
+  const fire = (type: string, e: any = {}) => {
+    const ev = { pointerId: 1, pointerType: 'touch', button: 0, clientX: 0, shiftKey: false, type, prevented: false, preventDefault() { this.prevented = true }, ...e }
+    for (const fn of [...(listeners.get(type) ?? [])]) fn(ev)
+    return ev
+  }
+  const drag = (from: number, to: number, extra: any = {}) => { fire('pointerdown', { clientX: from, ...extra }); fire('pointermove', { clientX: to, ...extra }); fire('pointerup', { clientX: to, ...extra }) }
+  return { kit, classes, props, attrs, writes, fire, drag, buttons, captured, listeners, tick: (ms: number) => { clock += ms } }
+}
+
+describe('Duo tables: the divider between the Sessions list and the reader', () => {
+  it('a finger drags the list wider; the share lands in storage once, when the finger lifts', () => {
+    const k = splitKit()
+    k.fire('pointerdown', { clientX: 400 })
+    expect(k.captured, 'the pointer is captured, so a pane never takes the drag').toEqual([1])
+    expect(k.classes.has('sx-dragging')).toBe(true)
+    k.fire('pointermove', { clientX: 500 })
+    expect(k.props.get('--sx-list-share')).toBe('40.00%')
+    expect(k.classes.has('sx-sized')).toBe(true)
+    expect(k.writes, 'nothing written mid-drag').toEqual([])
+    k.fire('pointerup', { clientX: 500 })
+    expect(k.classes.has('sx-dragging')).toBe(false)
+    expect(k.writes.map(w => JSON.parse(w))).toEqual([{ share: 40, full: false }])
+    expect(k.attrs.get('aria-valuenow')).toBe('40')
+    expect(k.attrs.get('aria-valuetext')).toBe('Session list 40% of the width')
+  })
+  it('the lift’s own position counts (a browser may fold the last moves into it); a lift that never moved is a tap', () => {
+    const k = splitKit()
+    k.fire('pointerdown', { clientX: 400 }); k.fire('pointermove', { clientX: 410 }); k.fire('pointerup', { clientX: 500 })
+    expect(k.props.get('--sx-list-share')).toBe('40.00%')
+    expect(JSON.parse(k.writes.at(-1)!)).toEqual({ share: 40, full: false })
+  })
+  it('both panes keep their minimums: the list 240 px, the reader 380 px past the 18 px divider', () => {
+    const k = splitKit()
+    k.drag(400, -5000)
+    expect(k.props.get('--sx-list-share')).toBe('24.00%')
+    k.drag(400, 5000)
+    expect(k.props.get('--sx-list-share')).toBe('60.20%')
+    expect([k.attrs.get('aria-valuemin'), k.attrs.get('aria-valuemax')]).toEqual(['24', '60'])
+  })
+  it('a double tap or a double click goes back to the default width; two taps far apart, a wobble or a cancel do not', () => {
+    const k = splitKit()
+    k.drag(400, 520)
+    expect(k.classes.has('sx-sized')).toBe(true)
+    k.drag(400, 402); k.tick(400); k.drag(400, 403)
+    expect(k.classes.has('sx-sized'), 'a 2 px wobble is a tap, and taps 400 ms apart are two single taps').toBe(true)
+    k.tick(400); k.fire('pointerdown', { clientX: 400 }); k.fire('pointercancel', { clientX: 400 }); k.tick(100); k.drag(400, 400)
+    expect(k.classes.has('sx-sized'), 'a cancelled touch is not a tap').toBe(true)
+    k.tick(100); k.drag(400, 400)
+    expect(k.classes.has('sx-sized')).toBe(false)
+    expect(k.props.has('--sx-list-share')).toBe(false)
+    expect(JSON.parse(k.writes.at(-1)!)).toEqual({ share: null, full: false })
+    k.drag(400, 520)
+    const dbl = k.fire('dblclick')
+    expect(dbl.prevented).toBe(true)
+    expect(k.classes.has('sx-sized')).toBe(false)
+  })
+  it('a right click and another finger never move it', () => {
+    const k = splitKit()
+    const right = k.fire('pointerdown', { pointerType: 'mouse', button: 2, clientX: 400 })
+    expect(right.prevented).toBe(false)
+    k.fire('pointermove', { pointerType: 'mouse', button: 2, clientX: 600 })
+    expect(k.classes.has('sx-sized')).toBe(false)
+    k.fire('pointerdown', { clientX: 400 })
+    k.fire('pointermove', { pointerId: 2, clientX: 600 })
+    expect(k.classes.has('sx-sized'), 'a second finger is not the one dragging').toBe(false)
+    k.fire('pointerup', { pointerId: 2, clientX: 600 })
+    expect(k.classes.has('sx-dragging'), 'and its lift does not end the drag').toBe(true)
+  })
+  it('keyboard: arrows step 16 px, Shift 64, Home and End go to the limits; other keys pass through', () => {
+    const k = splitKit()
+    expect(k.fire('keydown', { key: 'ArrowRight' }).prevented).toBe(true)
+    expect(k.props.get('--sx-list-share')).toBe('31.60%')
+    k.fire('keydown', { key: 'ArrowLeft', shiftKey: true })
+    expect(k.props.get('--sx-list-share')).toBe('25.20%')
+    k.fire('keydown', { key: 'End' }); expect(k.props.get('--sx-list-share')).toBe('60.20%')
+    k.fire('keydown', { key: 'Home' }); expect(k.props.get('--sx-list-share')).toBe('24.00%')
+    expect(k.writes.length, 'each key press is kept').toBe(4)
+    expect(k.fire('keydown', { key: 'Tab' }).prevented).toBe(false)
+  })
+  it('remembers the width and Full width on this device, and works when storage throws or holds junk', () => {
+    const k = splitKit({ stored: JSON.stringify({ share: 45, full: true }) })
+    expect(k.props.get('--sx-list-share')).toBe('45.00%')
+    expect(k.classes.has('sx-full')).toBe(true)
+    expect(k.buttons[0].textContent).toBe('Show list')
+    expect(k.buttons[0].attrs.get('aria-pressed')).toBe('true')
+    for (const stored of ['{not json', JSON.stringify({ share: 140 }), JSON.stringify({ share: '40' })]) {
+      const j = splitKit({ stored })
+      expect(j.classes.has('sx-sized'), stored).toBe(false)
+    }
+    const t = splitKit({ throwing: true })
+    t.drag(400, 500)
+    expect(t.props.get('--sx-list-share'), 'storage off: the choice lasts this visit').toBe('40.00%')
+    t.kit.toggleFull()
+    expect(t.classes.has('sx-full')).toBe(true)
+  })
+  it('Full width hides the list and Show list brings it back, with the button saying which', () => {
+    const k = splitKit()
+    expect(k.buttons[0].textContent).toBe('Full width')
+    k.kit.toggleFull()
+    expect(k.classes.has('sx-full')).toBe(true)
+    expect(k.buttons[0].textContent).toBe('Show list')
+    expect(JSON.parse(k.writes.at(-1)!)).toEqual({ share: null, full: true })
+    k.kit.toggleFull()
+    expect(k.classes.has('sx-full')).toBe(false)
+    expect(APP).toContain("if (act === 'full') { if (SX_SPLIT) SX_SPLIT.toggleFull(); return; }")
+    expect(APP).toContain("'</h2>' + sxFullButton() + '</div>'")
+  })
+  it('the page: a focusable separator between the list and the reader', () => {
+    const html = read('index.html')
+    const at = html.indexOf('id="sessions-list-col"'), handle = html.indexOf('id="sessions-handle"'), reader = html.indexOf('id="session-reader"')
+    expect(at).toBeGreaterThan(-1)
+    expect(handle).toBeGreaterThan(at)
+    expect(reader).toBeGreaterThan(handle)
+    const tag = /<div class="sx-handle"[^>]*>/.exec(html)![0]
+    for (const a of ['role="separator"', 'aria-orientation="vertical"', 'tabindex="0"', 'aria-controls="sessions-list-col"', 'aria-label="Session list width"']) expect(tag).toContain(a)
+  })
+  it('the stylesheet: only where both panes show, a 44 px target on touch, no browser panning, the same limits as the script', () => {
+    const SX = noComments(read('panes/sessions.css'))
+    expect(SX).toMatch(/^\.sx-handle, \.sx-full-btn \{ display: none; \}/m)
+    const wide = SX.slice(SX.indexOf('@media (min-width: 760px) {\n  .split.sx-split'))
+    const h = wide.slice(wide.indexOf('.sx-handle {'), wide.indexOf('}', wide.indexOf('.sx-handle {')))
+    expect(h).toMatch(/display:\s*flex/)
+    expect(h).toMatch(/touch-action:\s*none/)
+    expect(h).toMatch(/position:\s*sticky/)
+    expect(wide).toMatch(/grid-template-columns:\s*minmax\(260px, 340px\) 18px minmax\(0, 1fr\)/)
+    const lim = /\.split\.sx-split\.sx-sized \{ grid-template-columns: clamp\((\d+)px, var\(--sx-list-share, 30%\), calc\(100% - (\d+)px\)\) (\d+)px/.exec(wide)
+    expect(lim).not.toBeNull()
+    const n = (name: string) => Number(new RegExp(name + ' = (\\d+)').exec(APP)![1])
+    expect(Number(lim![1])).toBe(n('SX_LIST_MIN'))
+    expect(Number(lim![2])).toBe(n('SX_READER_MIN') + n('SX_HANDLE_W'))
+    expect(Number(lim![3])).toBe(n('SX_HANDLE_W'))
+    const coarse = /@media \(pointer: coarse\) \{ \.sx-handle::before \{[^}]*left: -(\d+)px; right: -(\d+)px; \} \}/.exec(wide)
+    expect(coarse).not.toBeNull()
+    expect(n('SX_HANDLE_W') + Number(coarse![1]) + Number(coarse![2])).toBeGreaterThanOrEqual(44)
+    expect(wide).toMatch(/\.split\.sx-split\.sx-full\.reading \{ grid-template-columns: minmax\(0, 1fr\); \}/)
+    expect(wide).toMatch(/\.sx-split\.sx-full\.reading > \.split-list, \.sx-split\.sx-full\.reading > \.sx-handle \{ display: none; \}/)
+    expect(wide).toMatch(/\.sx-split\.sx-dragging > \.split-list, \.sx-split\.sx-dragging > \.reader \{ pointer-events: none; \}/)
+  })
+})

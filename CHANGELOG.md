@@ -1,3 +1,19 @@
+## Unreleased (Duo tables)
+
+2026-11-07. On 6.99.33 (02dd4a7). Server only (Control Web); no route changed. No version yet (6.99.35 or later).
+
+Miles on the unfolded Duo (IMG_0508, IMG_0509): tables in a session reply broke words one letter per line, and the first column ("Toda y", "Sess ion shee t") broke mid-word with room to spare. He asked whether the line between the Sessions list and the reader could be dragged.
+
+**Default-on changes:**
+- **Table words stay whole.** The panes set `overflow-wrap: anywhere`, which lets a table squeeze a column to one letter. Table cells now wrap at spaces only, so a column is never narrower than its longest word. Only a token of 25 or more characters (a URL, a hash) may break inside.
+- **Column floors** (app.js `tableFit`, shared): a column whose text is longer than 10 characters keeps at least 10; a first column of short labels (up to 3 words and 28 characters) stays on one line; a longer first column gets 14 to 26 characters and wraps at words.
+- **A table too wide for its box scrolls inside it**, with the first column held at the left edge. The page never scrolls sideways. Same on the folded Duo. The look is unchanged (the separated border model draws the same 1 px lines, so the held column keeps its own).
+- The same applies to every markdown table in Control Web: the Sessions reader, Today's session sheet, Meetings notes and Ask, and Memories answers. Messages and Work chat do not draw tables (their markdown has none), so nothing changed there.
+- **Drag the line between the Sessions list and the reader** (760 px and up, where both show). Finger, mouse or pen; focus it and use the arrow keys (Shift for bigger steps, Home, End). The list keeps 240 px and the reader 380 px, also after the screen turns. A double tap or double click goes back to the default width. On touch the target is 44 px. The width is remembered on this device; without storage it lasts the visit.
+- **Full width / Show list** in the reader's header hides the list and brings it back, for when dragging is fiddly. Remembered the same way.
+
+**Tests:** duo-tables-web.test.ts (new, 24): tableFit, sxMd and the Memories renderer run from the real files; the divider runs from app.js on fake elements (drag, the lift's position, limits, double tap, a cancel, a second finger, right click, keys, storage that throws or holds junk, Full width); the stylesheet and page facts. reader-media-web.test.ts gives openSession its new sxFullButton dependency. 51 mutations from a green baseline, each landing exactly once, all killed. Headless Chrome renders before and after at 1430x1000, 1000x1430 and 382x678: words broken mid-word went from 3 to 54 per table to 0.
+
 ## 6.99.33 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
 
 2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). 6.99.32 (98f3cde) was the same work installed privately at 18:09 without the small-frames keyboard fix below; 6.99.33 replaces it. Server only (Control Web); no route changed, so it works with any COS Control that runs 6.99.29. The first public build with the 6.99.30 Duo layout work below; npm goes from 6.99.29 straight to 6.99.33.

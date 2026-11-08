@@ -1620,6 +1620,7 @@
       }
       if (act === 'clear') { var input = $('sessions-q'); input.value = ''; searchSessions(); input.focus(); return; }
       if (act === 'copy-session') return copySessionBrief();
+      if (act === 'full') { if (SX_SPLIT) SX_SPLIT.toggleFull(); return; }
       if (act === 'refresh-turns' && rd) { rd.refusal = null; renderVerdict(rd); refreshTurns(rd.provider, rd.id); return; }
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
       if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
@@ -1647,6 +1648,94 @@
       if (id === 'usage-model') { SX.uModel = e.target.value; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
     });
   }
+
+  // Duo tables: the divider between the Sessions list and the reader, where both show side by side (760 px and up).
+  // Drag it with a finger, mouse or pen (pointer events, captured, so a table's own sideways scroll and text selection
+  // in the panes never start a drag), or focus it and use the arrow keys (Shift for bigger steps, Home and End).
+  // A double tap or double click goes back to the default width. The width is a share of the split (CSS clamps it so the
+  // list keeps 240 px and the reader 380 px, also after the screen turns) and is remembered on this device; "Full width"
+  // in the reader hides the list and "Show list" brings it back. Storage that throws (a private window) only means the
+  // choice lasts this visit.
+  var SX_SPLIT_KEY = 'cos_web_sessions_split', SX_LIST_MIN = 240, SX_READER_MIN = 380, SX_HANDLE_W = 18, SX_KEY_STEP = 16, SX_DOUBLE_MS = 350;
+  function sxSplitKit(split, handle, storage) {
+    var saved = {};
+    try { var raw = JSON.parse(storage.getItem(SX_SPLIT_KEY) || 'null'); if (raw && typeof raw === 'object') saved = raw; } catch (_e) { saved = {}; }
+    var share = typeof saved.share === 'number' && saved.share > 0 && saved.share < 100 ? saved.share : null, full = saved.full === true, lastTap = 0;
+    function save() { try { storage.setItem(SX_SPLIT_KEY, JSON.stringify({ share: share, full: full })); } catch (_e) { /* this visit only */ } }
+    function total() { return split.getBoundingClientRect().width; }
+    function listWidth() { var l = split.querySelector('.split-list'); return l ? l.getBoundingClientRect().width : 0; }
+    function bounds(t) { return { min: SX_LIST_MIN, max: Math.max(SX_LIST_MIN, t - SX_HANDLE_W - SX_READER_MIN) }; }
+    function aria() {
+      var t = total(); if (!(t > 0)) return;
+      var b = bounds(t), pct = function (px) { return Math.round(px / t * 100); }, now = pct(listWidth());
+      handle.setAttribute('aria-valuemin', String(pct(b.min)));
+      handle.setAttribute('aria-valuemax', String(pct(b.max)));
+      handle.setAttribute('aria-valuenow', String(now));
+      handle.setAttribute('aria-valuetext', 'Session list ' + now + '% of the width');
+    }
+    function paint() {
+      split.classList.toggle('sx-sized', share != null);
+      if (share != null) split.style.setProperty('--sx-list-share', share.toFixed(2) + '%'); else split.style.removeProperty('--sx-list-share');
+      split.classList.toggle('sx-full', full);
+      document.querySelectorAll('[data-sx="full"]').forEach(function (b) { b.setAttribute('aria-pressed', String(full)); b.textContent = full ? 'Show list' : 'Full width'; });
+      aria();
+    }
+    // px: the list width asked for; kept inside both panes' minimums for the split's width now.
+    function setWidth(px, persist) {
+      var t = total(); if (!(t > 0)) return;
+      var b = bounds(t);
+      share = Math.min(b.max, Math.max(b.min, px)) / t * 100;
+      paint();
+      if (persist) save();
+    }
+    function reset() { share = null; paint(); save(); }
+    handle.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      var x0 = e.clientX, start = listWidth(), moved = false, id = e.pointerId;
+      try { handle.setPointerCapture(id); } catch (_e) {}
+      split.classList.add('sx-dragging');
+      function move(ev) {
+        if (ev.pointerId !== id) return;
+        if (!moved && Math.abs(ev.clientX - x0) < 4) return;
+        moved = true;
+        setWidth(start + ev.clientX - x0, false);
+      }
+      function end(ev) {
+        if (ev.pointerId !== id) return;
+        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
+        split.classList.remove('sx-dragging');
+        // The lift's own position counts: a browser may fold the last moves into it.
+        if (moved) { if (ev.type === 'pointerup') setWidth(start + ev.clientX - x0, false); save(); lastTap = 0; return; }
+        if (ev.type !== 'pointerup') return;
+        var now = Date.now();
+        if (now - lastTap < SX_DOUBLE_MS) { lastTap = 0; reset(); } else lastTap = now;
+      }
+      handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+    });
+    handle.addEventListener('dblclick', function (e) { e.preventDefault(); reset(); });
+    handle.addEventListener('keydown', function (e) {
+      var t = total(), b = bounds(t), w = listWidth(), step = e.shiftKey ? SX_KEY_STEP * 4 : SX_KEY_STEP;
+      var to = e.key === 'ArrowLeft' ? w - step : e.key === 'ArrowRight' ? w + step : e.key === 'Home' ? b.min : e.key === 'End' ? b.max : null;
+      if (to == null) return;
+      e.preventDefault();
+      setWidth(to, true);
+    });
+    paint();
+    return {
+      setWidth: setWidth, reset: reset, paint: paint,
+      toggleFull: function () { full = !full; paint(); save(); },
+      state: function () { return { share: share, full: full }; }
+    };
+  }
+  var SX_SPLIT = null;
+  (function () {
+    var split = $('sessions-split'), handle = $('sessions-handle');
+    if (!split || !handle) return;
+    var store; try { store = window.localStorage; } catch (_e) { store = null; }
+    SX_SPLIT = sxSplitKit(split, handle, store || { getItem: function () { return null; }, setItem: function () {} });
+    window.addEventListener('resize', function () { SX_SPLIT.paint(); });
+  })();
 
   // ── Sessions: read, send, queue, fork, stop (the glasses' Continue, from a browser) ──
   // The server owns every safety rule (agent-session-bindings.ts): COS writes into a desktop
@@ -1781,6 +1870,11 @@
     return 'Showing the last ' + turns.length + (total > turns.length && !d.truncated ? ' of ' + total : '') + ' turns. Copy session keeps the original request plus the newest context.';
   }
 
+  // Wide layouts: give the reader the whole width, or bring the list back (sxSplitKit). Hidden under 760 px by CSS.
+  function sxFullButton() {
+    var full = !!(SX_SPLIT && SX_SPLIT.state().full);
+    return '<button type="button" class="cx-btn quiet sx-full-btn" data-sx="full" aria-controls="sessions-list-col" aria-pressed="' + full + '">' + (full ? 'Show list' : 'Full width') + '</button>';
+  }
   function openSession(provider, id) {
     var reader = $('session-reader');
     if (!provider || !id) return;
@@ -1804,7 +1898,7 @@
       window.COSWeb.setCrumb(title);
       var trunc = sxTruncNote(d, turns, r.more);
       reader.innerHTML =
-        '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2></div>' +
+        '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2>' + sxFullButton() + '</div>' +
           '<p class="sx-subtitle">' + esc(sxSubtitle(d, provider, turns, r.more)) + '</p></div>' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
         (trunc ? '<p class="sx-note">' + esc(trunc) + '</p>' : '') +
