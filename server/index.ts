@@ -25,6 +25,8 @@ import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
 import { agentSessionsRouter } from './routes/agent-sessions.js'
 import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
+import { createLiveEventsRouter, liveEventsEnabled, realLiveSources } from './routes/live-events.js'
+import { LiveEventsHub } from './lib/live-events.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
@@ -1074,6 +1076,13 @@ app.use('/api', agentSessionsRouter)
 // router's `/attachability` below. READ-ONLY, and deliberately NOT behind
 // COS_THREAD_ATTACH_ENABLED -- see the header of the route for why.
 app.use('/api', agentSessionStreamRouter)
+// 7.0.1 live state: ONE change feed per open Control Web page (docs/live-events-contract.md). Ids, states, counts
+// and times only. COS_WEB_LIVE_EVENTS=0 registers no route (404), so the page polls exactly as before. The hub reads
+// nothing and ticks never while no stream is open; its reply counter is one Map increment per Stop.
+if (liveEventsEnabled()) {
+  const liveEventsHub = new LiveEventsHub({ sources: realLiveSources({ broker: () => permissionBroker }) })
+  app.use('/api', createLiveEventsRouter({ hub: liveEventsHub }))
+}
 // Presence view of Claude Code sessions on this Mac. Dark unless
 // COS_CLAUDE_SESSIONS_ENABLED=1 — it projects another product's 0700 state dir.
 app.use('/api', claudeSessionsRouter)
