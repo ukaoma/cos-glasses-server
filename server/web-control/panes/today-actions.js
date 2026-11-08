@@ -211,10 +211,13 @@
     return !!a.isContentEditable;
   }
   function viewport() { return W.viewportFit ? W.viewportFit() : null; }
+  // 7.0.2: `wide` keeps its 6.99.30 meaning, 600 px wide or more, so old and new reports compare. From 7.0.2 a short
+  // touch screen at that width counts as a phone (app.js isPhone, A8): that is shortTouch.
+  function crumbWide() { return window.matchMedia ? !!window.matchMedia('(min-width: 600px)').matches : !phone(); }
   function crumb(what, v, focus) {
     if (!W.layoutCrumb || !O.open || !v) return;
     W.layoutCrumb(what, { kind: O.open.kind, kb: KB.on, strip: KB.strip, tight: KB.tight, focus: !!focus, inset: v.inset, below: v.below,
-      lh: v.layoutH, top: v.top, h: v.height, zoomed: v.zoomed, wide: !phone() });
+      lh: v.layoutH, top: v.top, h: v.height, zoomed: v.zoomed, wide: crumbWide(), shortTouch: crumbWide() && phone() });
   }
   function applyFit() {
     KB.frame = 0;

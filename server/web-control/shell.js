@@ -77,10 +77,13 @@
   }
   // About 16 reads: never two runs at once, never more than one a minute, two at a time through storyApi, and never
   // ahead of the pane the person just opened (Safari keeps 6 connections to the Mac over HTTP/1.1).
-  // On the closed Duo (below 600px) the stories show only inside the section menu, so they load
-  // when the menu opens rather than costing the pane its connections on every visit.
+  // Below 600 px wide (the folded Duo) the rail is hidden and the stories show only inside the section menu, so they
+  // load when the menu opens rather than costing the pane its connections on every visit. This is the WIDTH test on
+  // purpose, not W.isPhone: from 7.0.2 a short touch screen at any width counts as a phone (the unfolded Duo, 951x539),
+  // and it still has the rail, its story lines and hot dots.
+  function railHidden() { return !window.matchMedia('(min-width: 600px)').matches; }
   function loadStories(force) {
-    if (!force && W.isPhone()) return;
+    if (!force && railHidden()) return;
     if (Date.now() - storiesAt < 60000) return;
     storiesAt = Date.now();
     var now = new Date();
@@ -260,9 +263,9 @@
     }
     crumbs.innerHTML = parts.join('');
     $('nav-back').disabled = onToday;
-    // The phone top bar names the detail too, so a reader says where it is.
+    // The phone top bar (below 600 px, the same width test) names the detail too, so a reader says where it is.
     var label = $('section-name');
-    if (label && detail && W.isPhone()) label.textContent = detail;
+    if (label && detail && railHidden()) label.textContent = detail;
   }
 
   document.addEventListener('click', function (e) {

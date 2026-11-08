@@ -21,14 +21,15 @@
   .msg-right .cc-head { padding: 14px 16px 12px; }
   .msg-right .cc-feed { flex: 1; overflow-y: auto; padding: 12px 16px 8px; overscroll-behavior: contain; }
   .msg-right .cc-composer { position: static; padding: 10px 16px 12px; background: var(--panel); }
-  /* 7.0.2 (A4): with an on-screen keyboard up (app.js sets html.kb-up and the visible box, --vv-top and --vv-h), the chat
-     column is the visible box, so its composer stays above the keyboard; the header drops to one row. */
-  html.kb-up .msg-right { top: calc(var(--vv-top, 0px) + 8px); height: calc(var(--vv-h, 100dvh) - 16px); min-height: 0; }
-  html.kb-up .msg-right .cc-head { padding: 6px 16px; }
-  html.kb-up .msg-right .cc-sub, html.kb-up .msg-right .cc-thread, html.kb-up .msg-right .cc-head-acts, html.kb-up .msg-right .cc-avatar.big { display: none; }
-  html.kb-up .msg-right .cc-title { font-size: 18px; }
-  html.kb-up .msg-right .cc-feed { min-height: 0; }
-  html.kb-up .msg-right .cc-prep { max-height: 35%; }
+  /* 7.0.2 (A4): with an on-screen keyboard up for a field in the chat (cos-chat.js sets html.kb-chat; app.js publishes
+     the visible box, --vv-top and --vv-h), the chat column is the visible box, so its composer stays above the keyboard;
+     the header drops to one row. The Messages search box on the left never resizes it. */
+  html.kb-chat .msg-right { top: calc(var(--vv-top, 0px) + 8px); height: calc(var(--vv-h, 100dvh) - 16px); min-height: 0; }
+  html.kb-chat .msg-right .cc-head { padding: 6px 16px; }
+  html.kb-chat .msg-right .cc-sub, html.kb-chat .msg-right .cc-thread, html.kb-chat .msg-right .cc-head-acts, html.kb-chat .msg-right .cc-avatar.big { display: none; }
+  html.kb-chat .msg-right .cc-title { font-size: 18px; }
+  html.kb-chat .msg-right .cc-feed { min-height: 0; }
+  html.kb-chat .msg-right .cc-prep { max-height: 35%; }
 }
 
 /* Below 860 px the chat fills the screen, so the composer sits at the bottom even when the chat is short. */
@@ -37,7 +38,7 @@
   .msg-split[data-show='chat'] .cc-feed { flex: 1; }
   /* 7.0.2 (A4): with the keyboard up the composer sticks above it: --vv-below is the layout viewport under the visible
      box (0 where the web view itself shrank). The home indicator is under the keyboard, so its inset goes. */
-  html.kb-up .msg-split[data-show='chat'] .cc-composer { bottom: var(--vv-below, 0px); padding-bottom: 8px; }
+  html.kb-chat .msg-split[data-show='chat'] .cc-composer { bottom: var(--vv-below, 0px); padding-bottom: 8px; }
 }
 
 /* ── the pinned row ───────────────────────────────────── */
@@ -117,18 +118,18 @@
   .cc-buttons .cx-btn { flex: 1; justify-content: center; }
   .cc-buttons .cc-attach { flex: none; }
 }
-/* 7.0.2 (A5): with an on-screen keyboard up (about 220 px left folded, 200 unfolded), the composer is compact: the box
-   (3 lines at most), the row of clip, Ask and Drop, and Model and Effort side by side on one 44 px row with their names
-   read from aria-label. Folded that is about 160 to 205 px. The camera (the clip's own menu offers Take Photo) and the
-   fine print wait for the keyboard to close. */
-html.kb-up .cc-composer { gap: 6px 8px; padding-top: 6px; }
-html.kb-up .cc-input { max-height: 88px; }
-html.kb-up .cc-composer .cc-hint, html.kb-up .cc-composer .cc-camera { display: none; }
-html.kb-up .cc-foot { flex-wrap: nowrap; }
-html.kb-up .cc-menus { display: flex; flex-wrap: nowrap; width: 100%; gap: 8px; }
-html.kb-up .cc-model { flex: 1 1 0; }
-html.kb-up .cc-model > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-html.kb-up .cc-model .field { width: 100%; }
+/* 7.0.2 (A5): the composer the keyboard is for (cos-chat.js marks it .cc-kb) is compact while it is up (about 220 px
+   left folded, 200 unfolded): the box (3 lines at most), then two rows, clip with Ask and Drop, then Model and Effort
+   side by side, their names read from aria-label. Measured in WebKit at 382 px with an empty box: 171 px (was 252). The
+   camera (the clip's own menu offers Take Photo) and the fine print wait for the keyboard to close. */
+html.kb-up .cc-composer.cc-kb { gap: 6px 8px; padding-top: 6px; }
+html.kb-up .cc-kb .cc-input { max-height: 88px; }
+html.kb-up .cc-composer.cc-kb .cc-hint, html.kb-up .cc-composer.cc-kb .cc-camera { display: none; }
+html.kb-up .cc-kb .cc-foot { flex-wrap: nowrap; }
+html.kb-up .cc-kb .cc-menus { display: flex; flex-wrap: nowrap; width: 100%; gap: 8px; }
+html.kb-up .cc-kb .cc-model { flex: 1 1 0; }
+html.kb-up .cc-kb .cc-model > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+html.kb-up .cc-kb .cc-model .field { width: 100%; }
 
 /* ── 6.99.12: the menus, the clip and the chips ───────── */
 .cc-menus { display: inline-flex; flex-wrap: wrap; gap: 6px 12px; }

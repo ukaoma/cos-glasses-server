@@ -224,18 +224,31 @@
   // 7.0.2 (A7): what "Default" resolves to on this Mac (/api/models defaultModel: the session's preference, then
   // COS_G2_DEFAULT_MODEL, then the built-in default), named in the menu: "Default (Codex Frontier)". On 11/07 Default
   // was Codex while Codex was out of usage, and nothing on the page said so. An older server sends no field: plain Default.
+  // A session bound to a key profile reads "Default (key profile)".
   function defaultLabel(d) {
+    if (d && d.source === 'profile') return 'key profile';
     var pref = d && typeof d.preference === 'string' ? d.preference : '';
     if (!pref) return '';
     for (var i = 0; i < CLAUDE_MENU.length; i++) if (CLAUDE_MENU[i][0] === pref) return CLAUDE_MENU[i][1];
     if (pref === 'haiku') return 'Claude Haiku';
     return ENGINE[pref] ? (ENGINE[pref] + (FALLBACK[pref] ? ' ' + FALLBACK[pref] : '')) : '';
   }
+  // The session an Ask from the chat continues, whose preference "Default" follows: the COS thread's newest session in
+  // thread mode, else the chat's own (C.session).
+  function defaultSession() { return threadOn() ? String(C.threadSession || '') : C.session && C.session.id ? String(C.session.id) : ''; }
+  function modelsPath() { var sid = defaultSession(); C.defaultFor = sid; return '/api/models' + (sid ? '?sessionId=' + encodeURIComponent(sid) : ''); }
+  // QA W5: the label is read again after each Ask finishes and whenever that session changes, so it never goes stale.
+  function refreshDefault() {
+    if (!C.models) return null;
+    return api(modelsPath()).then(function (m) {
+      var label = defaultLabel(m && m.defaultModel);
+      if (label !== C.defaultLabel) { C.defaultLabel = label; paintModelMenu(); }
+    }, function () {});
+  }
   function loadModels() {
     if (C.models) return;
     C.models = [];
-    var sid = !threadOn() && C.session && C.session.id ? String(C.session.id) : '';
-    api('/api/models' + (sid ? '?sessionId=' + encodeURIComponent(sid) : '')).then(function (m) {
+    api(modelsPath()).then(function (m) {
       C.models = modelsFrom(m);
       C.defaultLabel = defaultLabel(m && m.defaultModel);
       if (C.model && !C.models.some(function (o) { return o.value === C.model; })) { C.model = ''; save(); }
@@ -466,7 +479,7 @@
         '<button type="button" class="link-btn cc-text-btn" data-cos="cancel" data-cid="' + a.cid + '">Cancel</button>';
     } else if (a.status === 'completed' && a.no) {
       acts = '<button type="button" class="cx-btn primary" data-cos="open-msg" data-no="' + a.no + '">Open in Messages</button>';
-    } else if ((a.status === 'failed' || a.status === 'interrupted') && a.jobId && !a.retried) {
+    } else if ((a.status === 'failed' || a.status === 'interrupted') && a.jobId && !a.retried && !a.prepDraftId) {
       acts = '<button type="button" class="cx-btn primary" data-cos="again" data-cid="' + a.cid + '">Ask again</button>';
     }
     // A drop that became a question already shows its words as the drop: only the answer card is added.
@@ -1052,22 +1065,26 @@
       });
     };
     var prepare = (a.threaded ? threadPlan().then(function (plan) {
-      if (plan.sessionId) body.sessionId = plan.sessionId;
+      if (plan.sessionId) { body.sessionId = plan.sessionId; C.threadSession = plan.sessionId; }
       else if (plan.digest) body.reference = { query: THREAD_REF, response: plan.digest };
       a.carried = plan.sessionId ? '' : plan.digest ? 'summary' : 'plain';
     }) : Promise.resolve()).then(function () { withContext(body, opts.context); });
     prepare.then(function () { return admit(true); }).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
       take(a, job);
-      if (a.threaded) { C.threadCarried = a.carried; paintThread(); }
+      var before = defaultSession();
+      if (a.threaded) { C.threadCarried = a.carried; if (job.sessionId) C.threadSession = job.sessionId; paintThread(); }
       else if (job.sessionId && !a.replyKey) { C.session = { id: job.sessionId, day: today() }; save(); }
+      if (defaultSession() !== before) refreshDefault();
       if (dropId) api('/api/drops/' + encodeURIComponent(dropId) + '/ask', { method: 'POST', body: { clientJobId: a.cid, generation: 1 } }).catch(function () {});
       if (done) done(true);
       poll(a);
     }, function (err) {
       a.status = 'failed';
       a.error = err && err.code === 'durable_query_jobs_disabled' ? 'Ask needs the durable query jobs switch on your Mac.'
-        : err && /attachment/.test(String(err.code || '')) ? 'An attachment could not be read: ' + ((err && err.message) || err.code) + ' Your words and files are still in the box.'
+        : err && /attachment/.test(String(err.code || '')) ? 'An attachment could not be read: ' + ((err && err.message) || err.code) +
+          // An Ask again never came from the box (QA): say what to do instead of pointing at it.
+          (opts.reask ? ' Attach the file again in the box and ask again.' : ' Your words and files are still in the box.')
           : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer');
       if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
       if (done) done(false);
@@ -1106,17 +1123,25 @@
     if (/^(opus|fable|sonnet|haiku)/.test(m)) return 'Claude';
     return '';
   }
-  // "until <when>" or "for <how long>" from the provider's words or retryAfterMs; '' when neither says.
+  // "until <when>" or "for <how long>" from the provider's words or retryAfterMs; '' when neither says. A machine time
+  // (ISO 8601, or one that names UTC or GMT) is shown in this browser's own time zone.
+  var RESET_ISO = /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/;
+  function localWhen(d) {
+    try { return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (_e) { return ''; }
+  }
   function resetTime(err) {
     var msg = String((err && err.message) || '').slice(0, 2000);
     var m = /\b(?:try again|available again|resets?)\s+(at|on|after|in)?\s*([^.!\n·(]{2,48})/i.exec(msg), prep = m ? String(m[1] || '').toLowerCase() : '';
     if (!m) { m = /\buntil\s+()([^.!\n·(]{2,48})/i.exec(msg); prep = ''; }
-    if (m) { var t = m[2].replace(/[\s,;:]+$/, '').trim(); if (/\d/.test(t)) return (prep === 'in' ? 'for ' : 'until ') + t; }
-    var ms = err && Number(err.retryAfterMs);
-    if (ms > 0 && isFinite(ms)) {
-      var d = new Date(Date.now() + ms);
-      try { return 'until ' + d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (_e) { return ''; }
+    if (m) {
+      var iso = RESET_ISO.exec(msg.slice(m.index));
+      var when = iso && iso.index < 24 ? new Date(iso[0].replace(' ', 'T')) : /\b(?:UTC|GMT)\b/.test(m[2]) ? new Date(m[2].trim()) : null;
+      if (when && !isNaN(when.getTime())) { var local = localWhen(when); if (local) return 'until ' + local; }
+      var t = m[2].replace(/[\s,;:]+$/, '').trim();
+      if (/\d/.test(t)) return (prep === 'in' ? 'for ' : 'until ') + t;
     }
+    var ms = err && Number(err.retryAfterMs);
+    if (ms > 0 && isFinite(ms)) { var later = localWhen(new Date(Date.now() + ms)); return later ? 'until ' + later : ''; }
     return '';
   }
   function errorLine(job) {
@@ -1126,6 +1151,7 @@
       return (who || 'This model') + ' is out of usage ' + (until || 'for now') + '. Pick another model under Model and ask again.';
     }
     if (code === 'provider_auth') return (who || 'This model') + ' is not signed in on your Mac. Sign in there, or pick another model under Model and ask again.';
+    if (code === 'provider_context_too_long') return 'This conversation is too long for ' + (who || 'this model') + '. Start a new chat, or pick a model with a larger context under Model.';
     if (code === 'provider_timeout') return 'The model took longer than the time limit, so COS stopped waiting. Ask again, or pick a lower Effort for a faster answer.';
     if (code === 'interrupted' || (job && job.status === 'interrupted' && !code)) {
       if (err.cause === 'server_shutdown') return 'COS on your Mac shut down before this answer finished. When it is back, ask again.';
@@ -1138,12 +1164,14 @@
   // failed card keeps its line and loses the button.
   function askAgain(cid) {
     var a = C.asks.filter(function (x) { return x.cid === cid; })[0];
-    if (!a || a.retried || !(a.status === 'failed' || a.status === 'interrupted') || !a.jobId) return null;
+    // A Prep card is never resent as a plain Ask (QA W4): Prep has its own Run.
+    if (!a || a.retried || a.prepDraftId || !(a.status === 'failed' || a.status === 'interrupted') || !a.jobId) return null;
     a.retried = true;
     var g = a.again || {}, o = {};
     if (g.attachmentIds && g.attachmentIds.length) { o.attachmentIds = g.attachmentIds.slice(0, MAX_ATTS); o.atts = (g.atts || []).slice(0, MAX_ATTS); }
     if (g.replyKey) { o.replyKey = g.replyKey; o.sessionId = g.sessionId; }
     if (g.context) o.context = g.context;
+    o.reask = true;
     return submitAsk(a.query, null, null, o);
   }
   function poll(a) {
@@ -1161,6 +1189,7 @@
   }
   function finished(a) {
     postTurn(a);
+    refreshDefault();
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
     if (C.onAnswered) C.onAnswered();
     // A drop that became a question gets its answer as a follow-up: read the chat again.
@@ -1971,24 +2000,48 @@
     if (LAST.composer && form && form.getBoundingClientRect && (window.innerHeight || 0) - form.getBoundingClientRect().bottom > 1) { window.scrollTo(0, max); return true; }
     return false;
   }
-  // 7.0.2 (A4): two columns (860 px and up, the unfolded Duo) with the keyboard up. cos-chat.css makes the column the
-  // visible box (html.kb-up), but a sticky column only reaches its top once the page has scrolled to it, so the page
-  // scrolls it there, and where the page is too short to, the column is capped to what is left above the keyboard. The
-  // cap goes when the keyboard closes. Only when the keyboard is for a field in the chat column.
-  function dockWide(what) {
+  // 7.0.2 (A4): two columns (860 px and up, the unfolded Duo) with the keyboard up for a field in the chat column.
+  // cos-chat.css makes the column the visible box (html.kb-chat), but a sticky column only reaches its top once the page
+  // has scrolled to it, so on open the page scrolls it there, and where the page is too short to, the column is capped
+  // to what is left above the keyboard. The cap follows each change of the visible box while the keyboard is up (a
+  // keyboard rising in steps, QA W6) and goes when it closes, when focus leaves the column, or below 860 px (a fold
+  // with the keyboard up never keeps it).
+  function dockWide(what, v) {
     var mr = C.host;
-    if (!mr || !mr.style || !wide()) return false;
-    if (what !== 'open') { mr.style.maxHeight = ''; return false; }
-    // Only for a field in the chat column: the list's search box on the left keeps its own place.
-    var a = document.activeElement, v = W.viewportFit ? W.viewportFit() : null;
-    if (!a || !mr.contains || !mr.contains(a)) return false;
-    if (W.parseRoute().pane !== 'messages' || !v || !mr.getBoundingClientRect) return false;
+    if (!mr || !mr.style) return false;
+    var a = document.activeElement;
+    var keep = (what === 'open' || what === 'move') && wide() && !!a && !!mr.contains && mr.contains(a) && W.parseRoute().pane === 'messages';
+    v = v || (W.viewportFit ? W.viewportFit() : null);
+    if (!keep || !v || !mr.getBoundingClientRect) { mr.style.maxHeight = ''; return false; }
     var want = v.top + 8, top = mr.getBoundingClientRect().top;
-    if (top > want + 1) { window.scrollBy(0, Math.round(top - want)); top = mr.getBoundingClientRect().top; }
+    if (what === 'open' && top > want + 1) { window.scrollBy(0, Math.round(top - want)); top = mr.getBoundingClientRect().top; }
     mr.style.maxHeight = Math.max(120, Math.round(v.top + v.height - Math.max(top, v.top) - 8)) + 'px';
     return true;
   }
-  if (W.onKeyboard) W.onKeyboard(function (what) { if (what === 'after') settleAfterKeyboard(); else dockWide(what); });
+  // 7.0.2 (QA W7): which composer the keyboard is for. html.kb-up (app.js) says only that a keyboard is up on the page;
+  // html.kb-chat says it is for a field in the chat column (cos-chat.css docks the column and the one-column composer on
+  // it), and .cc-kb marks the one composer that has it (only that one turns compact). The Messages search box at 860 px
+  // and up, or a field in another pane, leaves the chat as it is.
+  function markKeyboard(up) {
+    var a = up ? document.activeElement : null, de = document.documentElement;
+    var form = a && a.closest ? a.closest('[data-cos-form]') : null;
+    document.querySelectorAll('.cc-composer.cc-kb').forEach(function (f) { if (f !== form) f.classList.remove('cc-kb'); });
+    if (form && form.classList) form.classList.add('cc-kb');
+    var inChat = !!(a && C.host && C.host.contains && C.host.contains(a));
+    if (de && de.classList) de.classList.toggle('kb-chat', inChat);
+    return inChat;
+  }
+  if (W.onKeyboard) W.onKeyboard(function (what, v) {
+    if (what === 'after') { settleAfterKeyboard(); return; }
+    markKeyboard(what !== 'close');
+    dockWide(what, v);
+  });
+  // Focus moving between fields while the keyboard stays up: mark (and dock) for the new one.
+  document.addEventListener('focusin', function () {
+    if (!W.keyboardUp || !W.keyboardUp()) return;
+    markKeyboard(true);
+    dockWide('move');
+  });
 
   // Crossing 860 px shows the chat beside the list: load it then.
   window.matchMedia('(min-width: 860px)').addEventListener('change', function (m) {
@@ -2052,7 +2105,7 @@
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
-    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _settle: settleAfterKeyboard, _dockWide: dockWide, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
+    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _settle: settleAfterKeyboard, _dockWide: dockWide, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();
