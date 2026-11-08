@@ -222,9 +222,11 @@
     var sf = d && d.sf;
     if (!sf || typeof sf.enabled !== 'boolean') return '';
     var env = sf.source === 'env';
+    // QA 7.0.0: a saved setting the Mac could not read fails closed (off). The row says so; turning it on saves it again.
     return group('Session files', '',
       row('Show files and images your sessions make',
         env ? 'Turned off on the Mac by the server environment (COS_WEB_SESSION_FILES=0).'
+          : sf.source === 'damaged' ? 'Couldn’t read the saved setting, so previews are off. Turn it on to save it again.'
           : 'Lets this page show images and files your sessions save in their project folder. Files stay on your Mac.',
         toggle(sf.enabled, 'data-set="session-files"' + (env ? ' disabled' : ''), 'Show files and images your sessions make')));
   }

@@ -207,31 +207,49 @@ export function selectedEvents(snapshot: CalendarSnapshot): SnapshotEvent[] {
 }
 
 /**
- * The same meeting invited on Exchange and on Gmail shows up twice. Merge when
- * the external id and occurrence match, or when title, start, end and organizer
- * side all match. Two events from the SAME calendar are never merged: two
- * 10:00 "Busy" holds are two holds.
+ * The same meeting invited on Exchange and on Gmail shows up twice. Merge only a true duplicate of the same meeting on
+ * another calendar: the external id and occurrence match, or the title (trimmed, case-folded), start and end all match
+ * AND the two share a named attendee or the same meeting link. Two events from the SAME calendar are never merged: two
+ * 10:00 "Busy" holds are two holds. QA 7.0.0: the shape fallback once keyed on the set of attendee DOMAINS, so two
+ * different "Weekly sync" meetings at one time with different people from one company merged into one.
  */
 export function dedupeEvents(rows: SnapshotEvent[]): SnapshotEvent[] {
   const out: SnapshotEvent[] = []
   const byExternal = new Map<string, SnapshotEvent>()
-  const byShape = new Map<string, SnapshotEvent>()
+  const byShape = new Map<string, SnapshotEvent[]>()
   for (const e of rows) {
     const extKey = e.externalId ? `${e.externalId}|${e.occurrenceStart}` : null
-    const shapeKey = `${e.title.trim().toLowerCase()}|${e.start}|${e.end ?? ''}|${organizerKey(e)}`
-    const prior = (extKey && byExternal.get(extKey)) || (organizerKey(e) ? byShape.get(shapeKey) : undefined)
-    if (prior && prior.calendarId !== e.calendarId) continue
+    const shapeKey = `${e.title.trim().toLowerCase()}|${e.start}|${e.end ?? ''}`
+    const byId = extKey ? byExternal.get(extKey) : undefined
+    const dup = (byId && byId.calendarId !== e.calendarId) ||
+      (byShape.get(shapeKey) ?? []).some(p => p.calendarId !== e.calendarId && sameMeeting(p, e))
+    if (dup) continue
     out.push(e)
-    if (extKey) byExternal.set(extKey, e)
-    byShape.set(shapeKey, e)
+    if (extKey && !byExternal.has(extKey)) byExternal.set(extKey, e)
+    const bucket = byShape.get(shapeKey)
+    if (bucket) bucket.push(e); else byShape.set(shapeKey, [e])
   }
   return out
 }
 
-/** A coarse organizer signature: the set of attendee domains. Empty means "unknown", which never merges by shape. */
-function organizerKey(e: SnapshotEvent): string {
-  const domains = [...new Set(e.attendees.map(a => a.domain).filter((d): d is string => !!d))].sort()
-  return domains.join(',')
+/** Same-shaped events that are one meeting: a shared named attendee (name and domain) or the same meeting link. */
+function sameMeeting(a: SnapshotEvent, b: SnapshotEvent): boolean {
+  const la = meetingLink(a.meetingUrl), lb = meetingLink(b.meetingUrl)
+  if (la && la === lb) return true
+  const named = (e: SnapshotEvent) => new Set(e.attendees.filter(x => !!x.name && !!x.name.trim()).map(x => `${x.name!.trim().toLowerCase()}|${(x.domain ?? '').toLowerCase()}`))
+  const na = named(a)
+  if (!na.size) return false
+  for (const k of named(b)) if (na.has(k)) return true
+  return false
+}
+
+/** A meeting link without its query or fragment (a Zoom pwd, a tracking tag), lower-cased host, no trailing slash. */
+function meetingLink(url: string | null): string | null {
+  if (!url) return null
+  try {
+    const u = new URL(url)
+    return `${u.protocol}//${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, '')}`
+  } catch { return null }
 }
 
 export function isMultiDay(e: SnapshotEvent): boolean {
@@ -304,7 +322,9 @@ export function snapshotToBridgeShape(snapshot: CalendarSnapshot, now = Date.now
   const timed = (e: SnapshotEvent) => isPrepWorthy(e, cals.get(e.calendarId))
   const current = remaining.find(e => timed(e) && Date.parse(e.start) <= now && endOf(e) > now) ?? null
   const next = events.find(e => timed(e) && Date.parse(e.start) > now) ?? null
-  const tomorrow = events.filter(e => { const s = Date.parse(e.start); return s >= dayEnd && s < dayEnd + 24 * 3600_000 })
+  // Tomorrow ends at the NEXT local midnight, not 24 h after this one (a DST day is 23 or 25 hours). QA 7.0.0.
+  const tomorrowEnd = localDayBounds(dayEnd).end
+  const tomorrow = events.filter(e => { const s = Date.parse(e.start); return s >= dayEnd && s < tomorrowEnd })
   const asDict = (e: SnapshotEvent) => bridgeEvent(e, cals.get(e.calendarId))
   const ageMinutes = Math.max(0, (now - Date.parse(snapshot.writtenAt)) / 60_000)
   return {
@@ -386,7 +406,11 @@ export function calendarStatus(now = Date.now()): {
   }
 }
 
-/** Today for Control Web and desktop: selected calendars only, the next 3 events. */
+/**
+ * Today for Control Web and desktop: selected calendars only, the next 3 timed meetings that count. QA 7.0.0: all-day
+ * and non-prep events (declined, holidays, attendee-less shared events) are filtered out BEFORE the 3 are taken, so they
+ * never use up the slots Today's "Later" shows. A bridge row without prep_worthy counts.
+ */
 export async function calendarToday(now = Date.now()): Promise<{
   connected: boolean
   source: CalendarSourceName
@@ -399,7 +423,7 @@ export async function calendarToday(now = Date.now()): Promise<{
   const data = read.data as Record<string, unknown> | null
   const connected = !!data && typeof data === 'object' && !('error' in data) && (read.source !== 'bridge' || pythonBridgeAvailable())
   const rows = connected && Array.isArray(data!.today_remaining) ? data!.today_remaining as Array<Record<string, unknown>> : []
-  const next = rows.slice(0, 3).map(r => ({
+  const next = rows.filter(r => r.is_all_day !== true && r.prep_worthy !== false).slice(0, 3).map(r => ({
     title: typeof r.title === 'string' ? r.title : 'Event',
     start: String(r.start_time ?? ''),
     end: typeof r.end_time === 'string' ? r.end_time : null,

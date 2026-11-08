@@ -545,6 +545,31 @@ describe('Today: files with a reply or a note, through the reader’s own send p
     expect(h.els['ta-files']!.innerHTML).toBe('')
   })
 
+  // QA 7.0.0 (Codex root-user W1): a busy Claude session that takes steering promised "lands at its next step" even with a
+  // file in the box, but a message with files waits for the turn end (the park answer says landsAt turn_end).
+  it('steer mid-turn with a file in the box: the note says the turn end, and goes back to next step when it is removed', async () => {
+    const routes: Routes = { ...OK_ROUTES,
+      ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0, midTurn: { available: true, mode: 'peer_inbox' } } },
+      ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Working right now.' } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0, landsAt: 'turn_end' } } }
+    const { h, pick, chip } = await overlay({ routes })
+    for (const es of h.streams) es.onmessage?.({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString() }) })
+    await flush()
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Working right now. Your message lands at its next step.')
+    pick(PDF()); await flush()
+    expect(h.els['ta-verdict']!.innerHTML, 'still uploading: it goes with the message').toContain('Working right now. A message with files waits and lands when this turn ends.')
+    ok(xhr(), mediaId('a')); await flush()
+    expect(h.els['ta-verdict']!.innerHTML).toContain('A message with files waits and lands when this turn ends.')
+    expect(h.els['ta-verdict']!.innerHTML).not.toContain('next step')
+    const att = /data-att="([^"]+)"/.exec(h.els['ta-files']!.innerHTML)![1]!
+    chip('att-remove', att); await flush()
+    expect(h.els['ta-verdict']!.innerHTML, 'words alone steer again').toContain('Your message lands at its next step.')
+    pick(PDF()); ok(xhr(), mediaId('b')); await flush()
+    h.els['ta-input']!.value = 'Read this when you can'
+    h.tap('send'); await flush()
+    expect(h.els['ta-status']!.textContent, 'the park answer decides the line after a send').toBe('The session is busy. Yours sends next, on its own.')
+  })
+
   it('a file the Mac no longer has: the server’s words, the files stay for Remove and attach again', async () => {
     const routes: Routes = { ...OK_ROUTES, ['POST ' + TURNS]: { status: 400, body: { outcome: 'refused', reason: 'invalid_request', attachmentError: 'media_expired', reasonCopy: 'A file you attached was kept for 4 hours and has gone. Remove it, attach it again, then send.' } } }
     const { h, pick } = await overlay({ routes })
@@ -1006,6 +1031,23 @@ describe('6.99.27: the Sessions reader’s box (Fork and Send) takes photos and 
     expect(forks[1]!.body.clientForkId).toBe(forks[0]!.body.clientForkId)
     expect(forks[2]!.body.clientForkId).not.toBe(forks[0]!.body.clientForkId)
     expect(forks[2]!.body.attachmentIds).toEqual([mediaId('b')])
+  })
+
+  // QA 7.0.0 (Codex root-user W1): the reader's note follows the box: files mean the turn end, words alone the next step.
+  it('steer mid-turn: a file in the reader box turns the note to the turn end; removing it brings next step back', async () => {
+    const t = readerPage()
+    const busy = { attachable: false, reason: 'native_target_busy', reasonCopy: 'Working right now.', ownerCount: 0, midTurn: true }
+    ;(t.r as { verdict: unknown }).verdict = busy
+    t.page.paint()
+    expect(t.els['session-verdict']!.innerHTML).toContain('Working right now. Your message lands at its next step.')
+    t.page.add([PDF()])
+    expect(t.els['session-verdict']!.innerHTML).toContain('Working right now. A message with files waits and lands when this turn ends.')
+    ok(xhr(), mediaId('d')); await flush()
+    expect(t.els['session-verdict']!.innerHTML).not.toContain('next step')
+    t.page.box().atts.slice().forEach((a: { id: string }) => t.kit.remove(t.page.box(), a.id)); await flush()
+    expect(t.els['session-verdict']!.innerHTML).toContain('Your message lands at its next step.')
+    ;(t.r as { verdict: unknown }).verdict = { ...busy, midTurn: false }; t.page.add([PDF()])
+    expect(t.els['session-verdict']!.innerHTML, 'no steering: the provider line, as before').toContain('A message you send waits and lands when this turn ends.')
   })
 
   it('a busy session: the parked message carries the files, and they leave the box', async () => {

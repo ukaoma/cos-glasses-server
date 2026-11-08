@@ -8,6 +8,9 @@
  * - COS_WEB_SESSION_FILES=0 (or false, off) on the Mac forces it OFF, whatever was saved. No value forces it on: an
  *   environment that wants previews leaves the variable unset.
  * - Read on every request, so a change applies at once and a restart is never needed.
+ * - QA 7.0.0: only a file that is not there (first use) gets the default. A saved file that is damaged, unreadable or
+ *   not this schema fails CLOSED (source 'damaged', off): it may have said off, and a privacy switch never turns itself
+ *   back on. The Settings row says so, and saving from it writes a good file again.
  *
  * Off means: GET .../output-images/:id/content and .../output-files/:id/content answer 403 previews_off before any
  * transcript or file is read, and the session detail's turns carry `previewsOff: true` instead of image and file
@@ -22,7 +25,7 @@ import { securePrivateDirectory } from './secure-user-config.js'
 import type { SessionTurn } from './agent-session-turns.js'
 
 export const SESSION_FILES_SETTINGS_FILE = 'web-session-files-settings.json'
-export type SessionFilesSource = 'env' | 'settings' | 'default'
+export type SessionFilesSource = 'env' | 'settings' | 'default' | 'damaged'
 export interface SessionFilesSetting { enabled: boolean; source: SessionFilesSource; saved: boolean | null }
 export interface SessionFilesSettingStore {
   read(): SessionFilesSetting
@@ -31,21 +34,29 @@ export interface SessionFilesSettingStore {
 
 export function createSessionFilesSetting(deps: { file: () => string; env?: () => Record<string, string | undefined> }): SessionFilesSettingStore {
   const env = deps.env ?? (() => process.env)
-  const saved = (): boolean | null => {
+  // 'absent' only for ENOENT (first use). Any other read error, bad JSON or a foreign shape is 'damaged'.
+  type Saved = { kind: 'absent' } | { kind: 'damaged' } | { kind: 'saved'; enabled: boolean }
+  const saved = (): Saved => {
+    let text: string
+    try { text = readFileSync(deps.file(), 'utf8') } catch (e) {
+      return (e as NodeJS.ErrnoException | null)?.code === 'ENOENT' ? { kind: 'absent' } : { kind: 'damaged' }
+    }
     try {
-      const raw = JSON.parse(readFileSync(deps.file(), 'utf8')) as unknown
+      const raw = JSON.parse(text) as unknown
       if (raw && typeof raw === 'object' && (raw as { schema?: unknown }).schema === 1 && typeof (raw as { enabled?: unknown }).enabled === 'boolean') {
-        return (raw as { enabled: boolean }).enabled
+        return { kind: 'saved', enabled: (raw as { enabled: boolean }).enabled }
       }
-    } catch { /* absent or damaged: nothing saved */ }
-    return null
+    } catch { /* damaged */ }
+    return { kind: 'damaged' }
   }
   const store: SessionFilesSettingStore = {
     read() {
       const s = saved()
+      const value = s.kind === 'saved' ? s.enabled : null
       // Only an off value forces anything; readSwitch with an ON fallback is false exactly for 0, false and off.
-      if (!readSwitch(env().COS_WEB_SESSION_FILES, true)) return { enabled: false, source: 'env', saved: s }
-      if (s !== null) return { enabled: s, source: 'settings', saved: s }
+      if (!readSwitch(env().COS_WEB_SESSION_FILES, true)) return { enabled: false, source: 'env', saved: value }
+      if (s.kind === 'saved') return { enabled: s.enabled, source: 'settings', saved: s.enabled }
+      if (s.kind === 'damaged') return { enabled: false, source: 'damaged', saved: null }
       return { enabled: true, source: 'default', saved: null }
     },
     set(enabled) {
