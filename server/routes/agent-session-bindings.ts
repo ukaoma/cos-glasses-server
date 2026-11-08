@@ -2754,8 +2754,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // 6.99.29 (Codex audit of e4758a6): the record names the SOURCE session, never the fork child
         // that actually receives the words, and the child has no binding yet. Until a destination
         // binding exists, a forked turn is recorded UNVERIFIED for the child: no footer, ever.
-        const forkVerdict = unvouched(deps.provenance.originOf(req), 'fork_destination_unbound')
+        // 6.99.31: a signed web fork is judged too, so its record says why (always fork_destination_unbound).
         const forkTurnId = typeof clientForkId === 'string' ? clientForkId : `fork-${randomBytes(12).toString('hex')}`
+        const forkVerdict = deps.provenance.acceptWebKey(unvouched(deps.provenance.originOf(req), 'fork_destination_unbound'), { provider: providerParam, sessionId: null, turnId: forkTurnId, words: prompt, attachments: [], fork: true })
         forkPrompt = deps.provenance.footed(prompt, forkTurnId, forkVerdict, providerParam)
         deps.provenance.record({ turnId: forkTurnId, prompt, verdict: forkVerdict, provider: providerParam, sessionId: threadIdParam, via: 'fork', fork: true })
       }
@@ -3139,6 +3140,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           return refuseTurn('invalid_request', { retryable: false, error: 'queued_turn_tampered', reasonCopy: QUEUED_TURN_TAMPERED_COPY })
         }
       }
+      // 6.99.31: a web turn carrying an enrolled phone key's envelope is judged once the binding names
+      // the real target (below). Its files are read here (the only await): the envelope's ordered
+      // manifest must equal them. Null: unreadable, so the turn is not vouched.
+      let webKeyFiles: ReadonlyArray<{ id: string; sha256: string }> | null = []
+      if (turnVerdict?.webKeyCandidate && attachIds.ids.length > 0) {
+        const m = await turnAttachmentManifest(attachIds.ids, deps.turnAttachmentStore)
+        webKeyFiles = m.ok ? m.manifest : null
+      }
       /** Ledgered once the text did, or may have, reached a session. Hash of the text WITHOUT the footer. */
       const ledgerTurn = (via: string, provider: string, sessionId: string): void => {
         if (provenance && turnVerdict && clientTurnId !== null) provenance.record({ turnId: clientTurnId, prompt, verdict: turnVerdict, provider, sessionId, via: turnCarried ? `drain-${via}` : via, continues: turnCarried })
@@ -3213,6 +3222,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (turnSeal !== null && !sealMatches(turnSeal, { provider: binding.provider, threadId: binding.nativeThreadId, attachments: turnSeal.attachments })) {
         console.warn(`[agent-session-bindings] queued turn seal mismatch (target) turnId=${turnId} clientTurnId=${clientTurnId}`)
         return refuseTurn('invalid_request', { retryable: false, error: 'queued_turn_tampered', reasonCopy: QUEUED_TURN_TAMPERED_COPY })
+      }
+      // 6.99.31: the envelope against the binding's provider and native thread (the actual receiving
+      // session), the exact words (before the files block) and the files. Synchronous: the nonce is
+      // spent here, in the same tick as the reuse check below. No envelope: the verdict is unchanged.
+      if (provenance && turnVerdict && turnVerdict.webKeyCandidate) {
+        turnVerdict = provenance.acceptWebKey(turnVerdict, { provider: binding.provider, sessionId: binding.nativeThreadId, bindingId, turnId: clientTurnId, words, attachments: webKeyFiles })
       }
       if (provenance && turnVerdict && provenance.reusesTurnId(clientTurnId, { prompt, verdict: turnVerdict, provider: binding.provider, sessionId: binding.nativeThreadId }, { continues: turnCarried })) {
         return refuseTurn('invalid_request', { retryable: false, error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })

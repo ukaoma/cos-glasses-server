@@ -1,0 +1,124 @@
+{
+  "description": "Synthetic public fixtures only; no production authorization. Unix milliseconds, maximum lifetime1800000ms.",
+  "packets": [
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "@gotcos/glasses-server",
+        "version": "7.0.6",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "npm-next",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"@gotcos/glasses-server\",\"channel\":\"npm-next\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"7.0.6\"}",
+      "packetSha256": "f006fcd8f6d18f45a0d5608ba4e63b56d970f95c97752611b271bf8a3829b142"
+    },
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "@gotcos/glasses-server",
+        "version": "7.0.6",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "npm-latest",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"@gotcos/glasses-server\",\"channel\":\"npm-latest\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"7.0.6\"}",
+      "packetSha256": "9a2cbe9e575a2db320afe8dce0e5675f073da1c11632d1accb9dba4bed65a24e"
+    },
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "cos-control",
+        "version": "0.5.381",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "control-appcast",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"cos-control\",\"channel\":\"control-appcast\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"0.5.381\"}",
+      "packetSha256": "c21781d2c2b2977ce6b60cf0d71611f43776b4cd4f0979298a34b2ffae31a81d"
+    },
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "cos-glasses-hub",
+        "version": "7.0.6",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "hub-alias",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"cos-glasses-hub\",\"channel\":\"hub-alias\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"7.0.6\"}",
+      "packetSha256": "4a95b8091a2f739b2e3d2e966adcff41719e0c8a678f8084aeeceffdd0bb2cba"
+    },
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "gotcos-site-manifest",
+        "version": "7.0.6",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "gotcos-site",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"gotcos-site-manifest\",\"channel\":\"gotcos-site\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"7.0.6\"}",
+      "packetSha256": "2c518894bc24e58bc6b07d54d567bbfd23a8fa81dc2285da5a0a6b11e7d79e7c"
+    },
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "cos-control-downloads-manifest",
+        "version": "0.5.381",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "control-downloads",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"cos-control-downloads-manifest\",\"channel\":\"control-downloads\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"0.5.381\"}",
+      "packetSha256": "4826414b715f1408923616bbbf58af71417fee2d1903d44729488825e6e9fdec"
+    },
+    {
+      "packet": {
+        "v": "cos-web-packet/1",
+        "packetId": "AAECAwQFBgcICQoL",
+        "action": "publish",
+        "artifact": "cos-release-docs-manifest",
+        "version": "7.0.6",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channel": "release-docs",
+        "provider": "codex",
+        "sessionId": "cos-phone-approval-fixture",
+        "createdAt": 1786000000000,
+        "exp": 1786001800000
+      },
+      "canonical": "{\"action\":\"publish\",\"artifact\":\"cos-release-docs-manifest\",\"channel\":\"release-docs\",\"createdAt\":1786000000000,\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"exp\":1786001800000,\"packetId\":\"AAECAwQFBgcICQoL\",\"provider\":\"codex\",\"sessionId\":\"cos-phone-approval-fixture\",\"v\":\"cos-web-packet/1\",\"version\":\"7.0.6\"}",
+      "packetSha256": "cf37caaab37467c2f832de167504b56348feda530604a2e65ed9f54cb40288f9"
+    }
+  ]
+}

@@ -27,3 +27,21 @@ export async function listenRequiredServers(listeners: RequiredListener[]): Prom
     throw error
   }
 }
+
+export interface ListenerPlanEntry { label: 'HTTPS' | 'HTTPS signer' | 'HTTP'; port: number; tls: boolean }
+
+/**
+ * Which listeners this boot REQUIRES (every one goes through listenRequiredServers, so a port another
+ * process holds fails the boot closed). 6.99.31: the phone key's signer origin (https, its own
+ * port, review B2/W2) is added only with COS_WEB_KEY_AUTHORITY on and only beside HTTPS. Flag off:
+ * exactly the 6.99.29 set.
+ */
+export function listenerPlan(opts: { httpsAvailable: boolean; webKeyAuthority: boolean; httpPort: number; httpsPort: number; signerPort: number }): ListenerPlanEntry[] {
+  const plan: ListenerPlanEntry[] = []
+  if (opts.httpsAvailable) {
+    plan.push({ label: 'HTTPS', port: opts.httpsPort, tls: true })
+    if (opts.webKeyAuthority) plan.push({ label: 'HTTPS signer', port: opts.signerPort, tls: true })
+  }
+  plan.push({ label: 'HTTP', port: opts.httpPort, tls: false })
+  return plan
+}

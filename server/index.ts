@@ -18,6 +18,13 @@ import { createClientInstanceRouter, isMeetingChunkPost, pairedInstanceFrom } fr
 import type { ClientInstanceOwner } from './lib/client-instance-claim.js'
 import { G2TurnLedger, G2TurnProvenance, G2_TURN_LEDGER_FILE, type OriginRequest } from './lib/g2-turn-provenance.js'
 import { createG2TurnsRouter } from './routes/g2-turns.js'
+import { WebKeyAuthority, webKeyAuthorityEnabled } from './lib/web-key-authority.js'
+import { deviceAllowlistFrom, WEB_KEY_AUDIT_FILE, WEB_KEY_NONCES_FILE, WEB_KEYS_FILE, WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from './lib/web-key-registry.js'
+import { WEB_KEY_SIGNER_PORT, webKeySignerOrigin } from './lib/web-key-origin.js'
+import { createWebKeyRouter } from './routes/web-key.js'
+import { WebKeySignHandoffs } from './lib/web-key-handoff.js'
+import { combinedIntegrityReport, createWebKeySignerHandler } from './lib/web-key-signer-app.js'
+import { WebControlIntegrity, webControlIntegrityEnabled } from './lib/web-control-integrity.js'
 import { getTailscaleNudger, installTailscaleNudger } from './lib/tailscale-nudge.js'
 import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
@@ -157,7 +164,7 @@ import { killNemotronChildren } from './lib/nemotron-cli.js'
 import { getSessionRaw, logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
 import { getMediaStore } from './lib/media-store.js'
 import { getTurnFileStore } from './lib/turn-file-store.js'
-import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
+import { listenerPlan, listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
 import { serverMetrics } from './lib/server-metrics.js'
 import { initializeServerInstanceId } from './lib/server-instance-id.js'
 import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-user-config.js'
@@ -384,6 +391,40 @@ app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: per
 // it (tailnetSelf and HTTPS_PORT are read at request time, after they are set below). It is
 // recorded, never vouched: the cookie is an HMAC of API_TOKEN, so any token holder can mint one.
 const clientInstanceOwners = new Map<string, ClientInstanceOwner>()
+// 6.99.31: the enrolled phone key (lib/web-key-authority.ts), behind COS_WEB_KEY_AUTHORITY (default
+// off, read at call time). Off, no envelope is read and no /api/web-key route exists. The stores only
+// read their files here (none exist until the feature is used); nothing is written while it is off.
+const webKeySelfDnsName = (): string | null => {
+  const name = tailnetSelf.currentSelfDnsName()
+  return typeof name === 'string' && name.trim() ? name.trim().toLowerCase().replace(/\.$/, '') : null
+}
+const webKeyRegistry = new WebKeyRegistry(dataPath(WEB_KEYS_FILE), dataPath(WEB_KEY_AUDIT_FILE))
+const webKeyAuthority = new WebKeyAuthority({
+  registry: webKeyRegistry,
+  nonces: new WebKeyNonces(dataPath(WEB_KEY_NONCES_FILE)),
+  packets: new WebKeyPackets(),
+  selfDnsName: webKeySelfDnsName,
+  // The ONE origin a phone signs from (review B2/W2): the signer listener on 3144 under this Mac's
+  // MagicDNS name. The passkey's clientDataJSON.origin and the cookie gate's extra port use it too.
+  expectedOrigin: () => webKeySignerOrigin(webKeySelfDnsName()),
+  // Review W1: no vouch unless served-asset integrity is running AND its last check passed.
+  // (webControlIntegrity is declared further down; this runs at request time, after it is set.)
+  integrity: () => {
+    // Phase 3: the signer page on 3144 holds the key, so its own manifest must pass too.
+    return combinedIntegrityReport(webControlIntegrity, webKeySignerIntegrity)
+  },
+})
+// Phase 3 (review W2): the 3143 to 3144 handoff. In memory, two minutes, claimed once. Unused while the flag is off.
+const webKeySignHandoffs = new WebKeySignHandoffs()
+// Phase 3: the signer page's own integrity check (server/web-signer/.manifest.json). Built only with the
+// flag on at boot, as the 3144 listener is (listenerPlan); off, the directory is never read.
+const webKeySignerIntegrity: WebControlIntegrity | null = webKeyAuthorityEnabled()
+  ? new WebControlIntegrity(path.join(path.dirname(fileURLToPath(import.meta.url)), 'web-signer'), { log: line => console.error(line.replace('[web-control-integrity]', '[web-signer-integrity]').replace('/control is', 'the 3144 signer is')) })
+  : null
+// Review W6: enrollment starts only from a device on COS_WEB_KEY_DEVICES (empty: none).
+const webKeyEnrollments = new WebKeyEnrollments(webKeyRegistry, { deviceAllowed: deviceAllowlistFrom() })
+// The ports a COS Control Web cookie is honoured on. Flag off: exactly 6.99.29's [3141, 3143].
+const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() ? [PORT, HTTPS_PORT, WEB_KEY_SIGNER_PORT] : [PORT, HTTPS_PORT])
 const g2Provenance = new G2TurnProvenance({
   ledger: new G2TurnLedger(dataPath(G2_TURN_LEDGER_FILE)),
   pairedInstance: (device, now, freshMs) => pairedInstanceFrom(clientInstanceOwners, device, now, freshMs),
@@ -393,8 +434,9 @@ const g2Provenance = new G2TurnProvenance({
     socket: { remoteAddress: req.socket?.remoteAddress ?? undefined },
   }, API_TOKEN, {
     selfDnsName: tailnetSelf.currentSelfDnsName(),
-    allowedPorts: [PORT, HTTPS_PORT],
+    allowedPorts: webCookiePorts(),
   }),
+  webKey: webKeyAuthority,
 })
 
 if (threadAttachEnabled()) {
@@ -443,7 +485,7 @@ const HTTPS_PORT = parseInt(process.env.HTTPS_PORT ?? '3143', 10)
 app.use('/api', requireApiToken(API_TOKEN, {
   onAuthenticated: req => pairingState.noteAuthenticated(req.socket?.remoteAddress),
   selfDnsName: () => tailnetSelf.currentSelfDnsName(),
-  allowedPorts: () => [PORT, HTTPS_PORT],
+  allowedPorts: () => webCookiePorts(),
 }))
 // Past the token gate, a request on a non-public path carried the token: mark a paired phone.
 // Only the X-Cos-Token header counts: a browser signed in to COS Control Web passed the gate
@@ -932,6 +974,23 @@ app.use('/api', diagRouter)
 app.use('/api', createClientInstanceRouter({ owners: clientInstanceOwners }))
 // G2 authority Tier 1: read-only provenance for one delivered turn (verify_g2_turn.py asks it).
 app.use('/api', createG2TurnsRouter({ provenance: g2Provenance, apiToken: () => API_TOKEN }))
+// 6.99.31: the enrolled phone key registry and ceremony. Not a route at all while COS_WEB_KEY_AUTHORITY is off.
+app.use('/api', createWebKeyRouter({
+  authority: webKeyAuthority,
+  enrollments: webKeyEnrollments,
+  isWebRequest: req => g2Provenance.originOf(req).origin.client === 'web',
+  apiToken: () => API_TOKEN,
+  selfDnsName: webKeySelfDnsName,
+  expectedOrigin: () => webKeyAuthority.deps.expectedOrigin(),
+  integrityStatus: () => ({ ...(webControlIntegrity?.status() ?? { enabled: false }), signer: webKeySignerIntegrity?.status() ?? null }),
+  // Phase 3: the phone's key steps and the handoff claim answer only on the 3144 signer listener.
+  isSignerRequest: req => req.socket?.localPort === WEB_KEY_SIGNER_PORT,
+  handoffs: webKeySignHandoffs,
+  resolveBinding: bindingId => {
+    const b = agentSessionBindingRegistry.get(bindingId)
+    return b ? { provider: b.provider, sessionId: b.nativeThreadId, epoch: b.epoch, targetKey: b.targetKey } : null
+  },
+}))
 app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
@@ -1574,8 +1633,17 @@ process.on('unhandledRejection', (reason: any) => {
 // Start HTTPS alongside HTTP — Even Hub WebView prefers HTTPS (iOS ATS).
 // Optional: drop cert.pem + key.pem in server/certs/ (e.g. via mkcert) to enable.
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+// 6.99.31 (Phase 6): served-asset integrity, OFF by default (lib/web-control-integrity.ts). On, /control
+// serves only bytes that matched the pack-time manifest, from memory, re-checked every 60 s, with no
+// disk server behind it. Read once at boot.
+const webControlIntegrity = webControlEnabled() && webControlIntegrityEnabled()
+  ? new WebControlIntegrity(path.join(path.dirname(fileURLToPath(import.meta.url)), 'web-control'))
+  : null
 if (webControlEnabled()) {
   const webControlDir = path.join(__dirname, 'web-control')
+  const webControlServers = webControlIntegrity
+    ? [createWebControlStatic(webControlDir, { integrity: webControlIntegrity })]
+    : [createWebControlStatic(webControlDir), express.static(webControlDir)]
   app.use('/control', (req, res, next) => {
     // Loopback and Tailscale only, unless COS_WEB_CONTROL_LAN=1 (review W2).
     if (!isWebControlSocketAllowed(req.socket?.remoteAddress, process.env, req.headers)) {
@@ -1586,7 +1654,7 @@ if (webControlEnabled()) {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'no-referrer')
     next()
-  }, createWebControlStatic(webControlDir), express.static(webControlDir))
+  }, ...webControlServers)
   app.use('/api', createWebControlRouter({
     apiToken: () => API_TOKEN,
     serverVersion: () => managedServerVersion() ?? 'unknown',
@@ -1632,18 +1700,21 @@ function withRequestTimeout<T extends { requestTimeout: number }>(server: T): T 
 
 const certDir = path.join(__dirname, 'certs')
 const listeners: RequiredListener[] = []
-if (existsSync(path.join(certDir, 'cert.pem'))) {
-  const httpsServer = withRequestTimeout(createHttpsServer({
-    cert: readFileSync(path.join(certDir, 'cert.pem')),
-    key: readFileSync(path.join(certDir, 'key.pem')),
-  }, app))
-  listeners.push({ server: httpsServer, port: HTTPS_PORT, host: BIND_HOST, label: 'HTTPS' })
-} else {
-  console.log('[COS API] No certs found — HTTPS disabled (drop cert.pem/key.pem in server/certs to enable)')
+const httpsAvailable = existsSync(path.join(certDir, 'cert.pem'))
+if (!httpsAvailable) console.log('[COS API] No certs found — HTTPS disabled (drop cert.pem/key.pem in server/certs to enable)')
+// 6.99.31: with COS_WEB_KEY_AUTHORITY on, the phone key's signer origin (https on 3144, same cert)
+// joins the REQUIRED set like 3143 (lib/listener-startup.ts listenerPlan). Flag off: 6.99.29's set.
+for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT, httpsPort: HTTPS_PORT, signerPort: WEB_KEY_SIGNER_PORT })) {
+  // Phase 3: 3144 serves the signer page (verified bytes only) and an allowlist of /api routes,
+  // never the big app (lib/web-key-signer-app.ts). It exists only with the flag on.
+  const handler = entry.label === 'HTTPS signer'
+    ? createWebKeySignerHandler({ integrity: webKeySignerIntegrity, api: app, origin: () => webKeySignerOrigin(webKeySelfDnsName()) })
+    : app
+  const server = entry.tls
+    ? withRequestTimeout(createHttpsServer({ cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) }, handler))
+    : withRequestTimeout(createHttpServer(app))
+  listeners.push({ server, port: entry.port, host: BIND_HOST, label: entry.label })
 }
-
-const httpServer = withRequestTimeout(createHttpServer(app))
-listeners.push({ server: httpServer, port: PORT, host: BIND_HOST, label: 'HTTP' })
 
 listenRequiredServers(listeners).then(() => {
   const serverInstanceId = initializeServerInstanceId()
