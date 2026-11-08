@@ -1,7 +1,7 @@
 /** Preview engine phase 1: text windows, the CSV/TSV table and its caps, and the header contract for every part. */
 import { describe, expect, it } from 'vitest'
 import {
-  HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_SAFE_CSP, HTML_SAFE_META_CSP, looksBinary, withCspMeta, PREVIEW_PARTS, previewHeaders, TABLE_CELL_CHARS, TABLE_COLUMNS_MAX, TABLE_PAGE_ROWS, TABLE_ROWS_MAX,
+  HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_RUN_RTC_GUARD, HTML_RUN_RTC_NAMES, HTML_SAFE_CSP, HTML_SAFE_META_CSP, looksBinary, withCspMeta, PREVIEW_PARTS, previewHeaders, TABLE_CELL_CHARS, TABLE_COLUMNS_MAX, TABLE_PAGE_ROWS, TABLE_ROWS_MAX,
   tablePage, tableRows, textWindow,
 } from './preview-content.js'
 
@@ -90,7 +90,7 @@ describe('the injected CSP meta (PLAN 6)', () => {
     expect(at('<h1>x</h1>')).toBe(META(HTML_SAFE_META_CSP) + '<h1>x</h1>')
     expect(at('<!DOCTYPE html>\n<html><head><link rel=stylesheet href="https://e.x/a.css">')).toBe('<!DOCTYPE html>\n' + META(HTML_SAFE_META_CSP) + '<html><head><link rel=stylesheet href="https://e.x/a.css">')
     expect(at('\ufeff  <!-- built --> <!doctype html><img src="https://t.x/p.gif">')).toBe('\ufeff  <!-- built --> <!doctype html>' + META(HTML_SAFE_META_CSP) + '<img src="https://t.x/p.gif">')
-    expect(at('<script>1</script>', 'html-run')).toBe(META(HTML_RUN_META_CSP) + '<script>1</script>')
+    expect(at('<script>1</script>', 'html-run')).toBe(META(HTML_RUN_META_CSP) + HTML_RUN_RTC_GUARD + '<script>1</script>')
   })
   it('the policies: scripts off fetches nothing; scripts on runs inline script with no network', () => {
     for (const p of [HTML_SAFE_META_CSP, HTML_RUN_META_CSP]) {
@@ -106,5 +106,28 @@ describe('the injected CSP meta (PLAN 6)', () => {
     const latin1 = Buffer.from([0x3c, 0x70, 0x3e, 0xe9, 0x3c, 0x2f, 0x70, 0x3e]) // <p>é</p> in Latin-1
     const out = withCspMeta(latin1, 'html')
     expect(out.subarray(out.length - latin1.length).equals(latin1)).toBe(true)
+  })
+})
+
+describe('the WebRTC guard (canary 16d): Run scripts only, the first script, constructors frozen as undefined', () => {
+  it('html-run carries it right after the policy and before any page script; scripts off never carries it', () => {
+    const page = '<!doctype html><head><script>new RTCPeerConnection()</script></head>'
+    const run = withCspMeta(Buffer.from(page), 'html-run').toString('utf8')
+    const scripts = [...run.matchAll(/<script\b/gi)].map(m => m.index!)
+    expect(run.indexOf(HTML_RUN_RTC_GUARD)).toBe(scripts[0])
+    expect(run.indexOf(HTML_RUN_RTC_GUARD)).toBe(run.indexOf('<meta http-equiv') + `<meta http-equiv="Content-Security-Policy" content="${HTML_RUN_META_CSP}">`.length)
+    expect(withCspMeta(Buffer.from(page), 'html').toString('utf8')).not.toContain('RTCPeerConnection"')
+  })
+  it('run in a window-like object, every RTC name is undefined, non-configurable and cannot be put back', async () => {
+    const vm = await import('node:vm')
+    const sandbox: Record<string, unknown> = { RTCPeerConnection: class {}, webkitRTCPeerConnection: class {}, RTCDataChannel: class {}, RTCSessionDescription: class {}, RTCIceCandidate: class {} }
+    sandbox.window = sandbox
+    vm.runInNewContext(HTML_RUN_RTC_GUARD.replace(/^<script>|<\/script>$/g, ''), sandbox)
+    for (const name of HTML_RUN_RTC_NAMES) {
+      const d = Object.getOwnPropertyDescriptor(sandbox, name)!
+      expect(d, name).toMatchObject({ value: undefined, writable: false, configurable: false })
+      expect(() => Object.defineProperty(sandbox, name, { value: class {} }), name).toThrow(TypeError)
+    }
+    expect(HTML_RUN_RTC_NAMES).toEqual(['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate'])
   })
 })

@@ -43,13 +43,24 @@ export const HTML_SAFE_META_CSP = "default-src 'none'; img-src data: blob:; styl
 export const HTML_RUN_META_CSP = "default-src 'none'; script-src 'unsafe-inline'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'"
 
 /**
+ * 7.0.5 canary 16 (Chrome 156 and WebKit 26.6, real viewer and route): with scripts on, a page script reached the
+ * network through WebRTC (5 STUN UDP datagrams in each). `connect-src 'none'` does not cover WebRTC and Chrome ignores
+ * `webrtc 'block'`. This guard, run before any page script, makes the RTC constructors non-configurable `undefined` on
+ * the window: 0 datagrams in both browsers. It is not a promise of "no network" (the words never say that).
+ */
+export const HTML_RUN_RTC_NAMES = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate'] as const
+export const HTML_RUN_RTC_GUARD = '<script>(function(){var n=' + JSON.stringify(HTML_RUN_RTC_NAMES) +
+  ';for(var i=0;i<n.length;i++){try{Object.defineProperty(window,n[i],{value:undefined,writable:false,enumerable:false,configurable:false})}catch(e){}}})();</script>'
+
+/**
  * The page with a CSP <meta> as the first thing the parser sees after any BOM, leading whitespace, comments and the
  * doctype (a tag before the doctype would put the page in quirks mode). Nothing before that point can load anything.
  * Bytes are spliced, never re-encoded, so a page in another charset is not changed beyond the inserted tag.
  */
 export function withCspMeta(bytes: Buffer, part: 'html' | 'html-run'): Buffer {
   const policy = part === 'html-run' ? HTML_RUN_META_CSP : HTML_SAFE_META_CSP
-  const tag = Buffer.from(`<meta http-equiv="Content-Security-Policy" content="${policy}">`, 'utf8')
+  // Run scripts: the WebRTC guard is the first script the page has (canary 16d), right after the policy.
+  const tag = Buffer.from(`<meta http-equiv="Content-Security-Policy" content="${policy}">` + (part === 'html-run' ? HTML_RUN_RTC_GUARD : ''), 'utf8')
   // The prefix is ASCII in every case that matters; latin1 keeps one char per byte so offsets are byte offsets.
   const head = bytes.subarray(0, 64 * 1024).toString('latin1')
   let at = head.charCodeAt(0) === 0xef && head.charCodeAt(1) === 0xbb && head.charCodeAt(2) === 0xbf ? 3 : 0

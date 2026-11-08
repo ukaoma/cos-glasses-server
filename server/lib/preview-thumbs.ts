@@ -35,8 +35,25 @@ export interface ThumbDeps {
   run(file: string, args: string[], timeoutMs: number): Promise<RunResult>
 }
 
+/**
+ * 7.0.5 canary 4: Quick Look reads an HTML page with no declared charset as Latin-1, so a UTF-8 page thumbnails as
+ * mojibake ("CafÃ©"). In the PRIVATE copy only, and only when the page declares no charset and its bytes are valid
+ * UTF-8, `<meta charset="utf-8">` goes right after `<head>` (or first, when there is no head). Proven under launchd.
+ */
+export function withUtf8Charset(bytes: Buffer, name: string): Buffer {
+  if (!/\.html?$/i.test(name)) return bytes
+  const head = bytes.subarray(0, 4096).toString('latin1')
+  if (/<meta\b[^>]*\bcharset\s*=/i.test(head)) return bytes
+  try { new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { return bytes }
+  const tag = Buffer.from('<meta charset="utf-8">')
+  const m = /<head\b[^>]*>/i.exec(head)
+  const at = m ? m.index + m[0].length : 0
+  return Buffer.concat([bytes.subarray(0, at), tag, bytes.subarray(at)])
+}
+
 export function thumbKey(identity: Identity): string {
-  return createHash('sha256').update(JSON.stringify(['thumb-v1', THUMB_SIZE, identity.dev, identity.ino, identity.size, identity.mtimeMs, identity.ctimeMs])).digest('hex')
+  // v2 (7.0.5): HTML thumbnails drawn before the charset fix were mojibake; a new key draws them again.
+  return createHash('sha256').update(JSON.stringify(['thumb-v2', THUMB_SIZE, identity.dev, identity.ino, identity.size, identity.mtimeMs, identity.ctimeMs])).digest('hex')
 }
 
 const realRun: ThumbDeps['run'] = (file, args, timeoutMs) => new Promise(resolve => {
@@ -88,7 +105,7 @@ export function createThumbnailer(deps: ThumbDeps) {
         // file name a session wrote reaches the command line.
         const ext = extname(name).toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10)
         const copy = join(work, 'preview' + ext)
-        writeFileSync(copy, bytes, { mode: 0o600 })
+        writeFileSync(copy, withUtf8Charset(bytes, name), { mode: 0o600 })
         const out = join(work, 'out'); mkdirSync(out, { mode: 0o700 })
         const result = await deps.run('/usr/bin/nice', ['-n', '10', '/usr/bin/qlmanage', '-t', '-s', String(THUMB_SIZE), '-o', out, copy], THUMB_TIMEOUT_MS)
         if (result.timedOut || result.code !== 0) return { status: 'unavailable' }

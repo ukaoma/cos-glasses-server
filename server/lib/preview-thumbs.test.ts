@@ -1,9 +1,10 @@
 /** Preview engine phase 1: Quick Look thumbnails with a fake runner. The real qlmanage is canaried separately. */
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { createThumbnailer, THUMB_CACHE_AGE_MS, THUMB_CONCURRENCY, thumbKey, type RunResult } from './preview-thumbs.js'
+import { createHash } from 'node:crypto'
+import { createThumbnailer, THUMB_CACHE_AGE_MS, THUMB_CONCURRENCY, THUMB_SIZE, thumbKey, withUtf8Charset, type RunResult } from './preview-thumbs.js'
 
 const made: string[] = []
 afterEach(() => { for (const p of made.splice(0)) rmSync(p, { recursive: true, force: true }) })
@@ -65,5 +66,37 @@ describe('qlmanage thumbnails', () => {
     expect(s.calls).toHaveLength(3)
     expect(statSync(first.path).mtimeMs).toBeGreaterThan(old.getTime())
     now += 1
+  })
+})
+
+describe('7.0.5 canary 4: an HTML page with no charset thumbnails as UTF-8, not mojibake', () => {
+  const META = '<meta charset="utf-8">'
+  it('the private copy gets the charset after <head> only when none is declared and the bytes are UTF-8', async () => {
+    let copied = ''
+    const s = setup((_f, args) => { copied = readFileSync(args[args.length - 1], 'latin1'); writeOut(args, PNG); return { code: 0, signal: null, timedOut: false } })
+    const page = Buffer.from('<!doctype html><html><head><title>Café</title></head><body>naïve ✓</body></html>', 'utf8')
+    await s.t.thumbnail(page, 'r.html', id(7))
+    expect(Buffer.from(copied, 'latin1').toString('utf8')).toBe('<!doctype html><html><head>' + META + '<title>Café</title></head><body>naïve ✓</body></html>')
+  })
+  it('a declared charset, bytes that are not UTF-8, and a file that is not HTML are copied exactly', () => {
+    const declared = Buffer.from('<html><head><meta charset="windows-1252"><p>x</p>')
+    expect(withUtf8Charset(declared, 'a.html').equals(declared)).toBe(true)
+    const httpEquiv = Buffer.from('<head><meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">')
+    expect(withUtf8Charset(httpEquiv, 'a.htm').equals(httpEquiv)).toBe(true)
+    const latin1 = Buffer.from([0x3c, 0x70, 0x3e, 0xe9, 0x3c, 0x2f, 0x70, 0x3e])
+    expect(withUtf8Charset(latin1, 'a.html').equals(latin1)).toBe(true)
+    const md = Buffer.from('# Café')
+    expect(withUtf8Charset(md, 'a.md').equals(md)).toBe(true)
+    expect(withUtf8Charset(Buffer.from('<p>Café</p>'), 'A.HTML').toString('utf8')).toBe(META + '<p>Café</p>')
+  })
+  it('the cache key moved to v2, so a mojibake thumbnail cached by 7.0.5 candidates before the fix is drawn again', () => {
+    const v1 = createHash('sha256').update(JSON.stringify(['thumb-v1', THUMB_SIZE, 1, 7, 10, 5, 6])).digest('hex')
+    expect(thumbKey(id(7))).not.toBe(v1)
+    expect(thumbKey(id(7))).toBe(createHash('sha256').update(JSON.stringify(['thumb-v2', THUMB_SIZE, 1, 7, 10, 5, 6])).digest('hex'))
+  })
+  it('a thumbnail smaller than 256 is fine (Quick Look never upscales): any real PNG is kept', async () => {
+    const tiny = Buffer.concat([PNG.subarray(0, 8), Buffer.alloc(4, 2)])
+    const s = setup((_f, args) => { writeOut(args, tiny); return { code: 0, signal: null, timedOut: false } })
+    expect((await s.t.thumbnail(Buffer.from('%PDF'), 'x.pdf', id(9))).status).toBe('ok')
   })
 })

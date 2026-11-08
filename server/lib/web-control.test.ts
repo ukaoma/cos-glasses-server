@@ -575,6 +575,15 @@ describe('Web sign-in hardening (limiter, private status, CSP)', () => {
     expect(shell).toContain("frame-ancestors 'self'")
   })
 
+  // 7.0.5 canary 16c/16e: the preview viewer's "Run scripts" frame cannot navigate itself (or meta-refresh) to another
+  // site only because THIS page's frame-src is 'self'. Without it, navigation leaked one request in Chrome and WebKit.
+  it('frame-src is exactly self: load-bearing for the HTML preview with scripts on', () => {
+    const csp = webControlCsp('/index.html')
+    const frame = csp.split(';').map(d => d.trim()).filter(d => d.startsWith('frame-src'))
+    expect(frame).toEqual(["frame-src 'self'"])
+    for (const path of ['/', '/panes/preview.js', '/panes/reader-media.js']) expect(webControlCsp(path), path).toContain("frame-src 'self';")
+  })
+
   it('does not exempt the removed /memory/web-op alias from the mutation lease', () => {
     expect(isReadOnlyApiPost('POST', '/memory/web-op')).toBe(false)
   })

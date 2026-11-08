@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createSessionPreviewRouter, partsFor } from './session-preview.js'
-import { HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_SAFE_CSP, HTML_SAFE_META_CSP } from '../lib/preview-content.js'
+import { HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_RUN_RTC_GUARD, HTML_SAFE_CSP, HTML_SAFE_META_CSP } from '../lib/preview-content.js'
 
 const ID = 'al_' + 'a'.repeat(64)
 const made: string[] = []
@@ -78,7 +78,7 @@ describe('preview routes', () => {
     expect(r.headers.get('x-content-type-options')).toBe('nosniff')
     s.close()
   })
-  it('html is sandboxed with no scripts and no network; html-run runs scripts in an opaque origin with no network', async () => {
+  it('html is sandboxed with no scripts and no fetches; html-run runs scripts in an opaque origin with no fetches and the WebRTC guard first', async () => {
     const s = await serve({ file: () => ok('r.html', 'html', '<h1>r</h1><script>1</script>') })
     const safe = await fetch(s.base + url('html'))
     expect(safe.headers.get('content-type')).toBe('text/html; charset=utf-8')
@@ -88,7 +88,7 @@ describe('preview routes', () => {
     const run = await fetch(s.base + url('html-run'))
     expect(run.headers.get('content-security-policy')).toBe(HTML_RUN_CSP)
     expect(run.headers.get('x-content-type-options')).toBe('nosniff')
-    expect(await run.text()).toBe(`<meta http-equiv="Content-Security-Policy" content="${HTML_RUN_META_CSP}"><h1>r</h1><script>1</script>`)
+    expect(await run.text()).toBe(`<meta http-equiv="Content-Security-Policy" content="${HTML_RUN_META_CSP}">${HTML_RUN_RTC_GUARD}<h1>r</h1><script>1</script>`)
     s.close()
   })
   it('HTML is shown full length: past 8 MiB in one page; its source is windowed at 512 KiB like any text', async () => {
