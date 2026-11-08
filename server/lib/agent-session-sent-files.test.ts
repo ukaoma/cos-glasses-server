@@ -38,8 +38,9 @@ function fixture(rows: (ws: string, root: string) => unknown[], opts: { workspac
   const normalized = join(root, 'normalized.jpg'); writeFileSync(normalized, 'jpeg')
   const ingest = vi.fn(async (_input: unknown) => ({ id: 'm_' + 'b'.repeat(24) }))
   const store = { ingestOutputImage: ingest, getContent: vi.fn(() => ({ status: 'ok' as const, path: normalized, mime: 'image/jpeg' as const, bytes: 4 })) }
+  const lookups: string[] = []
   const service = new AgentSessionOutputImages({
-    findSession: async (_p: AgentProvider, id: string) => id === 'session' ? transcript : null,
+    findSession: async (_p: AgentProvider, id: string) => { lookups.push(id); return id === 'session' ? transcript : null },
     workspace: async () => (opts.workspace ? opts.workspace(workspace, root) : workspace), secret: Buffer.alloc(32, 9), now: () => 1,
     store: () => store as unknown as ReturnType<typeof import('./media-store.js').getMediaStore>,
     home: () => join(root, 'home'),
@@ -48,7 +49,7 @@ function fixture(rows: (ws: string, root: string) => unknown[], opts: { workspac
     const ctx = await service.context(provider, 'session', transcript)
     return (await readRecentSessionTurns(provider, transcript, 10, undefined, ctx.project)).turns
   }
-  return { root, workspace, transcript, service, store, ingest, turns }
+  return { root, workspace, transcript, service, store, ingest, turns, lookups }
 }
 
 describe('SendUserFile records', () => {
@@ -100,13 +101,15 @@ describe('the reader shows sent files at their point in the conversation', () =>
   it('outside the workspace, through a link out, missing, a URL or a broad root: "not available", no bytes', async () => {
     const f = fixture((ws, root) => {
       symlinkSync(join(root, 'secret.pdf'), join(ws, 'out', 'link.pdf'))
-      return [share([join(root, 'secret.pdf'), join(ws, 'out', 'link.pdf'), 'out/gone.pdf', 'https://example.com/a.pdf', '~/a.pdf', '//host/a.pdf'], { cwd: ws })]
+      return [share([join(root, 'secret.pdf'), join(ws, 'out', 'link.pdf'), 'out/gone.pdf', 'https://example.com/a.pdf', '~/a.pdf', '//host/a.pdf', join(root, 'nothere.pdf')], { cwd: ws })]
     })
     const [t] = await f.turns()
     expect(t.outputFiles!.map(x => [x.name, x.state, x.reason])).toEqual([
       ['secret.pdf', 'unavailable', 'outside_workspace'], ['link.pdf', 'unavailable', 'outside_workspace'],
       ['gone.pdf', 'unavailable', 'missing'], ['a.pdf', 'unavailable', 'outside_workspace'],
       ['a.pdf', 'unavailable', 'outside_workspace'], ['a.pdf', 'unavailable', 'outside_workspace'],
+      // Gone and outside reads as outside: whether a path outside the workspace exists is never told.
+      ['nothere.pdf', 'unavailable', 'outside_workspace'],
     ])
     for (const x of t.outputFiles!) expect(x.size, x.name).toBeUndefined()
     for (const x of t.outputFiles!) expect((await f.service.fileContent('claude', 'session', x.id)).status).toBe('unavailable')
@@ -146,7 +149,10 @@ describe('serving a sent file', () => {
     expect(got).toMatchObject({ status: 'ok', name: 'report.pdf', kind: 'pdf' })
     expect((got as any).bytes.toString()).toBe('%PDF-1.7 bytes')
     expect((await f.service.fileContent('claude', 'session', 'af_' + 'c'.repeat(64))).status).toBe('not_found')
+    const before = f.lookups.length
     expect((await f.service.fileContent('claude', 'session', 'ai_' + 'c'.repeat(64))).status).toBe('not_found')
+    expect((await f.service.fileContent('claude', 'session', '../../etc/passwd')).status).toBe('not_found')
+    expect(f.lookups.length, 'a malformed id never reaches the transcript').toBe(before)
     expect((await f.service.fileContent('claude', 'nope', t.outputFiles![0].id)).status).toBe('not_found')
   })
   it('a file swapped for a link after it was listed is refused', async () => {
