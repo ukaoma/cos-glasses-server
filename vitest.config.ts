@@ -28,9 +28,10 @@ import { defineConfig } from 'vitest/config'
  *
  * WHY CONFIG-LEVEL AND NOT PER-FILE. DATA_DIR is a module-scope const evaluated at
  * import time, so a test that sets process.env inside beforeEach is already too
- * late. `test.env` is applied before any test module loads, which is the only point
- * where this can be made true for all 166 files at once. Per-file discipline had
- * 129 chances to be forgotten and was.
+ * late. `test.env` supplies a safe run-wide floor. The setup file then allocates a
+ * separate home for each test file before its modules load. A single run-wide
+ * home is not sufficient: concurrent cleanup tests can change another suite's
+ * read-only fingerprint. Per-file discipline had 129 chances to be forgotten.
  *
  * Files that set COS_DATA_DIR themselves still win — this is a floor, not a ceiling.
  *
@@ -54,7 +55,9 @@ process.once('exit', () => {
 export default defineConfig({
   test: {
     include: ['server/**/*.test.ts', 'shared/**/*.test.ts'],
+    setupFiles: ['./test-support/setup-data-home.ts'],
     env: {
+      COS_VITEST_RUN_DATA_DIR: isolatedDataDir,
       COS_DATA_DIR: isolatedDataDir,
       COS_PROFILE_PATH: join(isolatedDataDir, '.cos-profile.json'),
       // 6.97.0: a row can now claim to be measured, so a test's made-up numbers must never reach a
