@@ -156,8 +156,8 @@ describe('6.99.26 QA: a gated ask reads nothing', () => {
 describe('the settings route', () => {
   it('reads and writes the toggle; anything but { enabled: boolean } is refused', async () => {
     await start(null)
-    expect(await (await fetch(base + '/today/brief/settings')).json()).toEqual({ enabled: false, source: 'default', saved: null })
-    expect(await (await post('/today/brief/settings', { enabled: true })).json()).toEqual({ enabled: true, source: 'settings', saved: true, status: null })
+    expect(await (await fetch(base + '/today/brief/settings')).json()).toEqual({ enabled: false, source: 'default', saved: null, dailyCap: 100 })
+    expect(await (await post('/today/brief/settings', { enabled: true })).json()).toEqual({ enabled: true, source: 'settings', saved: true, status: null, dailyCap: 100 })
     expect((await post('/today/brief/settings', { enabled: 'yes' })).status).toBe(400)
     expect((await post('/today/brief/settings', { enabled: true, extra: 1 })).status).toBe(400)
     expect((await (await post('/today/brief', ASK)).json()).state).toBe('fresh')
@@ -241,5 +241,39 @@ describe('7.0.1: the Today refresh button (force)', () => {
     expect(await (await post('/today/brief', { ...ASK, force: true })).json()).toMatchObject({ state: 'off' })
     expect(boardReads).toBe(0)
     expect(prompts).toHaveLength(0)
+  })
+})
+
+describe('7.0.5: Summaries per day and reconnect', () => {
+  const put = (path: string, body: unknown) => fetch(base + path, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  it('GET and PUT /api/today/brief/settings/cap: 100 by default, clamped to 1 to 100, anything else refused', async () => {
+    await start(true)
+    const read = await fetch(base + '/today/brief/settings/cap')
+    expect(read.headers.get('cache-control')).toBe('private, no-store')
+    expect(await read.json()).toEqual({ dailyCap: 100, min: 1, max: 100, default: 100, usedToday: 0 })
+    expect(await (await put('/today/brief/settings/cap', { dailyCap: 250 })).json()).toMatchObject({ dailyCap: 100 })
+    expect(await (await put('/today/brief/settings/cap', { dailyCap: 0 })).json()).toMatchObject({ dailyCap: 1 })
+    expect(await (await put('/today/brief/settings/cap', { dailyCap: 25 })).json()).toMatchObject({ dailyCap: 25 })
+    expect((await (await fetch(base + '/today/brief/settings')).json()).dailyCap).toBe(25)
+    for (const bad of [{}, { dailyCap: '25' }, { dailyCap: null }, { dailyCap: 25, extra: 1 }, [25]]) {
+      const r = await put('/today/brief/settings/cap', bad)
+      expect(r.status, JSON.stringify(bad)).toBe(400)
+      expect((await r.json()).error.code).toBe('invalid_today_brief_cap')
+    }
+    expect((await (await fetch(base + '/today/brief/settings/cap')).json()).dailyCap).toBe(25)
+  })
+  it('reason "reconnect" skips the spacing once; any other reason is refused', async () => {
+    await start(true)
+    await post('/today/brief', ASK)
+    expect(prompts).toHaveLength(1)
+    const changed = { ...ASK, sessions: [{ ...ASK.sessions[0], waiting: 'Wants to publish 7.0.5' }] }
+    expect((await (await post('/today/brief', changed)).json()).reason).toBe('interval')
+    expect((await (await post('/today/brief', { ...changed, reason: 'reconnect' })).json()).state).toBe('fresh')
+    expect(prompts).toHaveLength(2)
+    const third = { ...ASK, sessions: [{ ...ASK.sessions[0], waiting: 'Wants a third thing' }] }
+    expect((await (await post('/today/brief', { ...third, reason: 'reconnect' })).json()).reason).toBe('interval')
+    expect(prompts).toHaveLength(2)
+    expect((await post('/today/brief', { ...ASK, reason: 'because' })).status).toBe(400)
+    expect((await post('/today/brief', { ...ASK, reason: 1 })).status).toBe(400)
   })
 })

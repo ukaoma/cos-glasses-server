@@ -236,7 +236,10 @@ describe('Settings: the status line under the toggle', () => {
   it('says paused until, today\u2019s cap reached, or the last failure, and nothing when all is well or off', () => {
     const s = fn()
     expect(s({ enabled: true, status: { kind: 'paused', until: '2026-11-07T15:00:00Z' } })).toMatch(/^Paused after three failed tries\. It tries again at /)
-    expect(s({ enabled: true, status: { kind: 'daily_cap', count: 60 } })).toBe('Today\u2019s 60 are used. It writes again tomorrow.')
+    // 7.0.5: the number is the "Summaries per day" setting; an older server's status (count only) still reads right.
+    expect(s({ enabled: true, status: { kind: 'daily_cap', count: 60, cap: 40 } })).toBe('Today\u2019s 40 summaries are used. It writes again tomorrow.')
+    expect(s({ enabled: true, status: { kind: 'daily_cap', count: 60 } })).toBe('Today\u2019s 60 summaries are used. It writes again tomorrow.')
+    expect(s({ enabled: true, status: { kind: 'daily_cap', count: 1, cap: 1 } })).toBe('Today\u2019s 1 summary is used. It writes again tomorrow.')
     expect(s({ enabled: true, status: { kind: 'failed', at: '2026-11-07T15:00:00Z', code: 'timeout' } })).toMatch(/^The last try failed at .*\(it took too long\)\.$/)
     expect(s({ enabled: true, status: null })).toBe('')
     expect(s({ enabled: false, status: { kind: 'daily_cap', count: 60 } })).toBe('')
@@ -248,11 +251,58 @@ describe('Settings: "Write the Today summary with a model"', () => {
     expect(SETTINGS).toContain("soft(api('/api/today/brief/settings'))")
     expect(SETTINGS).toContain('tb: r[8]')
     expect(SETTINGS).toContain("row('Write the Today summary with a model'")
-    expect(SETTINGS).toContain('at most every 10 minutes and 60 times a day')
+    expect(SETTINGS).toContain('at most every 10 minutes and no more than Summaries per day allows')
     expect(SETTINGS).toContain('each session\\u2019s sub-agents and the Work cards in progress')
     expect(SETTINGS).toContain('never during a recording')
     expect(SETTINGS).toContain('if (W.resetTodayBrief) W.resetTodayBrief();')
     expect(SETTINGS).toMatch(/toggle\(d\.tb\.enabled, 'data-set="today-brief"' \+ \(d\.tb\.source === 'env' \? ' disabled' : ''\)/)
     expect(SETTINGS).toContain("api('/api/today/brief/settings', { method: 'POST', body: { enabled: !ton } })")
+  })
+})
+
+describe('7.0.5: a reconnect asks at once, once; Summaries per day in Settings', () => {
+  it('after a recovered read, the next paint asks at once with reason "reconnect"; the one after is ordinary', async () => {
+    const s = story({ sessions: [WORKING], answer: () => FRESH })
+    s.render(); await s.flush()
+    expect(s.posts).toHaveLength(1)
+    expect(s.posts[0].body.reason).toBeUndefined()
+    s.clock.t += 61_000
+    s.render(); await s.flush()
+    expect(s.posts, 'the same rows a minute later: nothing').toHaveLength(1)
+    ;(s.fns.BRIEF as any).reconnect = true
+    s.render(); await s.flush()
+    expect(s.posts).toHaveLength(2)
+    expect(s.posts[1].body.reason).toBe('reconnect')
+    expect((s.fns.BRIEF as any).reconnect).toBe(false)
+    s.clock.t += 61_000
+    s.render(); await s.flush()
+    expect(s.posts, 'spent: the next paint is throttled as usual').toHaveLength(2)
+  })
+  it('a server before 7.0.5 refuses the reason (400 invalid_today_brief): the ask goes again without it', async () => {
+    const bad = Object.assign(new Error('That is not a Today summary request.'), { status: 400, code: 'invalid_today_brief' })
+    const s = story({ sessions: [WORKING], answer: (b: any) => (b && b.reason ? bad : FRESH) })
+    ;(s.fns.BRIEF as any).reconnect = true
+    s.render(); await s.flush(); await s.flush()
+    expect(s.posts.map(p => p.body.reason)).toEqual(['reconnect', undefined])
+    expect(s.els['today-story']!.innerHTML).toContain(esc(FRESH.text))
+  })
+  it('switched off: a reconnect is not a reason to ask early', async () => {
+    const s = story({ sessions: [WORKING], answer: () => ({ state: 'off', text: '', enabled: false }) })
+    s.render(); await s.flush()
+    ;(s.fns.BRIEF as any).reconnect = true
+    s.clock.t += 61_000
+    s.render(); await s.flush()
+    expect(s.posts).toHaveLength(1)
+  })
+  it('the sessions read and Today\u2019s read mark a reconnect only after a failed read', () => {
+    expect(APP).toContain("if (SL.failed) { SL.failed = false; if (typeof BRIEF === 'object' && BRIEF) BRIEF.reconnect = true; }")
+    expect(APP).toContain('function (err) { SL.inflight = null; SL.failed = true; throw err; }')
+    expect(APP).toContain("if ((TODAY.sessionsState === 'failed' || TODAY.offline === true) && res[0] && !offline) BRIEF.reconnect = true;")
+  })
+  it('Settings: a 1 to 100 number under the toggle, saved with PUT and shown as the server clamped it; hidden on an older server', () => {
+    expect(SETTINGS).toContain(`(typeof d.tb.dailyCap === 'number' ? row('Summaries per day'`)
+    expect(SETTINGS).toContain('id="today-brief-cap" data-set="today-brief-cap" min="1" max="100" step="1"')
+    expect(SETTINGS).toContain("api('/api/today/brief/settings/cap', { method: 'PUT', body: { dailyCap: wanted } })")
+    expect(SETTINGS).toContain('capField.value = String(v.dailyCap)')
   })
 })

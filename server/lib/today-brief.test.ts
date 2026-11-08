@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  TODAY_BRIEF_DAILY_CAP, TODAY_BRIEF_FORCE_MIN_MS, TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
+  TODAY_BRIEF_DAILY_CAP, TODAY_BRIEF_DAILY_CAP_MAX, TODAY_BRIEF_DAILY_CAP_MIN, TODAY_BRIEF_RECONNECT_MIN_MS, clampTodayBriefDailyCap, TODAY_BRIEF_FORCE_MIN_MS, TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
   claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 
@@ -66,11 +66,11 @@ describe('the switch (COS_TODAY_BRIEF_LLM, then the Settings toggle, then off)',
     const v = await h.brief.ask(inputs())
     expect(v).toMatchObject({ state: 'off', text: '', enabled: false, source: 'default', reason: 'switch_off' })
     expect(h.prompts).toHaveLength(0)
-    expect(h.brief.settings()).toEqual({ enabled: false, source: 'default', saved: null })
+    expect(h.brief.settings()).toEqual({ enabled: false, source: 'default', saved: null, dailyCap: 100 })
   })
   it('the Settings toggle turns it on, and it is saved for the next start', async () => {
     const h = harness({ enabled: null })
-    expect(h.brief.setEnabled(true)).toEqual({ enabled: true, source: 'settings', saved: true, status: null })
+    expect(h.brief.setEnabled(true)).toEqual({ enabled: true, source: 'settings', saved: true, status: null, dailyCap: 100 })
     expect(JSON.parse(readFileSync(h.deps.settingsFile, 'utf8'))).toEqual({ schema: 1, enabled: true })
     const v = await h.brief.ask(inputs())
     expect(v.state).toBe('fresh')
@@ -79,13 +79,13 @@ describe('the switch (COS_TODAY_BRIEF_LLM, then the Settings toggle, then off)',
   it('the env wins both ways when set; an unrecognised value falls through to the toggle', async () => {
     const off = harness({ enabled: true, env: { COS_TODAY_BRIEF_LLM: 'off' } })
     expect((await off.brief.ask(inputs())).state).toBe('off')
-    expect(off.brief.settings()).toEqual({ enabled: false, source: 'env', saved: true })
+    expect(off.brief.settings()).toEqual({ enabled: false, source: 'env', saved: true, dailyCap: 100 })
     expect(off.prompts).toHaveLength(0)
     const on = harness({ enabled: false, env: { COS_TODAY_BRIEF_LLM: '1' } })
     expect((await on.brief.ask(inputs())).state).toBe('fresh')
     expect(on.brief.settings().source).toBe('env')
     const junk = harness({ enabled: false, env: { COS_TODAY_BRIEF_LLM: 'maybe' } })
-    expect(junk.brief.settings()).toEqual({ enabled: false, source: 'settings', saved: false })
+    expect(junk.brief.settings()).toEqual({ enabled: false, source: 'settings', saved: false, dailyCap: 100 })
   })
   it('switching off after a summary hides it (no stale text under an off switch)', async () => {
     const h = harness()
@@ -142,7 +142,7 @@ describe('when it generates: fingerprint, 10-minute interval, 60 a day', () => {
     expect((await h.brief.ask(inputs({}, 'x3'))).state).toBe('fresh')
     expect(h.prompts).toHaveLength(4)
   })
-  it('the default caps are 60 a day and 10 minutes', async () => {
+  it('the default caps are 100 a day (7.0.5, was 60) and 10 minutes', async () => {
     const g = harness()
     for (let i = 0; i < 61; i++) { await g.brief.ask(inputs({}, 'e' + i)); g.clock.t += 1 }   // 61 changed asks inside a second
     expect(g.prompts).toHaveLength(1)
@@ -150,9 +150,9 @@ describe('when it generates: fingerprint, 10-minute interval, 60 a day', () => {
     await g.brief.ask(inputs({}, 'e-late'))
     expect(g.prompts).toHaveLength(2)
     const c = harness({ minIntervalMs: 0 })
-    for (let i = 0; i < 62; i++) await c.brief.ask(inputs({}, 'f' + i))
-    expect(c.prompts).toHaveLength(60)
-  }, 30_000)   // 60 durable (fsync) state writes
+    for (let i = 0; i < 102; i++) await c.brief.ask(inputs({}, 'f' + i))
+    expect(c.prompts).toHaveLength(100)
+  }, 60_000)   // 100 durable (fsync) state writes
   it('nothing to write about is not a call', async () => {
     const h = harness()
     const v = await h.brief.ask(normalizeTodayBriefInputs({ sessions: [], needs: [], sessionsRead: true, needsComplete: true }))
@@ -503,7 +503,7 @@ describe('6.99.26 QA: gates before reads, recording and drain, the lease, the st
     expect(h.brief.settings().status).toEqual({ kind: 'paused', until: new Date(T0 + 60 * MIN).toISOString() })
     const c = harness({ dailyCap: 1, minIntervalMs: 0 })
     await c.brief.ask(inputs())
-    expect(c.brief.settings().status).toEqual({ kind: 'daily_cap', count: 1 })
+    expect(c.brief.settings().status).toEqual({ kind: 'daily_cap', count: 1, cap: 1 })
     expect(harness().brief.settings().status).toBeNull()
     const junk = harness({ answer: () => Object.assign(new Error('x'), { code: 'Some Weird/Code' }) })
     await junk.brief.ask(inputs())
@@ -593,7 +593,7 @@ describe('6.99.27 QA round 2: more "nothing waits" phrasings, "none running", an
 describe('7.0.1: Sonnet and the forced refresh', () => {
   it('pins Sonnet by the CLI alias the isolated runner passes (never a dated id, never Opus)', () => {
     expect(TODAY_BRIEF_MODEL).toBe('sonnet')
-    expect(TODAY_BRIEF_DAILY_CAP).toBe(60)
+    expect(TODAY_BRIEF_DAILY_CAP).toBe(100)
     expect(TODAY_BRIEF_FORCE_MIN_MS).toBe(30_000)
   })
 
@@ -651,5 +651,104 @@ describe('7.0.1: Sonnet and the forced refresh', () => {
     const again = createTodayBrief(h.deps)
     h.clock.t += 5_000
     expect(again.gate({ force: true })).toBe('refresh_throttled')
+  })
+})
+
+describe('7.0.5: "Summaries per day" is a setting', () => {
+  it('defaults to 100, 1 to 100', () => {
+    const h = harness()
+    expect([TODAY_BRIEF_DAILY_CAP, TODAY_BRIEF_DAILY_CAP_MIN, TODAY_BRIEF_DAILY_CAP_MAX]).toEqual([100, 1, 100])
+    expect(h.brief.settings().dailyCap).toBe(100)
+    expect(h.brief.cap()).toEqual({ dailyCap: 100, min: 1, max: 100, default: 100, usedToday: 0 })
+  })
+  it('clamps: below 1 is 1, above 100 is 100, a fraction rounds, anything not a number is the default', () => {
+    expect([0, -5, 1, 7.4, 7.6, 100, 101, 250].map(clampTodayBriefDailyCap)).toEqual([1, 1, 1, 7, 8, 100, 100, 100])
+    expect([NaN, Infinity, '50', null, undefined].map(v => clampTodayBriefDailyCap(v))).toEqual([100, 100, 100, 100, 100])
+    const h = harness()
+    expect(h.brief.setDailyCap(0).dailyCap).toBe(1)
+    expect(h.brief.setDailyCap(500).dailyCap).toBe(100)
+    expect(h.brief.setDailyCap(12).dailyCap).toBe(12)
+  })
+  it('a saved value outside the range is clamped when read; the switch and the cap never overwrite each other', () => {
+    const h = harness({ enabled: true })
+    h.brief.setDailyCap(5)
+    expect(JSON.parse(readFileSync(h.deps.settingsFile, 'utf8'))).toEqual({ schema: 1, enabled: true, dailyCap: 5 })
+    h.brief.setEnabled(false)
+    expect(JSON.parse(readFileSync(h.deps.settingsFile, 'utf8'))).toEqual({ schema: 1, enabled: false, dailyCap: 5 })
+    h.brief.setEnabled(true)
+    expect(h.brief.settings().dailyCap).toBe(5)
+    writeFileSync(h.deps.settingsFile, JSON.stringify({ schema: 1, enabled: true, dailyCap: 9999 }))
+    expect(h.brief.settings().dailyCap).toBe(100)
+    writeFileSync(h.deps.settingsFile, JSON.stringify({ schema: 1, enabled: true, dailyCap: 0 }))
+    expect(h.brief.settings().dailyCap).toBe(1)
+  })
+  it('the server enforces the saved number, and the status says it', async () => {
+    const h = harness({ minIntervalMs: 0 })
+    h.brief.setDailyCap(2)
+    for (let i = 0; i < 2; i++) expect((await h.brief.ask(inputs({}, 'c' + i))).state).toBe('fresh')
+    expect((await h.brief.ask(inputs({}, 'c2'))).reason).toBe('daily_cap')
+    expect(h.prompts).toHaveLength(2)
+    expect(h.brief.settings().status).toEqual({ kind: 'daily_cap', count: 2, cap: 2 })
+    expect(h.brief.cap().usedToday).toBe(2)
+    // Raising it lets the day go on at once.
+    h.brief.setDailyCap(3)
+    expect((await h.brief.ask(inputs({}, 'c3'))).state).toBe('fresh')
+  })
+})
+
+describe('7.0.5: a reconnect writes at once, at most once per 10 minutes', () => {
+  it('a reconnect skips the 10-minute spacing once; a second reconnect inside 10 minutes does not', async () => {
+    const h = harness()
+    await h.brief.ask(inputs({}, 'r0'))
+    h.clock.t += MIN
+    expect(h.brief.gate()).toBe('interval')
+    expect(h.brief.gate({ reconnect: true })).toBeNull()
+    expect((await h.brief.ask(inputs({}, 'r1'), '', { reconnect: true })).state).toBe('fresh')
+    expect(h.prompts).toHaveLength(2)
+    h.clock.t += MIN
+    expect(h.brief.gate({ reconnect: true }), 'the rate guard').toBe('interval')
+    expect((await h.brief.ask(inputs({}, 'r2'), '', { reconnect: true })).reason).toBe('interval')
+    expect(h.prompts).toHaveLength(2)
+    h.clock.t += TODAY_BRIEF_RECONNECT_MIN_MS - MIN - 1
+    expect(h.brief.gate({ reconnect: true }), 'still inside 10 minutes of the last skip').toBe('interval')
+    h.clock.t += 1
+    expect(h.brief.gate({ reconnect: true })).toBeNull()
+  })
+  it('the rate guard persists across a restart', async () => {
+    const h = harness()
+    await h.brief.ask(inputs({}, 'p0'))
+    h.clock.t += MIN
+    await h.brief.ask(inputs({}, 'p1'), '', { reconnect: true })
+    const again = createTodayBrief(h.deps)
+    h.clock.t += MIN
+    expect(again.gate({ reconnect: true })).toBe('interval')
+  })
+  it('a reconnect that did not need the skip (the spacing had passed) does not spend it', async () => {
+    const h = harness()
+    await h.brief.ask(inputs({}, 'n0'))
+    h.clock.t += 11 * MIN
+    await h.brief.ask(inputs({}, 'n1'), '', { reconnect: true })
+    h.clock.t += MIN
+    expect(h.brief.gate({ reconnect: true })).toBeNull()
+    expect((await h.brief.ask(inputs({}, 'n2'), '', { reconnect: true })).state).toBe('fresh')
+    expect(h.prompts).toHaveLength(3)
+  })
+  it('a reconnect with unchanged inputs writes nothing; it never skips the daily cap, the breaker or the switch', async () => {
+    const h = harness()
+    await h.brief.ask(inputs({}, 'u0'))
+    h.clock.t += MIN
+    expect((await h.brief.ask(inputs({}, 'u0'), '', { reconnect: true })).state).toBe('fresh')
+    expect(h.prompts).toHaveLength(1)
+
+    const capped = harness({ dailyCap: 1 })
+    await capped.brief.ask(inputs({}, 'k0'))
+    capped.clock.t += MIN
+    expect(capped.brief.gate({ reconnect: true })).toBe('daily_cap')
+
+    const failing = harness({ answer: () => new Error('cli failed'), minIntervalMs: 0 })
+    for (let i = 0; i < 3; i++) await failing.brief.ask(inputs({}, 'f' + i))
+    expect(failing.brief.gate({ reconnect: true })).toBe('paused')
+
+    expect(harness({ enabled: false }).brief.gate({ reconnect: true })).toBe('switch_off')
   })
 })

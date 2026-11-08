@@ -4,14 +4,19 @@
  * - GET  /api/today/brief           the cached summary; never generates.
  * - POST /api/today/brief           an open Today's ask, with the rows it read (titles, states, how long, last lines,
  *                                   what needs you). Generates only when the switch is on, the inputs changed, 10 minutes
- *                                   passed and the day's 60 are not spent. The Work cards in progress come from the
+ *                                   passed and the day's cap (Summaries per day, 7.0.5) is not spent. The Work cards in progress come from the
  *                                   server's own shared board read, never the body.
  *                                   7.0.1: `"force": true` in the body is the Today refresh button. It skips the
  *                                   10-minute interval and the "inputs unchanged" check, at most once every 30 s,
- *                                   inside the same 60 a day. A throttled one answers reason `refresh_throttled` and
+ *                                   inside the same daily cap. A throttled one answers reason `refresh_throttled` and
  *                                   `retryAfterMs`.
+ *                                   7.0.5: `"reason": "reconnect"` says the client's read just recovered from a failed
+ *                                   one: that start skips the 10-minute interval, at most once per 10 minutes. The
+ *                                   "inputs unchanged" check, the breaker, the switch and the daily cap still apply.
  * - GET  /api/today/brief/settings  the switch and what set it.
  * - POST /api/today/brief/settings  { enabled: boolean }, the Settings toggle. COS_TODAY_BRIEF_LLM, when set, still wins.
+ * - GET  /api/today/brief/settings/cap   7.0.5 "Summaries per day": { dailyCap, min: 1, max: 100, default: 100, usedToday }.
+ * - PUT  /api/today/brief/settings/cap   { dailyCap: number }, clamped to 1 to 100 and saved; answers the same shape.
  * Auth is the parent /api gate (token or web session cookie). Every answer is private, no-store.
  */
 import { Router } from 'express'
@@ -99,12 +104,16 @@ export function workInProgress(rows: TaskBoardRow[] | null): BriefWork[] {
   return out.sort((a, b) => Number(b.running) - Number(a.running)).slice(0, 12)
 }
 
-/** The body without `force`, and whether it asked to force. Anything but a boolean `force` is a bad request. */
-export function splitForce(raw: unknown): { body: unknown; force: boolean } {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('force' in raw)) return { body: raw, force: false }
-  const { force, ...rest } = raw as Record<string, unknown>
-  if (typeof force !== 'boolean') throw new TodayBriefInputError('invalid_today_brief')
-  return { body: rest, force }
+/**
+ * The body without `force` and `reason`, and what they asked. Anything but a boolean `force` is a bad request; 7.0.5
+ * `reason` may only be "reconnect".
+ */
+export function splitForce(raw: unknown): { body: unknown; force: boolean; reconnect: boolean } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('force' in raw || 'reason' in raw)) return { body: raw, force: false, reconnect: false }
+  const { force, reason, ...rest } = raw as Record<string, unknown>
+  if (force !== undefined && typeof force !== 'boolean') throw new TodayBriefInputError('invalid_today_brief')
+  if (reason !== undefined && reason !== 'reconnect') throw new TodayBriefInputError('invalid_today_brief')
+  return { body: rest, force: force === true, reconnect: reason === 'reconnect' }
 }
 
 export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
@@ -121,7 +130,7 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
         return res.status(413).json({ error: { code: 'today_brief_too_large', message: 'Too much for the Today summary.' } })
       }
       // 7.0.1: `force` is the refresh button's flag, taken off before the rows are read (the rows reject unknown keys).
-      const { body, force } = splitForce(req.body)
+      const { body, force, reconnect } = splitForce(req.body)
       // The switch first: off reads nothing, not even the board.
       if (!deps.brief.settings().enabled) {
         normalizeTodayBriefInputs(body)
@@ -131,7 +140,7 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
       // the 30 s refresh floor): a gated ask answers from the page's rows alone and reads neither the board nor any
       // transcript.
       const pageInputs = normalizeTodayBriefInputs(body)
-      const closed = deps.brief.gate({ force })
+      const closed = deps.brief.gate({ force, reconnect })
       if (closed) return res.json(deps.brief.askGated(pageInputs, closed))
       const work = workInProgress(await deps.board().catch(() => null))
       let inputs = normalizeTodayBriefInputs(body, work)
@@ -142,7 +151,7 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
         const readings = await Promise.race([deps.subagents(keys).catch(() => new Map<string, SubagentReading>()), late]).finally(() => clearTimeout(timer))
         inputs = withSubagents(inputs, readings, (deps.now ?? Date.now)())
       }
-      res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs), { force }))
+      res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs), { force, reconnect }))
     } catch (error) {
       if (error instanceof TodayBriefInputError) return res.status(400).json({ error: { code: error.code, message: 'That is not a Today summary request.' } })
       console.warn(`[today-brief] ask failed (${error instanceof Error ? error.name : 'error'})`)
@@ -158,6 +167,17 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
       return res.status(400).json({ error: { code: 'invalid_today_brief_settings', message: 'Send { enabled: true } or { enabled: false }.' } })
     }
     try { res.json(deps.brief.setEnabled(body.enabled)) } catch { failed(res) }
+  })
+  // 7.0.5 "Summaries per day" (Control Web Settings and COS Control use the same route).
+  router.get('/today/brief/settings/cap', (_req, res) => {
+    try { res.json(deps.brief.cap()) } catch { failed(res) }
+  })
+  router.put('/today/brief/settings/cap', (req, res) => {
+    const body = req.body
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'dailyCap') || typeof body.dailyCap !== 'number' || !Number.isFinite(body.dailyCap)) {
+      return res.status(400).json({ error: { code: 'invalid_today_brief_cap', message: 'Send { dailyCap: a number from 1 to 100 }.' } })
+    }
+    try { res.json(deps.brief.setDailyCap(body.dailyCap)) } catch { failed(res) }
   })
   return router
 }

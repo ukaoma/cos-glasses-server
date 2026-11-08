@@ -212,7 +212,8 @@
     if (!st) return '';
     var at = function (iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
     if (st.kind === 'paused') return 'Paused after three failed tries. It tries again at ' + at(st.until) + '.';
-    if (st.kind === 'daily_cap') return 'Today\u2019s ' + st.count + ' are used. It writes again tomorrow.';
+    // 7.0.5: the number is the "Summaries per day" setting (an older server sends only the count).
+    if (st.kind === 'daily_cap') { var n = typeof st.cap === 'number' ? st.cap : st.count; return 'Today\u2019s ' + n + (n === 1 ? ' summary is' : ' summaries are') + ' used. It writes again tomorrow.'; }
     if (st.kind === 'failed') return 'The last try failed at ' + at(st.at) + (st.code === 'timeout' ? ' (it took too long).' : st.code === 'unavailable' ? ' (Claude Code was not found on your Mac).' : '.');
     return '';
   }
@@ -268,8 +269,11 @@
     if (cat.id === 'general' && d.tb && typeof d.tb.enabled === 'boolean') {
       out += group('Today summary', '',
         row('Write the Today summary with a model', d.tb.source === 'env' ? 'Set on the Mac by the server environment.' :
-          'Sonnet writes two or three sentences after the count of what needs you. It reads what Today shows (session titles and states, each session\u2019s latest reply, the questions sessions ask you, what needs you) and, on your Mac, each session\u2019s sub-agents and the Work cards in progress. It runs only while Today is open, only when something changed, never during a recording, at most every 10 minutes and 60 times a day. Refresh on Today asks for a new one at once, at most every 30 seconds.',
+          'Sonnet writes two or three sentences after the count of what needs you. It reads what Today shows (session titles and states, each session\u2019s latest reply, the questions sessions ask you, what needs you) and, on your Mac, each session\u2019s sub-agents and the Work cards in progress. It runs only while Today is open, only when something changed, never during a recording, at most every 10 minutes and no more than Summaries per day allows. Refresh on Today asks for a new one at once, at most every 30 seconds.',
           toggle(d.tb.enabled, 'data-set="today-brief"' + (d.tb.source === 'env' ? ' disabled' : ''), 'Write the Today summary with a model')) +
+        // 7.0.5 "Summaries per day" (GET/PUT /api/today/brief/settings/cap), 1 to 100, default 100. Shown when the server has it.
+        (typeof d.tb.dailyCap === 'number' ? row('Summaries per day', 'At most this many new summaries a day, Refresh included. 1 to 100.',
+          '<input type="number" class="cx-set-num" id="today-brief-cap" data-set="today-brief-cap" min="1" max="100" step="1" inputmode="numeric" value="' + esc(String(d.tb.dailyCap)) + '" aria-label="Summaries per day">') : '') +
         (briefStatus(d.tb) ? '<p class="cx-set-blurb" id="today-brief-status">' + esc(briefStatus(d.tb)) + '</p>' : ''));
     }
     if (cat.id === 'ai' && d.dp) {
@@ -462,6 +466,16 @@
 
   // Number, time, day and steer fields save when they change (a number is clamped by the server, then shown as saved).
   pane.addEventListener('change', function (e) {
+    // 7.0.5 "Summaries per day": the server clamps to 1 to 100 and answers what it saved; the field shows that.
+    if (e.target && e.target.id === 'today-brief-cap') {
+      var capField = e.target, wanted = Number(capField.value);
+      if (!isFinite(wanted)) { say('Type a number from 1 to 100.', true); return; }
+      api('/api/today/brief/settings/cap', { method: 'PUT', body: { dailyCap: wanted } }).then(function (v) {
+        if (v && typeof v.dailyCap === 'number') { capField.value = String(v.dailyCap); if (S.data && S.data.tb) S.data.tb.dailyCap = v.dailyCap; }
+        W.toast('Saved');
+      }, function (err) { say((err && err.message) || 'That did not save.', true); });
+      return;
+    }
     var f = e.target && e.target.closest ? e.target.closest('[data-p2]') : null;
     if (!f || f.getAttribute('data-set') === 'p2' || !S.data || !S.data.p2) return;
     var path = f.getAttribute('data-p2'), raw = f.value;

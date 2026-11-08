@@ -12,10 +12,10 @@
  *   set, the Settings toggle "Write the Today summary with a model" decides (today-brief-settings.json in the data
  *   folder). Neither set: OFF. The server has no clean private-build signal, so OFF is the default for everyone.
  * - CAPS: a generation only when an open Today asks (POST /api/today/brief), only when the trimmed inputs' fingerprint
- *   changed since the last summary, at most one start every 10 minutes, at most 60 starts a local day. A start is
+ *   changed since the last summary, at most one start every 10 minutes (7.0.5: a reconnect may skip that once per 10 minutes), at most "Summaries per day" starts a local day (7.0.5: a setting, 1 to 100, default 100; was 60). A start is
  *   counted BEFORE the call, so a call that ran was spent whatever became of it. 7.0.1 FORCED REFRESH (the Today
  *   refresh button, `force: true`): skips the 10-minute interval and the "inputs changed" check, at most one forced
- *   start every 30 s, and still inside the same 60 a day, the breaker, the switch, recording and drain.
+ *   start every 30 s, and still inside the same daily cap, the breaker, the switch, recording and drain.
  * - BREAKER: 3 failures in a row (a CLI error, a timeout, an empty or guarded answer) stop it for 1 hour; the next
  *   start after that hour is one trial, and a failed trial reopens it for another hour.
  * - NOT WHILE: a meeting is recording or the server is draining (6.99.26 QA). Those, the switch, the breaker, the cap
@@ -46,7 +46,7 @@ import { securePrivateDirectory } from './secure-user-config.js'
  *
  * COST, measured 11/07 with a full-size prompt (40 sessions, about 3.6k input tokens, about 100 output) through the
  * runner's own argv with JSON output: Sonnet $0.0156 to $0.0180 a call, Haiku $0.0008. About twenty times more a call.
- * The cap stays 60 starts a day (forced refreshes included), so the worst day is about $1.10 where Haiku's was about
+ * 7.0.5: the cap is "Summaries per day", default 100 (forced refreshes included), so the worst day is about $1.80 where Haiku's was about
  * $0.05; the 10-minute interval and "only when the inputs changed" keep a normal day far below the cap. On a Claude
  * subscription the CLI draws plan usage rather than billing; the figures are the CLI's own API-price estimate.
  */
@@ -54,7 +54,19 @@ export const TODAY_BRIEF_MODEL = 'sonnet'
 export const TODAY_BRIEF_EFFORT = 'low'
 export const TODAY_BRIEF_TIMEOUT_MS = 30_000
 export const TODAY_BRIEF_MIN_INTERVAL_MS = 10 * 60 * 1000
-export const TODAY_BRIEF_DAILY_CAP = 60
+/**
+ * 7.0.5 (Miles 11/08): "Summaries per day" is a setting, default 100, 1 to 100, saved with the switch in
+ * today-brief-settings.json and enforced here. Was a fixed 60. A saved value outside the range is clamped.
+ */
+export const TODAY_BRIEF_DAILY_CAP = 100
+export const TODAY_BRIEF_DAILY_CAP_MIN = 1
+export const TODAY_BRIEF_DAILY_CAP_MAX = 100
+/**
+ * 7.0.5: a client whose read failed and then recovered may say `reason: "reconnect"`: that one start skips the 10-minute
+ * interval (never the "inputs unchanged" check, the breaker, the switch or the daily cap). At most one such skip per
+ * this, so a client cannot use it to skip the interval again and again.
+ */
+export const TODAY_BRIEF_RECONNECT_MIN_MS = 10 * 60 * 1000
 /** 7.0.1: a forced refresh (the Today refresh button) at most once per this, on top of the daily cap. */
 export const TODAY_BRIEF_FORCE_MIN_MS = 30_000
 export const TODAY_BRIEF_BREAKER_FAILURES = 3
@@ -503,6 +515,8 @@ interface BriefFile {
   lastStartAt: number
   /** 7.0.1: when the last FORCED generation started (TODAY_BRIEF_FORCE_MIN_MS). */
   lastForceAt: number
+  /** 7.0.5: when the last start that used the reconnect skip began (TODAY_BRIEF_RECONNECT_MIN_MS). */
+  lastReconnectAt: number
   /** Failures in a row, and when the breaker opened. */
   failures: number
   openedAt: number
@@ -515,7 +529,7 @@ interface BriefFile {
   lastFailCode: string
   cache: BriefCache | null
 }
-const emptyFile = (day: string): BriefFile => ({ schema: 1, day, count: 0, lastStartAt: 0, lastForceAt: 0, failures: 0, openedAt: 0, lastAskFingerprint: '', lastOpener: '', lastFailAt: 0, lastFailCode: '', cache: null })
+const emptyFile = (day: string): BriefFile => ({ schema: 1, day, count: 0, lastStartAt: 0, lastForceAt: 0, lastReconnectAt: 0, failures: 0, openedAt: 0, lastAskFingerprint: '', lastOpener: '', lastFailAt: 0, lastFailCode: '', cache: null })
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
 
 function readJson(file: string): unknown {
@@ -541,6 +555,7 @@ function parseFile(raw: unknown, day: string): BriefFile {
     count: Math.floor(num(raw.count)),
     lastStartAt: num(raw.lastStartAt),
     lastForceAt: num(raw.lastForceAt),
+    lastReconnectAt: num(raw.lastReconnectAt),
     failures: Math.floor(num(raw.failures)),
     openedAt: num(raw.openedAt),
     lastAskFingerprint: typeof raw.lastAskFingerprint === 'string' ? raw.lastAskFingerprint : '',
@@ -574,29 +589,44 @@ export interface TodayBriefDeps {
 }
 
 /** The Settings status line's facts: paused until, today's cap reached, or the last call failed. */
-export type TodayBriefStatus = { kind: 'paused'; until: string } | { kind: 'daily_cap'; count: number } | { kind: 'failed'; at: string; code: string } | null
-export interface TodayBriefSettings { enabled: boolean; source: TodayBriefSwitchSource; saved: boolean | null; status?: TodayBriefStatus }
+export type TodayBriefStatus = { kind: 'paused'; until: string } | { kind: 'daily_cap'; count: number; cap: number } | { kind: 'failed'; at: string; code: string } | null
+export interface TodayBriefSettings { enabled: boolean; source: TodayBriefSwitchSource; saved: boolean | null; status?: TodayBriefStatus
+  /** 7.0.5: "Summaries per day" (TODAY_BRIEF_DAILY_CAP_MIN to _MAX). */
+  dailyCap: number }
+/** 7.0.5: GET|PUT /api/today/brief/settings/cap. */
+export interface TodayBriefCapView { dailyCap: number; min: number; max: number; default: number; usedToday: number }
+
+/** A whole number of summaries a day, 1 to 100. Anything that is not a finite number is the default. */
+export function clampTodayBriefDailyCap(value: unknown): number {
+  const n = typeof value === 'number' ? value : NaN
+  if (!Number.isFinite(n)) return TODAY_BRIEF_DAILY_CAP
+  return Math.min(TODAY_BRIEF_DAILY_CAP_MAX, Math.max(TODAY_BRIEF_DAILY_CAP_MIN, Math.round(n)))
+}
 
 export interface TodayBrief {
   /** The cached summary, no generation (GET). */
   peek(): TodayBriefView
   /** Why nothing could be generated now, checked BEFORE the server's board and sub-agent reads; null when it may.
    *  7.0.1 `force` (the refresh button): the 10-minute interval does not apply; one forced start per 30 s does. */
-  gate(opts?: { force?: boolean }): TodayBriefReason | null
+  gate(opts?: { force?: boolean; reconnect?: boolean }): TodayBriefReason | null
   /** A gated ask: the page's rows only, no reads and no call. Fresh while the page's rows match the cached summary's. */
   askGated(pageInputs: TodayBriefInputs, reason: TodayBriefReason): TodayBriefView
   /** An open Today's ask with what it read (POST). Generates only when every gate allows; never throws for a gate.
    *  `pageFingerprint` is the page's rows alone, kept with a new summary for later gated asks. */
-  ask(inputs: TodayBriefInputs, pageFingerprint?: string, opts?: { force?: boolean }): Promise<TodayBriefView>
+  ask(inputs: TodayBriefInputs, pageFingerprint?: string, opts?: { force?: boolean; reconnect?: boolean }): Promise<TodayBriefView>
   settings(): TodayBriefSettings
   setEnabled(enabled: boolean): TodayBriefSettings
+  /** 7.0.5: "Summaries per day". */
+  cap(): TodayBriefCapView
+  setDailyCap(value: number): TodayBriefCapView
 }
 
 export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
   const now = deps.now ?? Date.now
   const env = deps.env ?? (() => process.env)
   const minInterval = deps.minIntervalMs ?? TODAY_BRIEF_MIN_INTERVAL_MS
-  const dailyCap = deps.dailyCap ?? TODAY_BRIEF_DAILY_CAP
+  /** A test's fixed cap, else the saved setting (read live), else 100. */
+  const dailyCap = (): number => deps.dailyCap ?? savedCap() ?? TODAY_BRIEF_DAILY_CAP
   let state: BriefFile | null = null
   let inflight: Promise<void> | null = null
 
@@ -618,6 +648,17 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
   const savedSetting = (): boolean | null => {
     const raw = readJson(deps.settingsFile)
     return record(raw) && raw.schema === 1 && typeof raw.enabled === 'boolean' ? raw.enabled : null
+  }
+  const savedCap = (): number | null => {
+    const raw = readJson(deps.settingsFile)
+    return record(raw) && raw.schema === 1 && typeof raw.dailyCap === 'number' && Number.isFinite(raw.dailyCap) ? clampTodayBriefDailyCap(raw.dailyCap) : null
+  }
+  /** The settings file keeps both fields: writing one never drops the other. */
+  const writeSettings = (patch: { enabled?: boolean; dailyCap?: number }) => {
+    const enabled = patch.enabled ?? savedSetting()
+    const cap = patch.dailyCap ?? savedCap()
+    securePrivateDirectory(dirname(deps.settingsFile))
+    durableAtomicWriteFileSync(deps.settingsFile, JSON.stringify({ schema: 1, ...(enabled !== null ? { enabled } : {}), ...(cap !== null ? { dailyCap: cap } : {}) }) + '\n', { mode: 0o600 })
   }
   const resolveSwitch = (): { enabled: boolean; source: TodayBriefSwitchSource; saved: boolean | null } => {
     const saved = savedSetting()
@@ -654,12 +695,14 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     }
   }
 
-  const generate = (inputs: TodayBriefInputs, fingerprint: string, pageFingerprint: string, lease: { release(): void } | null, force = false): Promise<void> => {
+  const generate = (inputs: TodayBriefInputs, fingerprint: string, pageFingerprint: string, lease: { release(): void } | null, force = false, reconnectSkip = false): Promise<void> => {
     const f = load()
     // Counted before the call: a call that started was spent. A forced start counts against the same daily cap.
     f.count += 1
     f.lastStartAt = now()
     if (force) f.lastForceAt = now()
+    // 7.0.5: only a start that actually skipped the interval spends the reconnect allowance.
+    if (reconnectSkip) f.lastReconnectAt = now()
     save()
     const prompt = buildTodayBriefPrompt(inputs, now())
     const started = now()
@@ -695,29 +738,35 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       .finally(() => { try { lease?.release() } catch { /* released by its owner */ } })
   }
   /** The brief's own gates plus the server's (recording, drain). */
-  const gate = (f: BriefFile, force = false): TodayBriefReason | null => {
+  /** 7.0.5: a reconnect may skip the interval once per TODAY_BRIEF_RECONNECT_MIN_MS. */
+  const reconnectAllowed = (f: BriefFile) => !(f.lastReconnectAt && within(now() - f.lastReconnectAt, TODAY_BRIEF_RECONNECT_MIN_MS))
+  /** Whether this start would skip the interval because of a reconnect (the interval would hold it, the allowance is there). */
+  const reconnectSkips = (f: BriefFile, force: boolean, reconnect: boolean) =>
+    reconnect && !force && !!f.lastStartAt && within(now() - f.lastStartAt, minInterval) && reconnectAllowed(f)
+  const gate = (f: BriefFile, force = false, reconnect = false): TodayBriefReason | null => {
     if (!resolveSwitch().enabled) return 'switch_off'
     if (inflight) return null   // an ask waits on the call already running rather than answering stale
     const blocked = deps.blocked?.() ?? null
     if (blocked) return blocked
     if (breakerOpen(f)) return 'paused'
-    if (f.count >= dailyCap) return 'daily_cap'
+    if (f.count >= dailyCap()) return 'daily_cap'
     // 7.0.1: the refresh button skips the 10-minute interval, never the cap, the breaker or the switch, and has its own
     // floor so a held-down button cannot spend the day's cap in a minute.
     if (force) return forceWait(f) > 0 ? 'refresh_throttled' : null
-    if (f.lastStartAt && within(now() - f.lastStartAt, minInterval)) return 'interval'
+    if (f.lastStartAt && within(now() - f.lastStartAt, minInterval) && !reconnectSkips(f, force, reconnect)) return 'interval'
     return null
   }
   const settingsView = (): TodayBriefSettings => {
     const sw = resolveSwitch()
-    if (!sw.enabled) return sw
+    if (!sw.enabled) return { ...sw, dailyCap: dailyCap() }
     const f = load()
     const status: TodayBriefStatus = breakerOpen(f) ? { kind: 'paused', until: new Date(f.openedAt + TODAY_BRIEF_BREAKER_MS).toISOString() }
-      : f.count >= dailyCap ? { kind: 'daily_cap', count: f.count }
+      : f.count >= dailyCap() ? { kind: 'daily_cap', count: f.count, cap: dailyCap() }
         : f.failures > 0 && f.lastFailAt ? { kind: 'failed', at: new Date(f.lastFailAt).toISOString(), code: f.lastFailCode || 'failed' }
           : null
-    return { ...sw, status }
+    return { ...sw, status, dailyCap: dailyCap() }
   }
+  const capView = (): TodayBriefCapView => ({ dailyCap: dailyCap(), min: TODAY_BRIEF_DAILY_CAP_MIN, max: TODAY_BRIEF_DAILY_CAP_MAX, default: TODAY_BRIEF_DAILY_CAP, usedToday: load().count })
   const remember = (f: BriefFile, fingerprint: string, opener: string) => {
     if (f.lastAskFingerprint !== fingerprint || f.lastOpener !== opener) { f.lastAskFingerprint = fingerprint; f.lastOpener = opener; save() }
   }
@@ -727,7 +776,7 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       if (!resolveSwitch().enabled) return view('')
       return view(load().lastAskFingerprint)
     },
-    gate(opts) { return gate(load(), opts?.force === true) },
+    gate(opts) { return gate(load(), opts?.force === true, opts?.reconnect === true) },
     askGated(pageInputs, reason) {
       if (!resolveSwitch().enabled) return view('')
       const fingerprint = todayBriefFingerprint(pageInputs)
@@ -737,6 +786,7 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     async ask(inputs, pageFingerprint = '', opts) {
       if (!resolveSwitch().enabled) return view('')
       const force = opts?.force === true
+      const reconnect = opts?.reconnect === true
       const fingerprint = todayBriefFingerprint(inputs)
       const f = load()
       remember(f, fingerprint, todayBriefOpener(inputs))
@@ -746,12 +796,13 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       // Concurrent asks share one generation, whichever inputs started it.
       if (inflight) { await inflight; return view(fingerprint, todaysCache(load())?.fingerprint === fingerprint ? undefined : 'interval') }
       if (!hasBriefInputs(inputs)) return view(fingerprint, 'empty_inputs')
-      const closed = gate(f, force)
+      const closed = gate(f, force, reconnect)
       if (closed) return view(fingerprint, closed)
+      const reconnectSkip = reconnectSkips(f, force, reconnect)
       // The call holds the server's lease; a drain that began after the gate refuses here, before anything is spent.
       let lease: { release(): void } | null = null
       try { lease = deps.lease ? deps.lease() : null } catch { return view(fingerprint, 'maintenance') }
-      const run = generate(inputs, fingerprint, pageFingerprint, lease, force)
+      const run = generate(inputs, fingerprint, pageFingerprint, lease, force, reconnectSkip)
       inflight = run
       try { await run } finally { if (inflight === run) inflight = null }
       const after = todaysCache(load())
@@ -759,9 +810,13 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     },
     settings: settingsView,
     setEnabled(enabled) {
-      securePrivateDirectory(dirname(deps.settingsFile))
-      durableAtomicWriteFileSync(deps.settingsFile, JSON.stringify({ schema: 1, enabled }) + '\n', { mode: 0o600 })
+      writeSettings({ enabled })
       return settingsView()
+    },
+    cap: capView,
+    setDailyCap(value) {
+      writeSettings({ dailyCap: clampTodayBriefDailyCap(value) })
+      return capView()
     },
   }
 }

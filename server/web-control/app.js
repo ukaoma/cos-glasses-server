@@ -467,11 +467,14 @@
   // stories all asked for it separately. Now there is one copy: a request younger than maxAgeMs is
   // answered from it, a request already on the wire is shared, and panes can paint the last copy at
   // once while a fresh one loads (sessionListCached).
-  var SL = { data: null, at: 0, inflight: null, waiting: null };
+  var SL = { data: null, at: 0, inflight: null, waiting: null, failed: false };
   function sessionList(maxAgeMs) {
     if (SL.data && Date.now() - SL.at < (maxAgeMs || 0)) return Promise.resolve(SL.data);
     if (SL.inflight) return SL.inflight;
     SL.inflight = api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
+      // 7.0.5: a sessions read (Sessions pane or Today) that follows a failed one is a reconnect: Today's next summary
+      // ask says so (requestBrief), once.
+      if (SL.failed) { SL.failed = false; if (typeof BRIEF === 'object' && BRIEF) BRIEF.reconnect = true; }
       SL.data = d; SL.at = Date.now(); SL.inflight = null;
       // 7.0.1: a fresh list is corrected by the live model at once, so it never paints a state the stream already moved.
       // Only while a stream is open and live (review W1): reconnecting, busy or hidden, the list is the newest truth.
@@ -481,7 +484,7 @@
       }
       noteWaiting(d);
       return d;
-    }, function (err) { SL.inflight = null; throw err; });
+    }, function (err) { SL.inflight = null; SL.failed = true; throw err; });
     return SL.inflight;
   }
   function sessionListCached() { return SL.data ? { data: SL.data, at: SL.at } : null; }
@@ -1187,6 +1190,9 @@
       var open = sessions.filter(function (s) { return s.running && !s.running_active; });
       var recent = live.filter(function (s) { return Date.now() - (s.mtimeMs || 0) < LIVE_FRESH_MS; });
       var offline = !res[0] && !res[1];
+      // 7.0.5: the sessions or Today read recovered from a failed one, so the next summary ask says "reconnect" (the
+      // server lets that one start skip its 10-minute spacing, at most once per 10 minutes).
+      if ((TODAY.sessionsState === 'failed' || TODAY.offline === true) && res[0] && !offline) BRIEF.reconnect = true;
       TODAY.needs = needs; TODAY.working = working; TODAY.open = open; TODAY.welcome = welcome; TODAY.offline = offline; TODAY.at = Date.now();
       // your-move answers {available:false} when the board cannot be read: that is a failed read, not "nothing".
       TODAY.sessionsState = res[0] ? 'answered' : 'failed';
@@ -1239,9 +1245,9 @@
   // "The orchestrator's eyes" (Miles, 11/07): two or three sentences on what the sessions add up to, written by Sonnet on
   // the server (lib/today-brief.ts). Today sends what it already read: session titles, states, how long, each session's
   // latest line and what needs you. The server decides whether a new one is written (off unless switched on, only when
-  // the inputs changed, 10 minutes apart, 60 a day, a breaker). Today never waits for it: the counts line paints at once
+  // the inputs changed, 10 minutes apart, the Summaries per day cap, a breaker). Today never waits for it: the counts line paints at once
   // and the summary replaces it when one arrives. Never shown over a session list that was not read.
-  var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0 };
+  var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0, reconnect: false };
   // 6.99.26 QA: the same rows are asked about again only after five minutes (a Today that sits open still learns what
   // the server reads itself: sub-agents and Work cards); changed rows are asked about at once, one ask at a time.
   var BRIEF_RESEND_MS = 5 * 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000, BRIEF_TICK_MS = 60000, BRIEF_LIVE_GAP_MS = 60000;
@@ -1277,12 +1283,25 @@
     var body = briefInputs(m);
     var key = JSON.stringify([body.sessions.map(function (s) { return [s.title, s.state, s.line, s.waiting, s.agents]; }), body.needs, body.later, body.sessionsRead, body.needsComplete, body.unread, body.recording]);
     var since = Date.now() - BRIEF.sentAt;
-    if (BRIEF.view && BRIEF.view.state === 'off' ? since < BRIEF_OFF_RECHECK_MS : key === BRIEF.sentKey && since < BRIEF_RESEND_MS) return;
-    // 7.0.1: with the live stream Today repaints on every session move, so a changed Today asks at most once a minute
-    // (Refresh asks at once). Without it, 7.0.0's rule above is the only one.
-    if (typeof liveOn === 'function' && liveOn() && since < BRIEF_LIVE_GAP_MS) return;
+    // 7.0.5: right after a read recovered, ask at once (the server still holds its own gates).
+    var reconnect = BRIEF.reconnect && !(BRIEF.view && BRIEF.view.state === 'off');
+    if (!reconnect) {
+      if (BRIEF.view && BRIEF.view.state === 'off' ? since < BRIEF_OFF_RECHECK_MS : key === BRIEF.sentKey && since < BRIEF_RESEND_MS) return;
+      // 7.0.1: with the live stream Today repaints on every session move, so a changed Today asks at most once a minute
+      // (Refresh asks at once). Without it, 7.0.0's rule above is the only one.
+      if (typeof liveOn === 'function' && liveOn() && since < BRIEF_LIVE_GAP_MS) return;
+    }
+    BRIEF.reconnect = false;
+    if (reconnect) body.reason = 'reconnect';
     BRIEF.inflight = true; BRIEF.sentKey = key; BRIEF.sentAt = Date.now();
-    api('/api/today/brief', { method: 'POST', body: body, timeoutMs: 45000 }).then(function (v) {
+    var ask = function (b) { return api('/api/today/brief', { method: 'POST', body: b, timeoutMs: 45000 }); };
+    ask(body).catch(function (err) {
+      // A server before 7.0.5 refuses the unknown `reason` (400 invalid_today_brief): ask it the ordinary way.
+      if (!(reconnect && err && err.status === 400 && err.code === 'invalid_today_brief')) throw err;
+      var again = {};
+      Object.keys(body).forEach(function (k) { if (k !== 'reason') again[k] = body[k]; });
+      return ask(again);
+    }).then(function (v) {
       BRIEF.view = v && typeof v === 'object' ? v : null;
     }, function () { /* keep what was shown: the counts line or the last summary */ }).then(function () {
       BRIEF.inflight = false;
