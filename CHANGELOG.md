@@ -1,3 +1,25 @@
+## Unreleased (live state, web)
+
+Control Web half of 7.0.1 live state (branch `claude/live-state-web`). Reads `GET /api/events` from the server half (`claude/live-state-server`, `docs/live-events-contract.md`). Control Web only; no glasses, phone or Control update is needed.
+
+**Default-on changes (with a server that has `/api/events`; `COS_WEB_LIVE_EVENTS=0` on the server, or a server older than 7.0.1, gives exactly the 7.0.0 page):**
+- **One live stream per page.** Control Web opens one `EventSource('/api/events')` per tab and keeps it while the tab is visible. The pet's count and caption, Today's Running rows and counts, Needs you, and the Sessions rows' state chips follow it within about a second, instead of showing the last fetch. Cached data still paints first; the stream corrects it.
+- **A new session counts at once.** When the stream reports a session the list has not shown yet, a placeholder row ("New Claude Code session") joins the counts until the list read it triggers brings the title. A session that starts, ends or replies triggers one list read (debounced to 1 s) for the words.
+- **Running time ticks every second** on Today's Running rows ("Working for 4m 12s"), from the turn's start on the Mac's clock, with no polling. It pauses while the page is hidden.
+- **Reconnecting.** No frame for 30 s, or a dropped stream: Today's header says "Reconnecting", and the session list is read every 5 s until the stream is back. The stream resumes from its last id (`?after=<epoch>.<seq>`), so nothing in between is missed.
+- **Coming back** to the tab, from the back-forward cache, or back online: the list is read at once and the stream resumes from its last id. A hidden tab holds no stream and runs no live timer.
+- **Counts say how old they are.** While the page is not live, counts older than 30 s show their age beside Refresh and in the Sessions header ("As of 2 min ago"). Live counts show nothing extra.
+- **Questions.** A change in the server's question set asks the question cards to read at once; the cards' own poll is unchanged and stays the fallback.
+- **Fewer summary asks while live.** With the stream on, Today repaints on every session change, so it asks for a new Today summary at most once a minute (the server still decides). Without the stream, the 7.0.0 rule is unchanged.
+
+**Today Refresh (no switch):**
+- **Refresh** under Today's date (44 px target). It reads every Today source again (sessions, Work, the welcome, the recording, voices and memories), then asks the server for a new summary with `force: true`. The line beside it says "Updating", then "Updated just now".
+- The server's limits are said plainly: "Try again in 20 s" (one refresh per 30 s, counting down), "Daily summary limit reached", or the summary's other pause reasons. With the Today summary switched off, Refresh reads the state only.
+- Settings, Today summary: the description now says Sonnet writes the summary (the server moved from Haiku), and that Refresh asks for a new one at once, at most every 30 seconds.
+- Against a 7.0.0 server Refresh still works: the state is read again, and when that server refuses `force` (400 `invalid_today_brief`) the summary is asked for the ordinary way.
+
+**Unchanged:** every pane behaves as in 7.0.0 when the stream is absent (404, 401, 403 or a non-stream answer). A full server (503 `live_events_capacity`) is retried after 30 s with no fast polling. With no stream, the page tries once more only when it comes back to the screen ten or more minutes later.
+
 ## Unreleased (live state)
 
 Target 7.0.1, private. On 7.0.0 (39d063e) plus a test-only isolation fix (ef71c9c). Server half of "Control Web live state" (plan: operations/personal/wk45_2026/PLAN_control_web_live_state_2026-11-07.md). Miles, 11/07: the pet shows what was running at the last fetch, not now; the session activity, replies and running time should be accurate while caching keeps things fast. The client half (Control Web) is a separate branch.
