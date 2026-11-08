@@ -7,6 +7,8 @@ import { healthRouter, resolveDefaultModel } from './health.js'
 import { getOrCreateSession, setSessionModel } from '../lib/conversation.js'
 import { DEFAULT_MODEL } from '../../shared/model-preference.js'
 
+const PROFILE_ID = 'a7-test-profile'
+
 let server: Server | null = null
 let base = ''
 const ENV = process.env.COS_G2_DEFAULT_MODEL
@@ -31,6 +33,10 @@ describe('resolveDefaultModel (7.0.2 A7)', () => {
     expect(resolveDefaultModel({ env: 'gpt-nonsense' })).toEqual({ preference: DEFAULT_MODEL, source: 'built-in' })
     expect(resolveDefaultModel({ env: 'profile:abc' })).toEqual({ preference: DEFAULT_MODEL, source: 'built-in' })
   })
+  it('a session bound to a key profile: source profile, never named, ahead of the env default (QA W5)', () => {
+    expect(resolveDefaultModel({ sessionProfile: true, env: 'codex-frontier' })).toEqual({ preference: null, source: 'profile' })
+    expect(resolveDefaultModel({ sessionModel: 'opus', sessionProfile: true })).toEqual({ preference: 'opus', source: 'session' })
+  })
 })
 
 describe('/api/models defaultModel (7.0.2 A7)', () => {
@@ -52,5 +58,8 @@ describe('/api/models defaultModel (7.0.2 A7)', () => {
     expect(body.defaultModel).toEqual({ preference: 'opus', source: 'session' })
     const bad = await (await fetch(`${base}/api/models?sessionId=${encodeURIComponent('../x y')}`)).json() as any
     expect(bad.defaultModel).toEqual({ preference: 'codex-frontier', source: 'env' })
+    setSessionModel(sid, `profile:${PROFILE_ID}` as any)
+    const bound = await (await fetch(`${base}/api/models?sessionId=${encodeURIComponent(sid)}`)).json() as any
+    expect(bound.defaultModel).toEqual({ preference: null, source: 'profile' })
   }, 20_000)
 })

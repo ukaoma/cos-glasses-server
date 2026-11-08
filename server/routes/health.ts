@@ -59,7 +59,8 @@ import {
 import { isMediaProcessingReady } from '../lib/image-safety.js'
 import { DEFAULT_MODEL, type ModelPreference } from '../../shared/model-preference.js'
 import { closedEnvDefaultModel } from '../lib/key-profile-routing.js'
-import { getSessionModel } from '../lib/conversation.js'
+import { getSessionBinding, getSessionModel } from '../lib/conversation.js'
+import { isProfilePreference } from '../../shared/key-preference.js'
 import {
   MAX_OTHER_MEDIA_BYTES,
   MAX_VIDEO_MEDIA_BYTES,
@@ -636,18 +637,23 @@ function crashLoopParkingHealth(): { enabled: boolean; parked: number } {
  * model, so the request step only names a model a caller passes in. `source` says which step won.
  * A slot name only: never a key profile (closedEnvDefaultModel and getSessionModel are closed).
  */
-export type DefaultModelSource = 'request' | 'session' | 'env' | 'built-in'
-export function resolveDefaultModel(input: { requested?: ModelPreference | null; sessionModel?: ModelPreference | null; env?: string | undefined }): { preference: ModelPreference; source: DefaultModelSource } {
+export type DefaultModelSource = 'request' | 'session' | 'profile' | 'env' | 'built-in'
+/** `preference` is null only for `profile`: the session is bound to a key profile, never named here (plan 5.2). */
+export function resolveDefaultModel(input: { requested?: ModelPreference | null; sessionModel?: ModelPreference | null; sessionProfile?: boolean; env?: string | undefined }): { preference: ModelPreference | null; source: DefaultModelSource } {
   if (input.requested) return { preference: input.requested, source: 'request' }
   if (input.sessionModel) return { preference: input.sessionModel, source: 'session' }
+  // model-router routes a session bound to a profile through that profile when the request names no model.
+  if (input.sessionProfile) return { preference: null, source: 'profile' }
   const env = closedEnvDefaultModel(input.env)
   if (env) return { preference: env, source: 'env' }
   return { preference: DEFAULT_MODEL, source: 'built-in' }
 }
 // A session id is only looked up in the in-memory session map (an unknown id reads null), so nothing else is checked.
-function defaultModelField(sessionQuery: unknown): { preference: ModelPreference; source: DefaultModelSource } {
-  const sessionModel = typeof sessionQuery === 'string' && sessionQuery.length <= 128 ? getSessionModel(sessionQuery) : null
-  return resolveDefaultModel({ sessionModel, env: process.env.COS_G2_DEFAULT_MODEL })
+function defaultModelField(sessionQuery: unknown): { preference: ModelPreference | null; source: DefaultModelSource } {
+  const sid = typeof sessionQuery === 'string' && sessionQuery.length <= 128 ? sessionQuery : ''
+  const sessionModel = sid ? getSessionModel(sid) : null
+  const sessionProfile = !!sid && !sessionModel && isProfilePreference(getSessionBinding(sid))
+  return resolveDefaultModel({ sessionModel, sessionProfile, env: process.env.COS_G2_DEFAULT_MODEL })
 }
 
 // Stable app slots backed by Codex + Cursor live catalogs. Authenticated by
