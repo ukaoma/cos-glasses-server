@@ -4,7 +4,7 @@
  * Codex shapes), the real projection, a fake media store. The fixture root has a space and a dot component.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentSessionOutputImages, sentUserFiles } from './agent-session-output-images.js'
@@ -199,7 +199,7 @@ describe('load (PLAN 7, section 11): 20 cards in one reader', () => {
     const [turn] = await f.turns()
     const ids = turn.outputLinks!.map(l => l.id)
     const all = await Promise.all(ids.map(id => f.service.previewFile('claude', 'session', id)))
-    expect(all.map(r => r.status).sort()).toEqual(['ok', 'ok', 'unavailable'])
+    expect(all.map(r => r.status).sort(), 'the third is busy (503 previews_busy), which the web retries').toEqual(['busy', 'ok', 'ok'])
   })
 })
 
@@ -223,5 +223,24 @@ describe('sent files: JSON-string files and the Settings extra folders', () => {
     expect(got).toMatchObject({ status: 'ok', name: 'EVIDENCE.md', kind: 'markdown' })
     // The existing output-files route reads it under the same root.
     expect((await on.service.fileContent('claude', 'session', b.outputFiles![1].id)).status).toBe('ok')
+  })
+})
+
+describe('7.0.4 QA hard-link rule, for link cards too', () => {
+  it('a file with another hard link is a secret card and its id answers secret; a picture is exempt', async () => {
+    const f = fixture(t => [claudeSaid('[notes](notes.md) [shot](shot.png)', t.sub)])
+    writeFileSync(join(f.repo, '.env.hidden-copy'), 'x'); linkSync(join(f.repo, '.env'), join(f.sub, 'notes.md'))
+    writeFileSync(join(f.sub, 'shot.png'), 'png'); linkSync(join(f.sub, 'shot.png'), join(f.home, 'elsewhere', 'shot-link.png'))
+    const [turn] = await f.turns()
+    expect(turn.outputLinks!.map(l => [l.name, l.state, l.reason ?? ''])).toEqual([['notes.md', 'unavailable', 'secret_file'], ['shot.png', 'available', '']])
+    expect(turn.outputLinks![0].notice).toBe('Not shown: this file may hold secrets')
+  })
+  it('a file that gains a hard link after its card was made is refused when opened', async () => {
+    const f = fixture(() => [claudeSaid('[plan](operations/personal/wk45_2026/PLAN.md)')])
+    const [turn] = await f.turns()
+    const id = turn.outputLinks![0].id
+    expect((await f.service.previewFile('claude', 'session', id)).status).toBe('ok')
+    linkSync(join(f.sub, 'PLAN.md'), join(f.home, 'elsewhere', 'PLAN-copy.md'))
+    expect((await f.service.previewFile('claude', 'session', id)).status).toBe('secret')
   })
 })

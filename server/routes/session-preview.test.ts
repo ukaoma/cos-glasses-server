@@ -52,6 +52,7 @@ describe('preview routes', () => {
     const cases: Array<[unknown, string, number, string]> = [
       [{ status: 'not_found' }, url('raw'), 404, 'preview_not_found'],
       [{ status: 'secret' }, url('raw'), 403, 'secret_file_denied'],
+      [{ status: 'busy' }, url('raw'), 503, 'previews_busy'],
       [{ status: 'too_large' }, url('raw'), 413, 'preview_too_large'],
       [{ status: 'folder' }, url('raw'), 404, 'preview_folder'],
       [ok('a.md', 'markdown', 'x'), url('table'), 400, 'preview_part'],
@@ -167,5 +168,18 @@ describe('preview routes', () => {
     expect(partsFor('image', 'a.png')).toEqual(['raw', 'inline', 'thumb'])
     expect(partsFor('folder', 'x')).toEqual([])
     expect(partsFor('sheet', 'a.xlsx')).toEqual(['raw', 'thumb'])
+  })
+})
+
+describe('7.0.4 QA busy answer on the preview routes', () => {
+  it('a busy read and a busy thumbnail answer 503 previews_busy with Retry-After', async () => {
+    const s = await serve({ file: () => ({ status: 'busy' }) })
+    const r = await fetch(s.base + url('text'))
+    expect([r.status, r.headers.get('retry-after'), (await r.json()).error]).toEqual([503, '2', 'previews_busy'])
+    s.close()
+    const t = await serve({ file: () => ok('r.pdf', 'pdf', '%PDF'), thumb: { status: 'busy' } })
+    const rt = await fetch(t.base + url('thumb'))
+    expect([rt.status, rt.headers.get('retry-after'), (await rt.json()).error]).toEqual([503, '2', 'previews_busy'])
+    t.close()
   })
 })

@@ -229,6 +229,9 @@ export function resolveLinkTarget(rawTarget: string, bases: readonly (string | n
       const st = statSync(canonical)
       if (st.isDirectory()) return { state: 'available', path: canonical, root, name, isDir: true }
       if (!st.isFile()) return { state: 'unavailable', reason: 'missing', name }
+      // 7.0.4 QA's sent-file rule: a file with another hard link may be a secret under this name. Pictures are exempt
+      // (they are normalised to a JPEG, never served as they are).
+      if (st.nlink > 1 && !/\.(png|jpe?g|webp|hei[cf]|avif)$/i.test(canonical)) return { state: 'unavailable', reason: 'secret_file', name }
       return { state: 'available', path: canonical, root, name, isDir: false, size: st.size }
     } catch { return { state: 'unavailable', reason: 'missing', name } }
   }

@@ -618,10 +618,11 @@ export class AgentSessionOutputImages {
    */
   async previewFile(provider: AgentProvider, sessionId: string, id: string, peek = false): Promise<
     | { status: 'ok'; bytes: Buffer; name: string; kind: PreviewKind; type: string; line?: number; identity: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }; path: string; root: string; descriptor: SessionOutputLink | SessionOutputFile }
-    | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'folder' }> {
+    | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'folder' | 'busy' }> {
     const isLink = SESSION_OUTPUT_LINK_ID.test(id)
     if (!isLink && !SESSION_OUTPUT_FILE_ID.test(id)) return { status: 'not_found' }
-    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
+    // 7.0.4 QA: at the limit the answer is "busy" (503 previews_busy, retried by the web), never "unavailable".
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'busy' }
     this.readers++
     try {
       const transcript = await this.deps.findSession(provider, sessionId)
@@ -653,6 +654,9 @@ export class AgentSessionOutputImages {
       try {
         const before = await file.stat()
         if (!before.isFile()) return { status: 'unavailable' }
+        // 7.0.4 QA (the sent-file rule, for link cards too): a file with another hard link may be a secret under an
+        // innocent name, which realpath cannot see. Pictures go through the JPEG normaliser and are exempt.
+        if (before.nlink > 1 && !NORMALIZED_IMAGE.test(descriptor.name)) return { status: 'secret' }
         if (before.size > MAX_SHARED_FILE_BYTES) return { status: 'too_large' }
         const identity = { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs }
         const base = { status: 'ok' as const, name: descriptor.name, kind, type, ...(line ? { line } : {}), identity, path, root, descriptor }

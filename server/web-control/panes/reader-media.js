@@ -474,9 +474,16 @@
       if (!blob || !blob.size) throw new Error('No thumbnail');
       revoke(card); card.url = URL.createObjectURL(new Blob([blob], { type: 'image/png' }));
       t.textContent = ''; var img = element('img'); img.alt = ''; img.src = card.url; t.appendChild(img);
-    }).catch(function () {
+    }).catch(function (err) {
+      if (!scope.alive || generation !== card.generation) return;
+      // 7.0.4 QA's busy rule: a busy Mac is asked again after about 1, 2, 4 and 8 seconds, then the card stays plain.
+      if (busy(err) && (card.busyTries || 0) < BUSY_RETRIES) {
+        var delay = busyDelay(card.busyTries || 0); card.busyTries = (card.busyTries || 0) + 1;
+        setTimeout(function () { if (scope.alive && generation === card.generation && !card.url) linkThumb(scope, card, record); }, delay);
+        return;
+      }
       // No Quick Look picture on this Mac: an honest card, never a broken image.
-      if (scope.alive && generation === card.generation) { t.textContent = 'PDF'; t.title = 'No preview image'; }
+      t.textContent = 'PDF'; t.title = 'No preview image';
     });
   }
   function mountLinks(host, scope) {

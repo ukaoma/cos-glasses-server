@@ -82,7 +82,11 @@
     if (f.kind === 'markdown') return 'MD';
     var ext = /\.([a-z0-9]{1,4})$/i.exec(f.name); return ext ? ext[1].toUpperCase() : 'FILE';
   }
+  // 7.0.4 QA, kept in the shared viewer: 503 previews_busy means the Mac is already reading its limit of previews.
+  var BUSY_WORDS = 'Your Mac is busy with other previews. Try again in a moment.';
+  function isBusy(err) { return !!(err && err.status === 503 && err.code === 'previews_busy'); }
   function failWords(err) {
+    if (isBusy(err)) return BUSY_WORDS;
     if (err && err.status === 401) return 'Signed out. Connect this browser again to open the file.';
     if (err && err.status === 403) return err.code === 'secret_file_denied' ? REASONS.secret_file : 'Previews are off. Turn them on in Settings, Privacy.';
     if (err && err.status === 404) return 'This file is no longer in the recent turns. Reopen the session to refresh it.';
@@ -117,7 +121,16 @@
 
   // ── Renderers. `v` is the viewer shell from reader-media.js: { body, acts, alive(), request(url, foreground, type) } ──
   function status(v, words) { v.body.textContent = ''; var p = element('p', 'rm-status', words); p.setAttribute('role', 'status'); v.body.appendChild(p); return p; }
-  function fail(v) { return function (err) { if (v.alive()) status(v, failWords(err)); }; }
+  // A busy Mac, or one that did not answer, gets a "Try again" that draws the same file again; a refusal (secret,
+  // previews off, gone, too large) does not, because trying again cannot change it.
+  function fail(v) {
+    return function (err) {
+      if (!v.alive()) return;
+      status(v, failWords(err));
+      var again = isBusy(err) || !(err && err.status) || err.status === 503;
+      if (again && typeof v.retry === 'function') v.body.appendChild(button('Try again', function () { v.retry(); }));
+    };
+  }
   function textPart(v, scope, f, offset, limit) {
     return v.request(url(scope, f.id, 'text', '&offset=' + (offset || 0) + (limit ? '&limit=' + limit : '')), true, 'json').then(function (d) {
       if (!d || typeof d.text !== 'string') throw new Error('No text');
@@ -288,7 +301,8 @@
 
   function render(v, scope, dto) {
     var f = clean(dto); if (!f) return status(v, OFF);
-    v.body.className += ' pv-body';
+    if ((' ' + v.body.className + ' ').indexOf(' pv-body ') < 0) v.body.className += ' pv-body';
+    v.retry = function () { if (v.alive()) render(v, scope, dto); };
     if (f.state !== 'available') return status(v, REASONS[f.reason] || OFF);
     if (f.kind === 'markdown') return renderMarkdown(v, scope, f);
     if (f.kind === 'text' || f.kind === 'code') return renderCode(v, scope, f);
@@ -299,6 +313,6 @@
     return renderOther(v, scope, f);
   }
 
-  W.preview = { chip: chip, render: render, clean: clean, parts: parts, kindOf: kindOf, url: url, failWords: failWords, reasons: REASONS, isPhone: isPhone };
+  W.preview = { chip: chip, render: render, clean: clean, parts: parts, kindOf: kindOf, url: url, failWords: failWords, isBusy: isBusy, reasons: REASONS, isPhone: isPhone };
   W.registerPane('preview', W.preview);
 })();

@@ -19,6 +19,8 @@ import {
   HTML_PREVIEW_MAX, looksBinary, PREVIEW_PARTS, previewHeaders, tablePage, TEXT_WINDOW_MAX, textWindow, withCspMeta, type PreviewPart,
 } from '../lib/preview-content.js'
 import type { PreviewKind } from '../lib/session-links.js'
+/** The 7.0.4 code (routes/agent-sessions.ts PREVIEWS_BUSY), repeated here so this router needs nothing from that one. */
+const PREVIEWS_BUSY = 'previews_busy'
 
 type Previews = Pick<typeof agentSessionOutputImages, 'previewFile' | 'previewImage'>
 type Thumbs = Pick<typeof previewThumbnailer, 'thumbnail'>
@@ -53,9 +55,10 @@ export function partsFor(kind: PreviewKind, name: string): PreviewPart[] {
 function refuse(res: Response, status: string) {
   const map: Record<string, [number, string]> = {
     not_found: [404, 'preview_not_found'], unavailable: [503, 'preview_unavailable'], too_large: [413, 'preview_too_large'],
-    secret: [403, 'secret_file_denied'], folder: [404, 'preview_folder'], busy: [503, 'preview_busy'],
+    secret: [403, 'secret_file_denied'], folder: [404, 'preview_folder'], busy: [503, PREVIEWS_BUSY],
   }
   const [code, error] = map[status] ?? [503, 'preview_unavailable']
+  if (status === 'busy') res.set('Retry-After', '2')
   res.status(code).json({ error })
 }
 
@@ -110,7 +113,7 @@ export function createSessionPreviewRouter(deps: SessionPreviewDeps = {}): Route
       if (part === 'raw' || part === 'inline') { res.set(previewHeaders(part, found.name)); res.status(200).end(bytes); return }
       if (part === 'thumb') {
         const t = await thumbs.thumbnail(bytes, found.name, found.identity)
-        if (t.status !== 'ok') { res.status(503).json({ error: t.status === 'busy' ? 'preview_busy' : 'thumb_unavailable' }); return }
+        if (t.status !== 'ok') { if (t.status === 'busy') res.set('Retry-After', '2'); res.status(503).json({ error: t.status === 'busy' ? PREVIEWS_BUSY : 'thumb_unavailable' }); return }
         res.set(previewHeaders('thumb', found.name))
         res.sendFile(t.path, { dotfiles: 'allow', headers: { 'Content-Type': 'image/png' } }, err => {
           if (!err) return

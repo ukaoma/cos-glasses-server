@@ -311,3 +311,31 @@ describe('the viewer is readable on its dark overlay (7.0.5 render finding)', ()
     expect(read('./panes/reader-media.js')).toMatch(/\.rm-text\{[^}]*color:var\(--ink\)/)
   })
 })
+
+describe('7.0.4 QA busy words and retry, kept in the shared viewer', () => {
+  it('503 previews_busy says the Mac is busy and offers Try again, which draws the same file again', async () => {
+    const { P } = load()
+    let n = 0
+    const s = shell({ text: () => (++n === 1 ? Object.assign(new Error('x'), { status: 503, code: 'previews_busy' }) : { text: 'ok', offset: 0, end: 2, size: 2, more: false }) })
+    P.render(s.v, scope, card({ name: 'a.txt', kind: 'text', type: 'Text' }))
+    await flush()
+    expect(s.body.textContent).toContain('Your Mac is busy with other previews. Try again in a moment.')
+    s.body.find(e => e.tag === 'button' && e.textContent === 'Try again')!.click()
+    await flush()
+    expect(s.asked).toHaveLength(2)
+    expect(s.body.all().filter(e => e.className === 'pv-line').map(r => r.children[1].textContent)).toEqual(['ok'])
+  })
+  it('a refusal that trying again cannot change has no Try again', async () => {
+    const { P } = load()
+    const s = shell({ text: () => Object.assign(new Error('x'), { status: 403, code: 'previews_off' }) })
+    P.render(s.v, scope, card({ name: 'a.txt', kind: 'text', type: 'Text' }))
+    await flush()
+    expect(s.body.find(e => e.tag === 'button' && e.textContent === 'Try again')).toBeUndefined()
+  })
+  it('a busy card thumbnail is asked again after a back-off, as 7.0.4 thumbnails are', () => {
+    const MEDIA = read('./panes/reader-media.js')
+    const fn = MEDIA.slice(MEDIA.indexOf('function linkThumb('), MEDIA.indexOf('function mountLinks('))
+    expect(fn).toContain('if (busy(err) && (card.busyTries || 0) < BUSY_RETRIES)')
+    expect(fn).toContain('busyDelay(card.busyTries || 0)')
+  })
+})
