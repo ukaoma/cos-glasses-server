@@ -6,27 +6,45 @@
 // Claude links and 826 Codex links carrying `/Users/...` into Control Web. The path names the
 // person, their folders and their projects, and the browser has no use for it: it cannot open it.
 //
-// WHAT. Every absolute local path in a string becomes its base name, keeping a line anchor
+// WHAT. Every private local path in a string becomes its base name, keeping a line anchor
 // (`app.ts:42`, from `:42` or `#L42`). A Markdown link to a local file becomes its words (or the
 // base name when it has none). Web URLs are untouched; relative paths stay as written; a site path
 // such as `/api/x` is not a Mac path and stays too. `redactLocalPathsDeep` applies this to every
 // string in a JSON value, so a field added to the session detail later is covered without a list.
 //
-// WHAT COUNTS AS LOCAL. A path starting at a macOS/Unix top-level directory (`/Users`, `/Volumes`,
-// `/private`, `/var`, `/tmp`, ...), a home shorthand (`~/`, `~name/`, `$HOME/`, `${HOME}/`), a
-// `file://` URL, or an editor URL that opens a file (`vscode://file/...`). Folder names with
-// spaces are followed while the next words are capitalised and reach another `/`
-// (`/Users/x/Ukaoma Chief Of Staff/MU-Chief-Staff/CLAUDE.md` is one path).
+// WHAT COUNTS AS LOCAL (narrowed in 7.0.4 B1). Only places that name this Mac's people and data:
+// a path under `/Users/<name>`, `/Volumes/<name>`, `/private/...` (where /var and /tmp really
+// live) or `/var/folders/...` (per-user temp), a home shorthand (`~/`, `~name/` with a letter
+// first, `$HOME/`, `${HOME}/`), a `file://` URL, or an editor URL that opens a file
+// (`vscode://file/...`). The `.cos-glasses` data folder lives under the home folder, so it is
+// covered. Everything else is ordinary text and stays exactly as written: `/dev/null`,
+// `/usr/bin/env`, `/tmp/out`, `/opt/homebrew`, `/home`, `/run/start`, `~80/100`, `~1/3`, `A/B`,
+// dates and fractions. The first cut treated every Unix top-level folder as private and `~<digit>`
+// as home, and rewrote prose: "Pacing ~80/100 leads" read "Pacing 100 leads", "#!/usr/bin/env
+// node" read "#!env node".
+//
+// SPACES. A folder name with spaces (`/Users/x/Ukaoma Chief Of Staff/MU-Chief-Staff/CLAUDE.md`)
+// is followed across capitalised words, but only when the continuation ends at a real file
+// extension or a `/`. A continuation that ends anywhere else ("/Users/x/out Next Steps: Review
+// A/B results") is not taken, so the words after a path are never eaten. Either way the private
+// head (`/Users/<name>`) is removed.
 
-/** Top-level directories that begin an absolute local path. Case-sensitive, as written by tools. */
-const ROOTS = ['Users', 'Volumes', 'private', 'var', 'tmp', 'opt', 'Applications', 'Library', 'System', 'usr', 'etc', 'home', 'bin', 'sbin', 'dev', 'cores', 'Network', 'nix', 'mnt', 'root', 'srv', 'proc', 'run', 'snap']
 /** Editor and file URL schemes whose target is a file on this Mac. */
 const LOCAL_SCHEMES = ['file', 'vscode', 'vscode-insiders', 'cursor', 'windsurf', 'zed', 'idea', 'subl', 'txmt', 'mvim']
 
 /** Delimiters a path never runs through (besides whitespace) in prose, Markdown and code. */
 const DELIMS = `<>"'\`“”‘’|)\\]}*,;`
 const STOP = `\\s${DELIMS}`
-const HEAD = `(?:~[A-Za-z0-9._-]*|\\$HOME|\\$\\{HOME\\})(?=/)|/(?:${ROOTS.join('|')})(?![A-Za-z0-9_.-])`
+/** A root name in any letter case: APFS is case-insensitive, so `/USERS/jane` is the same folder as `/Users/jane`. */
+function anyCase(word: string): string {
+  return [...word].map(c => /[a-z]/i.test(c) ? `[${c.toUpperCase()}${c.toLowerCase()}]` : c).join('')
+}
+const USERS = anyCase('Users')
+/** A private root, followed by at least one more name: `/Users` alone, or "the /Users folder", is not a path. `//Users` counts. */
+const PRIVATE_ROOT = `/+(?:${USERS}|${anyCase('Volumes')}|${anyCase('private')})(?=/[^${STOP}/])|/+${anyCase('var')}/${anyCase('folders')}(?=/)`
+/** A home shorthand: `~/`, `~name/` (a letter first, so `~80/100` and `~1/3` stay numbers), `$HOME/`, `${HOME}/`. */
+const HOME_SHORTHAND = `(?:~(?:[A-Za-z][A-Za-z0-9._-]*)?|\\$HOME|\\$\\{HOME\\})(?=/)`
+const HEAD = `(?:${HOME_SHORTHAND}|${PRIVATE_ROOT})`
 /** A bare path follows prose punctuation, never a path segment (including ./ or ../). Web spans are handled separately. */
 const BARE = new RegExp(`(^|[^\\p{L}\\p{N}_./-])(${HEAD})([^${STOP}]*)`, 'gu')
 const SCHEME_URL = new RegExp(`\\b(?:${LOCAL_SCHEMES.join('|')}):\\/\\/[^${STOP}]*`, 'gi')
@@ -36,9 +54,12 @@ const WEB_URL = /\bhttps?:\/\/[^\s<>"'`“”‘’]+/gi
 const LINK = /(!?)\[([^\]\n]{0,500})\]\(\s*(<[^>\n]{1,4096}>|[^\s()<>\n][^)\n]{0,4096}?)\s*\)/g
 const LOCAL_DEST = new RegExp(`^(?:${HEAD})`)
 const LOCAL_SCHEME_DEST = new RegExp(`^(?:${LOCAL_SCHEMES.join('|')}):\\/\\/`, 'i')
+/** One word of a folder name with spaces: capitalised or a number, no colon, and not ending a sentence. */
+const SPACED_WORD = `[A-Z0-9](?:[^\\s/:${DELIMS}]*[^\\s/:.!?${DELIMS}])?`
 /** One more space-separated folder name, while the words are capitalised and lead to another `/`. */
-const SPACED_TAIL = new RegExp(`^( (?:[A-Z0-9][^\\s/${DELIMS}]* ){0,4}[A-Z0-9][^\\s/${DELIMS}]*/[^${STOP}]*)`)
-const HAS_EXTENSION = /\.[A-Za-z0-9]{1,10}(?::\d+)*$/
+const SPACED_TAIL = new RegExp(`^( (?:${SPACED_WORD} ){0,4}${SPACED_WORD}/[^${STOP}]*)`)
+/** A real file extension (with a letter in it, so `v1.2` and `10.15` are not), plus any `:line` anchors. */
+const HAS_EXTENSION = /\.(?=[A-Za-z0-9]{0,9}[A-Za-z])[A-Za-z0-9]{1,10}(?::\d+)*$/
 const TRAILING_PUNCTUATION = /[.:!?]+$/
 
 function decoded(value: string): string {
@@ -57,9 +78,18 @@ function baseName(path: string): string {
   }
   const query = value.indexOf('?')
   if (query >= 0) value = value.slice(0, query)
-  const parts = decoded(value).split('/').filter(Boolean)
+  const plain = decoded(value)
+  // The home folder itself names the person: it reads `~`, never its base name.
+  if (/^\/+users\/[^/]+\/?$/i.test(plain)) return '~' + anchor
+  const parts = plain.split('/').filter(Boolean)
   const last = parts.pop() || '~'
   return /:\d+$/.test(last) ? last : last + anchor
+}
+
+/** A path that may be carried across spaces: it ends at a real file extension or at a folder separator. */
+function endsAtFileOrFolder(path: string): boolean {
+  const core = path.replace(TRAILING_PUNCTUATION, '')
+  return core.endsWith('/') || HAS_EXTENSION.test(core)
 }
 
 function redactBare(text: string): string {
@@ -73,11 +103,19 @@ function redactBare(text: string): string {
     if (start < cursor) continue
     let path = head + body
     let end = start + match.length
-    for (let guard = 0; guard < 8 && !HAS_EXTENSION.test(path); guard++) {
-      const tail = SPACED_TAIL.exec(text.slice(end))
-      if (!tail) break
-      path += tail[1]
-      end += tail[1].length
+    // A folder name with spaces is followed only when the continuation ends at a file extension or a `/`.
+    // A path that already ends that way, or that ends a sentence, is never extended.
+    if (!endsAtFileOrFolder(path) && !TRAILING_PUNCTUATION.test(path)) {
+      let probe = path
+      let probeEnd = end
+      for (let guard = 0; guard < 8; guard++) {
+        const tail = SPACED_TAIL.exec(text.slice(probeEnd))
+        if (!tail) break
+        probe += tail[1]
+        probeEnd += tail[1].length
+        if (endsAtFileOrFolder(probe)) { path = probe; end = probeEnd; break }
+        if (TRAILING_PUNCTUATION.test(probe)) break
+      }
     }
     const punctuation = TRAILING_PUNCTUATION.exec(path)?.[0] ?? ''
     const core = punctuation ? path.slice(0, -punctuation.length) : path
@@ -108,7 +146,7 @@ function redactOutsideWebURLs(text: string): string {
       }
     }
     try { new URL(token) } catch { continue }
-    pieces.push(redact(text.slice(cursor, match.index)), token)
+    pieces.push(redact(text.slice(cursor, match.index)), hideHomeInUrl(token))
     cursor = match.index + token.length
     WEB_URL.lastIndex = cursor
   }
@@ -116,10 +154,72 @@ function redactOutsideWebURLs(text: string): string {
   return pieces.join('')
 }
 
-/** Every absolute local path in this text, as its base name. Web URLs and relative paths are untouched. */
+/**
+ * `/Users/<name>` (any letter case, any number of leading slashes) becomes `~`; the rest of the path is kept. Used where a
+ * base name would change what the text means: code spans and code blocks (a copied command must still run), a waiting
+ * permission's command, an approval card, and the query of a web URL. `/Users/Shared` is not a person's home and stays.
+ */
+const HOME_FOLDER = new RegExp(`(^|[^\\p{L}\\p{N}_.-])/+${USERS}/(?!Shared(?:/|$|[${STOP}]))[^${STOP}/&?#=]+`, 'gu')
+/** The same inside a URL query, percent-encoded: `%2FUsers%2Fjane` is `~`. */
+const ENCODED_HOME_FOLDER = /(?:%2F)+users%2F(?!shared(?:%2F|[&#\s]|$))[^%&?#=\s/]+/gi
+
+export function hideHomeFolder(text: string): string {
+  if (typeof text !== 'string' || !text) return text
+  return text.replace(HOME_FOLDER, '$1~')
+}
+
+/** A web URL exactly as written, except a home folder in its query or fragment (`?path=/Users/jane/a.pdf`). */
+function hideHomeInUrl(url: string): string {
+  const at = url.search(/[?#]/)
+  if (at < 0) return url
+  return url.slice(0, at) + hideHomeFolder(url.slice(at)).replace(ENCODED_HOME_FOLDER, '~')
+}
+
+/**
+ * Code in Markdown: fenced blocks (``` or ~~~, closed by a fence of the same kind at least as long, or by the end of the
+ * text) and inline code spans (a run of backticks closed by a run of the same length, within one paragraph).
+ */
+function codeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = []
+  let open: { start: number; mark: string; length: number } | null = null
+  for (let pos = 0; pos <= text.length;) {
+    const newline = text.indexOf('\n', pos)
+    const end = newline < 0 ? text.length : newline
+    const line = text.slice(pos, end)
+    if (!open) {
+      const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line)
+      if (fence && !(fence[1][0] === '`' && line.slice(fence[0].length).includes('`'))) open = { start: pos, mark: fence[1][0]!, length: fence[1].length }
+    } else {
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)
+      if (close && close[1][0] === open.mark && close[1].length >= open.length) { ranges.push([open.start, end]); open = null }
+    }
+    if (newline < 0) break
+    pos = newline + 1
+  }
+  if (open) ranges.push([open.start, text.length])
+  const inFence = (at: number) => ranges.some(([s, e]) => at >= s && at < e)
+  const INLINE = /(?<!`)(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g
+  const spans: Array<[number, number]> = []
+  for (let m = INLINE.exec(text); m; m = INLINE.exec(text)) {
+    if (inFence(m.index)) { INLINE.lastIndex = m.index + 1; continue }
+    if (/\n[ \t]*\n/.test(m[2]!)) { INLINE.lastIndex = m.index + m[1]!.length; continue }
+    spans.push([m.index, m.index + m[0].length])
+  }
+  return [...ranges, ...spans].sort((x, y) => x[0] - y[0])
+}
+
+/**
+ * Every private local path in this text. In prose a path becomes its base name (Markdown links to a local file become
+ * their words). In code spans and code blocks only the home folder is hidden (`/Users/<name>` reads `~`), so a copied
+ * command still means what it said. Web URLs are untouched except a home folder in their query; relative paths, site
+ * paths and system paths (`/dev/null`, `/usr/bin/env`, `/tmp/x`) stay as written.
+ */
 export function redactLocalPaths(text: string): string {
   if (typeof text !== 'string' || !text) return text
-  let out = text.replace(LINK, (match, _bang: string, words: string, rawDest: string) => {
+  const before = codeRanges(text)
+  const inCode = (at: number) => before.some(([s, e]) => at >= s && at < e)
+  const linked = text.replace(LINK, (match: string, _bang: string, words: string, rawDest: string, offset: number) => {
+    if (inCode(offset)) return match // a link written inside code is code
     const dest = rawDest.startsWith('<') ? rawDest.slice(1, -1).trim() : rawDest.trim()
     let target: string | null = null
     if (LOCAL_SCHEME_DEST.test(dest)) target = dest.replace(LOCAL_SCHEME_DEST, '').replace(/^[^/]*\//, '/')
@@ -132,17 +232,44 @@ export function redactLocalPaths(text: string): string {
     const anchor = /:\d+$/.exec(name)?.[0] ?? ''
     return anchor && !/:\d+$/.test(label) && label.split('/').pop() === name.slice(0, -anchor.length) ? label + anchor : label
   })
-  return redactOutsideWebURLs(out)
+  const pieces: string[] = []
+  let cursor = 0
+  for (const [start, end] of codeRanges(linked)) {
+    if (start < cursor) continue
+    pieces.push(redactOutsideWebURLs(linked.slice(cursor, start)), hideHomeFolder(linked.slice(start, end)))
+    cursor = end
+  }
+  pieces.push(redactOutsideWebURLs(linked.slice(cursor)))
+  return pieces.join('')
+}
+
+/** Fields whose words are a command or a reason a client acts on: paths are kept whole, only the home folder is hidden. */
+export const COMMAND_KEYS: ReadonlySet<string> = new Set(['waiting_detail', 'failure'])
+
+export interface RedactDeepOptions {
+  /** Keys whose strings keep their paths whole, with only the home folder hidden (default `COMMAND_KEYS`). */
+  commandKeys?: ReadonlySet<string>
+  /** Keys whose strings are sent exactly as written (an answer names an option by its exact label). */
+  verbatimKeys?: ReadonlySet<string>
+  /** Every string keeps its paths whole, with only the home folder hidden (approval and question cards). */
+  homeOnly?: boolean
 }
 
 /** A copy of this JSON value with every string redacted (keys are left alone). */
-export function redactLocalPathsDeep<T>(value: T): T {
-  if (typeof value === 'string') return redactLocalPaths(value) as T
-  if (Array.isArray(value)) return value.map(item => redactLocalPathsDeep(item)) as T
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = redactLocalPathsDeep(item)
-    return out as T
+export function redactLocalPathsDeep<T>(value: T, options: RedactDeepOptions = {}): T {
+  const commandKeys = options.commandKeys ?? COMMAND_KEYS
+  const verbatimKeys = options.verbatimKeys ?? new Set<string>()
+  const walk = (item: unknown, homeOnly: boolean): unknown => {
+    if (typeof item === 'string') return homeOnly ? hideHomeFolder(item) : redactLocalPaths(item)
+    if (Array.isArray(item)) return item.map(entry => walk(entry, homeOnly))
+    if (item && typeof item === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const [key, entry] of Object.entries(item as Record<string, unknown>)) {
+        out[key] = verbatimKeys.has(key) ? entry : walk(entry, homeOnly || commandKeys.has(key))
+      }
+      return out
+    }
+    return item
   }
-  return value
+  return walk(value, options.homeOnly === true) as T
 }

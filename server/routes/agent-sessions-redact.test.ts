@@ -16,8 +16,11 @@ afterAll(() => { for (const p of temps.splice(0)) rmSync(p, { recursive: true, f
 const closers: Array<() => Promise<void>> = []
 afterEach(async () => { await Promise.all(closers.splice(0).map(close => close())) })
 
-/** Independent of the module under test: an absolute local path, a home shorthand, or a file or editor URL. */
-const ABSOLUTE = /(?:^|[^A-Za-z0-9.:/-])\/(?:Users|Volumes|private|var|tmp|opt|Applications|Library|System|usr|etc|home)(?:\/|\b)|~[A-Za-z0-9._-]*\/|\$\{?HOME\}?\/|\bfile:\/\/|\bvscode:\/\//g
+/**
+ * Independent of the module under test: a person's home folder anywhere (prose or code), or a file or editor URL. Code
+ * spans keep system paths and show the home folder as `~` (7.0.4 W5), so `/private/tmp` in backticks is allowed.
+ */
+const ABSOLUTE = /\/+users\/(?!shared\b)|\bfile:\/\/|\bvscode:\/\//gi
 const WEB = ['https://github.com/example/repo/pull/12', 'https://example.com/docs/setup#step-2', 'http://localhost:3141/api/health']
 
 const CLAUDE_ID = 'aaaaaaaa-1111-4222-8333-444444444444'
@@ -86,6 +89,8 @@ function codexFixture() {
 function assertNoLocalPaths(json: string) {
   expect(json).not.toContain('/Users/')
   expect(json.match(ABSOLUTE) ?? []).toEqual([])
+  // Prose paths read as base names: no private root survives outside a code span.
+  expect(json.replace(/`[^`]*`/g, '').match(/(?:^|[^A-Za-z0-9.:/-])\/+(?:Users|Volumes|private)\/|~\//gi) ?? []).toEqual([])
 }
 
 describe('session detail: no absolute local path in any field', () => {
@@ -99,7 +104,7 @@ describe('session detail: no absolute local path in any field', () => {
     const body = JSON.parse(json) as { latest_reply: string; first_prompt: string; recent_turns: Array<{ text: string; outputFiles?: Array<{ name: string }> }> }
     // Base names with the line anchor, the web untouched, relative paths as written.
     const reply = body.recent_turns.map(x => x.text).join('\n')
-    for (const want of ['app.ts:42', 'routes.ts:9', 'notes.md.', '`out.log`', 'a.ts:3', 'b.md', '[guide](docs/guide.md)', 'server/lib/x.ts:12', ...WEB]) expect(reply, want).toContain(want)
+    for (const want of ['app.ts:42', 'routes.ts:9', 'notes.md.', '`/private/tmp/build/out.log`', 'a.ts:3', 'b.md', '[guide](docs/guide.md)', 'server/lib/x.ts:12', ...WEB]) expect(reply, want).toContain(want)
     expect(body.latest_reply).toContain('Checked app.json.')
     expect(body.latest_reply).toContain(WEB[0])
     // The first prompt is capped by the parser (mid-path here); what is left of the path is a base name.
@@ -114,7 +119,7 @@ describe('session detail: no absolute local path in any field', () => {
     const json = await res.text()
     assertNoLocalPaths(json)
     const body = JSON.parse(json) as { latest_reply: string; recent_turns: Array<{ text: string }> }
-    for (const want of ['server/app.ts:42', 'app.test.ts:7', '`x.json`', 'config.toml', 'server/lib/x.ts:12', '[guide](docs/guide.md)', WEB[0], WEB[1]]) expect(body.latest_reply, want).toContain(want)
+    for (const want of ['server/app.ts:42', 'app.test.ts:7', '`~/Documents/GitHub/repo/.config/x.json`', 'config.toml', 'server/lib/x.ts:12', '[guide](docs/guide.md)', WEB[0], WEB[1]]) expect(body.latest_reply, want).toContain(want)
     expect(body.recent_turns.map(x => x.text).join('\n')).toContain('Audit app.ts')
   })
 })
