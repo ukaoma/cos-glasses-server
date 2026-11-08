@@ -186,7 +186,8 @@ describe('the reader and Today hand file DTOs to the viewer', () => {
   })
   it('a turn with only files still mounts the viewer; Today keeps the files of its last reply', () => {
     // 11/08: tool-result image slots mount the viewer too.
-    expect(APP).toContain("if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length && !host.querySelectorAll('[data-reader-tools]').length) { readerImagesStop(host); return; }")
+    // Preview engine phase 1: a turn with only link cards mounts the viewer too.
+    expect(APP).toContain("if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length && !host.querySelectorAll('[data-reader-tools]').length && !host.querySelectorAll('[data-reader-links]').length) { readerImagesStop(host); return; }")
     expect(TODAY).toContain('outputImages: lastA.outputImages, outputFiles: lastA.outputFiles,')
   })
 })

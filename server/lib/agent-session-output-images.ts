@@ -12,9 +12,14 @@ import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './attached-
 import { readComposerFacts } from './cursor-session-model.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
 import { getMediaStore, STAGED_TTL_MS, type MediaStore } from './media-store.js'
+import { previewFoldersSetting } from './preview-folders-setting.js'
 import { isDeniedSecretPath, SECRET_FILE_NOTICE } from './secret-path-guard.js'
 import { previewErrorCode } from './preview-error-code.js'
 import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn, type SessionTurnProjection } from './agent-session-turns.js'
+import {
+  authorizedRoot, insideRoot, isLocalTarget, LINK_CARDS_PER_TURN, linkLabel, linkTokens, previewKind, resolveLinkTarget, SESSION_OUTPUT_LINK_ID,
+  splitLineAnchor, type LinkRoots, type PreviewKind, type SessionOutputLink,
+} from './session-links.js'
 import {
   decodeToolImage, estimateBytes, MAX_TOOL_IMAGE_BYTES, promptImages, SESSION_TOOL_IMAGE_ID, TOOL_IMAGES_PER_TURN, toolResultImages, toolUsesOf,
   type FoundToolImage, type SessionToolImage, type ToolUseMeta,
@@ -69,9 +74,11 @@ const SOURCES_MAX = (SESSION_TURNS_MAX + 1) * Math.max(OUTPUT_IMAGES_PER_TURN, S
 interface Candidate { source: string; label: string }
 interface Source { candidate: Candidate; root: string | null; descriptor: SessionOutputImage }
 interface FileSource { path: string | null; root: string | null; file: SessionOutputFile }
+/** A link card's authorized source (preview engine phase 1). Kept only for an available card. */
+interface LinkSource { path: string; root: string; link: SessionOutputLink }
 /** Where a tool-result image's bytes are. Embedded bytes are kept only for the one id a content request names. */
 type ToolSource = { kind: 'embedded'; mediaType: string; data: string } | { kind: 'path'; source: string; root: string; label: string }
-interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource>; toolSources: Map<string, ToolSource> }
+interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource>; toolSources: Map<string, ToolSource>; links: Map<string, LinkSource> }
 /** Tool calls remembered per read, so a result row can be labelled by the call that asked for it. */
 const TOOL_USES_MAX = 4096
 interface MediaCache { id: string; at: number }
@@ -84,6 +91,8 @@ export interface OutputImageDeps {
   now(): number
   /** The home directory the broad-root denylist is built from (tests inject a scratch home). */
   home?(): string
+  /** Settings extra folders COS may preview from (lib/preview-folders-setting.ts), canonical. Read on every context. */
+  extraRoots?(): readonly string[]
 }
 
 function assistantText(provider: AgentProvider, row: Record<string, unknown>): string | null {
@@ -259,9 +268,12 @@ export function sentUserFiles(provider: AgentProvider, row: Record<string, unkno
     const b = block as Record<string, unknown>
     if (b.type !== 'tool_use' || b.name !== 'SendUserFile' || !b.input || typeof b.input !== 'object') continue
     const input = b.input as Record<string, unknown>
-    if (!Array.isArray(input.files)) continue
+    // Preview engine phase 1: 11 of 1,112 real calls sent `files` as a JSON string ("[\"a.png\"]"). Parse it, then the same checks.
+    let list: unknown = input.files
+    if (typeof list === 'string' && list.length <= 64 * 1024) { try { list = JSON.parse(list) } catch { list = null } }
+    if (!Array.isArray(list)) continue
     let any = false
-    for (const f of input.files) {
+    for (const f of list) {
       if (typeof f !== 'string' || !f || f.length > 4096 || /[\u0000-\u001f\u007f]/.test(f)) continue
       files.push(f); any = true
     }
@@ -298,7 +310,18 @@ export class AgentSessionOutputImages {
     const sources = new Map<string, Source>()
     const transcriptKey = digest(resolve(transcript))
     const files = new Map<string, FileSource>()
+    const home = this.deps.home?.() ?? homedir()
+    let extraRoots: readonly string[] = []
+    try { extraRoots = this.deps.extraRoots?.() ?? [] } catch { extraRoots = [] }
+    const roots: LinkRoots = { workspace: root, extra: extraRoots, home }
+    const links = new Map<string, LinkSource>()
+    // A Codex rollout names its working folder in session_meta and each turn_context, not on the message rows.
+    let codexCwd: string | null = null
     const markdown: SessionTurnProjection = (p, row, turn) => {
+      if (p === 'codex' && (row.type === 'turn_context' || row.type === 'session_meta')) {
+        const cwd = (row.payload as Record<string, unknown> | null)?.cwd
+        if (typeof cwd === 'string' && isAbsolute(cwd)) codexCwd = cwd
+      }
       const raw = assistantText(p, row)
       if (!raw) return turn
       // Prose cleanup can collapse a huge whitespace/code prefix, bringing an unscanned
@@ -307,7 +330,9 @@ export class AgentSessionOutputImages {
       const shortened = raw.length > OUTPUT_IMAGE_SCAN_CHARS
       const scanned = shortened ? raw.slice(0, raw.lastIndexOf('\n', OUTPUT_IMAGE_SCAN_CHARS - 1) + 1) : raw
       const candidates = imageTokens(scanned)
-      if (!candidates.length && !shortened) return turn
+      // Link cards: local links only, never one inside an image token.
+      const linked = linkTokens(scanned).filter(l => isLocalTarget(l.target) && !candidates.some(c => l.start < c.end && c.start < l.end))
+      if (!candidates.length && !linked.length && !shortened) return turn
       const recordKey = digest(JSON.stringify(row))
       const refs = candidates.slice(0, OUTPUT_IMAGES_PER_TURN).map((c, ordinal) => {
         const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, ordinal, c.source])).digest('hex')
@@ -324,15 +349,42 @@ export class AgentSessionOutputImages {
       // Never turn an explicit local image into a browser-visible Mac path. Existing callers
       // without this opt-in projection retain their original text and contract.
       // The preview cap limits DTOs, not redaction: the sixth image is still private.
+      // Link cards (preview engine phase 1): each local link becomes `[words](cos-file:N)`, N its card. The Mac path
+      // never stays in the text, with previews on or off, past the card cap or not. The same target twice is one card.
+      const rowCwd = p === 'claude' ? (typeof row.cwd === 'string' && isAbsolute(row.cwd) ? row.cwd : null) : p === 'codex' ? codexCwd : null
+      const linkRefs: SessionOutputLink[] = [], byTarget = new Map<string, number>()
+      let linkExtra = 0
+      const linkWords = (token: { label: string; target: string }): string => {
+        let n = byTarget.get(token.target)
+        if (n === undefined) {
+          const resolved = resolveLinkTarget(token.target, [rowCwd, root], roots)
+          if (linkRefs.length >= LINK_CARDS_PER_TURN) { linkExtra++; return linkLabel(token.label, resolved.name) }
+          n = linkRefs.length; byTarget.set(token.target, n)
+          linkRefs.push(this.describeLink(provider, sessionId, transcriptKey, recordKey, n, token, resolved, lookupFailed, links))
+        }
+        // Each link keeps its own words; the same target twice shares one card.
+        return '[' + linkLabel(token.label, linkRefs[n].name) + '](cos-file:' + n + ')'
+      }
+      const edits = [
+        ...candidates.map(c => ({ start: c.start, end: c.end, words: () => '[Output image]' })),
+        ...linked.map(l => ({ start: l.start, end: l.end, words: () => linkWords(l) })),
+      ].sort((a, b) => a.start - b.start)
       const parts: string[] = []; let end = 0
-      for (const token of candidates) { parts.push(scanned.slice(end, token.start), '[Output image]'); end = token.end }
+      for (const edit of edits) { parts.push(scanned.slice(end, edit.start), edit.words()); end = edit.end }
       parts.push(scanned.slice(end))
+      if (linkExtra > 0) parts.push('\n\n' + linkExtra + (linkExtra === 1 ? ' more linked file is not shown as a card.' : ' more linked files are not shown as cards.'))
       const omission = '[Reply shortened at the image preview scan limit.]'
-      const text = shortened
+      let text = shortened
         ? [latestAssistantReply(parts.join(''), LATEST_REPLY_MAX - omission.length - 1), omission].filter(Boolean).join('\n')
         : latestAssistantReply(parts.join(''))
+      // The reply cap can cut a card marker in half; keep its words, never a broken marker.
+      text = text.replace(/\[([^\]\n]*)\]\(cos-[^)\s]*…/g, '$1…')
       const at = typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)) ? row.timestamp : undefined
-      return { ...(turn ?? { role: 'assistant' as const, text: '', ...(at ? { at } : {}) }), text, outputImages: refs }
+      return {
+        ...(turn ?? { role: 'assistant' as const, text: '', ...(at ? { at } : {}) }), text,
+        ...(candidates.length || shortened ? { outputImages: refs } : {}),
+        ...(linkRefs.length ? { outputLinks: linkRefs } : {}),
+      }
     }
     const project: SessionTurnProjection = (p, row, turn) => {
       const shaped = markdown(p, row, turn)
@@ -348,16 +400,20 @@ export class AgentSessionOutputImages {
         const remote = /^[a-z][a-z0-9+.-]*:/i.test(written) || written.startsWith('//') || written.startsWith('~')
         const lexical = remote || !cwd ? null : resolve(cwd, written)
         let canonical: string | null = null
-        if (lexical && root !== null) { try { canonical = realpathSync(lexical) } catch { canonical = null } }
+        // Preview engine phase 1: a Settings extra folder is an allowed root too (Miles decision 2). Nothing else is.
+        if (lexical && (root !== null || extraRoots.length)) { try { canonical = realpathSync(lexical) } catch { canonical = null } }
+        const allowRoot = canonical !== null ? authorizedRoot(canonical, roots) : null
+        const outside = root === null && lookupFailed ? 'unavailable' as const : 'outside_workspace' as const
         let reason: SessionOutputFile['reason'] | undefined
         let size: number | undefined
         // 7.0.4 S2: refused by name (as written or as it canonically resolves) before anything else is asked.
         if (secretSource(cwd, written)) reason = 'secret_file'
-        else if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
+        // Preview engine phase 1: with no workspace, a Settings extra folder can still authorize the file.
+        else if (root === null && !extraRoots.length) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
         else if (!lexical) reason = 'outside_workspace'
         // The canonical file decides: a link that leaves the workspace is outside it.
-        else if (canonical !== null && !inside(root, canonical)) reason = 'outside_workspace'
-        else if (canonical === null) reason = inside(root, lexical) ? 'missing' : 'outside_workspace'
+        else if (canonical !== null && !allowRoot) reason = outside
+        else if (canonical === null) reason = authorizedRoot(lexical, roots) ? 'missing' : outside
         else {
           try {
             const st = statSync(canonical)
@@ -373,7 +429,7 @@ export class AgentSessionOutputImages {
           const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'sent', ordinal, written])).digest('hex')
           const descriptor: SessionOutputImage = reason === 'secret_file' ? { id, label: name, ...SECRET } : { id, label: name, state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
           // The canonical path is the source, so the content route's no-symlink check holds for it.
-          sources.delete(id); sources.set(id, { candidate: { source: allowed ? canonical! : written, label: name }, root, descriptor })
+          sources.delete(id); sources.set(id, { candidate: { source: allowed ? canonical! : written, label: name }, root: allowRoot ?? root, descriptor })
           while (sources.size > SOURCES_MAX) sources.delete(sources.keys().next().value!)
           images.push(descriptor)
           return
@@ -381,7 +437,7 @@ export class AgentSessionOutputImages {
         const id = 'af_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'file', ordinal, written])).digest('hex')
         const { kind, type } = sharedFileKind(name)
         const file: SessionOutputFile = reason === 'secret_file' ? { id, name, kind, type, ...SECRET } : { id, name, kind, type, ...(size !== undefined ? { size } : {}), state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
-        files.delete(id); files.set(id, { path: allowed ? canonical : null, root, file })
+        files.delete(id); files.set(id, { path: allowed ? canonical : null, root: allowRoot ?? root, file })
         while (files.size > SOURCES_MAX) files.delete(files.keys().next().value!)
         out.push(file)
       })
@@ -492,11 +548,96 @@ export class AgentSessionOutputImages {
     withTools.reset = () => {
       // readRecentSessionTurns may grow from 2 to 8 to 24 MiB. Each pass must project
       // only its own records, not attach early images to a turn discarded with the smaller window.
-      sources.clear(); files.clear(); toolSources.clear(); uses.clear()
+      sources.clear(); files.clear(); toolSources.clear(); uses.clear(); links.clear()
+      codexCwd = null
       groups = new WeakMap()
       last = null; pending = []; pendingExtra = 0
     }
-    return { project: withTools, sources, files, toolSources }
+    return { project: withTools, sources, files, toolSources, links }
+  }
+
+  /** One link card's descriptor; an available card's canonical source is remembered for the preview route. */
+  private describeLink(provider: AgentProvider, sessionId: string, transcriptKey: string, recordKey: string, ordinal: number,
+    token: { label: string; target: string }, resolved: ReturnType<typeof resolveLinkTarget>, lookupFailed: boolean, links: Map<string, LinkSource>): SessionOutputLink {
+    const id = 'al_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'link', ordinal, token.target])).digest('hex')
+    const { line } = splitLineAnchor(token.target)
+    const name = resolved.name
+    const typed = resolved.state === 'available' && resolved.isDir ? { kind: 'folder' as PreviewKind, type: 'Folder' } : previewKind(name)
+    const link: SessionOutputLink = {
+      id, label: linkLabel(token.label, name), name, kind: typed.kind, type: typed.type,
+      ...(resolved.state === 'available' && resolved.size !== undefined ? { size: resolved.size } : {}),
+      ...(line ? { line } : {}),
+      state: resolved.state,
+      ...(resolved.state === 'unavailable' ? { reason: resolved.reason === 'outside_workspace' && lookupFailed ? 'unavailable' as const : resolved.reason } : {}),
+      ...(resolved.state === 'unavailable' && resolved.reason === 'secret_file' ? { notice: SECRET_FILE_NOTICE } : {}),
+    }
+    if (resolved.state === 'available') {
+      links.delete(id); links.set(id, { path: resolved.path, root: resolved.root, link })
+      while (links.size > SOURCES_MAX) links.delete(links.keys().next().value!)
+    }
+    return link
+  }
+
+  /**
+   * A link card (`al_`) or a sent file (`af_`), re-authorized for the preview route: the id must name a card or file in
+   * the session's newest turns, its canonical path must still be inside the root it was authorized under (the workspace
+   * or a Settings extra folder, read fresh), never a denied secret name, no component a link, and the same file before
+   * and after the read. `peek` reads no bytes (the meta part and image parts).
+   */
+  async previewFile(provider: AgentProvider, sessionId: string, id: string, peek = false): Promise<
+    | { status: 'ok'; bytes: Buffer; name: string; kind: PreviewKind; type: string; line?: number; identity: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }; path: string; root: string; descriptor: SessionOutputLink | SessionOutputFile }
+    | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'folder' }> {
+    const isLink = SESSION_OUTPUT_LINK_ID.test(id)
+    if (!isLink && !SESSION_OUTPUT_FILE_ID.test(id)) return { status: 'not_found' }
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
+    this.readers++
+    try {
+      const transcript = await this.deps.findSession(provider, sessionId)
+      if (!transcript) return { status: 'not_found' }
+      const context = await this.context(provider, sessionId, transcript)
+      const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
+      const descriptor = isLink
+        ? recent.turns.flatMap(t => t.outputLinks ?? []).find(l => l.id === id)
+        : recent.turns.flatMap(t => t.outputFiles ?? []).find(f => f.id === id)
+      if (!descriptor) return { status: 'not_found' }
+      // 7.0.4 S2: an id that names a secret answers 403 secret_file_denied, never bytes.
+      if (descriptor.reason === 'secret_file') return { status: 'secret' }
+      let path: string | null = null, root: string | null = null
+      if (isLink) { const s = context.links.get(id); path = s?.path ?? null; root = s?.root ?? null }
+      else { const s = context.files.get(id); path = s?.path ?? null; root = s?.root ?? null }
+      if (descriptor.state !== 'available' || !path || !root) return { status: 'unavailable' }
+      // The shared deny list, before any byte is read (and for a file sent before the list existed).
+      if (isDeniedSecretPath(path)) return { status: 'secret' }
+      if ((descriptor as SessionOutputLink).kind === 'folder') return { status: 'folder' }
+      if (!insideRoot(root, path) || realpathSync(path) !== path) return { status: 'unavailable' }
+      const { kind, type } = previewKind(descriptor.name)
+      const line = isLink ? (descriptor as SessionOutputLink).line : undefined
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        const before = await file.stat()
+        if (!before.isFile()) return { status: 'unavailable' }
+        if (before.size > MAX_SHARED_FILE_BYTES) return { status: 'too_large' }
+        const identity = { dev: before.dev, ino: before.ino, size: before.size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs }
+        const base = { status: 'ok' as const, name: descriptor.name, kind, type, ...(line ? { line } : {}), identity, path, root, descriptor }
+        if (peek) return { ...base, bytes: Buffer.alloc(0) }
+        const bytes = Buffer.alloc(before.size)
+        let offset = 0
+        while (offset < bytes.length) { const got = await file.read(bytes, offset, bytes.length - offset, offset); if (!got.bytesRead) break; offset += got.bytesRead }
+        const after = await file.stat(), current = statSync(path)
+        if (offset !== bytes.length || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+          || current.dev !== before.dev || current.ino !== before.ino || realpathSync(path) !== path) return { status: 'unavailable' }
+        return { ...base, bytes }
+      } finally { await file.close() }
+    } catch { return { status: 'unavailable' } }
+    finally { this.readers-- }
+  }
+
+  /** A link card or sent file that is a picture, through the same normalizer as output images (a JPEG). */
+  async previewImage(provider: AgentProvider, sessionId: string, id: string, variant: 'thumb' | 'phone') {
+    const found = await this.previewFile(provider, sessionId, id, true)
+    if (found.status !== 'ok') return found
+    if (found.kind !== 'image') return { status: 'unavailable' as const }
+    try { return await this.workspaceImage(id, found.root, found.path, found.name, variant) } catch { return { status: 'unavailable' as const } }
   }
 
   async content(provider: AgentProvider, sessionId: string, imageId: string, variant: 'thumb' | 'phone') {
@@ -669,4 +810,5 @@ export const agentSessionOutputImages = new AgentSessionOutputImages({
   },
   store: getMediaStore,
   secret: randomBytes(32), now: Date.now,
+  extraRoots: () => previewFoldersSetting.read().folders,
 })

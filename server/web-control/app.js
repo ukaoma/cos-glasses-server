@@ -3538,9 +3538,11 @@
   }
   function readerImagesMount(host, r) {
     if (!host || !r) return;
-    if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length && !host.querySelectorAll('[data-reader-tools]').length) { readerImagesStop(host); return; }
+    if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length && !host.querySelectorAll('[data-reader-tools]').length && !host.querySelectorAll('[data-reader-links]').length) { readerImagesStop(host); return; }
     var owner = host.__cosImageOwner = {};
-    ensurePane('readerMedia', 4000).then(function (kit) {
+    // Preview engine phase 1: the shared viewer loads first, so link cards and sent files open in it. If it cannot load,
+    // links stay their words and sent files keep the 6.99.35 viewer.
+    ensurePane('preview', 4000).catch(function () { return null; }).then(function () { return ensurePane('readerMedia', 4000); }).then(function (kit) {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
       if (!kit) throw new Error('Image previews could not load.');
       kit.mount(host, r.provider, r.id);
@@ -3572,7 +3574,7 @@
     out += original ? '## Original request\n\n' + original + '\n\n## Conversation\n\n' : '## Conversation\n\n';
     if (r.more) out += '[Older turns omitted. COS serves the newest ' + turns.length + '. Original request kept.]\n\n';
     turns.forEach(function (t) {
-      var text = String(t.text).trim();
+      var text = String(t.text).trim().replace(/\[([^\]\n]*)\]\(cos-file:\d{1,2}\)/g, '$1');
       if (original && t.role === 'user' && text === original) return;
       out += '**' + (t.role === 'user' ? 'You' : 'Assistant') + '**\n\n' + text + '\n\n';
     });
@@ -3590,9 +3592,16 @@
   // Markdown for an assistant turn (Control renders replies with COSMarkdownView): headings, lists,
   // code, quotes, tables, rules, links. Everything is escaped first, so a reply can never add
   // markup of its own; a link keeps only an http(s) address.
+  // Preview engine phase 1: the server turns a reply's local link into `[words](cos-file:N)`, N its card in the turn's
+  // outputLinks. While a turn with cards renders (sxInline.links), that becomes a slot panes/reader-media.js fills with the
+  // card; anywhere else (a file shown in the viewer, previews off, an older turn) it is just the words.
   function sxInline(s) {
+    var links = sxInline.links;
     var codes = [];
     s = s.replace(/`([^`\n]+)`/g, function (_m, c) { codes.push(c); return '\u0000' + (codes.length - 1) + '\u0000'; });
+    s = s.replace(/\[([^\]\n]*)\]\(cos-file:(\d{1,2})\)/g, function (_m, words, n) {
+      return links && Number(n) < links ? '<span class="rm-link-slot" data-reader-link="' + Number(n) + '">' + words + '</span>' : words;
+    });
     s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
     s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, '$1<em>$2</em>');
@@ -3603,7 +3612,13 @@
   var SX_RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
   var SX_TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
   function sxCells(row) { return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }); }
-  function sxMd(text) {
+  function sxMd(text, links) {
+    // links: the turn's card list. Only a real list turns markers into slots (the count bounds the indexes).
+    var held = sxInline.links;
+    sxInline.links = Array.isArray(links) && links.length ? Math.min(20, links.length) : null;
+    try { return sxMdBody(text); } finally { sxInline.links = held; }
+  }
+  function sxMdBody(text) {
     var lines = esc(String(text || '')).replace(/\r\n?/g, '\n').split('\n');
     var out = [], para = [], i = 0;
     function flush() { if (para.length) { out.push('<p>' + para.map(sxInline).join('<br>') + '</p>'); para = []; } }
@@ -3655,6 +3670,17 @@
   sxMd.unescaped = function (lines) {
     return lines.join('\n').split(/\n\s*\n/).map(function (p) { return '<p>' + p.split('\n').map(sxInline).join('<br>') + '</p>'; }).join('');
   };
+  // The card list a turn's Markdown box carries for panes/reader-media.js, checked here: ids and words only.
+  sxMd.linksAttr = function (turn) {
+    var list = turn && Array.isArray(turn.outputLinks) ? turn.outputLinks.slice(0, 20).map(function (x) {
+      return x && /^al_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable') ? {
+        id: x.id, name: String(x.name || 'File').slice(0, 120), label: String(x.label || '').slice(0, 120), kind: String(x.kind || 'file').slice(0, 20),
+        type: String(x.type || 'File').slice(0, 40), size: typeof x.size === 'number' && x.size >= 0 ? x.size : undefined,
+        line: typeof x.line === 'number' && x.line > 0 ? Math.floor(x.line) : undefined, state: x.state, reason: typeof x.reason === 'string' ? x.reason.slice(0, 30) : undefined
+      } : { id: '', state: 'invalid' };
+    }) : [];
+    return list.length ? ' data-reader-links="' + esc(JSON.stringify(list)) + '"' : '';
+  };
   // Nested lists by indent: a deeper item opens a list inside the open item, a shallower one closes back.
   function sxListBlock(lines, i) {
     var html = '', stack = [];
@@ -3690,7 +3716,7 @@
   // One turn's identity, for telling which turns a refresh brought that the page already shows.
   function sxTurnSig(t) {
     var text = String(t.text || t.content || '').trim();
-    return (String(t.role || '').toLowerCase() === 'user' ? 'u' : 'a') + '|' + (t.at || '') + '|' + text.length + '|' + text.slice(0, 48) + '|' + readerImagesHtml(t);
+    return (String(t.role || '').toLowerCase() === 'user' ? 'u' : 'a') + '|' + (t.at || '') + '|' + text.length + '|' + text.slice(0, 48) + '|' + readerImagesHtml(t) + (sxMd.linksAttr ? sxMd.linksAttr(t) : '');
   }
   function sxTurnHtml(t) {
     var role = String(t.role || '').toLowerCase() === 'user' ? 'user' : 'assistant';
@@ -3701,7 +3727,7 @@
       (when ? '<span class="sx-turn-when">' + esc(when) + '</span>' : '') + '</span>' +
       // A YOU turn shows only its attached images (and the previews-off mark); never a reply's outputs.
       (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' + readerImagesHtml(t, { part: 'user' })
-        : readerImagesHtml(t, { part: 'before' }) + '<div class="sx-md">' + sxMd(text) + '</div>' + readerImagesHtml(t, { part: 'after' })) + '</div>';
+        : readerImagesHtml(t, { part: 'before' }) + '<div class="sx-md"' + (sxMd.linksAttr ? sxMd.linksAttr(t) : '') + '>' + sxMd(text, t.outputLinks) + '</div>' + readerImagesHtml(t, { part: 'after' })) + '</div>';
   }
   // A refresh never rebuilds what you are reading (Miles, /qa: "start to scroll and then it reloads
   // the section"). The server's window slides as a session grows, so the turns the page already
@@ -6001,7 +6027,7 @@
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
     notSent: { rows: notSentRows, line: notSentLine, label: notSentLabel, note: noteNotSent, get: notSentFor },
-    imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop,
+    imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop, linksAttr: function (t) { return sxMd.linksAttr(t); },
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },

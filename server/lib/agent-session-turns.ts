@@ -35,6 +35,7 @@ import {
 } from './agent-session-store.js'
 import type { SessionOutputFile, SessionOutputImage } from './agent-session-output-images.js'
 import type { SessionToolImage } from './agent-session-tool-images.js'
+import type { SessionOutputLink } from './session-links.js'
 import { unwrapPeerMessage } from './session-stream-events.js'
 import { withoutTurnFooter } from './turn-footer.js'
 
@@ -47,6 +48,8 @@ export interface SessionTurn {
   outputImages?: SessionOutputImage[]
   /** Files a Claude session sent with SendUserFile that are not normalized images (6.99.35). Names only, no paths. */
   outputFiles?: SessionOutputFile[]
+  /** Preview engine phase 1: local Markdown links in this reply, as cards. The text carries `[words](cos-file:N)`; base names only, no paths. */
+  outputLinks?: SessionOutputLink[]
   /** Images the session looked at in the step around this turn (tool results), or a prompt's attached images. Opaque ids, no bytes, no paths. */
   toolImages?: SessionToolImage[]
   /** Images in that step past TOOL_IMAGES_PER_TURN: counted, never given an id. */

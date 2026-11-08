@@ -57,9 +57,10 @@
       })(job);
     }
   }
-  function imageRequest(url, valid, foreground) {
+  // type 'json' (preview engine phase 1): a text window or table page, parsed. Anything else is a blob.
+  function imageRequest(url, valid, foreground, type) {
     return new Promise(function (resolve, reject) {
-      var job = { valid: valid, resolve: resolve, reject: reject, run: function () { return W.api(url, { responseType: 'blob', timeoutMs: 20000 }); } };
+      var job = { valid: valid, resolve: resolve, reject: reject, run: function () { return W.api(url, type === 'json' ? { timeoutMs: 20000 } : { responseType: 'blob', timeoutMs: 20000 }); } };
       if (foreground) requests.unshift(job); else requests.push(job);
       pump();
     });
@@ -195,11 +196,13 @@
     var slots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-images]'));
     var fileSlots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-files]'));
     var toolSlots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-tools]'));
+    var linkSlots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-links]'));
     scope.records.forEach(function (record, slot) {
-      if (slots.indexOf(slot) < 0 && fileSlots.indexOf(slot) < 0 && toolSlots.indexOf(slot) < 0) { clearRecord(scope, record); scope.records.delete(slot); }
+      if (slots.indexOf(slot) < 0 && fileSlots.indexOf(slot) < 0 && toolSlots.indexOf(slot) < 0 && linkSlots.indexOf(slot) < 0) { clearRecord(scope, record); scope.records.delete(slot); }
     });
     mountFiles(host, scope);
     mountTools(host, scope, toolSlots);
+    mountLinks(host, scope);
     slots.forEach(function (slot) {
       if (scope.records.has(slot)) return;
       var raw; try { raw = JSON.parse(slot.getAttribute('data-reader-images') || '[]'); } catch (_e) { raw = []; }
@@ -234,6 +237,9 @@
       entries.forEach(function (e) {
         if (!e.isIntersecting) return;
         observer.unobserve(e.target);
+        // Preview engine phase 1: a link card's thumbnail loads the same lazy way.
+        var card = e.target.__cosLinkCard;
+        if (card) { delete e.target.__cosLinkCard; linkThumb(scope, card); }
         var item = e.target.__cosToolItem;
         if (!item || item.active === false) return;
         delete e.target.__cosToolItem;
@@ -334,6 +340,9 @@
     return false;
   }
   function fileViewer(scope, f, opener) {
+    // Preview engine phase 1: with the shared viewer loaded, a sent file opens in it (Markdown rendered, code with line
+    // numbers, CSV as a table, HTML full length with a per-open Run scripts). Without it, the 6.99.35 viewer below.
+    if (W.preview && (f.kind === 'text' || f.kind === 'html')) return openPreview(scope, { id: f.id, name: f.name, label: f.name, kind: W.preview.kindOf(f.name), type: f.type, size: f.size, state: f.state }, opener);
     var had = viewer; closeViewer(false, true);
     var el = element('div', 'rm-view'), head = element('div', 'rm-view-head'), body = element('div', 'rm-view-body'), acts = element('div', 'rm-view-acts');
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', f.type + ': ' + f.name);
@@ -382,6 +391,8 @@
     function busy(b, on, words) { b.disabled = on; status.textContent = on ? words : ''; }
     if (f.kind === 'pdf') {
       var openPdfBtn = item.open = button('Open', function () {
+        // Preview engine phase 1: on a desktop a PDF opens inline in the viewer; a phone keeps the new tab.
+        if (W.preview && !W.preview.isPhone()) { openPreview(scope, { id: f.id, name: f.name, label: f.name, kind: 'pdf', type: f.type, size: f.size, state: f.state }, openPdfBtn); return; }
         // The tab opens on the tap (a later window.open is blocked), then shows the PDF when it arrives.
         var pending = null; try { pending = window.open('', '_blank'); } catch (_e) { pending = null; }
         busy(openPdfBtn, true, 'Opening ' + f.name + '…');
@@ -427,6 +438,67 @@
     return slots;
   }
 
-  W.readerMedia = { mount: mount, unmount: unmount, isOpen: function () { return !!viewer; }, close: closeViewer, popIsMine: popIsMine };
+  // ── Preview engine phase 1: link cards and the shared viewer (panes/preview.js draws; this shell owns history) ──
+  function saveRaw(scope, f, failure) {
+    imageRequest(W.preview.url(scope, f.id, 'raw'), function () { return scope.alive; }, true).then(function (b) { saveBlob(b, f.name); }, failure);
+  }
+  function openPreview(scope, dto, opener) {
+    var f = W.preview && W.preview.clean(dto);
+    if (!f) return;
+    // A phone opens a PDF in its own tab, on the tap (a later window.open is blocked).
+    if (f.kind === 'pdf' && W.preview.isPhone()) { try { window.open(W.preview.url(scope, f.id, 'inline'), '_blank', 'noopener'); } catch (_e) {} return; }
+    var had = viewer; closeViewer(false, true);
+    var el = element('div', 'rm-view'), head = element('div', 'rm-view-head'), body = element('div', 'rm-view-body'), acts = element('div', 'rm-view-acts');
+    el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', f.type + ': ' + f.name);
+    var close = button('Close', function () { closeViewer(); });
+    var v = viewer = { el: el, body: body, scope: scope, opener: opener, close: close, url: '', generation: 0 };
+    if (W.preview.parts(f).indexOf('raw') >= 0) acts.appendChild(button('Download', function () { saveRaw(scope, f, function (err) { if (viewer === v) { var st = element('p', 'rm-status', W.preview.failWords(err)); st.setAttribute('role', 'status'); body.appendChild(st); } }); }));
+    acts.appendChild(close);
+    head.appendChild(element('h2', 'rm-view-label', f.name + (f.line ? ':' + f.line : ''))); head.appendChild(acts); el.appendChild(head); el.appendChild(body);
+    takeOver(v, had);
+    document.body.appendChild(el); document.documentElement.classList.add('rm-viewing'); close.focus();
+    var generation = v.generation;
+    W.preview.render({
+      body: body, acts: acts,
+      alive: function () { return viewer === v && v.generation === generation && scope.alive; },
+      request: function (u, foreground, type) { return imageRequest(u, function () { return viewer === v && scope.alive; }, foreground !== false, type); },
+      setUrl: function (u) { revoke(v); v.url = u; }, url: function () { return v.url; }
+    }, scope, f);
+  }
+  // A card where each local link sits: [data-reader-link="N"] inside a [data-reader-links] list from the server.
+  function linkThumb(scope, card, record) {
+    var t = card.thumb; if (!t) return;
+    var generation = ++card.generation;
+    imageRequest(W.preview.url(scope, card.f.id, 'thumb'), function () { return scope.alive && generation === card.generation; }, false).then(function (blob) {
+      if (!scope.alive || generation !== card.generation) return;
+      if (!blob || !blob.size) throw new Error('No thumbnail');
+      revoke(card); card.url = URL.createObjectURL(new Blob([blob], { type: 'image/png' }));
+      t.textContent = ''; var img = element('img'); img.alt = ''; img.src = card.url; t.appendChild(img);
+    }).catch(function () {
+      // No Quick Look picture on this Mac: an honest card, never a broken image.
+      if (scope.alive && generation === card.generation) { t.textContent = 'PDF'; t.title = 'No preview image'; }
+    });
+  }
+  function mountLinks(host, scope) {
+    if (!W.preview) return;
+    Array.prototype.slice.call(host.querySelectorAll('[data-reader-links]')).forEach(function (list) {
+      if (scope.records.has(list)) return;
+      var raw; try { raw = JSON.parse(list.getAttribute('data-reader-links') || '[]'); } catch (_e) { raw = []; }
+      var dtos = Array.isArray(raw) ? raw.slice(0, 20) : [];
+      var record = { items: [] }; scope.records.set(list, record);
+      var io = toolObserver(scope);
+      Array.prototype.slice.call(list.querySelectorAll('[data-reader-link]')).forEach(function (slot) {
+        var n = Math.floor(Number(slot.getAttribute('data-reader-link')));
+        var dto = n >= 0 && n < dtos.length ? dtos[n] : null;
+        var card = dto && W.preview.chip(scope, dto, slot.textContent, function (f, el) { openPreview(scope, f, el); });
+        if (!card) return;
+        record.items.push(card); card.open = card.el;
+        slot.textContent = ''; slot.appendChild(card.el);
+        if (card.thumb) { if (io) { card.el.__cosToolItem = null; card.el.__cosLinkCard = card; io.observe(card.el); } else linkThumb(scope, card, record); }
+      });
+    });
+  }
+
+  W.readerMedia = { mount: mount, unmount: unmount, isOpen: function () { return !!viewer; }, close: closeViewer, popIsMine: popIsMine, openPreview: openPreview };
   W.registerPane('readerMedia', W.readerMedia);
 })();

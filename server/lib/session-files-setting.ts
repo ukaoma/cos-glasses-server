@@ -12,6 +12,8 @@
  *   not this schema fails CLOSED (source 'damaged', off): it may have said off, and a privacy switch never turns itself
  *   back on. The Settings row says so, and saving from it writes a good file again.
  *
+ * Preview engine phase 1: link cards (outputLinks) and GET /api/preview/... ride the same switch, default on.
+ *
  * Off means: GET .../output-images/:id/content, .../output-files/:id/content and .../tool-images/:id/content answer 403 previews_off before any
  * transcript or file is read, and the session detail's turns carry `previewsOff: true` instead of image and file
  * descriptors (withoutPreviews), so not even a name reaches the browser.
@@ -23,6 +25,7 @@ import { dataPath } from './data-dir.js'
 import { readSwitch } from './env-switch.js'
 import { securePrivateDirectory } from './secure-user-config.js'
 import type { SessionTurn } from './agent-session-turns.js'
+import { withoutLinkMarkers } from './session-links.js'
 
 export const SESSION_FILES_SETTINGS_FILE = 'web-session-files-settings.json'
 export type SessionFilesSource = 'env' | 'settings' | 'default' | 'damaged'
@@ -75,8 +78,10 @@ export const sessionFilesSetting = createSessionFilesSetting({ file: () => dataP
 /** Turns with every image and file descriptor (tool-result and prompt images too) removed and `previewsOff` marked where there were any. Pure. */
 export function withoutPreviews(turns: SessionTurn[]): SessionTurn[] {
   return turns.map(t => {
-    if (!t.outputImages?.length && !t.outputFiles?.length && !t.toolImages?.length && !t.toolImagesMore) return t
-    const { outputImages: _i, outputFiles: _f, toolImages: _t, toolImagesMore: _m, ...rest } = t
-    return { ...rest, previewsOff: true as const }
+    if (!t.outputImages?.length && !t.outputFiles?.length && !t.toolImages?.length && !t.toolImagesMore && !t.outputLinks?.length) return t
+    const { outputImages: _i, outputFiles: _f, toolImages: _t, toolImagesMore: _m, outputLinks: _l, ...rest } = t
+    // Preview engine phase 1: link cards ride this switch. Off, a card marker turns back into the link's words, so not
+    // even a count reaches the browser. The Mac path was already gone from the text (session-links.ts).
+    return { ...rest, ...(_l?.length ? { text: withoutLinkMarkers(rest.text) } : {}), previewsOff: true as const }
   })
 }

@@ -88,8 +88,11 @@ import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-
 import { agentSessionOutputImages, sharedFileHeaders } from '../lib/agent-session-output-images.js'
 import { previewErrorCode } from '../lib/preview-error-code.js'
 import { sessionFilesSetting, withoutPreviews } from '../lib/session-files-setting.js'
+import { createSessionPreviewRouter } from './session-preview.js'
 
 export const agentSessionsRouter = Router()
+// Preview engine phase 1: GET /api/preview/agent-sessions/... and /api/preview-folders/settings (routes/session-preview.ts).
+agentSessionsRouter.use(createSessionPreviewRouter())
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value)
