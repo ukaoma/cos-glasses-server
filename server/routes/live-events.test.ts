@@ -121,7 +121,8 @@ describe('GET /api/events', () => {
     expect(r.type).toContain('text/event-stream')
     const snap = await r.waitFor(d => d.kind === 'snapshot')
     expect(r.frames[0]!.data.kind).toBe('snapshot')
-    expect(r.frames[0]!.id).toBeUndefined()
+    // The snapshot carries the id of the state it describes, so the browser's own reconnect resumes from it.
+    expect(r.frames[0]!.id).toBe(`${snap.epoch}.${snap.seq}`)
     expect(snap.sessions.map((s: any) => [s.sessionId, s.state])).toEqual([['aaaaaaaa-1', 'working']])
     expect(r.body.startsWith('retry: 3000\n\n')).toBe(true)
     r.close()

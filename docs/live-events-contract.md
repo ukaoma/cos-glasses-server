@@ -35,8 +35,9 @@ GET /api/events
 ## Frames
 
 Every frame is one `data:` line holding one JSON object. There are **no named SSE events and no comment keepalives**:
-one handler reads every frame, the same rule as the per-session stream. Frames that change state also carry an SSE
-`id:` line so the browser's `EventSource` resends it as `Last-Event-ID` on its own reconnect.
+one handler reads every frame, the same rule as the per-session stream. Frames that change state, and the snapshot, also
+carry an SSE `id:` line so the browser's `EventSource` resends it as `Last-Event-ID` on its own reconnect. `heartbeat`
+and `resume` never carry one.
 
 ```
 id: 1762578000123.42
@@ -57,7 +58,9 @@ Unknown fields must be ignored. New fields may be added without a contract versi
 ### `snapshot`
 
 The whole live model. Sent first on a fresh connect, and on a resume the server cannot honour (see Resume). Replace
-your live model with it.
+your live model with it. **It carries `id: <epoch>.<seq>`** (its `seq` is the newest state it includes, which can be
+0 on a server that has seen nothing yet), so a reconnect that sends it resumes from there instead of asking for
+another whole snapshot.
 
 ```json
 {
@@ -230,5 +233,9 @@ reaches back, else a snapshot).
     treat `ended` as idempotent.
   - Measured on a scratch server: hook event to frame 103 to 232 ms (http and https), a killed session's `ended`
     within about 0.5 s, a clean exit's `ended` within one 2 s tick.
+  - Today refresh: `force: true` on `POST /api/today/brief` landed in 86619e0 (the route takes `force` off the body
+    before the rows are checked, so the 7dbdf7f-era "unknown key" refusal is gone). A non-boolean `force` is 400.
   - Today refresh: Sonnet measured at $0.016 to $0.018 a call (Haiku $0.0008); `retryAfterMs` is whole ms, at most
     30000.
+- 2026-11-07 23:4x: **the `snapshot` frame now carries `id: <epoch>.<seq>`** (asked by the web half). Additive: a
+  client that builds its last id from `epoch` and `seq` sees the same value.

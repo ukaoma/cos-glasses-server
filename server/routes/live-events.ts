@@ -184,9 +184,16 @@ export interface LiveEventsRouterDeps {
   maxBufferBytes?: number
 }
 
-/** The stream frame on the wire: `id:` only on frames the ring remembers, then one `data:` line. */
+/**
+ * The stream frame on the wire: an `id:` line on every frame a resume can start after (the state frames, and the
+ * snapshot, whose seq is the state it describes), then one `data:` line. Heartbeat and resume carry none: they repeat
+ * the newest seq, and an id on them would only restate the last one.
+ *
+ * The snapshot's id means the browser's OWN EventSource reconnect resumes from the snapshot instead of asking for a
+ * second whole snapshot when nothing changed in between.
+ */
 export function frameText(frame: LiveFrame): string {
-  const remembered = frame.kind === 'session' || frame.kind === 'session.removed' || frame.kind === 'questions' || frame.kind === 'queue'
+  const remembered = frame.kind === 'snapshot' || frame.kind === 'session' || frame.kind === 'session.removed' || frame.kind === 'questions' || frame.kind === 'queue'
   return `${remembered ? `id: ${frame.epoch}.${frame.seq}\n` : ''}data: ${JSON.stringify(frame)}\n\n`
 }
 
