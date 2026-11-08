@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 
 // The Today summary on the web (app.js: the BRIEF block, renderStory, askCos). Runs the real app.js text against fakes;
 // the "server" is a function here, so nothing reaches a model or a Mac.
@@ -304,5 +305,59 @@ describe('7.0.5: a reconnect asks at once, once; Summaries per day in Settings',
     expect(SETTINGS).toContain('id="today-brief-cap" data-set="today-brief-cap" min="1" max="100" step="1"')
     expect(SETTINGS).toContain("api('/api/today/brief/settings/cap', { method: 'PUT', body: { dailyCap: wanted } })")
     expect(SETTINGS).toContain('capField.value = String(v.dailyCap)')
+  })
+})
+
+// QA 7.0.5 (agents 1, 2, 4): clearing "Summaries per day" sent Number('') = 0, the server clamped it to 1 and the page
+// said "Saved". Runs the real panes/settings.js in a vm: an empty, non-numeric or below-1 value sends nothing.
+describe('7.0.5 QA: Summaries per day ignores an empty or invalid value', () => {
+  async function loadSettings() {
+    const listeners: Record<string, (e: unknown) => void> = {}
+    const pane = { innerHTML: '', addEventListener: (type: string, fn: (e: unknown) => void) => { listeners[type] = fn } }
+    const status = { textContent: '', classList: { toggle: () => {} } }
+    const puts: unknown[] = [], toasts: string[] = []
+    let loadFn: (() => void) | null = null
+    const W = {
+      $: (id: string) => id === 'pane-settings' ? pane : id === 'settings-status' ? status : null, esc, state: {}, skeletonRows: () => '',
+      toast: (t: string) => { toasts.push(t) }, parseRoute: () => ({ pane: 'settings', args: [] }), go: () => {},
+      registerPane: (_n: string, def: { load: () => void }) => { loadFn = def.load },
+      api: (path: string, opts?: { method?: string; body?: any }) => {
+        if (path === '/api/today/brief/settings/cap' && opts?.method === 'PUT') {
+          puts.push(opts.body)
+          return Promise.resolve({ enabled: true, source: 'settings', dailyCap: Math.min(100, Math.max(1, Math.round(opts.body.dailyCap))) })
+        }
+        if (path === '/api/today/brief/settings') return Promise.resolve({ enabled: true, source: 'settings', dailyCap: 40 })
+        return Promise.reject(new Error('404'))
+      },
+    }
+    const ctx = vm.createContext({ window: { COSWeb: W }, document: {}, console, Promise, Number, String, isFinite })
+    vm.runInContext(SETTINGS, ctx)
+    loadFn!()
+    for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0))
+    expect(pane.innerHTML, 'the row is drawn from the loaded setting').toContain('id="today-brief-cap"')
+    const change = async (value: string) => {
+      const field = { id: 'today-brief-cap', value }
+      listeners.change({ target: field })
+      for (let i = 0; i < 3; i++) await new Promise(r => setTimeout(r, 0))
+      return field
+    }
+    return { change, puts, toasts, status }
+  }
+  it('an emptied field, letters, 0 or a negative sends nothing, keeps the saved number and says why', async () => {
+    const h = await loadSettings()
+    for (const bad of ['', '   ', 'abc', '0', '-3']) {
+      const f = await h.change(bad)
+      expect(f.value, JSON.stringify(bad)).toBe('40')
+    }
+    expect(h.puts).toEqual([])
+    expect(h.toasts).not.toContain('Saved')
+    expect(h.status.textContent).toBe('Type a number from 1 to 100.')
+  })
+  it('a real number still saves, and the field shows what the server kept', async () => {
+    const h = await loadSettings()
+    expect((await h.change('25')).value).toBe('25')
+    expect((await h.change('250')).value).toBe('100')
+    expect(h.puts).toEqual([{ dailyCap: 25 }, { dailyCap: 250 }])
+    expect(h.toasts).toEqual(['Saved', 'Saved'])
   })
 })

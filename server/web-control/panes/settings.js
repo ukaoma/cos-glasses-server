@@ -468,8 +468,14 @@
   pane.addEventListener('change', function (e) {
     // 7.0.5 "Summaries per day": the server clamps to 1 to 100 and answers what it saved; the field shows that.
     if (e.target && e.target.id === 'today-brief-cap') {
-      var capField = e.target, wanted = Number(capField.value);
-      if (!isFinite(wanted)) { say('Type a number from 1 to 100.', true); return; }
+      // QA 7.0.5: an emptied field (or letters, which a number field reads as '') is Number('') = 0, which the server
+      // clamps to 1. So an empty, non-numeric or below-1 value sends nothing, keeps the saved number and says why.
+      var capField = e.target, capRaw = String(capField.value == null ? '' : capField.value).trim(), wanted = Number(capRaw);
+      if (capRaw === '' || !isFinite(wanted) || wanted < 1) {
+        if (S.data && S.data.tb && typeof S.data.tb.dailyCap === 'number') capField.value = String(S.data.tb.dailyCap);
+        say('Type a number from 1 to 100.', true);
+        return;
+      }
       api('/api/today/brief/settings/cap', { method: 'PUT', body: { dailyCap: wanted } }).then(function (v) {
         if (v && typeof v.dailyCap === 'number') { capField.value = String(v.dailyCap); if (S.data && S.data.tb) S.data.tb.dailyCap = v.dailyCap; }
         W.toast('Saved');
