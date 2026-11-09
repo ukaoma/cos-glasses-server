@@ -70,9 +70,10 @@ describe('resolution rules', () => {
     const qa = resolutionCandidate(d, CARD, 'qa', 0)
     const item = toFeedItem(qa, 0)
     expect(item.needsReply).toBe(true)
-    expect(isWaiting(item)).toBe(true)
-    expect(isWaiting({ ...item, state: 'done' })).toBe(false)
-    expect(isWaiting(toFeedItem(c, 0))).toBe(false)
+    // 7.0.9: isWaiting reads the clock the items were made with (0 here), since a question stops waiting after 7 days.
+    expect(isWaiting(item, 0)).toBe(true)
+    expect(isWaiting({ ...item, state: 'done' }, 0)).toBe(false)
+    expect(isWaiting(toFeedItem(c, 0), 0)).toBe(false)
   })
 
   it('reads hook events as turn outcomes and matches held session ids', () => {

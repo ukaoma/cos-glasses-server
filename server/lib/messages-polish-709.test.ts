@@ -12,7 +12,11 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DropStore, InboxFeedStore, type FeedItem } from './drop-store.js'
 import { DropRouter } from './drop-router.js'
-import { DropService } from './drop-service.js'
+import { DropService, WAITING_EXPIRY_DAYS, WAITING_EXPIRY_MS, isWaiting } from './drop-service.js'
+import { randomUUID } from 'node:crypto'
+import express from 'express'
+import type { Server } from 'node:http'
+import { createDropsRouter } from '../routes/drops.js'
 import { fakeWriters, scriptedDecisionClient } from './__fixtures__/drop-fixtures.js'
 import { createJobTrailReader, type JobTrailDraft } from './job-trail.js'
 import { sendMessageDetail } from './session-stream-events.js'
@@ -116,5 +120,82 @@ describe('where a relayed message went (issue 4)', () => {
     expect(sendMessageDetail('')).toBe('')
     expect(sendMessageDetail(42)).toBe('')
     expect(sendMessageDetail('A very long peer session name that will not fit in a detail').length).toBeLessThanOrEqual(40)
+  })
+})
+
+describe('a question stops waiting 7 days after it was asked (Miles 11/08, "Expire after 7 days")', () => {
+  const ASKS = 'Call Dale about the Kickoff deck'   // a scripted router question with three choices
+  function clocked() {
+    const root = dir()
+    const clock = { t: Date.parse('2026-11-01T09:00:00.000Z') }
+    const now = () => new Date(clock.t)
+    const drops = new DropStore(join(root, 'drops')), feed = new InboxFeedStore(join(root, 'inbox'), now)
+    const s = new DropService({ drops, feed, now, writers: fakeWriters(), router: new DropRouter({ client: scriptedDecisionClient(), enabled: () => true }) })
+    cleanup.push(() => { drops.close(); feed.close() })
+    return { s, feed, clock }
+  }
+
+  it('one rule: 7 days, from when it was asked', () => {
+    expect(WAITING_EXPIRY_DAYS).toBe(7)
+    expect(WAITING_EXPIRY_MS).toBe(7 * 86_400_000)
+  })
+
+  it('just under 7 days it waits; at 7 days it moves to older questions, out of asked and the chat part of waiting only', async () => {
+    const h = clocked()
+    const asked = await h.s.submit({ dropId: randomUUID(), text: ASKS, source: 'web' })
+    const q = asked.items.find(i => i.kind === 'question')!
+    // Read the next minute: reading never restarts the clock.
+    h.clock.t += 60_000
+    h.s.markRead(q.id)
+    h.clock.t = Date.parse(q.createdAt) + WAITING_EXPIRY_MS - 1
+    expect(h.s.summary({ yourMove: 5 })).toMatchObject({ asked: 1, archived: 0, waiting: 6, waitingExpiryDays: 7 })
+    expect(h.s.archive().items).toEqual([])
+    expect(h.s.feed().items.find(i => i.id === q.id)).not.toHaveProperty('archived')
+    h.clock.t += 1
+    // Work's part of waiting is unchanged; only the chat's expired question leaves it.
+    expect(h.s.summary({ yourMove: 5 })).toMatchObject({ asked: 0, archived: 1, waiting: 5 })
+    expect(h.s.archive()).toMatchObject({ total: 1, waitingExpiryDays: 7, items: [{ id: q.id, archived: true, kind: 'question', state: 'live' }] })
+    expect(h.s.feed().items.find(i => i.id === q.id)).toMatchObject({ archived: true })
+    // A new question counts as before.
+    const fresh = await h.s.submit({ dropId: randomUUID(), text: ASKS, source: 'web' })
+    expect(h.s.summary()).toMatchObject({ asked: 1, archived: 1 })
+    expect(h.s.archive().items.map(i => i.id)).not.toContain(fresh.items.find(i => i.kind === 'question')!.id)
+  })
+
+  it('an older question still answers, and answering it clears it from older questions', async () => {
+    const h = clocked()
+    const asked = await h.s.submit({ dropId: randomUUID(), text: ASKS, source: 'web' })
+    const q = asked.items.find(i => i.kind === 'question')!
+    h.clock.t += 9 * 86_400_000
+    expect(h.s.archive().total).toBe(1)
+    const answered = await h.s.choose(q.id, asked.drop.choices![0].id)
+    expect(answered.items.find(i => i.id === q.id)).toMatchObject({ state: 'done' })
+    expect(h.s.archive().total).toBe(0)
+    expect(h.s.summary()).toMatchObject({ asked: 0, archived: 0 })
+  })
+
+  it('a needs-reply ping past 7 days dismisses from older questions too, and isWaiting takes the clock it is given', () => {
+    const h = clocked()
+    const [p] = h.feed.insert([item({ needsReply: true, createdAt: new Date(h.clock.t).toISOString() })])
+    expect(isWaiting(p, h.clock.t + WAITING_EXPIRY_MS - 1)).toBe(true)
+    expect(isWaiting(p, h.clock.t + WAITING_EXPIRY_MS)).toBe(false)
+    h.clock.t += WAITING_EXPIRY_MS
+    expect(h.s.archive().total).toBe(1)
+    expect(h.s.dismiss(p.id)).toMatchObject({ asked: 0 })
+    expect(h.s.archive().total).toBe(0)
+  })
+
+  it('GET /api/inbox/archive serves the list', async () => {
+    const h = clocked()
+    await h.s.submit({ dropId: randomUUID(), text: ASKS, source: 'web' })
+    h.clock.t += 8 * 86_400_000
+    const app = express(); app.use(express.json())
+    app.use('/api', createDropsRouter({ enabled: () => true, service: () => h.s }))
+    const server = await new Promise<Server>(r => { const sv = app.listen(0, '127.0.0.1', () => r(sv)) })
+    try {
+      const body = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/inbox/archive`).then(r => r.json()) as any
+      expect(body).toMatchObject({ total: 1, waitingExpiryDays: 7 })
+      expect(body.items[0]).toMatchObject({ kind: 'question', archived: true })
+    } finally { await new Promise<void>(r => server.close(() => r())) }
   })
 })

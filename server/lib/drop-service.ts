@@ -97,7 +97,21 @@ const filesLine = (n: number): string => n === 1 ? 'The file stays here in the C
 const nextAsk = (drop: DropRecord): DropNextAsk =>
   ({ kind: 'ask', prompt: drop.text, ...(drop.attachments?.length ? { attachmentIds: drop.attachments.map(a => a.id) } : {}) })
 /** One item that waits on an answer: a live question, or a live item marked needsReply (6.99.10). */
-export const isWaiting = (i: FeedItem): boolean => i.state === 'live' && (i.kind === 'question' || i.needsReply === true)
+/**
+ * 7.0.9 (Miles 11/08, "Expire after 7 days"): an item that asks for a reply stops waiting on you this long after it
+ * was asked (its own createdAt, never when it was read). It is not answered or closed: it moves to the chat's older
+ * questions (GET /api/inbox/archive), where it can still be read and answered, and answering it there clears it.
+ * The one rule for every count: `asked`, the chat part of `waiting`, `archived`, and the web's split.
+ */
+export const WAITING_EXPIRY_DAYS = 7
+export const WAITING_EXPIRY_MS = WAITING_EXPIRY_DAYS * 86_400_000
+const asksForReply = (i: FeedItem): boolean => i.state === 'live' && (i.kind === 'question' || i.needsReply === true)
+/** How long ago it was asked, in ms; an unreadable time reads as just asked (it keeps waiting rather than vanish). */
+const askedAgo = (i: FeedItem, nowMs: number): number => { const t = Date.parse(i.createdAt); return Number.isFinite(t) ? nowMs - t : 0 }
+export const isWaiting = (i: FeedItem, nowMs: number = Date.now()): boolean => asksForReply(i) && askedAgo(i, nowMs) < WAITING_EXPIRY_MS
+/** Asks for a reply, but was asked WAITING_EXPIRY_DAYS or more ago: shown under older questions, never counted. */
+export const isArchivedQuestion = (i: FeedItem, nowMs: number = Date.now()): boolean => asksForReply(i) && askedAgo(i, nowMs) >= WAITING_EXPIRY_MS
+export const ARCHIVE_LIST_MAX = 200
 const A = {
   undo: { id: 'undo', label: 'Undo' }, move: { id: 'move', label: 'Move' },
   openCard: { id: 'open_card', label: 'Open card' }, openThread: { id: 'open_thread', label: 'Open thread' },
@@ -565,14 +579,18 @@ export class DropService {
    * questions and needsReply items, which truly wait on a reply in this chat. `yourMove` is the Work part (null when
    * it could not be counted). `waiting` keeps its 6.99.10 meaning for COS Control, which reads it by that name.
    */
-  summary(extra: { yourMove?: number | null } = {}): { unread: number; waiting: number; asked: number; yourMove: number | null; lastLine: string; lastAt: string | null; version: number } {
+  summary(extra: { yourMove?: number | null } = {}): { unread: number; waiting: number; asked: number; archived: number; waitingExpiryDays: number; yourMove: number | null; lastLine: string; lastAt: string | null; version: number } {
     const items = this.deps.feed.list()
+    const nowMs = this.now().getTime()
     const unread = items.filter(i => i.readAt === null && (i.kind === 'ping' || i.kind === 'followup' || i.kind === 'question')).length
-    const asked = items.filter(i => isWaiting(i)).length
+    // 7.0.9: a question asked WAITING_EXPIRY_DAYS ago or more is in older questions, out of `asked` and so out of the
+    // chat part of `waiting`. Work's part of `waiting` (yourMove) is untouched.
+    const asked = items.filter(i => isWaiting(i, nowMs)).length
+    const archived = items.filter(i => isArchivedQuestion(i, nowMs)).length
     const counted = typeof extra.yourMove === 'number' && Number.isSafeInteger(extra.yourMove) && extra.yourMove >= 0
     const work = counted && (extra.yourMove as number) > 0 ? extra.yourMove as number : 0
     const last = items[items.length - 1]
-    return { unread, waiting: asked + work, asked, yourMove: counted ? extra.yourMove as number : null, lastLine: last ? short(pinLine(last), 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
+    return { unread, waiting: asked + work, asked, archived, waitingExpiryDays: WAITING_EXPIRY_DAYS, yourMove: counted ? extra.yourMove as number : null, lastLine: last ? short(pinLine(last), 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
   }
 
   /**
@@ -592,8 +610,18 @@ export class DropService {
     return { unread: s.unread, waiting: s.waiting, asked: s.asked, version: s.version }
   }
 
-  /** The chat, oldest first. `after` is an item id: only items after it. */
-  feed(options: { after?: string; limit?: number } = {}): { items: FeedItem[]; version: number; more: boolean } {
+  /**
+   * 7.0.9: the older questions, newest first: what still asks for a reply but was asked WAITING_EXPIRY_DAYS or more
+   * ago. Each answers exactly as in the chat (POST /api/inbox/action), and answering it takes it off this list.
+   */
+  archive(): { items: Array<FeedItem & { archived: true }>; total: number; waitingExpiryDays: number; version: number } {
+    const nowMs = this.now().getTime()
+    const all = this.deps.feed.list().filter(i => isArchivedQuestion(i, nowMs)).reverse()
+    return { items: all.slice(0, ARCHIVE_LIST_MAX).map(i => ({ ...i, archived: true as const })), total: all.length, waitingExpiryDays: WAITING_EXPIRY_DAYS, version: this.deps.feed.version() }
+  }
+
+  /** The chat, oldest first. `after` is an item id: only items after it. 7.0.9: an older question carries `archived: true`. */
+  feed(options: { after?: string; limit?: number } = {}): { items: Array<FeedItem & { archived?: true }>; version: number; more: boolean } {
     const items = this.deps.feed.list()
     let start = 0
     if (options.after) {
@@ -605,7 +633,8 @@ export class DropService {
     const rest = items.slice(start)
     // Without `after` the newest page; with it, the next page forward.
     const page = options.after ? rest.slice(0, limit) : rest.slice(-limit)
-    return { items: page, version: this.deps.feed.version(), more: options.after ? rest.length > limit : rest.length > limit }
+    const nowMs = this.now().getTime()
+    return { items: page.map(i => isArchivedQuestion(i, nowMs) ? { ...i, archived: true as const } : i), version: this.deps.feed.version(), more: options.after ? rest.length > limit : rest.length > limit }
   }
 
   /** The drop a chat item belongs to. */

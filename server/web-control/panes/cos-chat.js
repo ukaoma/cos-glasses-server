@@ -43,6 +43,8 @@
   var DRAFTS = 'cos.web.cosDrafts';
 
   var C = {
+    archive: null,          // 7.0.9: the older questions (GET /api/inbox/archive) once opened, newest first
+    archiveOpen: false,
     caps: null,             // null until /api/health is read: { dropIt, jobs, steer }
     capsLoading: null,
     summary: null,          // { unread, waiting, lastLine, lastAt }
@@ -400,6 +402,33 @@
     });
     C.items.sort(function (a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); });
   }
+  // ── older questions (7.0.9, Miles 11/08: "Expire after 7 days") ──
+  // What still asks for a reply but was asked 7 days ago or more stops counting as waiting (server rule
+  // WAITING_EXPIRY_DAYS, drop-service.ts) and shows here, closed until opened. Each still answers as in the chat, and
+  // answering it takes it off this list. The count and the days come from the server, so no rule is kept here.
+  function archivedOf(s) { var n = s && Number(s.archived); return Number.isInteger(n) && n > 0 ? n : 0; }
+  function archiveHtml() {
+    var n = C.archive ? C.archive.length : archivedOf(C.summary);
+    if (!n) return '';
+    var days = (C.summary && Number(C.summary.waitingExpiryDays)) || 7;
+    var body = !C.archiveOpen ? '' : C.archive === null ? '<p class="cc-fine">Reading older questions.</p>'
+      : C.archive.map(itemHtml).join('');
+    return '<details class="cc-archive" data-cos-archive' + (C.archiveOpen ? ' open' : '') + '><summary data-cos="archive">' +
+      n + (n === 1 ? ' older question' : ' older questions') + '</summary>' +
+      '<p class="cc-fine">Asked more than ' + days + ' days ago, so ' + (n === 1 ? 'it no longer counts' : 'they no longer count') + ' as waiting on you. You can still answer here.</p>' +
+      body + '</details>';
+  }
+  function loadArchive() {
+    return api('/api/inbox/archive').then(function (d) {
+      C.archive = (d && Array.isArray(d.items)) ? d.items : [];
+      paintFeed(false);
+    }, function () { if (C.archive === null) C.archive = []; paintFeed(false); });
+  }
+  function toggleArchive() {
+    C.archiveOpen = !C.archiveOpen;
+    if (C.archiveOpen) { C.archive = null; loadArchive(); }
+    else paintFeed(false);
+  }
   function markReadIfShown(force) {
     if (!dropOn() || !chatVisible() || !C.items || !C.items.length) return;
     if (!force && C.summary && !unreadOf(C.summary)) return;
@@ -674,10 +703,12 @@
     if (C.items === null && C.feedState !== 'error') html = W.skeletonRows(3);
     else if (C.feedState === 'error' && C.items === null) html = '<div class="cx-notice warn"><span>' + esc(C.feedError) + '</span></div><button type="button" class="cx-btn quiet" data-cos="retry">Try again</button>';
     else {
-      var rows = (C.items || []).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
+      // 7.0.9: a question asked 7 days ago or more (the server marks it `archived`) lives under older questions.
+      var rows = (C.items || []).filter(function (it) { return !it.archived; }).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
       C.asks.forEach(function (a) { if (!a.replyKey) rows.push({ at: new Date(a.at + (a.dropId ? 1 : 0)).toISOString(), html: askHtml(a, !!a.dropId) }); });
       rows.sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
-      html = rows.length ? rows.map(function (r) { return r.html; }).join('')
+      var older = archiveHtml();
+      html = rows.length || older ? older + rows.map(function (r) { return r.html; }).join('')
         : dropOn() ? '<p class="cc-empty">Nothing here yet. Ask COS something, or drop a thought and COS files it.</p>'
           : '<p class="cc-empty">Ask COS anything. Attach photos or files with the clip.</p>';
     }
@@ -1489,6 +1520,9 @@
   // ── actions on a line ─────────────────────────────────
   function act(itemId, action) {
     var item = (C.items || []).filter(function (i) { return i.id === itemId; })[0];
+    // 7.0.9: an older question answers from its list exactly as from the chat.
+    var fromArchive = !item || !!item.archived;
+    if (!item) item = (C.archive || []).filter(function (i) { return i.id === itemId; })[0];
     if (!item) return;
     if (action === 'move') { C.moving = C.moving === itemId ? '' : itemId; return paintFeed(false); }
     if (action === 'open_card') return W.go('work');
@@ -1517,6 +1551,8 @@
       // A reminder action answers the finished item itself (merged above); dismiss answers counts only.
       if (action === 'dismiss') item.state = 'done';
       if (ans && ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id, null, askFilesOf(ans.next));
+      // Answered: it is no longer an older question, wherever it was.
+      if (fromArchive) { delete item.archived; (C.items || []).forEach(function (i) { if (i.id === itemId) delete i.archived; }); if (C.archive) C.archive = C.archive.filter(function (i) { return i.id !== itemId; }); if (C.archiveOpen) loadArchive(); }
       paintFeed(false); refreshSummary();
     }, function (err) { W.toast((err && err.message) || 'That did not go through.'); });
   }
@@ -2145,6 +2181,7 @@
     if (what === 'open-msg') return W.go('messages', ['m', t.getAttribute('data-no')]);
     if (what === 'open-session') return W.go('sessions', [t.getAttribute('data-provider') || 'claude', t.getAttribute('data-sid')]);
     if (what === 'open-sessions') return W.go('sessions');
+    if (what === 'archive') return toggleArchive();
     if (what === 'steps') { var sa = C.asks.filter(function (x) { return x.cid === t.getAttribute('data-cid'); })[0]; if (sa) sa.stepsOpen = !sa.stepsOpen; return; }
     if (what === 'steer') {
       var a = C.asks.filter(function (x) { return x.cid === t.getAttribute('data-cid'); })[0];
@@ -2365,7 +2402,7 @@
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
-    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
+    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();

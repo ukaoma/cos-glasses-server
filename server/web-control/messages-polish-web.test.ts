@@ -341,3 +341,56 @@ describe('4. an Ask that sent a message to another session', () => {
     expect(html).not.toContain('uds:')
   })
 })
+
+describe('older questions: past 7 days they stop counting and move above the chat, still answerable', () => {
+  const q = (id: string, line: string) => ({ id, kind: 'question', threadId: 'd-' + id, createdAt: '2026-10-20T09:00:00.000Z', readAt: 'x', source: 'cos', line,
+    links: [], actions: [{ id: 'choose:c1', label: 'A task' }, { id: 'choose:c2', label: 'Just a note' }], state: 'live', key: 'k-' + id, archived: true })
+  function chatWith(answers: Record<string, Answer>) {
+    const h = load(answers)
+    const feed = { innerHTML: '', contains: () => false }
+    h.chat._state.caps = { dropIt: true, jobs: true, steer: false, thread: false, dropFiles: 0 }
+    h.chat._state.host = { querySelector: (sel: string) => (sel === '[data-cos-feed]' ? feed : null) }
+    h.chat._state.feedState = 'ready'
+    h.chat._state.summary = { unread: 0, asked: 1, archived: 2, waitingExpiryDays: 7, waiting: 1 }
+    h.chat._state.items = [q('fi_old1', 'Is Call Dale a task?'), { id: 'fi_new', kind: 'question', threadId: 'd-new', createdAt: '2026-11-08T09:00:00.000Z', readAt: null, source: 'cos',
+      line: 'Is Pick up cake a task?', links: [], actions: [{ id: 'choose:c1', label: 'A task' }], state: 'live', key: 'k-new' }]
+    return { ...h, feed }
+  }
+
+  it('the chat shows a closed "2 older questions" with the 7 days from the server, and keeps the expired one out of the stream', () => {
+    const h = chatWith({})
+    h.chat._paintFeed(false)
+    expect(h.feed.innerHTML).toContain('>2 older questions</summary>')
+    expect(h.feed.innerHTML).toContain('Asked more than 7 days ago, so they no longer count as waiting on you. You can still answer here.')
+    expect(h.feed.innerHTML).toContain('Is Pick up cake a task?')
+    expect(h.feed.innerHTML).not.toContain('Is Call Dale a task?')
+    expect(h.feed.innerHTML).not.toContain('<details class="cc-archive" data-cos-archive open>')
+  })
+
+  it('opening it lists them from the server; answering one posts the same action and takes it off the list', async () => {
+    let listed = [q('fi_old1', 'Is Call Dale a task?'), q('fi_old2', 'Is Book the venue a task?')]
+    const h = chatWith({
+      '/api/inbox/archive': () => ({ items: listed, total: listed.length, waitingExpiryDays: 7 }),
+      '/api/inbox/action': (b: { itemId: string }) => { listed = listed.filter(i => i.id !== b.itemId); return { items: [{ ...q(b.itemId, 'answered'), archived: undefined, state: 'done', actions: [] }] } },
+    })
+    h.tap('archive')
+    await flush()
+    expect(h.feed.innerHTML).toContain('<details class="cc-archive" data-cos-archive open>')
+    expect(h.feed.innerHTML).toContain('Is Book the venue a task?')
+    expect(h.feed.innerHTML).toContain('data-item="fi_old2" data-act="choose:c2"')
+    h.tap('act', { 'data-item': 'fi_old2', 'data-act': 'choose:c1' })
+    await flush()
+    expect(h.calls.filter(c => c.path === '/api/inbox/action')).toHaveLength(1)
+    expect(h.calls.filter(c => c.path === '/api/inbox/archive')).toHaveLength(2)
+    expect(h.chat._state.archive.map((i: { id: string }) => i.id)).toEqual(['fi_old1'])
+    expect(h.calls.find(c => c.path === '/api/inbox/action')).toBeTruthy()
+  })
+
+  it('nothing older: no list at all', () => {
+    const h = chatWith({})
+    h.chat._state.summary = { unread: 0, asked: 1, archived: 0, waitingExpiryDays: 7 }
+    h.chat._state.items = h.chat._state.items.filter((i: { archived?: boolean }) => !i.archived)
+    h.chat._paintFeed(false)
+    expect(h.feed.innerHTML).not.toContain('cc-archive')
+  })
+})

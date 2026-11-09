@@ -20,6 +20,7 @@
  *   POST /drops/:id/sent                                                                DropAnswer
  *   GET  /inbox/summary                                                                 { unread, waiting, asked, yourMove, lastLine, lastAt, version }
  *   GET  /inbox/feed      ?after&limit                                                  { items, version, more }
+ *   GET  /inbox/archive                                                                 { items, total, waitingExpiryDays, version } (7.0.9)
  *   POST /inbox/read      { through }                                                   { unread, waiting, version }
  *   POST /inbox/action    { itemId, action: 'choose:<id>' | 'undo' }                    DropAnswer
  *   POST /inbox/action    { itemId, action: 'dismiss' }                                 { unread, waiting, version }
@@ -210,6 +211,10 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) return bad(res, 'invalid_limit')
     try { await service.syncAsks() } catch { /* the chat still reads */ }
     try { return res.json(service.feed({ after, limit })) } catch (e) { return send(res, e) }
+  }))
+  // 7.0.9: the older questions (asked WAITING_EXPIRY_DAYS or more ago and still unanswered), newest first.
+  router.get('/inbox/archive', (_req, res) => withService(res, async service => {
+    try { return res.json(service.archive()) } catch (e) { return send(res, e) }
   }))
   router.post('/inbox/read', (req, res) => withService(res, async service => {
     if (!isRecord(req.body) || typeof req.body.through !== 'string') return bad(res, 'invalid_read')

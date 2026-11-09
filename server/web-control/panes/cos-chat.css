@@ -116,6 +116,14 @@
 .cc-relay { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--hairline); min-width: 0; }
 .cc-relay-line { margin: 0; font-size: 14px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; }
 .cc-relay-reply { margin: 6px 0 0; font-size: 14px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
+/* 7.0.9: older questions, closed until opened, above the chat. */
+.cc-archive { margin: 0 0 14px; padding: 0 0 10px; border-bottom: 1px solid var(--hairline); min-width: 0; }
+.cc-archive > summary { cursor: pointer; min-height: 36px; display: flex; align-items: center; font-size: 13.5px; color: var(--sub); }
+.cc-archive > summary::-webkit-details-marker { display: none; }
+.cc-archive > summary::before { content: ''; width: 0; height: 0; margin-right: 8px; border-style: solid; border-width: 4px 0 4px 6px; border-color: transparent transparent transparent currentColor; transition: transform 160ms ease; }
+.cc-archive[open] > summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .cc-archive > summary::before { transition: none; } }
+.cc-archive > .cc-fine { margin: 0 0 10px; }
 .cc-relay-who { display: block; font-size: 12.5px; color: var(--tertiary); margin-bottom: 2px; }
 .cc-steer { display: flex; gap: 8px; margin-top: 10px; }
 .cc-steer .field { flex: 1; min-width: 0; height: 36px; }
