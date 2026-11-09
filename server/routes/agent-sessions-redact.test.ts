@@ -97,7 +97,7 @@ describe('session detail: no absolute local path in any field', () => {
   it('Claude: links, bare paths, code spans, file and editor URLs, sent-file names and captions, the first prompt', async () => {
     claudeFixture()
     const base = await serve()
-    const res = await fetch(`${base}/api/agent-sessions/claude/${CLAUDE_ID}?turns=20`)
+    const res = await fetch(`${base}/api/agent-sessions/claude/${CLAUDE_ID}?turns=20&cards=1`)
     expect(res.status).toBe(200)
     const json = await res.text()
     assertNoLocalPaths(json)
@@ -138,3 +138,27 @@ describe('the list and search carry the same words', () => {
     assertNoLocalPaths(await search.text())
   })
 })
+
+describe('7.0.7: link-card markers only for a client that asks (cards=1)', () => {
+  it('without cards=1 (a tab opened before 7.0.7, an older client) a reply shows words, never a cos-file marker', async () => {
+    claudeFixture()
+    const base = await serve()
+    const res = await fetch(`${base}/api/agent-sessions/claude/${CLAUDE_ID}?turns=20`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { recent_turns: Array<{ role: string; text: string; outputLinks?: unknown[] }> }
+    const reply = body.recent_turns.filter(t => t.role === 'assistant').map(t => t.text).join('\n')
+    expect(reply).not.toContain('cos-file:')
+    expect(reply).toContain('app.ts:42')
+    expect(reply).toContain('guide')
+    assertNoLocalPaths(JSON.stringify(body))
+    // The cards themselves still arrive for a client that draws them from outputLinks (COS Control 0.5.380).
+    expect(body.recent_turns.some(t => Array.isArray(t.outputLinks) && t.outputLinks.length > 0)).toBe(true)
+  })
+  it('with cards=1 the reply carries the markers its outputLinks index', async () => {
+    claudeFixture()
+    const base = await serve()
+    const body = await (await fetch(`${base}/api/agent-sessions/claude/${CLAUDE_ID}?turns=20&cards=1`)).json() as { recent_turns: Array<{ role: string; text: string }> }
+    expect(body.recent_turns.filter(t => t.role === 'assistant').map(t => t.text).join('\n')).toContain('](cos-file:0)')
+  })
+})
+

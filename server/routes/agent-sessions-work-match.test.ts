@@ -105,6 +105,15 @@ describe('W1: the Mac helper matches a Work prompt that opens with a path', () =
     expect(res.body.first_prompt).not.toContain('/Users/')
   })
 
+  it('7.0.7: the Mac helper gets card words even if it asks for cards=1 (no Control build draws markers)', async () => {
+    const port = await serve()
+    const res = await get(port, DETAIL + '&cards=1', HELPER)
+    expect(res.status).toBe(200)
+    const assistant = (res.body.recent_turns ?? []).filter(t => t.role === 'assistant').map(t => t.text).join('\n')
+    expect(assistant).not.toContain('cos-file:')
+    expect(assistant).toContain('plan.md:3')
+  })
+
   it('without ?turns= nothing is exempt: the detail carries no recent_turns and no path', async () => {
     const port = await serve()
     const res = await get(port, `/api/agent-sessions/claude/${CLAUDE_ID}`, HELPER)

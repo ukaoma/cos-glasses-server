@@ -2718,7 +2718,7 @@
     var listed = (SX.rows || []).filter(function (s) { return sxSame(sxKey(s), provider + ':' + String(id).toLowerCase()); })[0];
     if (listed) window.COSWeb.setCrumb(sxTitle(listed));
     reader.innerHTML = '<div class="sx-reader-head"><div class="skeleton" style="height:26px;width:70%;margin:6px 0 10px"></div><div class="skeleton" style="width:45%"></div></div>' + skeletonRows(3);
-    api(sessionPath(provider, id, '?turns=' + SX_TURNS)).then(function (d) {
+    api(sessionPath(provider, id, '?turns=' + SX_TURNS + '&cards=1')).then(function (d) {
       if (state.reading !== r) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : ((d && d.recent_turns && d.recent_turns.turns) || (d && d.turns) || []);
       r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
@@ -3048,7 +3048,7 @@
   }
   function refreshTurns(provider, id) {
     var reading = state.reading;
-    api(sessionPath(provider, id, '?turns=' + SX_TURNS)).then(function (d) {
+    api(sessionPath(provider, id, '?turns=' + SX_TURNS + '&cards=1')).then(function (d) {
       var r = state.reading;
       if (!r || r !== reading || r.id !== id || r.provider !== provider) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];

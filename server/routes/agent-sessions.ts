@@ -936,12 +936,17 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // (cookie or token), phone, LAN, tailnet and proxied request gets the redacted body. The answer is already
     // `private, no-store`; Vary names every header the choice reads, so no cache can serve one as the other.
     if (turnsWanted !== null) res.vary('Cookie').vary('X-COS-Token').vary('Origin').vary('Referer').vary('User-Agent').vary('Sec-Fetch-Mode').vary('Sec-Fetch-Site').vary('Sec-Fetch-Dest')
-    if (recentTurns && Array.isArray(body.recent_turns) && isNativeMacCaller(req, res)) {
+    // 7.0.7 final QA: link-card markers (`[words](cos-file:N)`) go only to a client that asks for them with `cards=1`
+    // (Control Web from 7.0.7: the reader and Today's session sheet). Everyone else gets each card's words, as 7.0.4
+    // showed them: a Control Web tab opened before the update (it has no reload-on-version), COS Control (no build
+    // renders markers; its own cards come from outputLinks), the lens and any older client. outputLinks is unchanged.
+    const native = recentTurns && Array.isArray(body.recent_turns) ? isNativeMacCaller(req, res) : false
+    const cardsWanted = req.query.cards === '1'
+    // The native helper always gets words, whatever it asks for (no Control build draws markers).
+    if (recentTurns && Array.isArray(body.recent_turns) && (native || !cardsWanted)) {
       body.recent_turns = body.recent_turns.map((turn, index) => {
         const original = recentTurns!.turns[index]
-        if (original && original.role === 'user' && turn.role === 'user') return { ...turn, text: original.text }
-        // 7.0.5 QA: no COS Control build renders link cards yet, so the Mac gets each card's words, never a
-        // `cos-file:N` marker it would show as a dead link (the rule the web applies when N has no card).
+        if (native && original && original.role === 'user' && turn.role === 'user') return { ...turn, text: original.text }
         return typeof turn.text === 'string' && turn.text.includes('](cos-file:') ? { ...turn, text: withoutLinkMarkers(turn.text) } : turn
       })
     }

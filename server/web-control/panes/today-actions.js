@@ -1127,7 +1127,7 @@
   function loadLast(r) {
     var request = r.lastRead = {};
     O.lastState = 'loading'; O.lastWhy = ''; paintLast();
-    return K.answer(K.path(r.provider, r.id, '?turns=6'), { timeoutMs: 20000 }).then(function (a) {
+    return K.answer(K.path(r.provider, r.id, '?turns=6&cards=1'), { timeoutMs: 20000 }).then(function (a) {
       if (O.r !== r || r.lastRead !== request) return;
       if (a.status === 404) { O.lastState = 'none'; O.lastWhy = 'This session is not on your Mac any more.'; paintLast(); return; }
       if (a.status !== 200) { O.lastState = 'error'; paintLast(); return; }

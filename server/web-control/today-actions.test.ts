@@ -510,7 +510,7 @@ const NEED = { id: 'act-1', workId: 'task:personal:0123456789ab', domain: 'perso
   progress: { reported: 'needsInput', evidence: 'The install is ready. Should I publish?', paused: false } }
 const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
 const OK_ROUTES: Routes = {
-  ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [{ role: 'user', text: 'Do the QA' }, { role: 'assistant', text: 'Ready to publish **6.99.24**.', at: '2026-11-07T05:36:00Z' }] } },
+  ['GET ' + P('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [{ role: 'user', text: 'Do the QA' }, { role: 'assistant', text: 'Ready to publish **6.99.24**.', at: '2026-11-07T05:36:00Z' }] } },
   ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 0 } },
   ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
   ['POST /api/agent-sessions/bindings/b1/turns']: { status: 202, body: { outcome: 'queued' } },
@@ -650,7 +650,7 @@ describe('Running: a peek at what the session does now, and a note on the same p
   const ROW = { session_id: CID, provider: 'codex', display_label: 'COS Product Work (CODEX)', running: true, running_active: true, agent_state: 'running', state_source: 'hook' }
   it('reads the live stream with the reader’s reducer; a busy session parks the note in its queue under one key; closing stops the stream', async () => {
     const routes: Routes = {
-      ['GET ' + CP('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+      ['GET ' + CP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
       ['GET ' + CP('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
       ['POST ' + CP('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Working right now.' } },
       ['POST ' + CP('/queued-turns')]: { status: 200, body: { queued: true, position: 1 } },
@@ -686,7 +686,7 @@ describe('Running: a peek at what the session does now, and a note on the same p
   })
 
   it('a refused stream says why and keeps the stored reply', async () => {
-    const h = load({ data: { sessions: [ROW] }, routes: { ['GET ' + CP('?turns=6')]: { status: 200, body: { recent_turns: [{ role: 'assistant', text: 'Done with the build.' }] } } } })
+    const h = load({ data: { sessions: [ROW] }, routes: { ['GET ' + CP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [{ role: 'assistant', text: 'Done with the build.' }] } } } })
     h.ta.open('run', 'codex|' + CID, h.opener())
     await flush()
     const es = h.streams[0]
@@ -1333,7 +1333,7 @@ describe('the sheet never contradicts itself (qa2-user N3)', () => {
   it('the Running header follows the live feed, and an unknown tool reads as "Used <tool>"', async () => {
     const CID = '019a0000-1111-2222-3333-444455556666'
     const ROW = { session_id: CID, provider: 'codex', display_label: 'Codex work', running: true, running_active: true, agent_state: 'running', state_source: 'hook' }
-    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: { [`GET /api/agent-sessions/codex/${CID}?turns=6`]: { status: 200, body: { recent_turns: [] } } } })
+    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: { [`GET /api/agent-sessions/codex/${CID}?turns=6&cards=1`]: { status: 200, body: { recent_turns: [] } } } })
     h.ta.open('run', 'codex|' + CID, h.opener())
     await flush()
     expect(h.els['ta-run-state']!.textContent, 'before the feed: the session list').toBe('Working now, for 20 min')
@@ -1482,7 +1482,7 @@ describe('Stop on the Running peek (parity gap 4)', () => {
   const CP = (tail: string) => `/api/agent-sessions/codex/${encodeURIComponent(CID)}${tail}`
   const ROW = { session_id: CID, provider: 'codex', display_label: 'Codex work', running: true, running_active: true, agent_state: 'running', state_source: 'hook' }
   function peek(cancel: Reply | ((b: any, n: number) => Reply)) {
-    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: { ['GET ' + CP('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['POST ' + CP('/cancel')]: cancel as any } })
+    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: { ['GET ' + CP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['POST ' + CP('/cancel')]: cancel as any } })
     h.ta.open('run', 'codex|' + CID, h.opener())
     return h
   }
@@ -1776,7 +1776,7 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
     agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
   const QP = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(QSID)}${tail}`
   const model = { rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Gong personas team update asked you a question', why: 'Waiting for you. Paused until you answer.' }], now: [], later: [], failed: [], settled: true }
-  const routes: Routes = { ['GET ' + QP('?turns=6')]: { status: 200, body: { recent_turns: [{ role: 'assistant', text: 'Which personas should I update first?' }] } },
+  const routes: Routes = { ['GET ' + QP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [{ role: 'assistant', text: 'Which personas should I update first?' }] } },
     ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
   it('the Needs you row opens the waiting sheet: the question to answer, else the last message; no peek, no Stop', async () => {
     const h = load({ data: { sessions: [QROW] }, routes, model, questions: 0 })
@@ -1828,7 +1828,7 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
   const QROW = { session_id: QSID, provider: 'claude', display_label: 'Pricing page review', alive: true, running: true, running_active: false,
     agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
   const QP = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(QSID)}${tail}`
-  const routes: Routes = { ['GET ' + QP('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
+  const routes: Routes = { ['GET ' + QP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
   const ASK = 'Ship the pricing page today or wait for Brad?'
   const model = (ask: string) => ({ rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Pricing page review asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'mac', ask }], now: [], later: [], failed: [], settled: true })
   const MAC = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
@@ -1885,7 +1885,7 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
     const row = { ...QROW, provider: 'codex' }
     const key = 'codex|' + QSID
     const P = (tail: string) => `/api/agent-sessions/codex/${encodeURIComponent(QSID)}${tail}`
-    const r2: Routes = { ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
+    const r2: Routes = { ['GET ' + P('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
     const m = { rows: [{ kind: 'session', key, title: 'Codex asked', why: 'Waiting for you', where: '', ask: '' }], now: [], later: [], failed: [], settled: true }
     const h = load({ data: { sessions: [row] }, routes: r2, model: m, questions: 0, mac: 0, qLoad: { state: 'failed' } })
     h.ta.open('wait', key, h.opener())
@@ -2235,7 +2235,7 @@ describe('6.99.26: the waiting sheet offers only an answer that can reach the se
   const SID = 'eeeeeeee-5555-4555-8555-555555555555'
   const ROW = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
   const P = (prov: string, tail: string) => `/api/agent-sessions/${prov}/${encodeURIComponent(SID)}${tail}`
-  const routesFor = (prov: string): Routes => ({ ['GET ' + P(prov, '?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P(prov, '/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } })
+  const routesFor = (prov: string): Routes => ({ ['GET ' + P(prov, '?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P(prov, '/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } })
   const modelFor = (prov: string, where: string) => ({ rows: [{ kind: 'session', key: prov + '|' + SID, title: 'Release QA asked you a question', why: 'Waiting for you. Paused until you answer.', where }], now: [], later: [], failed: [], settled: true })
 
   it('a Mac card in the sheet says it itself: the line is not repeated, and there is no reply box', async () => {
@@ -2276,7 +2276,7 @@ describe('6.99.26: two held questions in Needs you, each answered in place (real
     const pending = [HELD(Q1ID, S1, 'Publish to npm next?'), HELD(Q2ID, S2, 'Which brand goes first?')]
     const routes: Routes = {
       'GET /api/session-questions?client=web&hold=1': () => ({ status: 200, body: { enabled: true, items: pending.slice(), settled: [], pollIntervalMs: 3_000 } }),
-      ['GET ' + P(S1, '?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P(S2, '?turns=6')]: { status: 200, body: { recent_turns: [] } },
+      ['GET ' + P(S1, '?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P(S2, '?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
       ['GET ' + P(S1, '/attachability')]: { status: 200, body: { attachable: true } }, ['GET ' + P(S2, '/attachability')]: { status: 200, body: { attachable: true } },
     }
     const model = { rows: [S1, S2].map((sid, i) => ({ kind: 'session', key: 'claude|' + sid, title: (i ? 'Persona refresh' : 'Release QA') + ' asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'here' })), now: [], later: [], failed: [], settled: true }
@@ -2685,7 +2685,7 @@ describe('6.99.26: just answered, the row says so instead of pointing at the Mac
   it('the sheet: Answered, no Mac line, no reply box', async () => {
     const SID = 'eeeeeeee-5555-4555-8555-555555555555'
     const ROW = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
-    const h = load({ data: { sessions: [ROW] }, routes: { [`GET /api/agent-sessions/claude/${SID}?turns=6`]: { status: 200, body: { recent_turns: [] } } }, questions: 0 })
+    const h = load({ data: { sessions: [ROW] }, routes: { [`GET /api/agent-sessions/claude/${SID}?turns=6&cards=1`]: { status: 200, body: { recent_turns: [] } } }, questions: 0 })
     ;(h.ctx as any).window.COSWeb.sessionQuestions.answeredFor = (id: string) => id === SID
     ;(h.ctx as any).window.COSWeb.sessionQuestions.answeredLine = 'Answered. The session carries on.'
     h.ta.open('wait', 'claude|' + SID, h.opener())
@@ -2933,7 +2933,7 @@ describe('QA round 1 (6.99.26): a sheet after a waiting sheet shows its foot aga
   it('Open Sort in Work is visible after a Claude waiting sheet hid the reply box', async () => {
     const SID = 'eeeeeeee-5555-4555-8555-555555555555'
     const ROW = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
-    const h = load({ data: { sessions: [ROW], intake: [ITEM(ID1, 'Roundtable branding')] }, routes: { [`GET /api/agent-sessions/claude/${SID}?turns=6`]: { status: 200, body: { recent_turns: [] } } }, questions: 0 })
+    const h = load({ data: { sessions: [ROW], intake: [ITEM(ID1, 'Roundtable branding')] }, routes: { [`GET /api/agent-sessions/claude/${SID}?turns=6&cards=1`]: { status: 200, body: { recent_turns: [] } } }, questions: 0 })
     h.ta.open('wait', 'claude|' + SID, h.opener())
     await flush()
     expect(h.els['ta-foot']!.hidden).toBe(true)
@@ -3314,7 +3314,7 @@ describe('one state for the session card: the freshest signal wins, and every pi
   const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
   const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
   const busyGate: Routes = {
-    ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + P('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
     ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
     ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Working right now.' } },
     ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } },
@@ -3628,7 +3628,7 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
   const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
   const ROW = { session_id: SID, provider: 'claude', display_label: 'General COS research to bring more value to users', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
   const routes: Routes = {
-    ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + P('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
     ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
   }
   const layerOf = (h: ReturnType<typeof load>) => h.document.appended as El
@@ -3979,12 +3979,12 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     ;(h.docListeners.visibilitychange || []).forEach(fn => fn({}))
     h.runFrames()
     expect(L.props['--ta-vh'], 'back in view refits').toBe('1000px')
-    const turnsBefore = h.calls.filter(c => c.path === P('?turns=6')).length
+    const turnsBefore = h.calls.filter(c => c.path === P('?turns=6&cards=1')).length
     h.winListeners.pageshow!({ persisted: true })
     await flush()
     expect(h.streams.length, 'a new stream').toBe(streams + 1)
     expect(h.streams[streams - 1].closed, 'the old one closed').toBe(true)
-    expect(h.calls.filter(c => c.path === P('?turns=6')).length, 'the last reply read again').toBeGreaterThan(turnsBefore)
+    expect(h.calls.filter(c => c.path === P('?turns=6&cards=1')).length, 'the last reply read again').toBeGreaterThan(turnsBefore)
     // Closed: none of these do anything.
     h.ta.close('user')
     h.winListeners.pageshow!({ persisted: true })
@@ -4060,7 +4060,7 @@ describe('6.99.29: the on-screen keyboard over the session sheet, wide and narro
   const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
   const ROW = { session_id: SID, provider: 'claude', display_label: 'General COS research to bring more value to users', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
   const busyGate: Routes = {
-    ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + P('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
     ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
   }
   const layerOf = (h: ReturnType<typeof load>) => h.document.appended as El
@@ -4231,7 +4231,7 @@ describe('QA 6.99.29 final: the Sessions reader', () => {
   it('a held follow-up sent 800 ms after the end shows Working, with Stop, for its whole run', async () => {
     let turnPolls = 0
     const pg = readerPage({
-      ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+      ['GET ' + P('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
       ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [] } },
       ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: null, reasonCopy: '', ownerCount: 0 } },
       ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b9', epoch: 2 } },
@@ -4386,7 +4386,7 @@ describe('QA 6.99.29 final: the Sessions reader', () => {
 describe('6.99.30: Back never lands on a dead entry, and our own Back steps cannot swallow a real one', () => {
   const SID2 = 'b5c3c5ee-f51d-4c19-9b22-d90b129d2a8e'
   const ROW = { session_id: SID2, provider: 'claude', display_label: 'Release QA', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
-  const routes: Routes = { [`GET /api/agent-sessions/claude/${SID2}?turns=6`]: { status: 200, body: { recent_turns: [] } } }
+  const routes: Routes = { [`GET /api/agent-sessions/claude/${SID2}?turns=6&cards=1`]: { status: 200, body: { recent_turns: [] } } }
 
   it('leaving for a tab from a session opened off the pet’s list takes the list’s entry off first, then replaces the overlay’s', async () => {
     const h = load({ data: { sessions: [ROW], working: [ROW] }, routes, pet: { waiting: [], running: [ROW], done: [] } })
@@ -4445,7 +4445,7 @@ describe('6.99.30: a hidden page spends nothing; the Mac going away shows at onc
   const PP = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID2)}${tail}`
   const ROW = { session_id: SID2, provider: 'claude', display_label: 'Release QA', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
   const busy: Routes = {
-    ['GET ' + PP('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + PP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } },
     ['GET ' + PP('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
   }
   it('the live clock’s tick re-asks a stale gate only while the page is visible', async () => {
@@ -4520,7 +4520,7 @@ describe('6.99.30: a queued message the server refused, in Today’s sheet and o
   const ROW = { session_id: SID2, provider: 'claude', display_label: 'Release QA', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
   it('the sheet says "Not sent: <reason>" for that session, and the mark the Sessions list reads is set and cleared from the server’s queue', async () => {
     let turns: unknown[] = [{ clientTurnId: 'ct1', status: 'refused', preview: 'Also fix the footer', reasonCopy: 'The thread changed on your Mac.' }, { clientTurnId: 'ct2', status: 'queued', preview: 'Later' }]
-    const routes: Routes = { ['GET ' + PP('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + PP('/queued-turns')]: () => ({ status: 200, body: { turns } }) }
+    const routes: Routes = { ['GET ' + PP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + PP('/queued-turns')]: () => ({ status: 200, body: { turns } }) }
     const h = load({ data: { sessions: [ROW], working: [ROW] }, routes })
     h.ta.open('run', 'claude|' + SID2, h.opener())
     await flush()
