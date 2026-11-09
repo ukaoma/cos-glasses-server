@@ -34,7 +34,7 @@ import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/mainte
 import { isRecordingLive } from '../lib/stt-runtime.js'
 import {
   TODAY_BRIEF_BODY_MAX_BYTES, TODAY_BRIEF_EFFORT, TODAY_BRIEF_SETTINGS_FILE, TODAY_BRIEF_STATE_FILE, TODAY_BRIEF_TIMEOUT_MS,
-  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, sessionContextLookups, todayBriefFingerprint, withRecentActivity, withSubagents, type BriefWork, type SubagentReading, type TodayBrief,
+  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, sessionContextLookups, todayBriefFingerprint, withCalendar, withRecentActivity, withSubagents, type BriefWork, type CalendarReading, type SubagentReading, type TodayBrief,
 } from '../lib/today-brief.js'
 
 export interface TodayBriefRouterDeps {
@@ -46,6 +46,9 @@ export interface TodayBriefRouterDeps {
    *  read, so an ask that stops waiting keeps what was read by then. Missing keys mean "not read": the page's counts
    *  and `line` stay, the line marked "may be old". */
   context?: (keys: string[], into: SessionContext) => Promise<unknown>
+  /** Today round 2: today's calendar (lib/calendar-source.ts calendarToday). Read with the session reads, inside the
+   *  same wait; a failed, slow or unconnected read means no calendar in the prompt. */
+  calendar?: () => Promise<CalendarReading | null>
   now?: () => number
 }
 
@@ -188,15 +191,21 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
       // with whatever they wrote by then (a Codex first scan that runs on still fills its memo for the next ask).
       const keys = sessionContextLookups(normalizeTodayBriefInputs(body))
       const context = emptySessionContext()
+      // Today round 2: the calendar reads alongside the sessions, inside the same wait; whatever has not answered by
+      // then is left out (a slow bridge never holds the ask).
+      const cal: { value: CalendarReading | null } = { value: null }
+      const work: Array<Promise<unknown>> = []
+      if (keys.length && deps.context) work.push(Promise.resolve().then(() => deps.context!(keys, context)).catch(() => undefined))
+      if (deps.calendar) work.push(Promise.resolve().then(() => deps.calendar!()).then(c => { cal.value = c }, () => undefined))
       let timer: ReturnType<typeof setTimeout> | undefined
-      const reads = keys.length && deps.context
-        ? Promise.race([Promise.resolve().then(() => deps.context!(keys, context)).catch(() => undefined), new Promise<void>(resolve => { timer = setTimeout(resolve, TODAY_BRIEF_SUBAGENT_WAIT_MS) })]).finally(() => clearTimeout(timer))
+      const reads = work.length
+        ? Promise.race([Promise.all(work), new Promise<void>(resolve => { timer = setTimeout(resolve, TODAY_BRIEF_SUBAGENT_WAIT_MS) })]).finally(() => clearTimeout(timer))
         : Promise.resolve()
       const [rows] = await Promise.all([deps.board().catch(() => null), reads])
       // A snapshot: a read still running after the wait cannot change the inputs under the call.
-      const agents = new Map(context.agents), recent = new Map(context.recent)
+      const agents = new Map(context.agents), recent = new Map(context.recent), calendar = cal.value
       let inputs = normalizeTodayBriefInputs(body, workInProgress(rows, now))
-      inputs = withRecentActivity(withSubagents(inputs, agents, now), recent, now)
+      inputs = withCalendar(withRecentActivity(withSubagents(inputs, agents, now), recent, now), calendar, now)
       res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs), { force, reconnect }))
     } catch (error) {
       if (error instanceof TodayBriefInputError) return res.status(400).json({ error: { code: error.code, message: 'That is not a Today summary request.' } })

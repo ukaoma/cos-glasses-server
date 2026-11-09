@@ -11,7 +11,7 @@ vi.mock('./python-bridge.js', () => ({
 }))
 
 import {
-  calendarStatus, calendarToday, dedupeEvents, isPrepWorthy, parseSnapshot, readCalendar, readSnapshot,
+  calendarStatus, calendarToday, dedupeEvents, endedRecently, isPrepWorthy, parseSnapshot, readCalendar, readSnapshot,
   resetCalendarSourceCache, snapshotToBridgeShape, type CalendarSnapshot, type SnapshotCalendar, type SnapshotEvent,
 } from './calendar-source.js'
 import { parseFeedItem } from './drop-store.js'
@@ -257,17 +257,19 @@ describe('readCalendar through the data dir', () => {
 
   // QA 7.0.0 (Codex root-user W2): the 3 were taken before all-day and declined events were dropped, so a day of
   // all-day events left Today's "Later" empty while timed meetings were still to come.
-  it('today takes the next 3 timed meetings that count: all-day and declined events never use up a slot', async () => {
+  it('today takes the next 5 timed meetings that count: all-day and declined events never use up a slot', async () => {
     vi.stubEnv('COS_DATA_DIR', dir)
     vi.resetModules()
     const mod = await import('./calendar-source.js')
     const allDay = [1, 2, 3].map(i => ev({ eventId: `ad${i}`, externalId: `ad${i}`, allDay: true, start: at(0), occurrenceStart: at(0), end: at(0, 0, 1), title: `All day ${i}` }))
     const declined = ev({ eventId: 'dec', externalId: 'dec', myStatus: 'declined', start: at(9, 30), occurrenceStart: at(9, 30), end: at(10), title: 'Declined' })
-    const timed = [11, 12, 13, 14].map(h => ev({ eventId: `t${h}`, externalId: `t${h}`, start: at(h), occurrenceStart: at(h), end: at(h, 30), title: `Meeting ${h}` }))
+    const timed = [11, 12, 13, 14, 15, 16].map(h => ev({ eventId: `t${h}`, externalId: `t${h}`, start: at(h), occurrenceStart: at(h), end: at(h, 30), title: `Meeting ${h}` }))
     writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(snap({ events: [...allDay, declined, ...timed] })))
     mod.resetCalendarSourceCache()
     const today = await mod.calendarToday(NOW)
-    expect(today.next.map(n => n.title)).toEqual(['Meeting 11', 'Meeting 12', 'Meeting 13'])
+    // Today round 2 (Miles 11/09): 5, was 3; remainingCount still counts all six.
+    expect(today.next.map(n => n.title)).toEqual(['Meeting 11', 'Meeting 12', 'Meeting 13', 'Meeting 14', 'Meeting 15'])
+    expect(today.remainingCount).toBe(6)
   })
 
   it('a bridge answer without prep_worthy: all-day rows still never use up a slot', async () => {
@@ -290,7 +292,7 @@ describe('readCalendar through the data dir', () => {
     expect(today.connected).toBe(false)
   })
 
-  it('today returns selected calendars only, the next 3, and status is counts only (P1-7)', async () => {
+  it('today returns selected calendars only, the next 5, and status is counts only (P1-7)', async () => {
     vi.stubEnv('COS_DATA_DIR', dir)
     vi.resetModules()
     const mod = await import('./calendar-source.js')
@@ -300,7 +302,7 @@ describe('readCalendar through the data dir', () => {
     const log = vi.spyOn(console, 'log'), warn = vi.spyOn(console, 'warn'), err = vi.spyOn(console, 'error')
     const today = await mod.calendarToday(NOW)
     expect(today.connected).toBe(true)
-    expect(today.next.map(n => n.title)).toEqual(['UNIQUE-SEED-10', 'UNIQUE-SEED-11', 'UNIQUE-SEED-12'])
+    expect(today.next.map(n => n.title)).toEqual(['UNIQUE-SEED-10', 'UNIQUE-SEED-11', 'UNIQUE-SEED-12', 'UNIQUE-SEED-13'])
     expect(today.remainingCount).toBe(4)
     const status = mod.calendarStatus(NOW)
     expect(status).toMatchObject({ source: 'snapshot', snapshot: 'fresh', access: 'granted', calendars: 1, selected: 1 })
@@ -464,6 +466,53 @@ describe('W23: travel and family events never become prep', () => {
     const today = await mod.calendarToday(NOW)
     expect(today.next.map(n => n.title)).toEqual(['Real meeting'])
     expect(today.remainingCount).toBe(1)
+  })
+})
+
+// Today round 2 (Miles 2026-11-09): endedRecently, meetings that ended within the last 2 hours, so the Today summary
+// knows a meeting is over and its prep is past. Read from today_events (past events included).
+describe('Today round 2: endedRecently', () => {
+  it('lists meetings that ended in the last 2 h, newest end first; not ones still on, older ones, or ones that do not count', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    // NOW is 09:00. Ended 08:30 (30 min ago), ended 07:05 (1 h 55 min ago), ended 06:55 (2 h 5 min ago, too old),
+    // still on (08:30 to 09:30), declined and ended 08:45, all-day.
+    const events = [
+      ev({ eventId: 'a', externalId: 'a', start: at(8), occurrenceStart: at(8), end: at(8, 30), title: 'Weatherford call' }),
+      ev({ eventId: 'b', externalId: 'b', start: at(6, 30), occurrenceStart: at(6, 30), end: at(7, 5), title: 'Early sync' }),
+      ev({ eventId: 'c', externalId: 'c', start: at(6), occurrenceStart: at(6), end: at(6, 55), title: 'Too old' }),
+      ev({ eventId: 'd', externalId: 'd', start: at(8, 30), occurrenceStart: at(8, 30), end: at(9, 30), title: 'Still on' }),
+      ev({ eventId: 'e', externalId: 'e', myStatus: 'declined', start: at(8, 15), occurrenceStart: at(8, 15), end: at(8, 45), title: 'Declined' }),
+      ev({ eventId: 'f', externalId: 'f', allDay: true, start: at(0), occurrenceStart: at(0), end: at(0, 0, 1), title: 'All day' }),
+    ]
+    writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(snap({ events })))
+    mod.resetCalendarSourceCache()
+    const today = await mod.calendarToday(NOW)
+    expect(today.endedRecently).toEqual([
+      { title: 'Weatherford call', start: at(8), end: at(8, 30) },
+      { title: 'Early sync', start: at(6, 30), end: at(7, 5) },
+    ])
+    // The one still on is in next, not ended.
+    expect(today.next.map(n => n.title)).toEqual(['Still on'])
+  })
+
+  it('the 2 h edge: ended exactly 2 h ago is in, a minute more is out; no end means an hour after the start', () => {
+    const row = (title: string, start: string, end: string | null) => ({ title, start_time: start, end_time: end, is_all_day: false, prep_worthy: true })
+    const out = endedRecently([row('Edge', at(6), at(7)), row('Past edge', at(6), at(6, 59)), row('No end', at(7, 30), null)], NOW)
+    expect(out.map(r => r.title)).toEqual(['No end', 'Edge'])
+    expect(out[0].end).toBe(at(8, 30))
+  })
+
+  it('a bridge answer: endedRecently comes from its today_events; not connected answers none', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    bridge.available = true
+    bridge.answer = { today_remaining: [], today_events: [{ title: 'Bridge ended', start_time: at(8), end_time: at(8, 45), is_all_day: false }] }
+    expect((await mod.calendarToday(NOW)).endedRecently.map(r => r.title)).toEqual(['Bridge ended'])
+    bridge.available = false
+    expect((await mod.calendarToday(NOW)).endedRecently).toEqual([])
   })
 })
 

@@ -1262,7 +1262,7 @@
     opts = opts || {};
     var a = { cid: uuid(), query: text, at: Date.now(), status: 'sending', partial: '', dropId: dropId || '', atts: opts.atts || [], replyKey: opts.replyKey || '' };
     // 7.0.2 (A6): what Ask again sends: the same words, files and conversation.
-    a.again = { attachmentIds: (opts.attachmentIds || []).slice(0, MAX_ATTS), atts: (opts.atts || []).slice(0, MAX_ATTS), sessionId: opts.sessionId || '', replyKey: opts.replyKey || '', context: opts.context || '' };
+    a.again = { attachmentIds: (opts.attachmentIds || []).slice(0, MAX_ATTS), atts: (opts.atts || []).slice(0, MAX_ATTS), sessionId: opts.sessionId || '', replyKey: opts.replyKey || '', context: opts.context || '', contextRef: opts.contextRef || '' };
     C.asks.push(a);
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(true);
     var body = { clientJobId: a.cid, generation: 1, query: text, source: 'web', activityToolMode: 'status' };
@@ -1299,7 +1299,7 @@
       // after the plan, immediately before admission (root review, 7.0.2: the thread can change between askAgain's check
       // and this send's own thread read, and a retry carries old files and context).
       if (opts.expect && !sameConversation(opts.expect, a)) throw Object.assign(new Error(MOVED_ON), { code: 'conversation_moved' });
-      withContext(body, opts.context);
+      withContext(body, opts.context, opts.contextRef);
     });
     prepare.then(function () { return admit(true); }).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
@@ -1333,12 +1333,63 @@
   }
   // An Ask from Today carries what Today shows (app.js askCos, panes/today-actions.js summary) as the quoted reference,
   // after a carried thread summary when there is one. Bounded, and only on the Ask it was given to.
+  // Today round 2: "Ask about this" names its own reference (ABOUT_REF).
   var TODAY_REF = 'What Today in COS Control shows right now', CONTEXT_MAX = 6000;
-  function withContext(body, context) {
+  function withContext(body, context, ref) {
     var text = typeof context === 'string' ? context.trim().slice(0, CONTEXT_MAX) : '';
     if (!text) return;
-    if (body.reference) body.reference = { query: body.reference.query + ', then ' + TODAY_REF.charAt(0).toLowerCase() + TODAY_REF.slice(1), response: body.reference.response + '\n\n' + text };
-    else body.reference = { query: TODAY_REF, response: text };
+    var name = typeof ref === 'string' && ref ? ref : TODAY_REF;
+    if (body.reference) body.reference = { query: body.reference.query + ', then ' + name.charAt(0).toLowerCase() + name.slice(1), response: body.reference.response + '\n\n' + text };
+    else body.reference = { query: name, response: text };
+  }
+
+  // ── Ask about this (Today round 2, Miles 11/09) ───────
+  // Today's box under the model summary (app.js sendTodayAsk) asks here. The typed words are the question; the summary,
+  // when it was written and the sessions it read go as the Ask's reference, which the server quotes as untrusted data
+  // (lib/prompt-reference-boundary.ts), so nothing in them can act as an instruction. Each session is named by the title
+  // its Sessions row shows, so COS can pass an instruction to it with its own relay (SendMessage to that title; the
+  // answer card then says "Sent to <title>", relayHtml). Never transcript text: only the last message into each session,
+  // as the summary already read it. The same lines as desktop Control 0.5.384's ```today-context block.
+  var ABOUT_REF = 'The Today summary and the sessions it read', ABOUT_ROWS = 12;
+  function aboutClock(v) { var d = W.toDate(v); return d ? W.clock(d) : ''; }
+  function aboutAgo(v) {
+    var d = W.toDate(v); if (!d) return '';
+    var m = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
+    if (m < 1) return 'just now';
+    if (m < 60) return m + ' min ago';
+    var h = Math.floor(m / 60);
+    return h < 48 ? h + ' h ago' : Math.round(h / 24) + ' days ago';
+  }
+  // A fence cannot be closed from inside: three backticks become three single quotes; one line per field.
+  function aboutText(v, n) { return clip(String(v == null ? '' : v).replace(/```/g, "'''"), n); }
+  function aboutContextText(ctx) {
+    if (!ctx || typeof ctx !== 'object') return '';
+    var summary = aboutText(ctx.summary, 1200);
+    var rows = Array.isArray(ctx.sessions) ? ctx.sessions.filter(function (r) { return r && r.title; }) : [];
+    if (!summary && !rows.length) return '';
+    var when = aboutClock(ctx.at);
+    var lines = [];
+    if (summary) lines.push('Today summary' + (when ? ', written ' + when : '') + ':', summary, '');
+    lines.push('Sessions Today read (' + rows.length + '):');
+    rows.slice(0, ABOUT_ROWS).forEach(function (r) {
+      var moved = aboutAgo(r.movedAt);
+      lines.push('- ' + [aboutText(r.title, 120), aboutText(r.provider || 'claude', 12), aboutText(r.state, 12)].join(' | ') +
+        (moved ? ' | last activity ' + moved : '') + (r.lastAsk ? ' | last ask: "' + aboutText(r.lastAsk, 160).replace(/"/g, "'") + '"' : ''));
+    });
+    if (rows.length > ABOUT_ROWS) lines.push('and ' + (rows.length - ABOUT_ROWS) + ' more');
+    return lines.join('\n').slice(0, CONTEXT_MAX);
+  }
+  function askAbout(text, ctx) {
+    return ensureCaps().then(function (caps) {
+      if (!caps || !caps.jobs) { var off = new Error('Ask needs the durable query jobs switch on your Mac.'); off.code = 'durable_query_jobs_disabled'; throw off; }
+      var q = String(text || '').trim();
+      if (!q) throw new Error('Type what to ask first.');
+      var body = aboutContextText(ctx);
+      return new Promise(function (resolve, reject) {
+        submitAsk(q, null, function (ok) { if (ok) resolve(['cos']); else reject(new Error('Not sent. Your words are still in the box on Today.')); },
+          body ? { context: body, contextRef: ABOUT_REF } : undefined);
+      });
+    });
   }
   function take(a, job) {
     a.jobId = job.jobId; a.status = job.status || a.status;
@@ -1438,6 +1489,7 @@
       if (g.attachmentIds && g.attachmentIds.length) { o.attachmentIds = g.attachmentIds.slice(0, MAX_ATTS); o.atts = (g.atts || []).slice(0, MAX_ATTS); }
       if (g.replyKey) { o.replyKey = g.replyKey; o.sessionId = g.sessionId; }
       if (g.context) o.context = g.context;
+      if (g.contextRef) o.contextRef = g.contextRef;
       o.reask = true;
       if (a.conv) { o.expect = a.conv; o.retryOf = a; }
       return submitAsk(a.query, null, null, o);
@@ -2350,6 +2402,8 @@
     on: on, dropOn: dropOn, askOn: askOn, known: function () { return !!C.caps; }, ensureCaps: ensureCaps, fromHealth: fromHealth, refreshSummary: refreshSummary,
     pinnedRowHtml: pinnedRowHtml, mount: mount, wide: wide,
     replyHtml: replyHtml, mountReply: mountReply, askFromSheet: askFromSheet,
+    // Today round 2: "Ask about this" under the Today summary (app.js sendTodayAsk).
+    askAbout: askAbout, aboutContextText: aboutContextText,
     onClick: onClick, onKey: onKey, onInput: onInput, onChange: onChangeEvent, onSubmit: onSubmit, onPaste: onPaste, onDrag: onDrag,
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.

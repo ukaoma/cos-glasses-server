@@ -254,6 +254,8 @@ select.field {
 .story { font: 400 24px/1.28 var(--display); letter-spacing: -0.005em; margin: 26px 2px; text-wrap: pretty; }
 /* The Today summary's quiet age line (app.js briefWhen). */
 .story-when { display: block; margin-top: 10px; font: 400 14px/1.35 var(--body); letter-spacing: 0; color: var(--sub); }
+/* Today round 2: "Ask about this" under the summary, the COS chat composer (panes/cos-chat.css) laid flat in the page. */
+.today-ask.cc-composer { position: static; background: transparent; border-top: 0; padding: 0 0 14px; }
 .story-skel { display: grid; gap: 12px; margin: 30px 0; }
 .story-skel .skeleton { height: 22px; }
 
@@ -298,6 +300,7 @@ select.field {
 .next-later .later-when { color: var(--sub); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 4.5em; }
 .next-later .later-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .next-later .later-asof { color: var(--sub); margin-top: 4px; }
+.next-later .later-more { margin-top: 4px; padding: 3px 0; }
 
 /* ── Lists (sessions, meetings, messages) ────────────────── */
 .list { background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow); }

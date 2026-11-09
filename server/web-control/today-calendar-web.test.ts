@@ -40,7 +40,7 @@ describe('Today: later today under Next up', () => {
     expect(HTML).toContain('id="next-later" class="next-later hidden"')
   })
 
-  it('lists up to two more, skipping the event Next up already shows, and escapes titles', async () => {
+  it('lists the rest, skipping the event Next up already shows, and escapes titles', async () => {
     const t = load({ connected: true, stale: false, asOf: null, next: [row('Pipeline review', '2026-11-09T15:00:00Z'), row('1:1 <Gina>', '2026-11-09T16:00:00Z'), row('Standup', '2026-11-09T17:00:00Z')] })
     await t.run(NEXT, new Date(NEXT.time))
     expect(t.calls).toEqual(['/api/calendar/today'])
@@ -49,6 +49,24 @@ describe('Today: later today under Next up', () => {
     expect(t.box.innerHTML).toContain('1:1 &lt;Gina&gt;')
     expect(t.box.innerHTML).toContain('Standup')
     expect(t.box.innerHTML).not.toContain('Calendar as of')
+  })
+
+  // Today round 2 (Miles 11/09): 5 rows in all (the event above plus up to 4), then "+N more today" opening Meetings.
+  it('lists up to four more under the event above, then "+N more today" for what is left past the rows shown', async () => {
+    const next = [row('Pipeline review', '2026-11-09T15:00:00Z'), ...[16, 17, 18, 19].map(h => row(`M${h}`, `2026-11-09T${h}:00:00Z`))]
+    const t = load({ connected: true, stale: false, asOf: null, remainingCount: 8, next })
+    await t.run(NEXT, new Date(NEXT.time))
+    expect(t.box.innerHTML.match(/class="later-row"/g)).toHaveLength(4)
+    for (const h of [16, 17, 18, 19]) expect(t.box.innerHTML).toContain(`M${h}`)
+    // 8 left today, 5 on screen (the event above and 4 rows): 3 more.
+    expect(t.box.innerHTML).toContain('<button type="button" class="link-btn later-more" data-goto="meetings">+3 more today</button>')
+  })
+
+  it('no "+N more" when every meeting left today is on screen', async () => {
+    const t = load({ connected: true, stale: false, asOf: null, remainingCount: 3, next: [row('Pipeline review', NEXT.time), row('A', '2026-11-09T16:00:00Z'), row('B', '2026-11-09T17:00:00Z')] })
+    await t.run(NEXT, new Date(NEXT.time))
+    expect(t.box.innerHTML.match(/class="later-row"/g)).toHaveLength(2)
+    expect(t.box.innerHTML).not.toContain('more today')
   })
 
   it('an aging snapshot says when it was read', async () => {

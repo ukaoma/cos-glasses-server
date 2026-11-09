@@ -454,25 +454,38 @@ export function countsAsMeeting(row: Record<string, unknown> | null | undefined)
 }
 
 /**
- * Today for Control Web and desktop: selected calendars only, the next 3 timed meetings that count. QA 7.0.0: all-day
- * and non-prep events (declined, holidays, attendee-less shared events) are filtered out BEFORE the 3 are taken, so they
- * never use up the slots Today's "Later" shows. QA W23: remainingCount counts the same rows, so a declined meeting or
- * a family flight is not "remaining".
+ * Today for Control Web and desktop: selected calendars only, the next 5 timed meetings that count (Today round 2,
+ * Miles 2026-11-09: was 3). QA 7.0.0: all-day and non-prep events (declined, holidays, attendee-less shared events) are
+ * filtered out BEFORE the 5 are taken, so they never use up the slots Today's "Later" shows. QA W23: remainingCount
+ * counts the same rows, so a declined meeting or a family flight is not "remaining".
+ *
+ * Today round 2: `endedRecently` lists the meetings that count which ended within the last CALENDAR_ENDED_RECENT_MS
+ * (2 h), newest end first, at most CALENDAR_ENDED_MAX. They come from `today_events` (the snapshot's and the bridge's
+ * own list of every event today, past ones included), with the same end rule the snapshot uses (no end: an hour after
+ * the start). The Today summary uses it to know a meeting is over, so its prep is past. Additive: the older fields keep
+ * their names and meaning (desktop Control 0.5.384 reads next, remainingCount, stale and asOf).
  */
-export async function calendarToday(now = Date.now()): Promise<{
+export const CALENDAR_NEXT_MAX = 5
+export const CALENDAR_ENDED_RECENT_MS = 2 * 3600_000
+export const CALENDAR_ENDED_MAX = 5
+export interface CalendarTodayRow { title: string; start: string; end: string | null; allDay: boolean; calendar: string | null; meetingUrl: string | null }
+export interface CalendarEndedRow { title: string; start: string; end: string }
+export interface CalendarTodayView {
   connected: boolean
   source: CalendarSourceName
   asOf: string | null
   stale: boolean
   remainingCount: number
-  next: Array<{ title: string; start: string; end: string | null; allDay: boolean; calendar: string | null; meetingUrl: string | null }>
-}> {
+  next: CalendarTodayRow[]
+  endedRecently: CalendarEndedRow[]
+}
+export async function calendarToday(now = Date.now()): Promise<CalendarTodayView> {
   const read = await readCalendar(8_000, now)
   const data = read.data as Record<string, unknown> | null
   const connected = !!data && typeof data === 'object' && !('error' in data) && (read.source !== 'bridge' || pythonBridgeAvailable())
   const rows = connected && Array.isArray(data!.today_remaining) ? data!.today_remaining as Array<Record<string, unknown>> : []
   const counted = rows.filter(countsAsMeeting)
-  const next = counted.slice(0, 3).map(r => ({
+  const next = counted.slice(0, CALENDAR_NEXT_MAX).map(r => ({
     title: typeof r.title === 'string' ? r.title : 'Event',
     start: String(r.start_time ?? ''),
     end: typeof r.end_time === 'string' ? r.end_time : null,
@@ -480,6 +493,7 @@ export async function calendarToday(now = Date.now()): Promise<{
     calendar: typeof r.calendar_name === 'string' ? r.calendar_name : null,
     meetingUrl: typeof r.meeting_url === 'string' ? r.meeting_url : null,
   }))
+  const all = connected && Array.isArray(data!.today_events) ? data!.today_events as Array<Record<string, unknown>> : []
   return {
     connected,
     source: read.source,
@@ -487,5 +501,21 @@ export async function calendarToday(now = Date.now()): Promise<{
     stale: data?.is_stale === true,
     remainingCount: connected ? counted.length : 0,
     next,
+    endedRecently: endedRecently(all, now),
   }
+}
+
+/** Meetings that count and ended within CALENDAR_ENDED_RECENT_MS of `now`, newest end first. */
+export function endedRecently(rows: Array<Record<string, unknown>>, now: number): CalendarEndedRow[] {
+  const out: Array<CalendarEndedRow & { endMs: number }> = []
+  for (const r of rows) {
+    if (!countsAsMeeting(r)) continue
+    const startMs = Date.parse(String(r.start_time ?? ''))
+    if (!Number.isFinite(startMs)) continue
+    const endRaw = typeof r.end_time === 'string' && r.end_time ? Date.parse(r.end_time) : NaN
+    const endMs = Number.isFinite(endRaw) ? endRaw : startMs + 3600_000
+    if (endMs > now || now - endMs > CALENDAR_ENDED_RECENT_MS) continue
+    out.push({ title: typeof r.title === 'string' ? r.title : 'Event', start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString(), endMs })
+  }
+  return out.sort((a, b) => b.endMs - a.endMs).slice(0, CALENDAR_ENDED_MAX).map(({ endMs: _e, ...r }) => r)
 }

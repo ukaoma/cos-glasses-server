@@ -24,6 +24,9 @@ let genDelay: Promise<void> = Promise.resolve()
 let subagentCalls: string[][] = []
 let subagentAnswer: (keys: string[]) => Promise<Map<string, any>> = async () => new Map()
 let recentAnswer: (keys: string[]) => Map<string, any> = () => new Map()
+// Today round 2: the calendar the route reads with the sessions. undefined: no calendar dependency at all.
+let calendarAnswer: (() => Promise<any>) | undefined
+let calendarCalls = 0
 async function start(enabled: boolean | null) {
   dir = mkdtempSync(join(tmpdir(), 'today-brief-route-'))
   if (enabled !== null) writeFileSync(join(dir, 's.json'), JSON.stringify({ schema: 1, enabled }))
@@ -39,7 +42,7 @@ async function start(enabled: boolean | null) {
     // Recent activity lands first, then the sub-agents, as the real reader writes each as it is read.
     for (const [k, v] of recentAnswer(keys)) into.recent.set(k, v)
     for (const [k, v] of await subagentAnswer(keys)) into.agents.set(k, v)
-  }, now: () => Date.parse('2026-11-07T13:00:00Z') }))
+  }, ...(calendarAnswer ? { calendar: () => { calendarCalls++; return calendarAnswer!() } } : {}), now: () => Date.parse('2026-11-07T13:00:00Z') }))
   server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`
 }
@@ -48,7 +51,7 @@ afterEach(async () => {
   server = null
   rmSync(dir, { recursive: true, force: true })
 })
-beforeEach(() => { board = []; subagentAnswer = async () => new Map(); recentAnswer = () => new Map() })
+beforeEach(() => { board = []; subagentAnswer = async () => new Map(); recentAnswer = () => new Map(); calendarAnswer = undefined; calendarCalls = 0 })
 
 const post = (path: string, body: unknown) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 const ASK = { sessions: [{ title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 5, waiting: 'Wants to run npm publish' }], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false }
@@ -323,5 +326,52 @@ describe('2026-11-09: recent activity and the dated board on the ask', () => {
       row({ title: 'Undated', workStage: 'draft' }),
     ], now)
     expect(out.map(w => [w.title, w.movedMinutes])).toEqual([['Changed', 60], ['Created only', Math.round((now - Date.parse('2026-11-05')) / 60000)], ['Undated', null]])
+  })
+})
+
+// Today round 2 (Miles 2026-11-09): the route reads today's calendar inside the same parallel reads and wait, and a
+// calendar that is down, slow or not connected costs only the calendar section.
+describe('Today round 2: the calendar on the ask', () => {
+  const NOW = Date.parse('2026-11-07T13:00:00Z')
+  const iso = (mins: number) => new Date(NOW + mins * 60_000).toISOString()
+  const CAL = { connected: true, next: [{ title: 'Weatherford follow up', start: iso(45), end: iso(75) }], endedRecently: [{ title: 'Weatherford call', start: iso(-60), end: iso(-15) }] }
+
+  it('the calendar block reaches the prompt: next with minutes until, and the meeting that ended', async () => {
+    calendarAnswer = async () => CAL
+    await start(true)
+    const v = await (await post('/today/brief', ASK)).json()
+    expect(v.state).toBe('fresh')
+    expect(calendarCalls).toBe(1)
+    expect(prompts[0]).toContain('Calendar today, from the person\u2019s selected calendars:')
+    expect(prompts[0]).toMatch(/- Next: "Weatherford follow up" at \d{1,2}:\d{2} [AP]M \(in 45 min\)/)
+    expect(prompts[0]).toContain('- Ended: "Weatherford call"')
+    expect(prompts[0]).toContain('ended 15 min ago')
+  })
+
+  it('fails soft: a failed, not connected or slow calendar means no section, and a slow one never holds the ask', async () => {
+    for (const answer of [async () => { throw new Error('down') }, async () => ({ connected: false, next: [], endedRecently: [] }), async () => null]) {
+      calendarAnswer = answer
+      await start(true)
+      expect((await (await post('/today/brief', ASK)).json()).state).toBe('fresh')
+      expect(prompts[0]).not.toContain('Calendar today')
+      if (server) await new Promise(r => server!.close(r))
+      server = null
+      rmSync(dir, { recursive: true, force: true })
+    }
+    calendarAnswer = () => new Promise(() => {})
+    await start(true)
+    const t0 = Date.now()
+    expect((await (await post('/today/brief', ASK)).json()).state).toBe('fresh')
+    expect(Date.now() - t0).toBeLessThan(6000)
+    expect(prompts[0]).not.toContain('Calendar today')
+  }, 20_000)
+
+  it('a gated ask reads no calendar', async () => {
+    calendarAnswer = async () => CAL
+    await start(true)
+    await post('/today/brief', ASK)
+    expect(calendarCalls).toBe(1)
+    await post('/today/brief', { ...ASK, sessions: [{ ...ASK.sessions[0], minutes: 400 }] })
+    expect(calendarCalls).toBe(1)
   })
 })

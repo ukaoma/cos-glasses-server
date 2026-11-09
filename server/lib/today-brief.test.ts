@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   TODAY_BRIEF_DAILY_CAP, TODAY_BRIEF_DAILY_CAP_MAX, TODAY_BRIEF_DAILY_CAP_MIN, TODAY_BRIEF_RECONNECT_MIN_MS, clampTodayBriefDailyCap, TODAY_BRIEF_FORCE_MIN_MS, TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
-  claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, sessionContextLookups, todayBriefFingerprint, withSubagents, withRecentActivity, scrubRecentText, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
+  claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, sessionContextLookups, todayBriefFingerprint, withSubagents, withRecentActivity, scrubRecentText, BRIEF_AGENT_ROWS_MAX, withCalendar, briefClock, calendarClockTokens, briefReadRows, sessionMeeting, type CalendarReading, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 import type { RecentActivity } from './agent-session-recent.js'
 
@@ -902,5 +902,181 @@ describe('2026-11-09 "recent activity first" (Miles approved: recent messages an
     expect(keys).toHaveLength(12)
     expect(keys[0]).toBe(KEY(2))
     expect(keys).not.toContain(KEY(1))
+  })
+})
+
+// Today round 2 (Miles typed 2026-11-09 09:19 to 09:20 CST): the "tomorrow" sentence goes, and the summary knows the
+// calendar: what is on, what is next with its time, and what ended in the last 2 hours (its prep is past).
+describe('Today round 2: the prompt no longer asks for "can wait until tomorrow"', () => {
+  it('the system prompt never instructs the model to say anything can wait until tomorrow; the opener says what can wait', () => {
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).not.toContain('say they can wait until tomorrow')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT.toLowerCase()).not.toContain('can wait until tomorrow')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Never tell the person that something can wait, until tomorrow or any later time')
+    // The "nothing waits" rule stays.
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('While Needs you has items, never say nothing is waiting.')
+    // No em or en dashes in the prompt's own words.
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).not.toMatch(/[\u2013\u2014]/)
+  })
+})
+
+describe('Today round 2: a calendar-aware summary', () => {
+  // T0 is 15:00 local. A meeting on now (14:30 to 15:30), the next five at 16:00 to 20:00, one ended 14:00 to 14:30,
+  // one ended at 12:50 (2 h 10 min ago: too old).
+  const iso = (h: number, m = 0) => new Date(new Date(T0).setHours(h, m, 0, 0)).toISOString()
+  const reading = (over: Partial<CalendarReading> = {}): CalendarReading => ({
+    connected: true,
+    next: [
+      { title: 'Design review', start: iso(14, 30), end: iso(15, 30) },
+      ...[16, 17, 18, 19, 20].map(h => ({ title: `Meeting ${h}`, start: iso(h), end: iso(h, 30) })),
+    ],
+    endedRecently: [{ title: 'Weatherford call', start: iso(14), end: iso(14, 30) }, { title: 'Older one', start: iso(12), end: iso(12, 50) }],
+    ...over,
+  })
+
+  it('in progress, the next 4 with minutes until, and what ended in the last 2 h reach the prompt; at most 8 events', () => {
+    const cal = withCalendar(inputs(), reading(), T0)
+    expect(cal.calendar!.inProgress.map(e => e.title)).toEqual(['Design review'])
+    expect(cal.calendar!.next.map(e => e.title)).toEqual(['Meeting 16', 'Meeting 17', 'Meeting 18', 'Meeting 19'])
+    expect(cal.calendar!.ended.map(e => e.title)).toEqual(['Weatherford call'])
+    const data = buildTodayBriefData(cal)
+    expect(data).toContain('Calendar today, from the person\u2019s selected calendars:')
+    expect(data).toContain('- In progress: "Design review" (2:30 PM to 3:30 PM, started 30 min ago)')
+    expect(data).toContain('- Next: "Meeting 16" at 4:00 PM (in 1 h)')
+    expect(data).toContain('- Ended: "Weatherford call" (2:00 PM to 2:30 PM, ended 30 min ago)')
+    expect(data).not.toContain('Meeting 20')
+    expect(data).not.toContain('Older one')
+    const prompt = buildTodayBriefPrompt(cal, T0)
+    expect(prompt).toContain('- Ended: "Weatherford call"')
+    // The bound: about 8 events at most, whatever the calendar sends.
+    const many = withCalendar(inputs(), reading({ next: Array.from({ length: 20 }, (_, i) => ({ title: `N${i}`, start: iso(15, 1 + i), end: iso(15, 2 + i) })),
+      endedRecently: Array.from({ length: 9 }, (_, i) => ({ title: `E${i}`, start: iso(14), end: iso(14, 50 - i) })) }), T0)
+    const n = many.calendar!.inProgress.length + many.calendar!.next.length + many.calendar!.ended.length
+    expect(n).toBeLessThanOrEqual(8)
+  })
+
+  it('the 11/09 replay: duplicates across calendars and canceled events take no slot, so the meeting that just ended stays', () => {
+    const cal = withCalendar(inputs(), reading({
+      next: [{ title: 'Check Zero', start: iso(14, 30), end: iso(15, 15) }, { title: 'Forecast', start: iso(14, 45), end: iso(15, 45) }, { title: 'Forecast', start: iso(14, 45), end: iso(15, 45) },
+        { title: 'Canceled: Forecast', start: iso(16), end: iso(16, 30) }, { title: 'Later', start: iso(16, 30), end: iso(17) }],
+      endedRecently: [{ title: 'JetOut Sync', start: iso(14), end: iso(14, 30) }, { title: 'Weekly Marketing Call', start: iso(13), end: iso(14) }, { title: 'Weekly Marketing Call', start: iso(13), end: iso(14) },
+        { title: 'Weatherford - CatchUp', start: iso(13, 30), end: iso(14) }, { title: 'Weatherford - CatchUp', start: iso(13, 30), end: iso(14) }],
+    }), T0)
+    expect(cal.calendar!.ended.map(e => e.title)).toEqual(['JetOut Sync', 'Weekly Marketing Call', 'Weatherford - CatchUp'])
+    expect(cal.calendar!.inProgress.map(e => e.title)).toEqual(['Check Zero', 'Forecast'])
+    expect(cal.calendar!.next.map(e => e.title)).toEqual(['Later'])
+    // Never more than 8 in all, however full each list is.
+    const full = withCalendar(inputs(), reading({ next: [...Array.from({ length: 3 }, (_, i) => ({ title: `On${i}`, start: iso(14, i), end: iso(16) })), ...Array.from({ length: 6 }, (_, i) => ({ title: `N${i}`, start: iso(16 + i), end: iso(16 + i, 30) }))],
+      endedRecently: Array.from({ length: 5 }, (_, i) => ({ title: `E${i}`, start: iso(13), end: iso(14, 30 - i) })) }), T0)
+    expect([full.calendar!.inProgress.length, full.calendar!.next.length, full.calendar!.ended.length]).toEqual([2, 3, 3])
+  })
+
+  it('a session whose recent words name a meeting that ended is marked in the data: its prep is past (the 11/09 replay)', () => {
+    const read = new Map<string, RecentActivity>([['claude|weatherford01', { asks: [{ at: T0 - 70 * MIN, text: 'Can you prep me for the weatherford call. Goal: 2027 budget', via: 'typed' }],
+      reply: { at: T0 - 65 * MIN, text: 'The banner is the Done notice for the Weatherford prep. A restart needs your go.' }, movedAt: T0 - 65 * MIN } as unknown as RecentActivity],
+    ['claude|zerotests01', { asks: [{ at: T0 - 5 * MIN, text: 'run the suite, zero failures please, and check the report', via: 'typed' }], reply: null, movedAt: T0 - 5 * MIN } as unknown as RecentActivity]])
+    const page = normalizeTodayBriefInputs({ sessions: [
+      { title: 'Can you prep me for the weatherford call', provider: 'claude', state: 'open', minutes: 65, line: 'x', key: 'claude|weatherford01' },
+      { title: 'Test run', provider: 'claude', state: 'working', minutes: 5, line: 'x', key: 'claude|zerotests01' }], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false })
+    const cal = withCalendar(withRecentActivity(page, read, T0), reading({ next: [{ title: 'Check Zero Report Reminder', start: iso(14, 30), end: iso(15, 15) }],
+      endedRecently: [{ title: 'Weatherford - CatchUp', start: iso(14), end: iso(14, 20) }, { title: 'Weekly Marketing Call', start: iso(13), end: iso(14) }] }), T0)
+    expect(sessionMeeting(cal.sessions[0]!, cal.calendar)?.event.title).toBe('Weatherford - CatchUp')
+    // Generic words ("check", "report", "zero" is too short) never tie a session to a meeting.
+    expect(sessionMeeting(cal.sessions[1]!, cal.calendar)).toBeNull()
+    const data = buildTodayBriefData(cal)
+    expect(data).toContain('its recent words are about the meeting "Weatherford - CatchUp", which ended 40 min ago: any prep for it is past')
+    expect(data.match(/its recent words are about the meeting/g)).toHaveLength(1)
+  })
+
+  it('the ended window is 2 hours: a meeting ended 1 h 59 min ago is in, 2 h 1 min ago is out', () => {
+    const cal = withCalendar(inputs(), reading({ next: [], endedRecently: [{ title: 'Just in', start: iso(12), end: iso(13, 1) }, { title: 'Just out', start: iso(12), end: iso(12, 59) }] }), T0)
+    expect(cal.calendar!.ended.map(e => e.title)).toEqual(['Just in'])
+  })
+
+  it('no calendar read, not connected, or nothing today: no section, and the inputs are untouched', () => {
+    const base = inputs()
+    expect(withCalendar(base, null, T0)).toBe(base)
+    expect(withCalendar(base, { connected: false, next: [{ title: 'X', start: iso(16), end: iso(17) }] }, T0)).toBe(base)
+    expect(withCalendar(base, { connected: true, next: [], endedRecently: [] }, T0)).toBe(base)
+    expect(buildTodayBriefData(base)).not.toContain('Calendar today')
+  })
+
+  it('titles are scrubbed like every field: no URLs, ids or paths, and a quote cannot end the quoted text', () => {
+    const cal = withCalendar(inputs(), reading({ next: [{ title: 'Sync "with" https://zoom.us/j/123 at ~/Documents/secret/plan.md 0123456789abcdef0123', start: iso(16), end: iso(17) }], endedRecently: [] }), T0)
+    const data = buildTodayBriefData(cal)
+    expect(data).not.toContain('zoom.us')
+    expect(data).not.toContain('Documents')
+    expect(data).not.toContain('0123456789abcdef')
+    expect(data).toContain("Sync 'with'")
+  })
+
+  it('the prompt tells the model how to use the calendar: time when it matters, ties only when mentioned, ended means prep is past', () => {
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Mention the current or next meeting with its time only when it matters')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Tie a session to a meeting only when that session\u2019s recent messages or latest reply mention that meeting.')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('never say a prep still needs a go before a meeting that already ended')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('say that meeting ended, then what the session is doing or waiting on now, and do not call it prep')
+  })
+
+  it('the date guard allows a clock time the calendar holds, as the model writes it, and still drops one it does not', () => {
+    const cal = withCalendar(inputs(), reading(), T0)
+    const ok = (t: string) => cleanTodayBriefWithGuard(t, cal, T0).dropped !== 'date_claim' && cleanTodayBriefWithGuard(t, cal, T0).text !== null
+    expect(briefClock(Date.parse(iso(16)))).toBe('4:00 PM')
+    for (const t of ['Your next meeting is at 4:00 PM, and the build is moving along well.', 'Meeting 16 starts at 4 PM and the build is moving along well.',
+      'Meeting 16 starts at 4pm and the build is moving along well.', 'The design review runs until 3:30 and the build is moving along well.',
+      'Meeting 16 is at 16:00 today and the build is moving along well.']) {
+      expect(ok(t), t).toBe(true)
+    }
+    for (const t of ['Your next meeting is at 4:15 PM, and the build is moving along well.', 'Lunch is at 1 PM and the build is moving along well.',
+      'The review is at 11:30 and the build is moving along well.']) {
+      expect(cleanTodayBriefWithGuard(t, cal, T0).guard ?? cleanTodayBriefWithGuard(t, cal, T0).dropped, t).toBe('date_claim')
+    }
+    // Exact tokens, never a substring: "11 pm" in the calendar must not back "1 pm".
+    const late = withCalendar(inputs(), reading({ next: [{ title: 'Late call', start: iso(23), end: iso(23, 30) }], endedRecently: [] }), T0)
+    expect(calendarClockTokens(late).has('11 pm')).toBe(true)
+    expect(calendarClockTokens(late).has('at 11')).toBe(true)
+    expect(unbackedDateClaim('Lunch is at 1 pm today.', inputsCorpus(late), '', 'wednesday', calendarClockTokens(late))).toBe('at 1')
+    expect(unbackedDateClaim('Lunch is 1 pm today.', inputsCorpus(late), '', 'wednesday', calendarClockTokens(late))).toBe('1 pm')
+    // Without a calendar, the same calendar time is still unbacked.
+    expect(unbackedDateClaim('Meeting 16 starts at 4:00 PM.', inputsCorpus(inputs()), '', 'wednesday', calendarClockTokens(inputs()))).toBe('4:00')
+  })
+
+  it('the fingerprint includes the calendar, with minutes bucketed: a minute nearer is not news; a meeting ending is', () => {
+    const at = (t: number) => withCalendar(inputs(), reading(), t)
+    const base = todayBriefFingerprint(inputs())
+    const a = todayBriefFingerprint(at(T0))
+    expect(a).not.toBe(base)
+    // 15:12 and 15:13: 48 and 47 min to Meeting 16, 42 and 43 since the design review started (one bucket each).
+    expect(todayBriefFingerprint(at(T0 + 12 * MIN))).toBe(todayBriefFingerprint(at(T0 + 13 * MIN)))
+    // 15:31: the design review ended, so it is no longer in progress.
+    expect(todayBriefFingerprint(at(T0 + 31 * MIN))).not.toBe(todayBriefFingerprint(at(T0 + 13 * MIN)))
+  })
+
+  it('"today" is backed when the calendar lists something today; the calendar titles back a date in a title', () => {
+    const cal = withCalendar(inputs(), reading(), T0)
+    expect(inputsCorpus(cal)).toContain('today')
+    expect(inputsCorpus(cal)).toContain('weatherford call')
+    expect(inputsCorpus(inputs())).not.toContain('weatherford')
+  })
+})
+
+describe('Today round 2: the sessions a summary read go with it ("Ask about this")', () => {
+  it('a written summary carries its sessions: title, provider, state, when it moved, the last message into it; no ids', async () => {
+    const h = harness()
+    const read = new Map<string, RecentActivity>([['claude|abcdef123456', { asks: [{ at: T0 - 20 * MIN, text: 'review the Weatherford transcript', via: 'typed' }, { at: T0 - 5 * MIN, text: 'then move to the next step', via: 'typed' }], reply: { at: T0 - 2 * MIN, text: 'On it' }, movedAt: T0 - 2 * MIN } as unknown as RecentActivity]])
+    const page = normalizeTodayBriefInputs({ sessions: [{ title: 'Weatherford prep', provider: 'claude', state: 'working', minutes: 3, line: 'x', key: 'claude|abcdef123456' }], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false })
+    const v = await h.brief.ask(withRecentActivity(page, read, T0))
+    expect(v.state).toBe('fresh')
+    expect(v.sessions).toEqual([{ title: 'Weatherford prep', provider: 'claude', state: 'working', movedAt: new Date(T0 - 2 * MIN).toISOString(), lastAsk: 'then move to the next step' }])
+    expect(JSON.stringify(v.sessions)).not.toContain('abcdef123456')
+    // GET (peek) and a restart keep them.
+    expect(h.brief.peek().sessions).toEqual(v.sessions)
+    expect(createTodayBrief(h.deps).peek().sessions).toEqual(v.sessions)
+  })
+
+  it('at most 12, waiting first, and sessions collapsed for being quiet over a day are left out', () => {
+    const rows = Array.from({ length: 15 }, (_, i) => ({ title: `S${i}`, provider: 'claude', state: i === 14 ? 'waiting' : 'open', minutes: i === 13 ? 3000 : i, line: '' }))
+    const read = briefReadRows(normalizeTodayBriefInputs({ sessions: rows, needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false }), T0)
+    expect(read).toHaveLength(12)
+    expect(read[0].title).toBe('S14')
+    expect(read.map(r => r.title)).not.toContain('S13')
   })
 })

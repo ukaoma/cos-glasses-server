@@ -403,7 +403,7 @@ export function _resetWelcomeContextCachesForTests(): void {
 
 /**
  * PH plan P1: Today's calendar for Control Web and desktop. Behind the /api token gate. Selected calendars only, the
- * next 3 events. `connected: false` means "Calendar not connected", never an empty day.
+ * next 5 events (Today round 2, was 3), plus `endedRecently` (ended within 2 h). `connected: false` means "Calendar not connected", never an empty day.
  */
 welcomeContextRouter.get('/calendar/today', async (_req, res) => {
   try {

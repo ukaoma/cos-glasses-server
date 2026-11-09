@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const src = vi.hoisted(() => ({ read: { source: 'snapshot', data: {} as unknown, ageMs: 0 } as { source: string; data: unknown; ageMs: number | null } }))
 vi.mock('../lib/calendar-source.js', () => ({
   readCalendar: async () => src.read,
-  calendarToday: async () => ({ connected: false, source: 'none', asOf: null, stale: false, remainingCount: 0, next: [] }),
+  calendarToday: async () => ({ connected: false, source: 'none', asOf: null, stale: false, remainingCount: 0, next: [], endedRecently: [] }),
 }))
 vi.mock('../lib/python-bridge.js', () => ({
   pythonBridgeAvailable: () => false,

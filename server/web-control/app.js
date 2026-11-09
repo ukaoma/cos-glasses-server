@@ -1441,12 +1441,17 @@
   function renderStory(m) {
     var el = $('today-story');
     el.className = 'story';
-    if (TODAY.offline) { el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
+    // Today round 2: "Ask about this" shows under a model summary only (paintTodayAsk, below the Today block). The test
+    // harnesses that run this block alone do not have it, so it is looked up, never assumed.
+    var askBox = typeof paintTodayAsk === 'function' ? paintTodayAsk : function () {};
+    if (TODAY.offline) { askBox(null); el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
     // The model's summary when there is one (it never blocks: the counts line below shows until it lands). The test
     // harnesses that run this block alone have no requestBrief, so it is looked up, never assumed.
+    askBox(null);
     if (typeof requestBrief === 'function') {
       requestBrief(m);
       var brief = briefShown();
+      askBox(brief);
       if (brief) { el.innerHTML = esc(brief.text) + '<span class="story-when">' + esc(briefWhen(brief, m)) + '</span>'; return; }
     }
     var first = '';
@@ -1851,9 +1856,12 @@
       '<button type="button" class="link-btn" data-goto="meetings">Open meeting</button>';
     card.classList.remove('hidden');
   }
-  // PH plan P1: the rest of today from GET /api/calendar/today (selected calendars, next 3), under Next up.
+  // PH plan P1: the rest of today from GET /api/calendar/today (selected calendars), under Next up.
   // An aging snapshot says when it was read. Not connected or nothing more: the block stays hidden.
+  // Today round 2 (Miles 11/09): Next up is 5 rows in all, the event above plus up to 4 more, then "+N more today"
+  // (opens Meetings) when the calendar has more meetings left today than are shown. Desktop Control 0.5.384 matches.
   function loadCalendarLater(n, d) {
+    var LATER_ROWS = 4;
     var box = $('next-later'); if (!box) return;
     if (!n || !n.title || !d) { box.classList.add('hidden'); box.innerHTML = ''; return; }
     var gen = TODAY.gen;
@@ -1861,12 +1869,16 @@
       if (gen !== TODAY.gen) return;
       if (!c || !c.connected) { box.classList.add('hidden'); box.innerHTML = ''; return; }
       var same = function (r) { var rd = toDate(r.start); return r.title === n.title && rd && d && Math.abs(rd.getTime() - d.getTime()) < 60000; };
-      var rows = (c.next || []).filter(function (r) { return !r.allDay && !same(r); }).slice(0, 2);
+      var list = c.next || [];
+      var rows = list.filter(function (r) { return !r.allDay && !same(r); }).slice(0, LATER_ROWS);
       var asOf = c.stale && c.asOf ? toDate(c.asOf) : null;
       var html = rows.map(function (r) {
         var rd = toDate(r.start);
         return '<div class="later-row"><span class="later-when">' + esc(rd ? clock(rd) : '') + '</span><span class="later-what">' + esc(r.title) + '</span></div>';
       }).join('');
+      // What is left today past the rows on screen (the event above counts when it is one of today's).
+      var shown = rows.length + (list.some(same) ? 1 : 0), more = (Number(c.remainingCount) || 0) - shown;
+      if (more > 0) html += '<button type="button" class="link-btn later-more" data-goto="meetings">' + esc('+' + more + ' more today') + '</button>';
       if (asOf) html += '<div class="later-asof">' + esc('Calendar as of ' + clock(asOf)) + '</div>';
       box.innerHTML = html;
       box.classList.toggle('hidden', !html);
@@ -1877,6 +1889,52 @@
     if (!n || !n.title || !chat || !chat.prepFor) return;
     go('messages', ['cos']);
     chat.prepFor(n.title, d ? d.toISOString() : null).catch(function (err) { toast((err && err.message) || 'Prep me did not start.'); });
+  }
+  // ── Ask about this (Today round 2, Miles 11/09) ─────────
+  // "Ask COS from this page about the summary and take action coming off of that summary": one box under the model's
+  // summary. Send goes to Messages, then COS, and submits an Ask (panes/cos-chat.js askAbout) that carries the summary,
+  // when it was written and the sessions it read, as the Ask's quoted reference (data, never instructions; no transcript
+  // text, only the last message into each session). COS can then answer, or pass an instruction to a session by its
+  // title through the Ask's own relay ("Sent to <title>" on the answer card). Hidden without a model summary, without
+  // Ask on the Mac (capabilities: durable query jobs) or while the Mac does not answer.
+  function paintTodayAsk(brief) {
+    var form = $('today-ask'); if (!form) return;
+    var chat = window.COSWeb && window.COSWeb.cosChat;
+    // Ask's capability is read once per page (the chat's /api/health read); paint again when it lands.
+    if (brief && chat && chat.known && !chat.known() && chat.ensureCaps && !TODAY.askCaps) {
+      TODAY.askCaps = true;
+      chat.ensureCaps().then(function () { if (TODAY.model && state.pane === 'today') renderStory(TODAY.model); }, function () {});
+    }
+    var on = !!(brief && !TODAY.offline && TODAY.sessionsState === 'answered' && chat && chat.askAbout && chat.askOn && chat.askOn());
+    form.classList.toggle('hidden', !on);
+  }
+  // The sessions the summary read: the server's own list with the summary (7.0.10+ round 2 `sessions`: title, provider,
+  // state, when it last moved, the last message into it), else what this page holds for the same rows.
+  function todayAskContext(b) {
+    var rows = [];
+    if (Array.isArray(b.sessions) && b.sessions.length) {
+      b.sessions.forEach(function (r) { if (r && r.title) rows.push({ title: String(r.title), provider: String(r.provider || 'claude'), state: String(r.state || ''), movedAt: r.movedAt || null, lastAsk: r.lastAsk ? String(r.lastAsk) : '' }); });
+    } else {
+      (state.sessions || []).forEach(function (s) {
+        if (sxKeepWarm(s)) return;
+        var kind = sxState(s) === 'waiting' ? 'waiting' : s.running_active ? 'working' : s.running ? 'open' : '';
+        if (!kind) return;
+        var k = splitSessionId(s.provider, s.session_id || s.id);
+        rows.push({ title: sessionTitle(s), provider: k.provider, state: kind, movedAt: kind === 'open' ? (s.last_activity_at || s.state_since) : (s.state_since || s.last_activity_at), lastAsk: '' });
+      });
+    }
+    return { summary: String(b.text || ''), at: b.at || null, sessions: rows };
+  }
+  function sendTodayAsk() {
+    var input = $('today-ask-input'), text = input ? input.value.trim() : '';
+    var chat = window.COSWeb && window.COSWeb.cosChat, b = briefShown();
+    if (!text || TODAY.askBusy || !b || !chat || !chat.askAbout) return;
+    TODAY.askBusy = true;
+    var ctx = todayAskContext(b);
+    go('messages', ['cos']);
+    chat.askAbout(text, ctx).then(function () { input.value = ''; autoGrow(input); }, function (err) {
+      toast((err && err.message) || 'Ask did not send. Your words are still in the box on Today.');
+    }).then(function () { TODAY.askBusy = false; });
   }
   // From today's meetings: Work's suggestions from meetings held today. They stay here until
   // midnight, then join Sort in Work; Review opens them in Work's Sort.
@@ -6023,6 +6081,7 @@
           showAuth(err && err.status ? err.message : UNREACHABLE_COPY);
         });
     } else if (f.id === 'session-form') sendSessionTurn(false);
+    else if (f.id === 'today-ask') sendTodayAsk();
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }
     else if (f.id === 'ask-form') {
       var hits = $('ask-hits'); if (hits && $('ask-q').value.trim().length >= 2) renderAsk();
