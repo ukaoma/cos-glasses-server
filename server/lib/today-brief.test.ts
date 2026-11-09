@@ -987,6 +987,21 @@ describe('Today round 2: a calendar-aware summary', () => {
     expect(data.match(/its recent words are about the meeting/g)).toHaveLength(1)
   })
 
+  it('the 11/09 replay at 9:52: an ended meeting a session names keeps its slot; a "Blocked" hold never ties a session', () => {
+    const read = new Map<string, RecentActivity>([['claude|weatherford01', { asks: [{ at: T0 - 80 * MIN, text: 'Prep me for the weatherford call. If you need input or are blocked, say so', via: 'typed' }],
+      reply: { at: T0 - 75 * MIN, text: 'The Done notice for the Weatherford prep is stuck. A restart needs your go.' }, movedAt: T0 - 75 * MIN } as unknown as RecentActivity]])
+    const page = normalizeTodayBriefInputs({ sessions: [{ title: 'Weatherford prep', provider: 'claude', state: 'open', minutes: 75, line: 'x', key: 'claude|weatherford01' }],
+      needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false })
+    const cal = withCalendar(withRecentActivity(page, read, T0), reading({ next: [{ title: 'Blocked', start: iso(16), end: iso(17) }],
+      endedRecently: [{ title: 'Check Zero Report', start: iso(14), end: iso(14, 45) }, { title: 'JetOut Sync', start: iso(14), end: iso(14, 30) },
+        { title: 'Weekly Marketing Call', start: iso(13), end: iso(14) }, { title: 'Weatherford - CatchUp', start: iso(13, 30), end: iso(14) }] }), T0)
+    expect(cal.calendar!.ended.map(e => e.title)).toEqual(['Weatherford - CatchUp', 'Check Zero Report', 'JetOut Sync'])
+    const met = sessionMeeting(cal.sessions[0]!, cal.calendar)
+    expect(met?.kind).toBe('ended')
+    expect(met?.event.title).toBe('Weatherford - CatchUp')
+    expect(sessionMeeting(cal.sessions[0]!, { inProgress: [], ended: [], next: cal.calendar!.next })).toBeNull()
+  })
+
   it('the ended window is 2 hours: a meeting ended 1 h 59 min ago is in, 2 h 1 min ago is out', () => {
     const cal = withCalendar(inputs(), reading({ next: [], endedRecently: [{ title: 'Just in', start: iso(12), end: iso(13, 1) }, { title: 'Just out', start: iso(12), end: iso(12, 59) }] }), T0)
     expect(cal.calendar!.ended.map(e => e.title)).toEqual(['Just in'])

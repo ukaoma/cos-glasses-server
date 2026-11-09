@@ -416,8 +416,13 @@ export function withCalendar(inputs: TodayBriefInputs, reading: CalendarReading 
   // too so a reading from anywhere (an older server's rows) obeys it. Raw titles, before scrubbing, as the API keys them.
   const fields = (r: { title: unknown; start: unknown }) => ({ title: r.title, start: r.start })
   const timed = distinctMeetings((reading.next ?? []).filter(r => r && r.allDay !== true), fields)
+  // Ended: the ones a session's own words name first (the 11/09 replay at 9:52: three newer ended meetings pushed the
+  // Weatherford call out, and its session was back to "the prep is waiting on your go"), then the newest end first.
+  const named = (e: BriefEvent) => inputs.sessions.some(s => sessionNamesMeeting(s, e.title))
   const ended = distinctMeetings(reading.endedRecently ?? [], fields).map(r => event(r.title, r.start, r.end, (_s, e) => now - e))
-    .filter((e): e is BriefEvent => !!e && e.endMs <= now && now - e.endMs <= BRIEF_CAL_ENDED_MS).slice(0, BRIEF_CAL_ENDED_MAX)
+    .filter((e): e is BriefEvent => !!e && e.endMs <= now && now - e.endMs <= BRIEF_CAL_ENDED_MS)
+    .map((e, i) => ({ e, i, named: named(e) })).sort((a, b) => Number(b.named) - Number(a.named) || a.i - b.i).map(x => x.e)
+    .slice(0, BRIEF_CAL_ENDED_MAX)
   const inProgress = timed.filter(r => Date.parse(String(r.start)) <= now)
     .map(r => event(r.title, r.start, r.end, s => now - s)).filter((e): e is BriefEvent => !!e && e.endMs > now).slice(0, BRIEF_CAL_IN_PROGRESS_MAX)
   const room = Math.min(BRIEF_CAL_NEXT_MAX, BRIEF_CAL_TOTAL_MAX - ended.length - inProgress.length)
@@ -533,7 +538,10 @@ export function briefSessionCollapsed(s: BriefSession): boolean {
 const MEETING_WORD_GENERIC = new Set(['meeting', 'meetings', 'weekly', 'daily', 'monthly', 'quarterly', 'calls', 'catchup', 'catch', 'review', 'reviews',
   'standup', 'check', 'checkin', 'report', 'reminder', 'update', 'updates', 'planning', 'session', 'sessions', 'intro', 'discussion', 'follow', 'followup',
   'marketing', 'systems', 'canceled', 'cancelled', 'friday', 'monday', 'tuesday', 'wednesday', 'thursday', 'about', 'other', 'their', 'there', 'office',
-  'hours', 'focus', 'block', 'lunch', 'agenda', 'notes', 'touch', 'touchbase', 'internal', 'external', 'group', 'kickoff', 'working'])
+  'hours', 'focus', 'block', 'lunch', 'agenda', 'notes', 'touch', 'touchbase', 'internal', 'external', 'group', 'kickoff', 'working',
+  // The 11/09 replay at 9:52: a "Blocked" hold tied the Weatherford session ("...if you need input or are blocked").
+  'blocked', 'blocker', 'blocks', 'holds', 'tentative', 'travel', 'commute', 'break', 'personal', 'private', 'offline', 'available', 'dinner',
+  'prepare', 'meetup', 'today', 'tomorrow', 'stand', 'standing', 'start', 'started'])
 const meetingWords = (title: string) => [...new Set(title.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 5 && !MEETING_WORD_GENERIC.has(w)))]
 /**
  * Today round 2: the calendar meeting a session's own recent words name (its recent messages, latest reply or "started
@@ -544,13 +552,16 @@ const meetingWords = (title: string) => [...new Set(title.toLowerCase().split(/[
  */
 export function sessionMeeting(s: BriefSession, cal: BriefCalendar | null | undefined): { kind: 'in' | 'ended' | 'next'; event: BriefEvent } | null {
   if (!cal) return null
-  const text = (s.recent ? [...(s.asks ?? []).map(a => a.text), s.reply?.text ?? '', s.startedAs ?? ''] : [s.line]).join(' ').toLowerCase()
-  if (!text.trim()) return null
-  const has = (w: string) => new RegExp(`(?:^|[^a-z0-9])${w}(?:[^a-z0-9]|$)`).test(text)
   for (const [kind, list] of [['in', cal.inProgress], ['ended', cal.ended], ['next', cal.next]] as const) {
-    for (const e of list) if (meetingWords(e.title).some(has)) return { kind, event: e }
+    for (const e of list) if (sessionNamesMeeting(s, e.title)) return { kind, event: e }
   }
   return null
+}
+/** Whether a session's own recent words (else its page line) name a meeting, by a distinctive word of its title. */
+export function sessionNamesMeeting(s: BriefSession, title: string): boolean {
+  const text = (s.recent ? [...(s.asks ?? []).map(a => a.text), s.reply?.text ?? '', s.startedAs ?? ''] : [s.line]).join(' ').toLowerCase()
+  if (!text.trim()) return false
+  return meetingWords(title).some(w => new RegExp(`(?:^|[^a-z0-9])${w}(?:[^a-z0-9]|$)`).test(text))
 }
 
 /** The fenced data block, most important first, bounded to TODAY_BRIEF_DATA_MAX_CHARS. */
