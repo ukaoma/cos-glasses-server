@@ -1,3 +1,12 @@
+## 7.0.7 - Answer lists never change what Markdown draws
+
+2026-11-08. 7.0.6 (f98dbbd, installed privately on Miles's Mac) plus three final QA fixes. Server and Control Web. This is the public candidate, paired with COS Control 0.5.380.
+
+- **Answer lists never change what the reader draws (final QA W1).** 7.0.5 puts a COS answer's inline numbered list on its own lines, and a new line could start with a character the renderer reads as Markdown: "Note this. > 5 users said: 1. ..." drew "5 users said" as a quote and lost the ">", "Done. # of open items: 1. ..." drew a heading and lost the "#", and "**Steps: 1. ... 2. ...**" split the bold across lines so both "**" showed. Now a cut never enters inline code, `**bold**`, `__bold__`, `*italic*` or `_italic_`; a lead-in "Label:" that starts with `#`, `>`, `-`, `*`, `+`, `|`, `[`, `<` or a number marker stays on the line before it; and a list whose item starts with `#`, `>` or a task box (`[x]`) is left as it was written. The three QA answers now draw exactly the characters they drew before 7.0.5; only line breaks differ. Copy turn copies the answer as stored, as before.
+- **Preview refusal logs are rate limited (final QA N1).** The preview routes' refusal lines go through the 7.0.4 routes' limiter: the same line logs once per 10 seconds, with the count it held back.
+- **Notes corrected.** The 7.0.4 known limits now say the live stream's `prompt` events are redacted (0c8cb5e) and its other event kinds are not. The 7.0.5 note says exactly which Markdown leaves an answer alone.
+- No other change from 7.0.6. Default-on for every install: the answer list rules above (a narrowing of 7.0.5's) and the log limit.
+
 ## 7.0.6 - The preview viewer always opens on screen
 
 2026-11-08. 7.0.5 (689b9e8, installed privately on Miles's Mac) plus one fix. Server and Control Web only. Pairs with the same COS Control as 7.0.5.
@@ -20,7 +29,7 @@
 - **SendUserFile `files` sent as a JSON string** (11 of 1,112 real calls) is read like a list, with the same checks. Before, those files were dropped silently.
 - **Today summary: up to 100 a day** (was 60). It is now a setting, "Summaries per day", 1 to 100, in Settings under the Today summary switch. The server enforces it, and the status line says "Today's N summaries are used."
 - **Today summary after a reconnect.** When the sessions or Today read recovers from a failed one, the next summary ask starts at once instead of waiting out the 10-minute spacing. At most once per 10 minutes; "only when something changed", the 3-failure pause, the switch and the daily cap still apply.
-- **COS answers read as lists on the web.** An answer written for the lens as one paragraph ("What it unlocks for me: 1. Prep... 2. Catching conflicts...") is drawn with each numbered item on its own line under its lead-in, in the COS chat card and the Messages reader. Only line breaks are added, on the web only: the lens and the stored answer are unchanged, and an answer that already has Markdown is left alone. The chat card also keeps an answer's own line breaks now (they ran together before).
+- **COS answers read as lists on the web.** An answer written for the lens as one paragraph ("What it unlocks for me: 1. Prep... 2. Catching conflicts...") is drawn with each numbered item on its own line under its lead-in, in the COS chat card and the Messages reader. Only line breaks are added, on the web only: the lens and the stored answer are unchanged, and an answer that already has Markdown structure is left alone: a bulleted or numbered line, a heading, a quote or table line, a blank line or a code fence. (7.0.7 adds that a cut never enters inline code, bold or italic, and never starts a new line that the renderer would draw as a heading, quote, bullet or table.) The chat card also keeps an answer's own line breaks now (they ran together before).
 
 **Off by default:**
 - **Extra folders** (Settings, Privacy, under the session files switch). Empty until you add one. A session may open files only from its own project folder, plus each folder named there. Broad folders (home, Documents, Library, /, /Volumes, temp) and anything inside Library, .cos-glasses, .ssh, .codex, .claude or .config are refused with the reason ("COS never previews from that folder."). A folder saved before that rule stops counting.
@@ -74,7 +83,7 @@
 - The guard is name-based: a COPY of a secret under an ordinary name is not caught. Images go through the JPEG normaliser, so a text secret cannot leave as an image.
 - A `~name/` with a letter first is read as a home folder, so prose like "~half/most" loses "~half/".
 - Any local process that holds the API token can read user turns as written; it can already read the transcripts themselves.
-- The live session stream (`agent-session-stream.ts`) and the Claude sessions routes are not covered by S1 here.
+- The Claude sessions routes are not covered by S1 here. The live session stream (`agent-session-stream.ts`) is covered only for its `prompt` events (0c8cb5e, in 7.0.5): they are redacted like the turn history. Its other event kinds are sent as before.
 
 **Tests (B1, W1, W5 and QA fixes):** local-path-redact (92: a must-not-change table of prose, code, shell lines, ratios, fractions, dates, versions and https links, including every string the first cut rewrote; a must-redact table of Mac paths with spaces, dot folders, quotes, backticks, `file://`, `:42`, Markdown bold, italic and blockquotes), agent-sessions-work-match (21, through the real token gate: the helper over 127.0.0.1 and ::1 matches; Origin, Referer, Sec-Fetch-*, a browser user agent, proxy headers, LAN and tailnet sources and cookie sessions get redacted text), secret-path-guard (48), the preview routes and Control Web. Every new guard was mutated on a green baseline and killed. Read-only replay over 16,886 recent assistant replies: the first cut changed 147 lines with no private path in them; this one changes 0 and leaves no `/Users/<name>`.
 
