@@ -15,7 +15,8 @@
     "test": "vitest run --maxWorkers=1",
     "typecheck": "tsc --noEmit",
     "mutation:gate": "node server/scripts/mutation-gate.mjs",
-    "control2:lab": "node bin/control2-foundation.cjs"
+    "control2:lab": "node bin/control2-foundation.cjs",
+    "prepack": "node server/scripts/write-web-control-manifest.mjs && node server/scripts/write-web-control-manifest.mjs server/web-signer"
   },
   "keywords": [
     "even-g2",
@@ -148,7 +149,10 @@
     "docs/test-plan-6.71.8.md",
     "docs/test-plan-6.71.9.md",
     "docs/test-plan-6.71.10.md",
-    "docs/test-plan-6.71.11.md"
+    "docs/test-plan-6.71.11.md",
+    "!server/scripts/web-key-mutation-gate.mjs",
+    "!server/scripts/web-key-signer-mutation-gate.mjs",
+    "docs/web-key-verifier-contract.md"
   ],
   "author": "COS Contributors",
   "license": "MIT",

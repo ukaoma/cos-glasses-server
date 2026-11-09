@@ -11,9 +11,9 @@
 // message that landed in the wrong session does not verify there. An unknown provider keeps the
 // `<claude|codex|cursor>` placeholder rather than naming a wrong one.
 //
-// The COS-WEB tag is reserved for a future web origin backed by a device key the API token cannot
-// produce. In 6.99.29 no turn is footed COS-WEB: a web turn is recorded, never vouched. The readers
-// still take either tag off.
+// The COS-WEB tag is for a web turn signed by an enrolled phone key the API token cannot produce
+// (6.99.31, behind COS_WEB_KEY_AUTHORITY, default off: lib/web-key-authority.ts). Off, as in 6.99.29,
+// no turn is footed COS-WEB: a web turn is recorded, never vouched. The readers take either tag off.
 //
 // The verifier (MU-Chief-Staff operations/scripts/verify_g2_turn.py) mirrors G2_TURN_FOOTER_RE.
 //

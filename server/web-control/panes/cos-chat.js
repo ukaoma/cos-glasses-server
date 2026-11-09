@@ -114,7 +114,9 @@
       // reply box shows no clip, so a file can never be dropped from a turn in silence.
       turnFiles: h && Number.isInteger(h.threadTurnAttachments) && h.threadTurnAttachments > 0 ? Math.min(h.threadTurnAttachments, MAX_ATTS) : 0,
       // 6.99.27: any file for a session turn, up to this many bytes (threadTurnFileBytes). 0: the chat's list only.
-      turnFileBytes: h && Number.isInteger(h.threadTurnFileBytes) && h.threadTurnFileBytes > 0 ? Math.min(h.threadTurnFileBytes, MAX_DOC) : 0
+      turnFileBytes: h && Number.isInteger(h.threadTurnFileBytes) && h.threadTurnFileBytes > 0 ? Math.min(h.threadTurnFileBytes, MAX_DOC) : 0,
+      // 6.99.31: the Mac runs the phone key signer (webKeySigner 1, only with COS_WEB_KEY_AUTHORITY on). Absent: 0, nothing offered.
+      webKeySigner: h && h.webKeySigner === 1 ? 1 : 0
     };
     if (next.prep && next.prep.serverInstanceId) PREP_INST = next.prep.serverInstanceId;
     var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread;
@@ -2173,6 +2175,8 @@
       // How many files a session turn takes on this Mac (threadTurnAttachments); 0 means words only.
       turnFiles: function () { return C.caps && C.caps.turnFiles > 0 ? C.caps.turnFiles : 0; },
       turnFileBytes: function () { return C.caps && C.caps.turnFiles > 0 && C.caps.turnFileBytes > 0 ? C.caps.turnFileBytes : 0; },
+      // 6.99.31: 1 when the Mac offers "Approve on this phone" (the 3144 signer), else 0.
+      webKeySigner: function () { return C.caps && C.caps.webKeySigner === 1 ? 1 : 0; },
       askOn: askOn, ensureCaps: ensureCaps
     },
     // 6.99.19: Prep. meetings.js reads the capability from here (one /api/health read for the page).
