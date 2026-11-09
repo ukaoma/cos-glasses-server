@@ -230,7 +230,7 @@ describe('production reader and Today hook coverage', () => {
       newFeed: () => ({}), SX: { view: 'sessions', rows: [] }, sxSave: noop, paintSessionsHero: noop, sxSame: () => false, sxKey: () => '',
       skeletonRows: () => '', api: async () => ({ recent_turns: turns }), sessionPath: () => '/session', SX_TURNS: 40, sxTitle: () => 'Images', sxTruncNote: () => '',
       sxBadge: () => '', sxFullButton: () => '', esc, sxSubtitle: () => '', renderTurns: render.render, readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,
-      setLive: noop, sxNoteList: noop, paintReaderFiles: noop, readerKit: () => null, renderHeld: noop, loadQueue: noop, sxProbeAttach: noop, requestAnimationFrame: noop, watchSession: noop, sxEmpty: (s: string) => s,
+      setLive: noop, sxNoteList: noop, paintReaderFiles: noop, readerKit: () => null, renderHeld: noop, loadQueue: noop, sxProbeAttach: noop, paintWebKeyOffer: noop, requestAnimationFrame: noop, watchSession: noop, sxEmpty: (s: string) => s,
     }
     new Function('deps', 'with(deps){' + region(APP, '  function openSession(provider, id)', '  // ACTIVITY') + 'openSession("codex", "session-one");}')(deps)
     await flush()

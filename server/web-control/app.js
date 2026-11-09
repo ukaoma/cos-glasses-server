@@ -3515,7 +3515,8 @@
   }
   // Safari can restore this exact DOM after enrollment or revocation on the separate signer origin.
   // Refetch once per persisted return; closed/replaced readers are pruned and no timer is installed.
-  window.addEventListener('pageshow', function (e) {
+  // (Guarded: it runs at load, and a host without window events, the web-control vm harnesses, must still load.)
+  if (window.addEventListener) window.addEventListener('pageshow', function (e) {
     if (!e || !e.persisted) return;
     var nav = WEB_KEY.navigation; WEB_KEY.navigation = null;
     if (nav && nav.token.completed && nav.r.phoneNavigation === nav.token) {
