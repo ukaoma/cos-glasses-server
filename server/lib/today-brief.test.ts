@@ -1014,6 +1014,9 @@ describe('Today round 2: a calendar-aware summary', () => {
     expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Tie a session to a meeting only when that session\u2019s recent messages or latest reply mention that meeting.')
     expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('never say a prep still needs a go before a meeting that already ended')
     expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('say that meeting ended, then what the session is doing or waiting on now, and do not call it prep')
+    // Miles 11/09 (typed 09:5x): fold the next meeting into the existing sentences; the 3-sentence cap stays.
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('When an upcoming meeting matters, work it into one of your sentences')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Never spend a separate sentence on a meeting: still at most three sentences in all.')
   })
 
   it('the date guard allows a clock time the calendar holds, as the model writes it, and still drops one it does not', () => {

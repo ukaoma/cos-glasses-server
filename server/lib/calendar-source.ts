@@ -22,6 +22,7 @@
 import { lstatSync, readFileSync } from 'node:fs'
 import { dataPath } from './data-dir.js'
 import { callPython, pythonBridgeAvailable } from './python-bridge.js'
+import { distinctMeetings, type MeetingFields } from './calendar-meetings.js'
 
 export const SNAPSHOT_FRESH_MS = 2 * 3600_000
 export const SNAPSHOT_MAX_AGE_MS = 24 * 3600_000
@@ -61,6 +62,8 @@ export interface SnapshotEvent {
   attendees: SnapshotAttendee[]
   /** Allowlisted hosts only (zoom.us, teams.microsoft.com, meet.google.com). */
   meetingUrl: string | null
+  /** Today round 2: EventKit's status said canceled (only when the writer sends `status: "canceled"`). */
+  canceled?: boolean
 }
 
 export interface CalendarSnapshot {
@@ -159,6 +162,7 @@ export function parseSnapshot(raw: unknown): CalendarSnapshot | null {
       isOrganizer: r.isOrganizer === true,
       attendees,
       meetingUrl: url,
+      ...(typeof r.status === 'string' && /^cancel+ed$/i.test(r.status.trim()) ? { canceled: true } : {}),
     })
   }
   return { version: 1, writtenAt, windowStart, windowEnd, access, calendars, events }
@@ -340,6 +344,7 @@ export function bridgeEvent(e: SnapshotEvent, calendar: SnapshotCalendar | undef
     event_id: e.eventId,
     external_id: e.externalId,
     occurrence_start: e.occurrenceStart,
+    ...(e.canceled ? { canceled: true } : {}),
   }
 }
 
@@ -464,6 +469,10 @@ export function countsAsMeeting(row: Record<string, unknown> | null | undefined)
  * own list of every event today, past ones included), with the same end rule the snapshot uses (no end: an hour after
  * the start). The Today summary uses it to know a meeting is over, so its prep is past. Additive: the older fields keep
  * their names and meaning (desktop Control 0.5.384 reads next, remainingCount, stale and asOf).
+ *
+ * Today round 2 follow-up: canceled events and duplicates (the same title at the same start) are dropped BEFORE next,
+ * remainingCount and endedRecently are taken (calendar-meetings.ts, the helper the Today summary uses too), so
+ * remainingCount counts real, distinct meetings and no slot is spent twice on one.
  */
 export const CALENDAR_NEXT_MAX = 5
 export const CALENDAR_ENDED_RECENT_MS = 2 * 3600_000
@@ -484,7 +493,7 @@ export async function calendarToday(now = Date.now()): Promise<CalendarTodayView
   const data = read.data as Record<string, unknown> | null
   const connected = !!data && typeof data === 'object' && !('error' in data) && (read.source !== 'bridge' || pythonBridgeAvailable())
   const rows = connected && Array.isArray(data!.today_remaining) ? data!.today_remaining as Array<Record<string, unknown>> : []
-  const counted = rows.filter(countsAsMeeting)
+  const counted = distinctMeetings(rows.filter(countsAsMeeting), bridgeMeetingFields)
   const next = counted.slice(0, CALENDAR_NEXT_MAX).map(r => ({
     title: typeof r.title === 'string' ? r.title : 'Event',
     start: String(r.start_time ?? ''),
@@ -505,11 +514,15 @@ export async function calendarToday(now = Date.now()): Promise<CalendarTodayView
   }
 }
 
-/** Meetings that count and ended within CALENDAR_ENDED_RECENT_MS of `now`, newest end first. */
+/** A bridge-shaped row's meeting identity, for calendar-meetings.ts. */
+export function bridgeMeetingFields(r: Record<string, unknown>): MeetingFields {
+  return { title: r.title, start: r.start_time, status: r.status, canceled: r.canceled }
+}
+
+/** Distinct, not canceled meetings that count and ended within CALENDAR_ENDED_RECENT_MS of `now`, newest end first. */
 export function endedRecently(rows: Array<Record<string, unknown>>, now: number): CalendarEndedRow[] {
   const out: Array<CalendarEndedRow & { endMs: number }> = []
-  for (const r of rows) {
-    if (!countsAsMeeting(r)) continue
+  for (const r of distinctMeetings(rows.filter(countsAsMeeting), bridgeMeetingFields)) {
     const startMs = Date.parse(String(r.start_time ?? ''))
     if (!Number.isFinite(startMs)) continue
     const endRaw = typeof r.end_time === 'string' && r.end_time ? Date.parse(r.end_time) : NaN

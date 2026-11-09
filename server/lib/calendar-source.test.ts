@@ -516,6 +516,37 @@ describe('Today round 2: endedRecently', () => {
   })
 })
 
+// Today round 2 follow-up (coordinator 11/09): the API drops canceled events and duplicates BEFORE next,
+// remainingCount and endedRecently. The live snapshot's duplicates were mostly on ONE Exchange calendar with
+// different external ids, so they are keyed by title and start, whatever the calendar.
+describe('Today round 2: next, remainingCount and endedRecently count distinct, real meetings', () => {
+  it('one row per meeting (same title and start, on one calendar or two), none for a canceled one', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    const events = [
+      ev({ eventId: 'f1', externalId: 'x1', start: at(9, 30), occurrenceStart: at(9, 30), end: at(10, 30), title: 'Funnel Analysis' }),
+      ev({ eventId: 'f2', externalId: 'x2', start: at(9, 30), occurrenceStart: at(9, 30), end: at(10, 30), title: 'Funnel Analysis', attendees: [{ name: 'Someone else', domain: 'example.com' }] }),
+      ev({ calendarId: 'cal-2', eventId: 'f3', externalId: 'x3', start: at(9, 30), occurrenceStart: at(9, 30), end: at(10, 30), title: 'funnel analysis' }),
+      ev({ eventId: 'c1', externalId: 'c1', start: at(10, 30), occurrenceStart: at(10, 30), end: at(11), title: 'Canceled: Forecast' }),
+      ev({ eventId: 's1', externalId: 's1', start: at(11), occurrenceStart: at(11), end: at(11, 30), title: 'Status canceled' }),
+      ev({ eventId: 'r1', externalId: 'r1', start: at(12), occurrenceStart: at(12), end: at(12, 30), title: 'Real one' }),
+      ev({ eventId: 'w1', externalId: 'w1', start: at(8), occurrenceStart: at(8), end: at(8, 30), title: 'Weatherford - CatchUp' }),
+      ev({ eventId: 'w2', externalId: 'w2', start: at(8), occurrenceStart: at(8), end: at(8, 30), title: 'Weatherford - CatchUp' }),
+      ev({ eventId: 'w3', externalId: 'w3', start: at(8, 15), occurrenceStart: at(8, 15), end: at(8, 45), title: 'Cancelled: Weatherford prep' }),
+    ]
+    const raw = { ...snap({ calendars: [cal(), cal({ id: 'cal-2', title: 'Gmail', sourceType: 'caldav' })], events }) } as Record<string, unknown>
+    // The writer's EventKit status, when it sends one: canceled.
+    ;(raw.events as Array<Record<string, unknown>>)[4].status = 'canceled'
+    writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(raw))
+    mod.resetCalendarSourceCache()
+    const today = await mod.calendarToday(NOW)
+    expect(today.next.map(n => n.title)).toEqual(['Funnel Analysis', 'Real one'])
+    expect(today.remainingCount).toBe(2)
+    expect(today.endedRecently.map(r => r.title)).toEqual(['Weatherford - CatchUp'])
+  })
+})
+
 function muScriptsDir(): string | null {
   const candidates = [
     process.env.COS_SCRIPTS_DIR ? resolve(process.env.COS_SCRIPTS_DIR) : null,
