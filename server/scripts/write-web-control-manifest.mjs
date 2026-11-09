@@ -37,5 +37,7 @@ if (isMain) {
   const tmp = `${out}.tmp`
   writeFileSync(tmp, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 })
   renameSync(tmp, out)
-  console.log(`[web-control-manifest] ${out} (${Object.keys(manifest.files).length} files)`)
+  // stderr, never stdout: it runs as `prepack`, and `npm pack --json` callers (the release packager, package-contents and
+  // launcher-contract tests) parse stdout as JSON (7.0.9 full suite).
+  console.error(`[web-control-manifest] ${out} (${Object.keys(manifest.files).length} files)`)
 }
