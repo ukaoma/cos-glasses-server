@@ -1,3 +1,12 @@
+## 7.0.12 - Prep any meeting on Today, with your own context
+
+2026-11-09. 7.0.11 (1beefbd) plus one change. Private on Miles's Mac first.
+
+- **Prep on every Next up row (Control Web).** Each meeting row has a quiet Prep; the first row keeps Prep me and Open meeting and gains Add context. Prep opens a panel under that row: a box for goals, people and what you want out of it, Add files, Cancel and Start prep. One panel at a time; the words survive the page's refresh; Escape keeps them, Cancel drops them.
+- **Start prep** uses that meeting's own Prep draft (the same one Prep me opens): typed context is added after any notes already there, files upload first, and a file that does not go in stops the run with one line saying so. With Prep off but Ask on, it asks "Prep me for <title> at <time>" with the context as quoted data. With neither, no Prep is offered.
+- **Holds get no Prep.** New `CALENDAR_HOLD_WORDS` / `isCalendarHold` (Blocked, Busy, Hold, Focus, Travel, Personal, OOO, Lunch and similar, whole word at the start, unless the title says "with"). `/api/calendar/today` rows and welcome-context `nextEvent` carry `hold` (additive).
+- **Default-on for every install:** yes, the Prep actions on Today (web). Desktop follows in Control 0.5.385.
+
 ## 7.0.11 - Today knows your calendar, shows more of it, and takes questions
 
 2026-11-09. 7.0.10 (004df50) plus Today round 2. Private on Miles's Mac first.
