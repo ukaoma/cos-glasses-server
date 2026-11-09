@@ -1,3 +1,13 @@
+## 7.0.9 - 7.0.8 plus phone approvals (dormant) and the anchor bootstrap switch
+
+2026-11-08. 7.0.8 (d8bc2a7) merged with the phone approvals server (6ed40cd), plus one new switch. Both switches below are OFF by default, so with neither set this build behaves as 7.0.8 for every install. Not device-qualified; private on Miles's Mac first.
+
+- **Phone approvals, dormant.** The enrolled phone key server (the `/api/web-key/*` routes, the signer page on port 3144, served-asset integrity for it, and verified-turn authority for a phone-signed Control Web turn) is in the package behind `COS_WEB_KEY_AUTHORITY`, default off. Off, none of those routes exists (each answers 404 as on 7.0.8), port 3144 is never opened, `/api/health` has no `webKeySigner`, and a web turn is recorded exactly as on 7.0.8: never vouched. `verify_g2_turn.py` keeps refusing web authority either way.
+- **New: `COS_WEB_KEY_ANCHOR_BOOTSTRAP`, default off.** On, with `COS_WEB_KEY_AUTHORITY` off, the server answers exactly two routes so COS Control can register this Mac's Touch ID key and start its 24 hour clock: `POST /api/web-key/anchor` (loopback only, the API token and the key's own signature, as before) and `GET /api/web-key/status` (API token only). The status reply in this mode is `{ ok: true, enabled: false, mode: "bootstrap", anchorRegistered, anchorMature, anchorSetAt, aud, origin, epoch }`; `enabled` stays false so an older COS Control hides phone approvals. Everything else stays off exactly as with both switches off: phone enrollment, the key list, revoke, nonces, approval packets, the handoff, the consume route, port 3144, the signer integrity check, the extra cookie port, `webKeySigner` in health, and verified-turn authority. Read like every switch: `1`, `true` or `on` is on, `0`, `false` or `off` is off, anything else the default. Listed in `managed-runtime-contract.json`.
+- **With `COS_WEB_KEY_AUTHORITY` on, nothing changes** and the bootstrap switch does nothing: the status reply is byte for byte the 6.99.31 one (no `mode` field). The anchor registered in bootstrap mode is the same record the authority reads, so turning the authority on later needs no second registration and keeps its `setAt`.
+- **Known, unchanged: registering the same key again restarts its 24 hour clock.** The server sets `setAt` to now on every registration, the same key included (no keys are revoked and the epoch stays). Do not re-register to check that the key persisted.
+- Default-on for every install: none.
+
 ## 7.0.8 - Control Web home screen icon
 
 2026-11-08. 7.0.7 (689a41b, the public candidate) plus one change. Control Web only. Private on Miles's Mac first.
