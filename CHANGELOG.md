@@ -1,3 +1,10 @@
+## 7.0.8 - Control Web home screen icon
+
+2026-11-08. 7.0.7 (689a41b, the public candidate) plus one change. Control Web only. Private on Miles's Mac first.
+
+- **Control Web has a home screen icon.** Saving Control Web to an iPhone home screen showed a grey letter, because iOS ignores the SVG favicon. The page now names a 180 px PNG of the COS mark on its cream background (`apple-touch-icon.png`). Remove an old shortcut and add it again from Safari's Share menu to pick it up.
+- No other change from 7.0.7. Default-on for every install: this icon only.
+
 ## 7.0.7 - Answer lists never change what Markdown draws
 
 2026-11-08. 7.0.6 (f98dbbd, installed privately on Miles's Mac) plus four final QA fixes. Server and Control Web. This is the public candidate, paired with COS Control 0.5.380.
