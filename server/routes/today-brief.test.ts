@@ -23,6 +23,7 @@ function row(over: Partial<TaskBoardRow>): TaskBoardRow {
 let genDelay: Promise<void> = Promise.resolve()
 let subagentCalls: string[][] = []
 let subagentAnswer: (keys: string[]) => Promise<Map<string, any>> = async () => new Map()
+let recentAnswer: (keys: string[]) => Map<string, any> = () => new Map()
 async function start(enabled: boolean | null) {
   dir = mkdtempSync(join(tmpdir(), 'today-brief-route-'))
   if (enabled !== null) writeFileSync(join(dir, 's.json'), JSON.stringify({ schema: 1, enabled }))
@@ -33,7 +34,12 @@ async function start(enabled: boolean | null) {
   })
   const app = express()
   app.use(express.json({ limit: '1mb' }))
-  app.use('/api', createTodayBriefRouter({ brief, board: async () => { boardReads++; return board }, subagents: keys => { subagentCalls.push(keys); return subagentAnswer(keys) }, now: () => Date.parse('2026-11-07T13:00:00Z') }))
+  app.use('/api', createTodayBriefRouter({ brief, board: async () => { boardReads++; return board }, context: async (keys, into) => {
+    subagentCalls.push(keys)
+    // Recent activity lands first, then the sub-agents, as the real reader writes each as it is read.
+    for (const [k, v] of recentAnswer(keys)) into.recent.set(k, v)
+    for (const [k, v] of await subagentAnswer(keys)) into.agents.set(k, v)
+  }, now: () => Date.parse('2026-11-07T13:00:00Z') }))
   server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`
 }
@@ -42,7 +48,7 @@ afterEach(async () => {
   server = null
   rmSync(dir, { recursive: true, force: true })
 })
-beforeEach(() => { board = []; subagentAnswer = async () => new Map() })
+beforeEach(() => { board = []; subagentAnswer = async () => new Map(); recentAnswer = () => new Map() })
 
 const post = (path: string, body: unknown) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 const ASK = { sessions: [{ title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 5, waiting: 'Wants to run npm publish' }], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false }
@@ -103,7 +109,7 @@ describe('sub-agents on the ask', () => {
     subagentAnswer = async () => new Map([[K(2), { rows: [{ name: 'today-brief-builder', task: 'Today summary via Haiku', status: 'running', at: Date.parse('2026-11-07T12:56:00Z') }], running: 1, idle: 0, done: 0, failed: 0, total: 1 }]])
     expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
     expect(subagentCalls).toEqual([[K(3), K(2), K(1)]])
-    expect(prompts[0]).toContain('- "today-brief-builder" (running, moved 4 min ago): "Today summary via Haiku"')
+    expect(prompts[0]).toContain('"today-brief-builder" (running, moved 4 min ago): "Today summary via Haiku"')
     expect(prompts[0]).not.toMatch(/aaaaaaaa|claude\|/)
   })
   it('a slow read never holds the ask past its wait: the page\u2019s counts go instead', async () => {
@@ -112,7 +118,7 @@ describe('sub-agents on the ask', () => {
     const t0 = Date.now()
     expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
     expect(Date.now() - t0).toBeLessThan(4000)
-    expect(prompts[0]).toContain('sub-agents: 1 running')
+    expect(prompts[0]).toContain('in the last 2 hours: 1 running')
   }, 8000)
   it('a failed read is the same as none', async () => {
     await start(true)
@@ -176,7 +182,8 @@ describe('workInProgress', () => {
     ]
     const out = workInProgress(rows)
     expect(out).toHaveLength(12)
-    expect(out[0]).toEqual({ title: 'Planned with an agent', stage: 'planned', running: true })
+    // An undated card's last move is unknown (null), never "just now".
+    expect(out[0]).toEqual({ title: 'Planned with an agent', stage: 'planned', running: true, movedMinutes: null })
     expect(out.map(w => w.title)).toContain('In QA')
     expect(out.map(w => w.title)).toContain('Legacy active')
     expect(out.map(w => w.title)).not.toContain('Planned only')
@@ -185,9 +192,9 @@ describe('workInProgress', () => {
   })
 })
 
-describe('readSubagentsFor (the server’s own reads)', () => {
+describe('readSessionContext (the server’s own reads)', () => {
   it('finds a Claude session by id under the sessions home and reads its sub-agents; a bad or unknown key reads nothing', async () => {
-    const { readSubagentsFor } = await import('./today-brief.js')
+    const { readSessionContext } = await import('./today-brief.js')
     const home = mkdtempSync(join(tmpdir(), 'brief-home-'))
     const prev = process.env.COS_AGENT_SESSIONS_HOME
     process.env.COS_AGENT_SESSIONS_HOME = home
@@ -199,7 +206,7 @@ describe('readSubagentsFor (the server’s own reads)', () => {
         JSON.stringify({ type: 'assistant', timestamp: '2026-11-07T12:00:00Z', message: { content: [{ type: 'tool_use', id: 't1', name: 'Agent', input: { name: 'qa-ghost', description: 'Ghost hunter QA' } }] } }),
         JSON.stringify({ type: 'user', timestamp: '2026-11-07T12:00:01Z', toolUseResult: { status: 'teammate_spawned', name: 'qa-ghost' }, message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }),
       ].join('\n') + '\n')
-      const out = await readSubagentsFor(['claude|' + id, 'claude|bbbbbbbb-2222-4222-8222-222222222222', 'cursor|cccccccc-3333-4333-8333-333333333333'])
+      const out = (await readSessionContext(['claude|' + id, 'claude|bbbbbbbb-2222-4222-8222-222222222222', 'cursor|cccccccc-3333-4333-8333-333333333333'])).agents
       expect([...out.keys()]).toEqual(['claude|' + id])
       expect(out.get('claude|' + id)!.rows).toEqual([{ name: 'qa-ghost', task: 'Ghost hunter QA', status: 'running', at: Date.parse('2026-11-07T12:00:01Z') }])
     } finally {
@@ -275,5 +282,46 @@ describe('7.0.5: Summaries per day and reconnect', () => {
     expect(prompts).toHaveLength(2)
     expect((await post('/today/brief', { ...ASK, reason: 'because' })).status).toBe(400)
     expect((await post('/today/brief', { ...ASK, reason: 1 })).status).toBe(400)
+  })
+})
+
+describe('2026-11-09: recent activity and the dated board on the ask', () => {
+  const NOW = Date.parse('2026-11-07T13:00:00Z')
+  const K = (n: number) => `claude|aaaaaaaa-1111-4111-8111-11111111111${n}`
+  const body = { sessions: [
+    { title: 'Product work', provider: 'claude', state: 'open', minutes: 11, key: K(1), line: 'Yesterday we ran a bakeoff to improve transcription' },
+    { title: 'Favicon question', provider: 'claude', state: 'open', minutes: 540, key: K(2), line: 'gotcos favicon' },
+  ], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false }
+
+  it('what was read before the wait ended goes in; a session not read keeps its line, marked may be old', async () => {
+    await start(true)
+    recentAnswer = () => new Map([[K(1), { asks: [{ at: NOW - 16 * 60000, text: 'is everything live?', via: 'typed' }], reply: { at: NOW - 11 * 60000, text: 'The public release is live.' }, movedAt: NOW - 11 * 60000 }]])
+    subagentAnswer = () => new Promise(() => {})   // the sub-agent read never answers: the ask goes on after its wait
+    expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
+    expect(subagentCalls).toEqual([[K(1), K(2)]])
+    expect(prompts[0]).toContain('(16 min ago, typed by the person) "is everything live?"')
+    expect(prompts[0]).toContain('latest reply (11 min ago) "The public release is live."')
+    expect(prompts[0]).not.toContain('bakeoff')
+    expect(prompts[0]).toContain('latest line (may be old): "gotcos favicon"')
+  }, 8000)
+  it('the board is read with dates: a card not moved in two days is a count, a card moved today shows', async () => {
+    await start(true)
+    board = [
+      row({ title: 'Stale card', workStage: 'qa', lineChangedAt: '2026-10-31T12:00:00Z' } as any),
+      row({ title: 'Fresh card', workStage: 'draft', lineChangedAt: '2026-11-07T10:00:00Z' } as any),
+    ]
+    expect((await (await post('/today/brief', ASK)).json()).state).toBe('fresh')
+    expect(prompts[0]).toContain('- Fresh card (being built, moved 3 h ago)')
+    expect(prompts[0]).not.toContain('Stale card')
+    expect(prompts[0]).toContain('(1 more Work card is in progress, untouched for over two days; the newest of them moved 7 days ago.)')
+  })
+  it('workInProgress dates a card by its line change, else its creation day, and keeps the most recently moved', () => {
+    const now = NOW
+    const out = workInProgress([
+      row({ title: 'Created only', workStage: 'qa', createdOn: '2026-11-05' } as any),
+      row({ title: 'Changed', workStage: 'built', lineChangedAt: '2026-11-07T12:00:00Z', createdOn: '2026-10-01' } as any),
+      row({ title: 'Undated', workStage: 'draft' }),
+    ], now)
+    expect(out.map(w => [w.title, w.movedMinutes])).toEqual([['Changed', 60], ['Created only', Math.round((now - Date.parse('2026-11-05')) / 60000)], ['Undated', null]])
   })
 })

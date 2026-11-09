@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   TODAY_BRIEF_DAILY_CAP, TODAY_BRIEF_DAILY_CAP_MAX, TODAY_BRIEF_DAILY_CAP_MIN, TODAY_BRIEF_RECONNECT_MIN_MS, clampTodayBriefDailyCap, TODAY_BRIEF_FORCE_MIN_MS, TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
-  claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
+  claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, sessionContextLookups, todayBriefFingerprint, withSubagents, withRecentActivity, scrubRecentText, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
+import type { RecentActivity } from './agent-session-recent.js'
 
 // No model is ever called here: `generate` is a fake that records its prompts.
 let dir = ''
@@ -365,18 +366,18 @@ describe('sub-agents (Miles 11/07: "those summaries should be able to see sub ag
   it('keeps a valid key only to look sub-agents up, and the page\u2019s counts until the server reads more', () => {
     const i = base()
     expect(i.sessions.map(s => s.key)).toEqual([KEY, 'codex|019a0000-1111-2222-3333-444455556666', ''])
-    expect(subagentLookups(i)).toEqual(['codex|019a0000-1111-2222-3333-444455556666', KEY])
+    expect(sessionContextLookups(i)).toEqual(['codex|019a0000-1111-2222-3333-444455556666', KEY])
     const data = buildTodayBriefData(i)
-    expect(data).toContain('sub-agents: 2 running, 1 done')
+    // 2026-11-09: the page's counts alone carry no ages: the running ones are a count, the finished one history.
+    expect(data).toContain('sub-agents active or finished in the last 2 hours: 2 running')
+    expect(data).toContain('(1 sub-agent finished earlier; history, not shown)')
   })
   it('puts names, tasks, status and when each moved in the prompt, quoted as data, with no ids, keys or paths', () => {
     const prompt = buildTodayBriefPrompt(withSubagents(base(), reading(), NOW), NOW)
-    expect(prompt).toContain('sub-agents: 1 running, 1 idle')
-    expect(prompt).toContain('- "today-brief-builder" (running, moved 4 min ago): "Today summary via Haiku, capped"')
-    expect(prompt).toContain('- "qa-ghost" (idle, moved 30 min ago): "Ghost \'hunter\' QA in"')
+    expect(prompt).toContain('sub-agents active or finished in the last 2 hours: "today-brief-builder" (running, moved 4 min ago): "Today summary via Haiku, capped"; "qa-ghost" (idle, moved 30 min ago): "Ghost \'hunter\' QA in"')
     for (const bad of ['aaaaaaaa', '019a0000', 'claude|', 'codex|', '/Users/']) expect(prompt).not.toContain(bad)
     expect(TODAY_BRIEF_SYSTEM_PROMPT_HAS_UNTRUSTED()).toBe(true)
-    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Use them to say who is on what')
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Sub-agents listed are running or finished in the last two hours')
   })
   it('a sub-agent changing state is new news; one ticking along is not', () => {
     const a = withSubagents(base(), reading(), NOW)
@@ -394,7 +395,7 @@ describe('sub-agents (Miles 11/07: "those summaries should be able to see sub ag
     expect(enriched.sessions[0]!.agents!.rows).toHaveLength(6)
     expect(enriched.sessions[0]!.agents!.total).toBe(10)
     const data = buildTodayBriefData(enriched)
-    expect((data.match(/^  - "agent-/gm) || []).length).toBeLessThanOrEqual(BRIEF_AGENT_ROWS_MAX)
+    expect((data.match(/"agent-\d+" \(running/g) || []).length).toBeLessThanOrEqual(BRIEF_AGENT_ROWS_MAX)
     expect(data.length).toBeLessThanOrEqual(TODAY_BRIEF_DATA_MAX_CHARS)
   })
   it('the thirty-row cap holds even when everything would fit', () => {
@@ -403,8 +404,9 @@ describe('sub-agents (Miles 11/07: "those summaries should be able to see sub ag
     const i = withSubagents(normalizeTodayBriefInputs({ sessions, sessionsRead: true, needsComplete: true }), new Map(sessions.map(s => [s.key, small(6)] as [string, SubagentReading])), NOW)
     const data = buildTodayBriefData(i)
     expect(data.length, 'well under the bound').toBeLessThan(TODAY_BRIEF_DATA_MAX_CHARS / 2)
-    expect((data.match(/^  - "a\d/gm) || []).length).toBe(BRIEF_AGENT_ROWS_MAX)
-    expect((data.match(/sub-agents: 6 running/g) || []).length, 'every session still says its counts').toBe(8)
+    expect((data.match(/"a\d+" \(running/g) || []).length).toBe(BRIEF_AGENT_ROWS_MAX)
+    // 30 rows fill five sessions; the other three still say how many run, as a count.
+    expect((data.match(/last 2 hours: 6 running$/gm) || []).length, 'every session still says its counts').toBe(3)
   })
   it('a session the server could not read keeps the page\u2019s counts', () => {
     expect(withSubagents(base(), new Map(), NOW).sessions[0]!.agents!.total).toBe(3)
@@ -750,5 +752,155 @@ describe('7.0.5: a reconnect writes at once, at most once per 10 minutes', () =>
     expect(failing.brief.gate({ reconnect: true })).toBe('paused')
 
     expect(harness({ enabled: false }).brief.gate({ reconnect: true })).toBe('switch_off')
+  })
+})
+
+describe('2026-11-09 "recent activity first" (Miles approved: recent messages and replies, not the first prompt)', () => {
+  const NOW = Date.parse('2026-11-09T12:25:00Z')
+  const M = 60_000
+  const KEY = (n: number) => `claude|aaaaaaaa-1111-4111-8111-11111111111${n}`
+  const OLD_FIRST = 'Yesterday we ran a bakeoff to improve transcription quality'
+  const page = (sessions: Array<Record<string, unknown>>, work: Array<Record<string, unknown>> = []) =>
+    normalizeTodayBriefInputs({ sessions, needs: [{ title: 'Review 7 memories' }], sessionsRead: true, needsComplete: true }, work as any)
+  const activity = (over: Partial<RecentActivity> = {}): RecentActivity => ({
+    asks: [{ at: NOW - 16 * M, text: 'is everything live? any changes pending?', via: 'typed' }],
+    reply: { at: NOW - 11 * M, text: 'The public release is live. Your Mac has a newer private build.' }, movedAt: NOW - 11 * M, ...over,
+  })
+
+  it('first-prompt suppression: a read session shows its recent asks and reply, never the page line that leads with its first prompt', () => {
+    const i = page([{ title: 'COS Product Work', provider: 'claude', state: 'open', minutes: 11, key: KEY(1), line: `${OLD_FIRST}. Release is live` }])
+    const read = withRecentActivity(i, new Map([[KEY(1), activity()]]), NOW)
+    const data = buildTodayBriefData(read)
+    expect(data).not.toContain('bakeoff')
+    expect(data).toContain('recent messages into it, oldest first: (16 min ago, typed by the person) "is everything live? any changes pending?"')
+    expect(data).toContain('latest reply (11 min ago) "The public release is live. Your Mac has a newer private build."')
+    // Unread, the page line is the fallback, marked as possibly old.
+    expect(buildTodayBriefData(i)).toContain(`latest line (may be old): "${OLD_FIRST}. Release is live"`)
+  })
+  it('"started today as" only for a session under a day old, and never the title again', () => {
+    const i = page([{ title: 'Genshin settings (fork)', provider: 'claude', state: 'open', minutes: 5, key: KEY(1) }])
+    const young = withRecentActivity(i, new Map([[KEY(1), activity({ startedAt: NOW - 22 * 60 * M, firstAsk: 'I am trying to play' })]]), NOW)
+    expect(buildTodayBriefData(young)).toContain('started today as: "I am trying to play"')
+    const old = withRecentActivity(i, new Map([[KEY(1), activity({ startedAt: NOW - 25 * 60 * M, firstAsk: 'I am trying to play' })]]), NOW)
+    expect(buildTodayBriefData(old)).not.toContain('started today as')
+    const same = withRecentActivity(i, new Map([[KEY(1), activity({ startedAt: NOW - 60 * M, firstAsk: 'Genshin settings (fork)' })]]), NOW)
+    expect(buildTodayBriefData(same)).not.toContain('started today as')
+    // An untitled session's title is its first ask cut short, behind an image marker: the same words, said once.
+    const untitled = page([{ title: '[Image #1] gotcos is just a webapp (saved from comet browser) is it possible to', provider: 'claude', state: 'open', minutes: 600, key: KEY(1) }])
+    const u = buildTodayBriefData(withRecentActivity(untitled, new Map([[KEY(1), activity({ startedAt: NOW - 600 * M, firstAsk: 'gotcos is just a webapp (saved from comet browser) is it possible to change the icon' })]]), NOW))
+    expect(u).toContain('Session titled "gotcos is just a webapp')
+    expect(u).not.toContain('Image #1')
+    expect(u).not.toContain('started today as')
+  })
+  it('asks older than a day are not recent messages', () => {
+    const i = page([{ title: 'Long session', provider: 'claude', state: 'open', minutes: 3, key: KEY(1) }])
+    const r = withRecentActivity(i, new Map([[KEY(1), activity({ asks: [{ at: NOW - 25 * 60 * M, text: 'an ask from yesterday morning', via: 'typed' }], movedAt: NOW - 3 * M })]]), NOW)
+    const data = buildTodayBriefData(r)
+    expect(data).not.toContain('an ask from yesterday morning')
+    expect(data).toContain('no message into it in the last day')
+  })
+  it('peer label: a message sent in from another screen or session is labelled so, never as typed by the person', () => {
+    const i = page([{ title: 'Disk cleanup', provider: 'claude', state: 'open', minutes: 5, key: KEY(1) }])
+    const r = withRecentActivity(i, new Map([[KEY(1), activity({ asks: [
+      { at: NOW - 21 * M, text: 'can you look at an obvious cleanup', via: 'typed' },
+      { at: NOW - 7 * M, text: 'Anything else not used for 6 months?', via: 'peer' },
+    ] })]]), NOW)
+    const data = buildTodayBriefData(r)
+    expect(data).toContain('(7 min ago, sent in from another screen or session) "Anything else not used for 6 months?"')
+    expect(data).not.toContain('(7 min ago, typed by the person)')
+    expect(data).toContain('(21 min ago, typed by the person) "can you look at an obvious cleanup"')
+  })
+  it('scrub: secrets, long opaque tokens and short git hashes go, image markers too; versions and plain numbers stay', () => {
+    const raw = 'Commit [Image #2] from94a168e and 1b2a8f2 with sk-ant-api03-abcdefghijkl and ghp_' + 'A'.repeat(30) +
+      ' key ' + 'Qm9vbXNoYWthbGFrYS1zZWNyZXQta2V5LXZhbHVl' + ' on 7.0.9 build 434 at 1234567 for cafe and deadbeef'
+    const s = scrubRecentText(raw, 400)
+    for (const bad of ['94a168e', '1b2a8f2', 'abcdefghijkl', 'AAAAAAAAAA', 'Qm9vbXNo', 'Image #2', '[Image']) expect(s).not.toContain(bad)
+    // A hex word with no digit is a word ("deadbeef", "cafe"): the hash rule needs a digit and a letter.
+    for (const good of ['Commit', 'from', '7.0.9', 'build 434', '1234567', 'cafe', 'deadbeef']) expect(s).toContain(good)
+  })
+  it('token scrub: an opaque token of 32 or more characters goes even with no known prefix; 31 stays', () => {
+    expect(scrubRecentText('anchor ' + 'k'.repeat(16) + 'Z9'.repeat(8) + ' pinned', 200)).toBe('anchor pinned')
+    expect(scrubRecentText('word ' + 'abcdefghij'.repeat(3) + 'x', 200)).toContain('abcdefghij')
+  })
+  it('hash scrub: a short git hash goes even glued to a word; a hex word with no digit stays', () => {
+    expect(scrubRecentText('is from94a168e plus your WIP snapshot0c1d2e3f', 200)).toBe('is from plus your WIP snapshot')
+    expect(scrubRecentText('a decade of facade', 200)).toBe('a decade of facade')
+  })
+  it('2 h window: a sub-agent finished within two hours shows with its task; older finished ones are one count', () => {
+    const i = page([{ title: 'Orchestrator', provider: 'codex', state: 'open', minutes: 11, key: 'codex|019a0000-1111-2222-3333-444455556666' }])
+    const reading: SubagentReading = { rows: [
+      { name: 'Pascal', task: 'release worker', status: 'done', at: NOW - 7 * 60 * M },
+      { name: 'Hegel', task: 'appcast check', status: 'done', at: NOW - 90 * M },
+      { name: 'Faraday', task: 'docs', status: 'done', at: NOW - 36 * 60 * M },
+    ], running: 0, idle: 0, done: 3, failed: 0, total: 3 }
+    const data = buildTodayBriefData(withSubagents(i, new Map([['codex|019a0000-1111-2222-3333-444455556666', reading]]), NOW))
+    expect(data).toContain('"Hegel" (done, moved 1 h ago): "appcast check"')
+    expect(data).not.toContain('Pascal')
+    expect(data).not.toContain('Faraday')
+    expect(data).toContain('(2 sub-agents finished earlier; history, not shown)')
+  })
+  it('running sub-agent counts as working: an idle session whose sub-agent runs is working, in its row and the counts', () => {
+    const i = page([{ title: 'Glasses review', provider: 'claude', state: 'open', minutes: 1, key: KEY(1) }])
+    const reading: SubagentReading = { rows: [{ name: 'brief-builder', task: 'build the summary fix', status: 'running', at: NOW - M }], running: 1, idle: 0, done: 0, failed: 0, total: 1 }
+    const data = buildTodayBriefData(withSubagents(i, new Map([[KEY(1), reading]]), NOW))
+    expect(data).toContain('Sessions: 0 waiting on the person, 1 working, 0 idle but moved in the last hour')
+    expect(data).toContain('(Claude Code, working, last moved 1 min ago)')
+  })
+  it('24 h collapse: an idle session quiet for over a day is one count line; under a day, or waiting, it shows', () => {
+    const i = page([
+      { title: 'Original Genshin session', provider: 'claude', state: 'open', minutes: 9 * 24 * 60 },
+      { title: 'Favicon question', provider: 'claude', state: 'open', minutes: 9 * 60 },
+      { title: 'Quiet two days', provider: 'claude', state: 'open', minutes: 25 * 60 },
+      { title: 'Asked days ago', provider: 'claude', state: 'waiting', minutes: 3 * 24 * 60, waiting: 'Has a plan for you to approve' },
+    ])
+    const data = buildTodayBriefData(i)
+    expect(data).not.toContain('Original Genshin session')
+    expect(data).not.toContain('Quiet two days')
+    expect(data).toContain('Favicon question')
+    expect(data).toContain('Asked days ago')
+    expect(data).toContain('Sessions: 1 waiting on the person, 0 working, 0 idle but moved in the last hour, 1 idle and quiet longer. 2 more open sessions have not moved in over a day and are left out.')
+    // Read from its transcript, a session the page called recent but that has not moved in a day collapses too.
+    const read = withRecentActivity(page([{ title: 'Stale by its transcript', provider: 'claude', state: 'open', minutes: 2, key: KEY(1) }]),
+      new Map([[KEY(1), activity({ asks: [], reply: null, movedAt: NOW - 30 * 60 * M })]]), NOW)
+    expect(buildTodayBriefData(read)).not.toContain('Stale by its transcript')
+  })
+  it('48 h collapse: Work cards not moved in two days are one line with the newest move; recent and running ones show', () => {
+    const old = page([], [
+      { title: 'Quilt pages', stage: 'qa', running: false, movedMinutes: 7 * 24 * 60 },
+      { title: 'Small Biz Promo', stage: 'built', running: false, movedMinutes: 38 * 24 * 60 },
+    ])
+    expect(buildTodayBriefData(old)).toContain('Work cards: 2 in progress, none moved in the last two days (the newest move was 7 days ago).')
+    expect(buildTodayBriefData(old)).not.toContain('Quilt pages')
+    const mixed = page([], [
+      { title: 'Moved yesterday', stage: 'draft', running: false, movedMinutes: 20 * 60 },
+      { title: 'Three days ago', stage: 'qa', running: false, movedMinutes: 3 * 24 * 60 },
+      { title: 'Agent on it', stage: 'built', running: true, movedMinutes: 9 * 24 * 60 },
+    ])
+    const data = buildTodayBriefData(mixed)
+    expect(data).toContain('- Moved yesterday (being built, moved 20 h ago)')
+    expect(data).toContain('- Agent on it (built, an agent is on it, moved 9 days ago)')
+    expect(data).not.toContain('Three days ago')
+    expect(data).toContain('(1 more Work card is in progress, untouched for over two days; the newest of them moved 3 days ago.)')
+  })
+  it('the fingerprint changes with a new ask or reply, not with a minute ticking by; the date guard backs words from an ask', () => {
+    const i = page([{ title: 'Release', provider: 'claude', state: 'open', minutes: 2, key: KEY(1) }])
+    const a = withRecentActivity(i, new Map([[KEY(1), activity()]]), NOW)
+    const later = withRecentActivity(i, new Map([[KEY(1), activity()]]), NOW + 2 * M)
+    expect(todayBriefFingerprint(later)).toBe(todayBriefFingerprint(a))
+    const newAsk = withRecentActivity(i, new Map([[KEY(1), activity({ asks: [{ at: NOW - M, text: 'ship it tomorrow', via: 'typed' }] })]]), NOW)
+    expect(todayBriefFingerprint(newAsk)).not.toBe(todayBriefFingerprint(a))
+    expect(inputsCorpus(newAsk)).toContain('ship it tomorrow')
+    expect(cleanTodayBriefWithGuard('The release session plans to ship it tomorrow.', newAsk, NOW).text).toBe('The release session plans to ship it tomorrow.')
+  })
+  it('the context reads cover waiting, working and anything moved within a day, at most twelve', () => {
+    const sessions = [
+      { title: 'Old open', provider: 'claude', state: 'open', minutes: 25 * 60, key: KEY(1) },
+      { title: 'Waiting old', provider: 'claude', state: 'waiting', minutes: 3 * 24 * 60, key: KEY(2) },
+      ...Array.from({ length: 14 }, (_, n) => ({ title: 'Open ' + n, provider: 'claude', state: 'open', minutes: n, key: 'claude|bbbbbbbb-1111-4111-8111-1111111111' + String(n).padStart(2, '0') })),
+    ]
+    const keys = sessionContextLookups(normalizeTodayBriefInputs({ sessions, sessionsRead: true }))
+    expect(keys).toHaveLength(12)
+    expect(keys[0]).toBe(KEY(2))
+    expect(keys).not.toContain(KEY(1))
   })
 })

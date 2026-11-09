@@ -131,7 +131,7 @@ import { findPinnedCli, killParakeetChildren, sweepParakeetStaging, sweepStalePa
 import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
-import { createTodayBriefRouter, defaultTodayBrief, readSubagentsFor } from './routes/today-brief.js'
+import { createTodayBriefRouter, defaultTodayBrief, readSessionContext } from './routes/today-brief.js'
 import { liveCosAskRouter } from './routes/live-cos-ask.js'
 import { meetingAskRouter } from './routes/meeting-ask.js'
 import { meetingAskRuntime } from './lib/meeting-ask-runtime.js'
@@ -213,7 +213,7 @@ import { BOOT_RESUME_LEDGER_FILE, createBootResumeGate, installBootResumeGate } 
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
 import { WorkHandoffRequestStore, createOptionalWorkHandoffRequestStore, handoffRequestCapabilities } from './lib/work-handoff-requests.js'
 import { createWorkBoardReader } from './lib/work-board-reader.js'
-import { listBoard } from './lib/task-store.js'
+import { listBoard, listBoardWithDates } from './lib/task-store.js'
 import { createDefaultWorkReviewRuntime } from './lib/work-review-backend.js'
 import { createMorningBriefRouter } from './routes/morning-brief.js'
 import { getMorningBriefScheduler, startMorningBriefScheduler, stopMorningBriefScheduler } from './lib/morning-brief-runtime.js'
@@ -1021,7 +1021,9 @@ app.use(['/api/work-board', '/api/tasks'], (req, res, next) => {
 app.use('/api', createWorkBoardRouter({ readBoard: workBoardReader, requests: () => handoffRequestCapabilities(workHandoffRequestStore, Date.now()) }))
 app.use('/api', createWorkHandoffRequestsRouter({ store: workHandoffRequestStore, readBoard: workBoardReader }))
 // The Today summary for COS Control Web (6.99.26 candidate): Haiku, off unless switched on, with its own caps and breaker.
-app.use('/api', createTodayBriefRouter({ brief: defaultTodayBrief(), board: () => workBoardReader.read(60_000, 3_000).catch(() => null), subagents: keys => readSubagentsFor(keys) }))
+// 2026-11-09: the brief reads the DATED board (when each card last moved), through its own bounded, shared reader.
+const datedWorkBoardReader = createWorkBoardReader(() => listBoardWithDates())
+app.use('/api', createTodayBriefRouter({ brief: defaultTodayBrief(), board: () => datedWorkBoardReader.read(60_000, 3_000).catch(() => null), context: (keys, into) => readSessionContext(keys, into) }))
 // Work intake (6.57.0): meeting-derived suggestions, asks and review items. Optional: a bad journal never blocks boot.
 const workIntakeStore = createOptionalWorkIntakeStore(() => new WorkIntakeStore(dataPath('work-intake')))
 app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))

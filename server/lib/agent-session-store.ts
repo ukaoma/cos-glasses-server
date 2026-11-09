@@ -250,7 +250,7 @@ const STRIPPABLE_TAGS = [
   'local-command-stdout', 'local-command-stderr', 'thinking',
 ]
 
-const STRIPPABLE_TAG_RE = new RegExp(`</?(?:${STRIPPABLE_TAGS.join('|')})(?:\\s[^>]*)?/?>`, 'gi')
+export const STRIPPABLE_TAG_RE = new RegExp(`</?(?:${STRIPPABLE_TAGS.join('|')})(?:\\s[^>]*)?/?>`, 'gi')
 
 /**
  * Fenced code and known tags out. Shared so `proseSnippet` and `latestAssistantReply`
@@ -995,7 +995,7 @@ export async function peekCodexMeta(path: string): Promise<{ id: string; cwd: st
   return { id, cwd, title, subagent, created }
 }
 
-async function peekCursorDiscussion(path: string): Promise<{ lastUser: string | null; latestAssistant: string }> {
+export async function peekCursorDiscussion(path: string): Promise<{ lastUser: string | null; latestAssistant: string }> {
   const text = await readWindow(path, true)
   let lastUser: string | null = null
   for (const line of text.split('\n')) {
@@ -1010,7 +1010,7 @@ async function peekCursorDiscussion(path: string): Promise<{ lastUser: string | 
   return { lastUser, latestAssistant: latestAssistantFromWindow(text) }
 }
 
-async function firstCursorUserTitle(path: string): Promise<string | null> {
+export async function firstCursorUserTitle(path: string): Promise<string | null> {
   const text = await readWindow(path, false)
   let fallback: string | null = null
   for (const line of text.split('\n')) {
