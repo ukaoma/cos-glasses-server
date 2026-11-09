@@ -133,6 +133,87 @@ describe('structureLensAnswer: text it must leave alone', () => {
   })
 })
 
+// 7.0.7 (final QA W1): a cut makes a new line start, and md() styles a line by how it starts; it also cannot close
+// **bold** across lines. So a cut never enters a code, bold or italic span, never makes a line start with a heading,
+// quote, bullet, table row, "[" or "<" or a number marker, and a list whose item starts a block is left whole.
+describe('structureLensAnswer: md() draws the same characters (7.0.7, final QA W1)', () => {
+  // QA's three probes. Before 7.0.7: "> 5" drew as a quote and lost its ">", "# of" drew as a heading and lost its "#",
+  // and the bold was split across lines so both ** showed as stars.
+  it('a "Label:" that starts with > or # stays on its line; the list still structures', () => {
+    expect(f('Note this. > 5 users said: 1. Fast. 2. Cheap.')).toBe('Note this. > 5 users said:\n\n1. Fast.\n2. Cheap.')
+    expect(f('Done. # of open items: 1. Deck. 2. Budget.')).toBe('Done. # of open items:\n\n1. Deck.\n2. Budget.')
+    expect(f('Done. - next: 1. a. 2. b.')).toBe('Done. - next:\n\n1. a.\n2. b.')
+  })
+  it('a "Label:" that starts with * + | [ < or a number marker stays on its line', () => {
+    expect(f('Done. * next: 1. a. 2. b.')).toBe('Done. * next:\n\n1. a.\n2. b.')
+    expect(f('Done. + next: 1. a. 2. b.')).toBe('Done. + next:\n\n1. a.\n2. b.')
+    expect(f('Done. | next: 1. a. 2. b.')).toBe('Done. | next:\n\n1. a.\n2. b.')
+    expect(f('Done. [Miles]: 1. a. 2. b.')).toBe('Done. [Miles]:\n\n1. a.\n2. b.')
+    expect(f('Done. <details>: 1. a. 2. b.')).toBe('Done. <details>:\n\n1. a.\n2. b.')
+    expect(f('Done. 3) next: 1. a. 2. b.')).toBe('Done. 3) next:\n\n1. a.\n2. b.')
+    expect(f('Done. 2026 plan: 1. a. 2. b.')).toBe('Done.\n\n2026 plan:\n\n1. a.\n2. b.')
+  })
+  it('never inside **bold**, __bold__, *italic*, _italic_ or md()\'s code span ("``" is not one); a list item may hold **bold** itself', () => {
+    for (const c of [
+      '**Steps: 1. Prep the deck. 2. Ship it.**',
+      '__Steps: 1. Prep the deck. 2. Ship it.__',
+      '*Steps: 1. Prep the deck. 2. Ship it.*',
+      '_Steps: 1. Prep the deck. 2. Ship it._',
+      'Plan: 1. a**b. 2. c**d.',
+      'Plan: 1. a*b. 2. c*d.',
+      'Note `` x. Plan: 1. a. 2. b` y.',
+    ]) expect(f(c), c).toBe(c)
+    expect(f('Plan: 1. **Prep** the deck. 2. Ship it.')).toBe('Plan:\n\n1. **Prep** the deck.\n2. Ship it.')
+    expect(f('Plan: 1. Prep the *deck*. 2. Ship __it__.')).toBe('Plan:\n\n1. Prep the *deck*.\n2. Ship __it__.')
+  })
+  it('"2 * 3", a lone "*" and a word\'s own underscores are not spans', () => {
+    expect(f('2 * 3 is six. Plan: 1. a. 2. b * c.')).toBe('2 * 3 is six.\n\nPlan:\n\n1. a.\n2. b * c.')
+    expect(f('Set: 1. max_tokens to 5. 2. top_p to 1.')).toBe('Set:\n\n1. max_tokens to 5.\n2. top_p to 1.')
+    expect(f('Set: 1. max_tokens to 5. 2. Use COS_ as the prefix.')).toBe('Set:\n\n1. max_tokens to 5.\n2. Use COS_ as the prefix.')
+    expect(f('Plan: 1. a * b. 2. c*.')).toBe('Plan:\n\n1. a * b.\n2. c*.')
+  })
+  it('an item that starts a heading, a quote or a Mac task box leaves its whole list alone (never half a list)', () => {
+    for (const c of [
+      'Plan: 1. # one. 2. b.',
+      'Plan: 1. a. 2. > b.',
+      'Plan: 1. [x] done. 2. [ ] open.',
+      'Do: 1. # a. 2. b. Also. 1. c. 2. d.',
+    ]) expect(f(c), c).toBe(c)
+    expect(f('Do: 1. # a. 2. b. Next: 1. c. 2. d.')).toBe('Do: 1. # a. 2. b.\n\nNext:\n\n1. c.\n2. d.')
+    expect(f('Read: 1. [Spec](https://a.co/s). 2. Reply.')).toBe('Read:\n\n1. [Spec](https://a.co/s).\n2. Reply.')
+  })
+  // Through the real md(): the drawn answer is the original's, line breaks aside (no lost #, > or **).
+  const drawn = (s: string) => K.md(s).replace(/\s+/g, '')
+  it('the three QA probes through the real md(): same characters, only line breaks differ', () => {
+    for (const probe of ['Note this. > 5 users said: 1. Fast. 2. Cheap.', 'Done. # of open items: 1. Deck. 2. Budget.', '**Steps: 1. Prep the deck. 2. Ship it.**']) {
+      expect(drawn(f(probe)), probe).toBe(drawn(probe))
+    }
+    expect(K.md(f('Note this. > 5 users said: 1. Fast. 2. Cheap.'))).toBe('Note this. &gt; 5 users said:\n\n1. Fast.\n2. Cheap.')
+    expect(K.md(f('Done. # of open items: 1. Deck. 2. Budget.'))).toBe('Done. # of open items:\n\n1. Deck.\n2. Budget.')
+    expect(K.md(f('**Steps: 1. Prep the deck. 2. Ship it.**'))).toBe('<strong>Steps: 1. Prep the deck. 2. Ship it.</strong>')
+    expect(K.md(f('Plan: 1. **Prep** the deck. 2. Ship it.'))).toBe('Plan:\n\n1. <strong>Prep</strong> the deck.\n2. Ship it.')
+  })
+  it('fuzz: 3000 list-shaped answers full of Markdown marks draw the same characters through md()', () => {
+    let seed = 11
+    const rnd = () => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296 }
+    const toks = ['1.', '2.', '3.', 'Plan:', 'go.', 'now?', '**', '**bold', 'it**', '**x**', '*', '*it*', '_', '_it_', '__b__', 'x_y', '#', '>', '-', '+', '|', '[x]', '[Miles]:', '<details>', '3)', '`', '`c`', 'word', 'Done.', 'note:', '\n']
+    let structured = 0
+    for (let i = 0; i < 3000; i++) {
+      let s = 'Intro text. '
+      const n = 3 + Math.floor(rnd() * 25)
+      for (let k = 0; k < n; k++) {
+        if (k % 3 === 0) s += ['go.', 'Plan:', 'now?'][(k / 3) % 3 | 0] + ' ' + (1 + ((k / 3) | 0) % 4) + '. '
+        s += toks[Math.floor(rnd() * toks.length)] + (rnd() < 0.85 ? ' ' : '')
+      }
+      const out = f(s)
+      if (out !== s) structured++
+      expect(ink(out), s).toBe(ink(s))
+      expect(drawn(out), s).toBe(drawn(s))
+    }
+    expect(structured).toBeGreaterThan(1000)
+  })
+})
+
 describe('structureLensAnswer: whitespace only, and fast', () => {
   it('fuzz: 2000 random answers keep every character in order', () => {
     let seed = 7
@@ -215,6 +296,16 @@ describe('the Messages reader (panes/messages.js turnCards) structures the COS a
     const m = /<div class="cx-card-label">COS<\/div><div class="cx-card-body md" data-hl>([\s\S]*?)<\/div>/.exec(html)
     expect(m).not.toBeNull()
     expect(m![1]).toBe(K.md(E455))
+  })
+  it('Copy turn copies the answer as stored, never the structured text (7.0.7, Mac final QA W1 checked on the web)', () => {
+    // eslint-disable-next-line no-new-func
+    const copyTurnText = new Function('numOf', slice(MSG, '  function copyTurnText(t) {', '  function renderMessage(') + '\nreturn copyTurnText;')(
+      () => 455) as (t: Record<string, unknown>) => string
+    expect(copyTurnText({ query: 'What does this unlock?', text: T455 })).toBe('[Msg 455] User: What does this unlock?\n[Msg 455] COS: ' + T455)
+    // Both Copy actions (one turn, and the archive chat's turn) go through it, with the turn as loaded.
+    expect(MSG).toContain("W.copyText(copyTurnText(turn))")
+    expect(MSG).toContain("W.copyText(copyTurnText(ct))")
+    expect(MSG.match(/structureLensAnswer/g)?.length).toBe(1)
   })
   it('YOUR words are not restructured (only the answer is)', () => {
     const html = turnCards({ query: 'List: 1. a. 2. b.', text: 'ok' }, 'm-1')

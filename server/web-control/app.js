@@ -31,14 +31,31 @@
   // answer (the chat card, the Messages reader), each run of inline items 1, 2, 3 in order goes on its own line under
   // its lead-in. Only whitespace changes: every character of the answer stays. The lens and the stored text never see it.
   // Conservative: text with any Markdown structure is left alone; a marker counts only after a sentence end (". " ": "
-  // "? " "! ") and never inside a code span; fewer than two items, or numbers out of order, are not a list;
+  // "? " "! ") and never inside a code, bold or italic span; fewer than two items, or numbers out of order, are not a list;
   // words after the last item stay in it, except a short "Label:" sentence followed by a new 1, which starts the next list.
+  // 7.0.7 (final QA W1): a new line never starts with what a renderer reads as a block. A "Label:" that starts with one
+  // stays on the line before it, and a list whose item starts with one is left as it is (never half a list).
   var LA_STRUCTURED = /^[ \t]*(?:[-*+][ \t]|\d{1,3}[.)][ \t]|#|>|\|)|\n[ \t]*\n|```|~~~/m;
   var LA_MARK = /([.:?!]["'”’)]?)([ \t]+)([1-9]\d?)\.(?=[ \t]+\S)/g;
   var LA_END = /[.?!]["'”’)]?([ \t]+)/g;
-  // Code spans only: a link holds no whitespace, and only whitespace is ever replaced, so a link is never cut.
-  var LA_GUARD = /`[^`\n]*`/g;
+  // Spans no cut may enter. Each kind is found on its own, as its renderer finds it, and a cut is refused inside any of
+  // them: md()'s own `code` and **bold** (never empty, no star inside bold), and for the Mac's inline Markdown *italic*,
+  // __bold__ and _italic_, each opening on a non-space and closing after one, on one line ("2 * 3" and a lone "*" are
+  // not spans). A word's own underscores (max_tokens, top_p) are matched first, so they never open a span. A link holds
+  // no whitespace, and only whitespace is ever replaced, so a link is never cut.
+  var LA_GUARD = /`[^`\n]+`/g;
+  var LA_BOLD = /\*\*[^*\n]+\*\*/g;
+  var LA_STAR = /\*(?!\*)\S(?:[^*\n]*(?!\*)\S)?\*/g;
+  var LA_UNDER = /[A-Za-z0-9]_+|__(?!_)\S(?:[^_\n]*(?!_)\S)?__(?![A-Za-z0-9])|_(?!_)\S(?:[^_\n]*(?!_)\S)?_(?![A-Za-z0-9])/g;
+  var LA_SPANS = [LA_GUARD, LA_BOLD, LA_STAR, LA_UNDER];
+  // What a line may not start with when a cut makes it start (md() here; the Mac's COSMarkdownParser also reads
+  // "[Speaker]:" lines and "<details>"): a heading, quote, bullet or table row, a "[" or "<", or a number list marker.
+  var LA_BLOCK_START = /[ \t]*(?:[\-#>*+|<\[]|\d+[.)])/y;
+  // What an item's own words may not start with: a heading, a quote, or a Mac task box ("1. [x] done").
+  var LA_ITEM_START = /[ \t]*(?:[#>]|\[[ xX]\])/y;
   var LA_LABEL_MAX = 100;
+  // Does `re` (sticky) match at `at` in `line`?
+  function laAt(re, line, at) { re.lastIndex = at; return re.test(line); }
   function structureLensAnswer(text) {
     var s = text == null ? '' : String(text);
     if (s.indexOf('. ') < 0 || LA_STRUCTURED.test(s)) return s;
@@ -52,13 +69,19 @@
     return changed ? out.join('\n') : s;
   }
   function laLine(line) {
-    var starts = [], ends = [], m;
-    LA_GUARD.lastIndex = 0;
-    while ((m = LA_GUARD.exec(line))) { starts.push(m.index); ends.push(m.index + m[0].length); }
-    // Inside a code span? The spans are in order and never overlap: binary search.
+    var kinds = [], m;
+    for (var g = 0; g < LA_SPANS.length; g++) {
+      var re = LA_SPANS[g], starts = [], ends = [];
+      re.lastIndex = 0;
+      while ((m = re.exec(line))) { starts.push(m.index); ends.push(m.index + m[0].length); }
+      if (starts.length) kinds.push([starts, ends]);
+    }
+    // Inside a span of any kind? One kind's spans are in order and never overlap: binary search each.
     var guarded = function (at) {
-      var lo = 0, hi = starts.length - 1;
-      while (lo <= hi) { var mid = (lo + hi) >> 1; if (starts[mid] > at) hi = mid - 1; else if (ends[mid] <= at) lo = mid + 1; else return true; }
+      for (var k = 0; k < kinds.length; k++) {
+        var st = kinds[k][0], en = kinds[k][1], lo = 0, hi = st.length - 1;
+        while (lo <= hi) { var mid = (lo + hi) >> 1; if (st[mid] > at) hi = mid - 1; else if (en[mid] <= at) lo = mid + 1; else return true; }
+      }
       return false;
     };
     var marks = [];
@@ -82,17 +105,23 @@
       var run = runs[q], first = run[0];
       // After a list, only a "Label:" lead-in starts another; anything else stays in the last item.
       if (lists && !first.colon) continue;
-      if (first.colon) {
-        // The lead-in is the "Label:" sentence: it gets its own line when it is short.
-        var from = -1, to = -1, e;
-        LA_END.lastIndex = prevEnd;
-        while ((e = LA_END.exec(line)) && e.index + e[0].length < first.ws) {
-          if (!guarded(e.index)) { to = e.index + e[0].length; from = to - e[1].length; }
+      // An item whose words start a block leaves its whole list as it is; it still counts as a list, so the words after
+      // it stay in its last item.
+      var clean = true;
+      for (var j = 0; j < run.length; j++) if (laAt(LA_ITEM_START, line, run[j].body)) { clean = false; break; }
+      if (clean) {
+        if (first.colon) {
+          // The lead-in is the "Label:" sentence: it gets its own line when it is short and does not start a block.
+          var from = -1, to = -1, e;
+          LA_END.lastIndex = prevEnd;
+          while ((e = LA_END.exec(line)) && e.index + e[0].length < first.ws) {
+            if (!guarded(e.index)) { to = e.index + e[0].length; from = to - e[1].length; }
+          }
+          if (from >= 0 && first.ws - to <= LA_LABEL_MAX && !laAt(LA_BLOCK_START, line, to)) cuts.push([from, to, '\n\n']);
         }
-        if (from >= 0 && first.ws - to <= LA_LABEL_MAX) cuts.push([from, to, '\n\n']);
+        cuts.push([first.ws, first.at, '\n\n']);
+        for (var r2 = 1; r2 < run.length; r2++) cuts.push([run[r2].ws, run[r2].at, '\n']);
       }
-      cuts.push([first.ws, first.at, '\n\n']);
-      for (var j = 1; j < run.length; j++) cuts.push([run[j].ws, run[j].at, '\n']);
       prevEnd = run[run.length - 1].body;   // after the last item's own "5.", which is not a sentence end
       lists++;
     }
