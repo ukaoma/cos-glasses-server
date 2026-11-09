@@ -1,3 +1,11 @@
+## 7.0.13 - Work chat Plan no longer fails on a short session id
+
+2026-11-09. 7.0.12 (2d54a4a) plus one fix. Private on Miles's Mac first.
+
+- **The bug.** Before every Work chat plan, COS Control pushes a snapshot of the sessions it sees. A Claude CLI session the server knows only by its short 8 character id reached that snapshot as `claude:<8 hex>`, and the server rejected the WHOLE snapshot (400 `invalid_snapshot`, `invalid_live_row`). While that one session ran, Plan failed on every card with "could not build this task's session list".
+- **The fix.** A live row with an invalid id, or text past its bounds, is skipped and counted instead. `/api/work/orchestrator/input` and `/snapshot` report `droppedLiveRows` (only when not zero) and log it. Links and receipts stay strict: a bad one is still a 400.
+- **Default-on for every install:** yes (a parse that used to refuse now accepts and skips). A clean snapshot answers exactly as before.
+
 ## 7.0.12 - Prep any meeting on Today, with your own context
 
 2026-11-09. 7.0.11 (1beefbd) plus one change. Private on Miles's Mac first.
