@@ -1,3 +1,14 @@
+## 7.0.10 - Today summary describes what is happening now
+
+2026-11-09. 7.0.9 (1b2a8f2) plus one change. Private on Miles's Mac first.
+
+- **Today summary, recent activity first.** The summary used to see each session through one 180 character line made of its FIRST prompt and the latest reply, so a session's opening ask from weeks ago led the summary. It now reads, on the server, each session's last 1 to 3 messages from the past 24 hours (with how long ago), the start of the latest reply, and when the session last moved. Titles are treated as history.
+- **Sub-agents:** only running ones, or ones finished within 2 hours, with their task. Older finished ones become a count. A session with a running sub-agent counts as working.
+- **Collapsing:** sessions quiet for over a day become one count line (a session waiting on the person always shows). Work cards that have not moved in 48 hours become one line.
+- **Messages relayed in from another screen or session** are labelled as such and never attributed to the person. Agent hand-backs and background-task notices are not counted as asks.
+- **Privacy:** more of each session's recent text goes to the same model through the same isolated runner. Every field is scrubbed for secrets, long opaque tokens and short commit ids before it is sent; only the summary is cached.
+- **Default-on for every install:** yes, this changes the Today summary's inputs and prompt for everyone. Model, interval, daily cap, switch and breaker are unchanged (Sonnet).
+
 ## 7.0.9 - 7.0.8 plus phone approvals (dormant) and the anchor bootstrap switch
 
 2026-11-08. 7.0.8 (d8bc2a7) merged with the phone approvals server (6ed40cd), plus one new switch. Both switches below are OFF by default, so with neither set this build behaves as 7.0.8 for every install. Not device-qualified; private on Miles's Mac first.
