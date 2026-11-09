@@ -387,6 +387,13 @@ export class InboxFeedStore {
   private items: FeedItem[] = []
   private quarantined: unknown[] = []
   private versionNo = 0
+  /**
+   * 7.0.9 (Miles 11/08, "99 plus messages, despite the fact that I've already seen all of those"): the moment this
+   * feed started counting unread as net new. Every item still unread when the first build with it opened the file is
+   * marked read once, at that open, so the rail never counts what was already on screen. A file this build wrote
+   * carries it; a file without it (an older build wrote it last) is migrated on open.
+   */
+  private readFloorAt: string
   private readonly path: string
   private readonly lock: ServerInstanceLock
   private closed = false
@@ -400,6 +407,19 @@ export class InboxFeedStore {
       this.versionNo = Number.isSafeInteger(v) && (v as number) >= 0 ? v as number : this.items.length
     } catch (e) { this.close(); throw e }
     if (this.quarantined.length) console.warn(`[inbox] ${this.quarantined.length} unreadable feed item(s) set aside`)
+    const floor = opened.journal?.readFloorAt
+    this.readFloorAt = this.now().toISOString()
+    if (typeof floor === 'string' && Number.isFinite(Date.parse(floor))) this.readFloorAt = floor
+    else if (opened.journal) this.migrateReadFloor()
+  }
+  /** When unread started meaning net new on this feed (see readFloorAt). */
+  readFloor(): string { return this.readFloorAt }
+  /** Once per file: what was unread before this build opened it had already been shown, so it reads as read now. */
+  private migrateReadFloor(): void {
+    const at = this.readFloorAt
+    const next = this.items.map(i => i.readAt === null ? { ...i, readAt: at } : i)
+    // A file that cannot be written now still opens; the next open tries again. Unread never blocks the chat.
+    try { this.write(next, 1) } catch (e) { console.warn(`[inbox] read floor not written: ${(e as Error).message}`) }
   }
   /** Oldest first, as a chat reads. */
   list(): FeedItem[] { return structuredClone(this.items) }
@@ -455,7 +475,7 @@ export class InboxFeedStore {
     if (kept.length > DROP_LIMITS.feed) throw new DropStoreError('inbox_store_full', 503)
     const version = this.versionNo + bump
     // Never write a file the reader would refuse: the oldest COS lines (receipts, answers, pings) go first.
-    const serialize = () => JSON.stringify({ version: 1, feedVersion: version, items: kept, quarantined: this.quarantined }) + '\n'
+    const serialize = () => JSON.stringify({ version: 1, feedVersion: version, readFloorAt: this.readFloorAt, items: kept, quarantined: this.quarantined }) + '\n'
     let body = serialize()
     while (Buffer.byteLength(body) > this.maxBytes) {
       const oldest = kept.findIndex(i => i.kind !== 'drop')

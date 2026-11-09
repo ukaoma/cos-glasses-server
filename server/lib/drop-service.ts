@@ -559,14 +559,20 @@ export class DropService {
    * waits on an answer from you, and clears only when it is answered, done or dismissed: every live question COS asked
    * (a router ask), every live item marked `needsReply` (a follow-up that needs a decision, a ping that asks), plus
    * `yourMove`, the Work items in Your move, when the caller could count them. Always a whole number, never negative.
+   *
+   * 7.0.9 (Miles 11/08: the web rail said 99+ and the pinned row "286 waiting" for things he had already seen): two
+   * more fields, so a client can say what each number is. `asked` is the chat's own part of `waiting`, the live
+   * questions and needsReply items, which truly wait on a reply in this chat. `yourMove` is the Work part (null when
+   * it could not be counted). `waiting` keeps its 6.99.10 meaning for COS Control, which reads it by that name.
    */
-  summary(extra: { yourMove?: number | null } = {}): { unread: number; waiting: number; lastLine: string; lastAt: string | null; version: number } {
+  summary(extra: { yourMove?: number | null } = {}): { unread: number; waiting: number; asked: number; yourMove: number | null; lastLine: string; lastAt: string | null; version: number } {
     const items = this.deps.feed.list()
     const unread = items.filter(i => i.readAt === null && (i.kind === 'ping' || i.kind === 'followup' || i.kind === 'question')).length
     const asked = items.filter(i => isWaiting(i)).length
-    const work = typeof extra.yourMove === 'number' && Number.isSafeInteger(extra.yourMove) && extra.yourMove > 0 ? extra.yourMove : 0
+    const counted = typeof extra.yourMove === 'number' && Number.isSafeInteger(extra.yourMove) && extra.yourMove >= 0
+    const work = counted && (extra.yourMove as number) > 0 ? extra.yourMove as number : 0
     const last = items[items.length - 1]
-    return { unread, waiting: asked + work, lastLine: last ? short(pinLine(last), 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
+    return { unread, waiting: asked + work, asked, yourMove: counted ? extra.yourMove as number : null, lastLine: last ? short(pinLine(last), 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
   }
 
   /**
@@ -574,7 +580,7 @@ export class DropService {
    * its buttons. Only an item marked `needsReply` can be dismissed; a question is answered by one of its choices
    * (Just a note among them). Idempotent: a second dismiss answers the same.
    */
-  dismiss(itemId: string): { unread: number; waiting: number; version: number } {
+  dismiss(itemId: string): { unread: number; waiting: number; asked: number; version: number } {
     const item = this.deps.feed.get(itemId)
     if (!item) throw new DropError('feed_item_not_found', 404)
     if (!item.needsReply) throw new DropError('not_dismissable', 409, 'Only something that waits on you can be dismissed.')
@@ -583,7 +589,7 @@ export class DropService {
       this.deps.feed.update(new Set([item.id]), i => ({ ...i, state: 'done', actions: [], readAt: i.readAt ?? at }))
     }
     const s = this.summary()
-    return { unread: s.unread, waiting: s.waiting, version: s.version }
+    return { unread: s.unread, waiting: s.waiting, asked: s.asked, version: s.version }
   }
 
   /** The chat, oldest first. `after` is an item id: only items after it. */
@@ -609,7 +615,7 @@ export class DropService {
     return item.threadId
   }
 
-  markRead(through: string): { unread: number; waiting: number; version: number } {
+  markRead(through: string): { unread: number; waiting: number; asked: number; version: number } {
     const items = this.deps.feed.list()
     const index = items.findIndex(i => i.id === through)
     if (index < 0) throw new DropError('feed_item_not_found', 404)
@@ -618,7 +624,7 @@ export class DropService {
     if (ids.size) this.deps.feed.update(ids, item => ({ ...item, readAt: at }))
     const s = this.summary()
     // Opening the chat clears unread only: what waits on you stays until it is answered, done or dismissed.
-    return { unread: s.unread, waiting: s.waiting, version: s.version }
+    return { unread: s.unread, waiting: s.waiting, asked: s.asked, version: s.version }
   }
 
   /** History (plan section 6), P1: words over drop text and link labels, with kind and status filters, newest first. */

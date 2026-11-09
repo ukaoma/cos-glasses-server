@@ -307,7 +307,25 @@ export function detailForTool(name: unknown, input: unknown): string {
     const lines = countLines(args.content)
     return lines === 0 ? '' : oneLine(`${lines} lines`, DETAIL_MAX_CHARS)
   }
+  if (lower === 'sendmessage') return sendMessageDetail(args.to)
   return ''
+}
+
+/**
+ * 7.0.9 (Miles 11/08, "Why aren't you responding to the other session?"): who a SendMessage went to, so a COS answer
+ * that relayed a message can say where its reply will show. Claude Code's `to` is a peer's name, `bridge:<session id>`
+ * or `uds:<socket>`. A socket is a file on the Mac and is never shown; a session id shows its first 8 characters; a
+ * name with a slash in it is treated as a path. Nothing else of the message (its words) is read.
+ */
+export function sendMessageDetail(to: unknown): string {
+  const raw = typeof to === 'string' ? oneLine(to, 200) : ''
+  if (!raw) return ''
+  if (raw === '*') return 'to every session'
+  if (/^uds:/i.test(raw)) return 'to another session'
+  const bridge = /^bridge:\s*(.+)$/i.exec(raw)
+  const who = bridge ? `session ${bridge[1].trim().slice(0, 8)}` : raw
+  if (/[\\/~]/.test(who)) return 'to another session'
+  return oneLine(`to ${who}`, DETAIL_MAX_CHARS)
 }
 
 /**

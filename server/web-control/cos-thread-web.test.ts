@@ -85,7 +85,7 @@ describe('COS Control Web: the COS thread (6.99.16)', () => {
     const h = load({
       '/api/cos-thread': thread({ mode: 'continue', sessionId: 'sess0042', reason: 'continue', digest: null }),
       '/api/query-jobs': admitted('sess0042', 504),
-      '/api/query-jobs/j-504?generation=1': () => (++polls < 3 ? { job: { jobId: 'j-504', status: 'running', sessionId: 'sess0042', globalMsgNum: 504 } }
+      '/api/query-jobs/j-504?generation=1&trail=1': () => (++polls < 3 ? { job: { jobId: 'j-504', status: 'running', sessionId: 'sess0042', globalMsgNum: 504 } }
         : { job: { jobId: 'j-504', status: 'completed', response: 'Two meetings and a dentist.', sessionId: 'sess0042', globalMsgNum: 504 } }),
       '/api/cos-thread/turn': thread({ mode: 'continue', sessionId: 'sess0042', reason: 'continue', digest: null }, 4),
     })
@@ -109,7 +109,7 @@ describe('COS Control Web: the COS thread (6.99.16)', () => {
     const h = load({
       '/api/cos-thread': thread({ mode: 'fresh', sessionId: null, reason: 'size', digest: 'Earlier in this COS thread (a summary carried over; ask COS to search History or Messages for more):' }),
       '/api/query-jobs': (b: any) => admitted(b.sessionId ?? 'sess0200', 600),
-      '/api/query-jobs/j-600?generation=1': { job: { jobId: 'j-600', status: 'running', sessionId: 'sess0200', globalMsgNum: 600 } },
+      '/api/query-jobs/j-600?generation=1&trail=1': { job: { jobId: 'j-600', status: 'running', sessionId: 'sess0200', globalMsgNum: 600 } },
     })
     h.ask('First')
     await flush()
@@ -130,7 +130,7 @@ describe('COS Control Web: the COS thread (6.99.16)', () => {
   })
 
   it('without the capability the old rule stands: the per-day session, no thread reads, no turn posts', async () => {
-    const h = load({ '/api/query-jobs': admitted('sess-day', 505), '/api/query-jobs/j-505?generation=1': { job: { jobId: 'j-505', status: 'completed', response: 'ok', sessionId: 'sess-day' } } })
+    const h = load({ '/api/query-jobs': admitted('sess-day', 505), '/api/query-jobs/j-505?generation=1&trail=1': { job: { jobId: 'j-505', status: 'completed', response: 'ok', sessionId: 'sess-day' } } })
     h.chat._state.caps = { dropIt: true, jobs: true, steer: false, thread: false, dropFiles: 0 }
     h.chat._state.session = { id: 'sess-day', day: 'today' }
     h.ask('Old style')

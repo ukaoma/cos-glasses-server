@@ -29,9 +29,12 @@
    finishes, POST /api/cos-thread/turn once with its answer. "New thread" in the header posts /api/cos-thread/new.
    Without the capability, the old rule stands: one conversation per day, kept in this browser.
 
-   The rail badge on Messages is a number for `waiting` (GET /api/inbox/summary) and a dot for unread only. It is read
-   with the shell's existing status read (shell.js checkServer), never on a timer of its own, and painting it touches
-   only the badge, never the pane. */
+   The rail badge on Messages (7.0.9, Miles 11/08: "notifications would just be for net new messages") is a number for
+   `unread` only: what COS sent since the chat was last open on any device (the server keeps readAt, and the first
+   7.0.9 open marked everything older as read). A dot, with no number, says something in the chat waits on your reply
+   (`asked`). Work's Your move is not counted here: it has its own count on Today and in Work. It is read with the
+   shell's existing status read (shell.js checkServer), never on a timer of its own, and painting it touches only the
+   badge, never the pane. */
 (function () {
   'use strict';
   var W = window.COSWeb;
@@ -135,7 +138,7 @@
       serverInstanceId: typeof p.serverInstanceId === 'string' ? p.serverInstanceId : '' };
   }
   // The shell's status read (shell.js checkServer) hands its /api/health answer here.
-  function fromHealth(h) { setCaps(h); }
+  function fromHealth(h) { setCaps(h); if (C.asks.some(relayPending)) loadRelayRows(15000); }
   function ensureCaps() {
     if (C.caps) return Promise.resolve(C.caps);
     if (!C.capsLoading) C.capsLoading = api('/api/health').then(function (h) { setCaps(h); return C.caps; }, function () { C.capsLoading = null; return null; });
@@ -151,10 +154,12 @@
       return null;
     });
   }
-  function waitingOf(s) { var n = s && Number(s.waiting); return Number.isInteger(n) && n > 0 ? n : 0; }
+  // `asked` is the chat's own part of `waiting` (7.0.9). An older server without it: the chat's part cannot be told
+  // apart from Work's, so nothing is claimed as waiting on a reply here.
+  function waitingOf(s) { var n = s && Number(s.asked); return Number.isInteger(n) && n > 0 ? n : 0; }
   function unreadOf(s) { var n = s && Number(s.unread); return Number.isInteger(n) && n > 0 ? n : 0; }
-  // A number for what waits on you, a dot for unread only. Created on first paint, so with Drop it off the rail's DOM
-  // is untouched.
+  // A number for what is new, a dot for a reply the chat waits on. Created on first paint, so with Drop it off the
+  // rail's DOM is untouched.
   function paintRail() {
     var waiting = waitingOf(C.summary), unread = unreadOf(C.summary);
     document.querySelectorAll('.rail-btn[data-pane="messages"], #section-menu [data-goto="messages"]').forEach(function (b) {
@@ -164,10 +169,10 @@
         var dot = document.createElement('span'); dot.className = 'inbox-dot hidden'; dot.setAttribute('data-inbox-dot', '');
         b.appendChild(count); b.appendChild(dot);
       }
-      count.textContent = waiting > 99 ? '99+' : String(waiting);
-      count.classList.toggle('hidden', !waiting);
-      b.querySelector('[data-inbox-dot]').classList.toggle('hidden', !(unread && !waiting));
-      var label = waiting ? waiting + ' waiting on you' : unread ? unread + ' new in COS' : '';
+      count.textContent = unread > 99 ? '99+' : String(unread);
+      count.classList.toggle('hidden', !unread);
+      b.querySelector('[data-inbox-dot]').classList.toggle('hidden', !(waiting && !unread));
+      var label = [unread ? unread + ' new in COS' : '', waiting ? waiting + ' waiting on your reply' : ''].filter(Boolean).join(', ');
       b.setAttribute('aria-label', 'Messages' + (label ? ', ' + label : ''));
     });
   }
@@ -181,7 +186,7 @@
   // ── the pinned row (first in Recent) ──────────────────
   function pinStatus() {
     var s = C.summary, w = waitingOf(s), u = unreadOf(s);
-    return [w ? w + ' waiting' : '', u ? u + ' new' : ''].filter(Boolean).join(' · ');
+    return [u ? u + ' new' : '', w ? w + ' waiting on your reply' : ''].filter(Boolean).join(' · ');
   }
   function pinnedRowHtml(selected) {
     var s = dropOn() ? C.summary : null;
@@ -400,7 +405,7 @@
     if (!force && C.summary && !unreadOf(C.summary)) return;
     var last = C.items[C.items.length - 1];
     api('/api/inbox/read', { method: 'POST', body: { through: last.id } }).then(function (r) {
-      if (C.summary) { C.summary.unread = r.unread; if (typeof r.waiting === 'number') C.summary.waiting = r.waiting; }
+      if (C.summary) { C.summary.unread = r.unread; if (typeof r.waiting === 'number') C.summary.waiting = r.waiting; if (typeof r.asked === 'number') C.summary.asked = r.asked; }
       paintRail(); paintPin();
     }, function () {});
   }
@@ -484,10 +489,159 @@
   function askState(a) {
     return a.status === 'completed' ? 'Answered' : a.status === 'canceled' ? 'Canceled' : a.status === 'failed' || a.status === 'interrupted' ? 'Did not finish' : a.status === 'sending' ? 'Sending' : 'Answering';
   }
+  // ── what a running answer is doing, and where a relayed message went (7.0.9) ──
+  // Miles 11/08: "It's hard to see when a session is making progress, whereas when you're wearing it on the glasses, we
+  // can see the whole audit trail." The steps are the job's own trail (GET /api/query-jobs/:id?trail=1, the lens's
+  // data, redacted for secrets on the Mac at the journal), read by the poll this card already runs. While it runs: the
+  // newest few, newest last. Once it ends: a quiet "N steps" that opens.
+  var TERMINAL = { completed: 1, failed: 1, canceled: 1, interrupted: 1 };
+  function askRunning(a) { return !TERMINAL[a.status]; }
+  function hasText(a) { return !!(a.response || a.partial); }
+  var STEP_VERBS = { read: 'Read', edit: 'Edited', write: 'Edited', bash: 'Ran', search: 'Searched', task: 'Delegated', other: 'Used' };
+  var LIVE_STEPS = 6, DONE_STEPS = 40;
+  // A path on the Mac shows as its last part only. Paths are not secrets on the Mac, but the web never shows one.
+  var MAC_PATH = /(?:~|\/(?:Users|home|private|var|tmp|opt|Volumes|Library|System|Applications|etc))(?:\/[^\s'"`()<>\[\]{},;|]+)+\/?/g;
+  function scrubPaths(text) {
+    return String(text || '').replace(MAC_PATH, function (p) { var parts = p.replace(/\/+$/, '').split('/'); return parts[parts.length - 1] || 'a file'; });
+  }
+  function stepText(e) {
+    if (!e || typeof e !== 'object') return null;
+    if (e.kind === 'tool') {
+      var target = clip(scrubPaths(e.target), 90), detail = clip(scrubPaths(e.detail), 60);
+      if (target === 'SendMessage') return { kind: 'tool', text: 'Sent a message' + (detail ? ' ' + detail : '') };
+      var verb = STEP_VERBS[e.verb] || 'Used';
+      return { kind: 'tool', text: (target ? verb + ' ' + target : verb) + (detail ? ' (' + detail + ')' : '') };
+    }
+    if (e.kind === 'status' && (e.detail || e.needs_action)) return { kind: 'note', text: clip(scrubPaths(e.detail || e.needs_action), 140) };
+    if (e.kind === 'prose' && e.text) return { kind: 'prose', text: clip(scrubPaths(e.text), 160) };
+    return null;
+  }
+  function stepsOf(a) {
+    var out = [];
+    (a.trail || []).forEach(function (e) { var t = stepText(e); if (t && t.text) out.push(t); });
+    return out;
+  }
+  function stepLi(t) { return '<li class="cc-step ' + t.kind + '">' + esc(t.text) + '</li>'; }
+  function earlierLi(n) { return n > 0 ? '<li class="cc-step more">' + n + ' earlier ' + (n === 1 ? 'step' : 'steps') + '</li>' : ''; }
+  function stepsHtml(a) {
+    var steps = stepsOf(a);
+    if (!steps.length) return '';
+    if (askRunning(a)) {
+      var live = steps.slice(-LIVE_STEPS);
+      return '<ol class="cc-steps live" aria-label="What COS is doing">' + earlierLi(steps.length - live.length) + live.map(stepLi).join('') + '</ol>';
+    }
+    var kept = steps.slice(-DONE_STEPS);
+    return '<details class="cc-steps-done"' + (a.stepsOpen ? ' open' : '') + '><summary data-cos="steps" data-cid="' + esc(a.cid) + '">' +
+      steps.length + (steps.length === 1 ? ' step' : ' steps') + '</summary><ol class="cc-steps">' + earlierLi(steps.length - kept.length) + kept.map(stepLi).join('') + '</ol></details>';
+  }
+
+  // Issue 4 (Miles 11/08, Message #465 "Why aren't you responding to the other session?"): an answer that sent a message
+  // to another session (SendMessage in its trail) gets that session's reply in that session, never here. The card says
+  // where it went, opens that session, and shows its newest reply once the session has answered. Read from the session
+  // list the shell already keeps (W.sessionList, cached), refreshed by the live stream and the shell's status read.
+  function relaysOf(a) {
+    var out = [];
+    (a.trail || []).forEach(function (e) {
+      if (!e || e.kind !== 'tool' || String(e.target) !== 'SendMessage') return;
+      var m = /^to (.+)$/.exec(String(e.detail || '').trim());
+      var name = m && m[1] !== 'another session' && m[1] !== 'every session' ? m[1].trim() : '';
+      if (out.indexOf(name) < 0) out.push(name);
+    });
+    return out.slice(-2);
+  }
+  function rowTitle(r) { return String(r.display_label || r.custom_title || r.title || '').replace(/\s+/g, ' ').trim(); }
+  function relayRow(name) {
+    if (!name || !Array.isArray(C.sessionRows)) return null;
+    var want = name.toLowerCase(), sid = /^session ([0-9a-f]{8})$/i.exec(name);
+    for (var i = 0; i < C.sessionRows.length; i++) {
+      var r = C.sessionRows[i], id = String(r.session_id || r.id || '').replace(/^(claude|codex|cursor):/, '');
+      if (sid ? id.toLowerCase().indexOf(sid[1].toLowerCase()) === 0 : rowTitle(r).toLowerCase() === want || id.toLowerCase() === want) return r;
+    }
+    return null;
+  }
+  function msOf(v) { var d = W.toDate(v); return d ? d.getTime() : 0; }
+  // The session's newest reply, only once it came after this Ask started.
+  function relayReply(r, a) {
+    var text = r && String(r.last_reply || '').trim();
+    if (!text) return '';
+    var at = msOf(r.state_since) || msOf(r.last_activity_at);
+    return at && at > (a.at || 0) ? text : '';
+  }
+  function relayHtml(a) {
+    var names = relaysOf(a);
+    if (!names.length) return '';
+    return '<div class="cc-relays" data-ask-relay>' + names.map(function (name) {
+      var r = relayRow(name), title = r ? rowTitle(r) || name : name, reply = relayReply(r, a);
+      var id = r ? String(r.session_id || r.id || '').replace(/^(claude|codex|cursor):/, '') : '';
+      var where = title ? 'Sent to ' + title + '.' : 'Sent to another session.';
+      return '<div class="cc-relay"><p class="cc-relay-line">' + esc(where) + ' Its answer shows in that session, not here.</p>' +
+        (reply ? '<p class="cc-relay-reply"><span class="cc-relay-who">' + esc(title || 'The session') + ' replied</span>' + esc(clip(scrubPaths(reply), 400)) + '</p>' :
+          askRunning(a) ? '' : '<p class="cc-fine">Its reply shows here when it answers.</p>') +
+        '<div class="cc-acts">' + (r ? '<button type="button" class="cx-btn" data-cos="open-session" data-provider="' + esc(r.provider || 'claude') + '" data-sid="' + esc(id) + '">Open session</button>'
+          : '<button type="button" class="cx-btn quiet" data-cos="open-sessions">Open Sessions</button>') + '</div></div>';
+    }).join('') + '</div>';
+  }
+  function relayPending(a) {
+    if (!relaysOf(a).length || Date.now() - (a.at || 0) > 2 * 3600000) return false;
+    return relaysOf(a).some(function (n) { var r = relayRow(n); return !relayReply(r, a); });
+  }
+  var relayHooked = false;
+  function loadRelayRows(maxAgeMs) {
+    if (!W.sessionList) return;
+    W.sessionList(maxAgeMs).then(function (d) {
+      if (!d || !Array.isArray(d.sessions)) return;
+      C.sessionRows = d.sessions;
+      C.asks.forEach(function (x) { if (relaysOf(x).length) paintRelay(x); });
+    }, function () {});
+  }
+  // No loop of its own: the first read when a relay shows up, then the live stream's frames and the shell's status read.
+  function watchRelays(a) {
+    if (!relaysOf(a).length || a.relayWatched) return;
+    a.relayWatched = true;
+    loadRelayRows(15000);
+    if (!relayHooked && W.live && typeof W.live.on === 'function') {
+      relayHooked = true;
+      W.live.on(function () { if (C.asks.some(relayPending)) loadRelayRows(15000); });
+    }
+  }
+  function paintRelay(a) {
+    var el = document.querySelector('[data-ask="' + a.cid + '"]');
+    var box = el && el.querySelector('[data-ask-relay-slot]');
+    if (!box) return;
+    var html = relayHtml(a);
+    if (box.getAttribute('data-html') !== html) { box.innerHTML = html; box.setAttribute('data-html', html); }
+  }
+  // Issue 2 (Message #463 said "Answered" over "COS is answering"): a finished Ask with no words. The card used to read
+  // "no words yet" as "still answering". Now it reads the turn from Messages once (the answer may have reached Messages
+  // after this card's last read), and if Messages has no words either, says so, with its steps and where it sent things.
+  function emptyAnswerHtml(a) {
+    if (a.recovering) return '<span class="cc-wait">Reading the answer from Messages.</span>';
+    if (relaysOf(a).length) return '';
+    return '<span class="cc-wait">COS finished without a written answer.' + (stepsOf(a).length ? ' What it did is under steps.' : '') + '</span>';
+  }
+  function recoverAnswer(a) {
+    if (a.recovered || a.recovering) return Promise.resolve();
+    a.recovered = true;
+    if (!a.no) return Promise.resolve();
+    a.recovering = true;
+    paintAsk(a);
+    return api('/api/sessions/today/all-messages?limit=100').then(function (d) {
+      var list = (d && d.messages) || [];
+      for (var i = list.length - 1; i >= 0; i--) {
+        var t = list[i], no = t.no != null ? t.no : t.globalMsgNum;
+        if (Number(no) === Number(a.no) && (!a.sessionId || !t.sessionId || t.sessionId === a.sessionId)) {
+          if (typeof t.text === 'string' && t.text.trim()) a.response = t.text;
+          break;
+        }
+      }
+    }, function () {}).then(function () { a.recovering = false; paintAsk(a, true); });
+  }
   function askHtml(a, linked) {
     var running = a.status === 'sending' || a.status === 'queued' || a.status === 'running';
     var title = a.no ? 'Message #' + a.no : 'Asking COS';
     var body = answerHtml(a);
+    // "COS is answering" only while it is; a finished Ask with no words says so (issue 2).
+    if (!body) body = a.status === 'completed' ? emptyAnswerHtml(a) : askRunning(a) ? '<span class="cc-wait">COS is answering. It also lands in Messages on the glasses.</span>' : '';
     var acts = '';
     if (running && a.jobId) {
       acts = (C.caps && C.caps.steer && a.steerable !== false ? '<button type="button" class="link-btn cc-text-btn" data-cos="steer" data-cid="' + a.cid + '">Steer</button>' : '') +
@@ -503,7 +657,9 @@
     return (linked ? '' : '<div class="cc-line you"><div class="cc-bubble">' + esc(a.query) + '</div>' + sentAttsHtml(a.atts) + '<div class="cc-src">' + (a.replyKey ? 'Replied on the web' : 'Asked on the web') + '</div></div>') +
       '<div class="cc-line cos" data-ask="' + a.cid + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
       '<p class="cc-card-title"><span data-ask-title>' + esc(title) + '</span><span class="cx-time" data-ask-state>' + esc(askState(a)) + '</span></p>' +
-      '<div class="cc-answer md" data-ask-body>' + (body || '<span class="cc-wait">COS is answering. It also lands in Messages on the glasses.</span>') + '</div>' +
+      '<div class="cc-answer md" data-ask-body>' + body + '</div>' +
+      '<div class="cc-steps-slot" data-ask-steps>' + stepsHtml(a) + '</div>' +
+      '<div data-ask-relay-slot>' + relayHtml(a) + '</div>' +
       (a.error ? '<p class="cc-fine warn">' + esc(a.error) + '</p>' : '') +
       '<div class="cc-acts" data-ask-acts>' + acts + '</div>' +
       (a.steering ? '<form class="cc-steer" data-cos-steer="' + a.cid + '"><input class="field" type="text" maxlength="2000" placeholder="Steer the answer" aria-label="Steer the answer"><button type="submit" class="cx-btn">Send</button></form>' : '') +
@@ -537,7 +693,8 @@
     else if (W.parseRoute().args[0] === 'cos') window.scrollTo(0, document.body.scrollHeight);
   }
   // A running Ask updates its own card in place, so a poll never rebuilds the chat (or the reader).
-  function paintAsk(a) {
+  // `inPlace`: repaint this card only, never the chat around it (a late answer from recoverAnswer).
+  function paintAsk(a, inPlace) {
     var el = document.querySelector('[data-ask="' + a.cid + '"]');
     if (!el) return a.replyKey ? paintReplyFeed(a.replyKey) : paintFeed(false);
     var running = a.status === 'sending' || a.status === 'queued' || a.status === 'running';
@@ -545,7 +702,12 @@
     var st = el.querySelector('[data-ask-state]'); if (st) st.textContent = askState(a);
     var body = el.querySelector('[data-ask-body]'); var text = a.response || a.partial;
     if (body && text && body.getAttribute('data-len') !== String(text.length) + (a.response ? 'r' : '')) { body.innerHTML = answerHtml(a); body.setAttribute('data-len', String(text.length) + (a.response ? 'r' : '')); }
-    if (!running) { if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false); }
+    // No words and no longer running: never leave "COS is answering" under a finished card (issue 2).
+    else if (body && !text && !askRunning(a)) { var none = a.status === 'completed' ? emptyAnswerHtml(a) : ''; if (body.getAttribute('data-none') !== none) { body.innerHTML = none; body.setAttribute('data-none', none); body.removeAttribute('data-len'); } }
+    var steps = el.querySelector('[data-ask-steps]');
+    if (steps) { var sig = (a.trail ? a.trail.length + ':' + (a.trail.length ? a.trail[a.trail.length - 1].trailSeq : 0) : '0') + (askRunning(a) ? 'r' : 'd'); if (steps.getAttribute('data-sig') !== sig) { steps.innerHTML = stepsHtml(a); steps.setAttribute('data-sig', sig); } }
+    paintRelay(a);
+    if (!running && !inPlace) { if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false); }
   }
 
   function uploadsPending(k) { return k.atts.some(function (t) { return t.state === 'reading' || t.state === 'uploading'; }); }
@@ -1153,6 +1315,8 @@
     if (job.sessionId) a.sessionId = job.sessionId;
     if (typeof job.partialText === 'string') a.partial = job.partialText;
     if (typeof job.response === 'string') a.response = job.response;
+    // 7.0.9: the steps, as the lens reads them (bounded on the Mac to 200 entries and 32,000 characters).
+    if (Array.isArray(job.trail)) { a.trail = job.trail; watchRelays(a); }
     if (job.steerable === false) a.steerable = false;
     if (job.error && (a.status === 'failed' || a.status === 'interrupted')) a.error = errorLine(job);
   }
@@ -1252,7 +1416,7 @@
     var started = Date.now();
     var tick = function () {
       if (!a.jobId) return;
-      api('/api/query-jobs/' + a.jobId + '?generation=1').then(function (d) {
+      api('/api/query-jobs/' + a.jobId + '?generation=1&trail=1').then(function (d) {
         if (d && d.job) take(a, d.job);
         paintAsk(a);
         if (['completed', 'failed', 'canceled', 'interrupted'].indexOf(a.status) >= 0) return finished(a);
@@ -1262,6 +1426,7 @@
     setTimeout(tick, 600);
   }
   function finished(a) {
+    if (a.status === 'completed' && !hasText(a)) recoverAnswer(a);
     postTurn(a);
     refreshDefault();
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
@@ -1978,6 +2143,9 @@
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
     if (what === 'move-cancel') { C.moving = ''; return paintFeed(false); }
     if (what === 'open-msg') return W.go('messages', ['m', t.getAttribute('data-no')]);
+    if (what === 'open-session') return W.go('sessions', [t.getAttribute('data-provider') || 'claude', t.getAttribute('data-sid')]);
+    if (what === 'open-sessions') return W.go('sessions');
+    if (what === 'steps') { var sa = C.asks.filter(function (x) { return x.cid === t.getAttribute('data-cid'); })[0]; if (sa) sa.stepsOpen = !sa.stepsOpen; return; }
     if (what === 'steer') {
       var a = C.asks.filter(function (x) { return x.cid === t.getAttribute('data-cid'); })[0];
       if (a) { a.steering = !a.steering; if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false); var f = document.querySelector('[data-cos-steer="' + a.cid + '"] input'); if (f) f.focus(); }
@@ -2197,7 +2365,7 @@
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
-    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
+    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();
