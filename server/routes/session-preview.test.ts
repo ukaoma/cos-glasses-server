@@ -2,10 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createSessionPreviewRouter, partsFor } from './session-preview.js'
+import { createSessionPreviewRouter, logPreviewRefusal, partsFor } from './session-preview.js'
+import { resetPreviewLogThrottle } from '../lib/preview-log-throttle.js'
 import { HTML_RUN_CSP, HTML_RUN_META_CSP, HTML_RUN_RTC_GUARD, HTML_SAFE_CSP, HTML_SAFE_META_CSP } from '../lib/preview-content.js'
 
 const ID = 'al_' + 'a'.repeat(64)
@@ -190,6 +191,7 @@ describe('7.0.5 QA: preview refusals and failures are logged, with no path', () 
   const PATHY = '/Users/someone/secret/plan.md'
   async function logged(opts: Parameters<typeof serve>[0], path: string) {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetPreviewLogThrottle()
     try {
       const s = await serve(opts)
       const r = await fetch(s.base + path)
@@ -230,6 +232,38 @@ describe('7.0.5 QA: preview refusals and failures are logged, with no path', () 
   it('a missing id is ordinary and is not logged; a success logs nothing', async () => {
     expect((await logged({ file: () => ({ status: 'not_found' }) }, url('raw'))).lines).toEqual([])
     expect((await logged({ file: () => ok('plan.md', 'markdown', '# a') }, url('text'))).lines).toEqual([])
+  })
+  // 7.0.7 (final QA N1): the 7.0.4 routes' limiter, shared. A page of busy thumbnails is one line, then the count.
+  it('a burst of one line logs once per 10 seconds, with the count it held back; a different line is not held back', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetPreviewLogThrottle()
+    try {
+      const busy = { route: 'content' as const, provider: 'claude', part: 'thumb', kind: 'pdf' as const }
+      for (let i = 0; i < 5; i++) logPreviewRefusal(busy, 'previews_busy', 1_000 + i)
+      logPreviewRefusal({ ...busy, kind: 'html' as const }, 'previews_busy', 1_010)
+      logPreviewRefusal(busy, 'previews_busy', 12_000)
+      expect(warn.mock.calls.map(c => c.join(' '))).toEqual([
+        '[preview] content refused reason=previews_busy provider=claude part=thumb kind=pdf',
+        '[preview] content refused reason=previews_busy provider=claude part=thumb kind=html',
+        '[preview] content refused reason=previews_busy provider=claude part=thumb kind=pdf (+4 like it)',
+      ])
+    } finally { warn.mockRestore() }
+  })
+  it('a burst through the routes: 6 busy thumbnails in a row log one line', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetPreviewLogThrottle()
+    try {
+      const s = await serve({ file: () => ({ status: 'busy' }) })
+      for (let i = 0; i < 6; i++) { const r = await fetch(s.base + url('thumb')); expect(r.status).toBe(503); await r.text() }
+      s.close()
+      expect(warn.mock.calls.map(c => c.join(' '))).toEqual(['[preview] content refused reason=previews_busy provider=claude part=thumb'])
+    } finally { warn.mockRestore() }
+  })
+  it('the limiter is the 7.0.4 one, not a second copy', () => {
+    const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
+    expect(src('./session-preview.ts')).toContain("import { warnPreviewThrottled } from '../lib/preview-log-throttle.js'")
+    expect(src('./agent-sessions.ts')).toContain('warnPreviewThrottled(kind + ')
+    for (const f of ['./session-preview.ts', './agent-sessions.ts']) expect(src(f)).not.toMatch(/new Map<string, \{ at: number; quiet: number \}>/)
   })
   it('a detail that is not a plain word is never written', async () => {
     const r = await logged({ file: () => ({ status: 'unavailable', reason: PATHY }) }, meta)

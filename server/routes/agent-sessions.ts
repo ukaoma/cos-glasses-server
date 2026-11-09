@@ -87,6 +87,7 @@ import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-
 
 import { agentSessionOutputImages, sharedFileHeaders } from '../lib/agent-session-output-images.js'
 import { previewErrorCode } from '../lib/preview-error-code.js'
+import { resetPreviewLogThrottle, warnPreviewThrottled } from '../lib/preview-log-throttle.js'
 import { sessionFilesSetting, withoutPreviews } from '../lib/session-files-setting.js'
 import { withoutLinkMarkers } from '../lib/session-links.js'
 import { createSessionPreviewRouter } from './session-preview.js'
@@ -657,21 +658,16 @@ export const SECRET_FILE_DENIED = 'secret_file_denied'
 export const PREVIEWS_BUSY = 'previews_busy'
 
 type PreviewKind = 'output_image' | 'tool_image' | 'sent_file'
-const previewLogAt = new Map<string, { at: number; quiet: number }>()
 /**
  * 7.0.4 QA: every preview refusal and failure is logged with its kind and a reason code, never a path or a session's
  * words. A burst of the same reason (a page of thumbnails while the reader is full) logs once per 10 seconds, with the
- * count it held back.
+ * count it held back (lib/preview-log-throttle.ts, shared with the preview engine routes since 7.0.7).
  */
 export function logPreviewOutcome(kind: PreviewKind, reason: string, now = Date.now()): void {
-  const key = kind + ':' + reason
-  const last = previewLogAt.get(key)
-  if (last && now - last.at < 10_000) { last.quiet++; return }
-  previewLogAt.set(key, { at: now, quiet: 0 })
-  console.warn(`[agent-sessions] preview ${kind} refused reason=${reason}${last?.quiet ? ` (+${last.quiet} like it)` : ''}`)
+  warnPreviewThrottled(kind + ':' + reason, `[agent-sessions] preview ${kind} refused reason=${reason}`, now)
 }
 /** Tests only: forget the burst window, so each case logs. */
-export function resetPreviewLogThrottle(): void { previewLogAt.clear() }
+export { resetPreviewLogThrottle }
 /** The answer for a preview read that did not succeed, logged (a missing id is ordinary and is not). */
 function previewRefusal(res: import('express').Response, kind: PreviewKind, status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'busy'): void {
   const noun = kind === 'sent_file' ? 'file' : 'image'

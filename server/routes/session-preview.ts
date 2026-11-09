@@ -21,6 +21,7 @@ import {
 } from '../lib/preview-content.js'
 import type { PreviewKind } from '../lib/session-links.js'
 import { previewErrorCode } from '../lib/preview-error-code.js'
+import { warnPreviewThrottled } from '../lib/preview-log-throttle.js'
 /** The 7.0.4 code (routes/agent-sessions.ts PREVIEWS_BUSY), repeated here so this router needs nothing from that one. */
 const PREVIEWS_BUSY = 'previews_busy'
 
@@ -60,15 +61,17 @@ const SAFE_WORD = /^[a-z0-9_-]{1,40}$/i
 /**
  * QA 7.0.5 (the 7.0.4 promise, for the preview engine's routes): one line per refusal or failure, with a stable reason
  * code and the provider, part and file kind. A missing id (404 preview_not_found) is ordinary and is not logged, as in
- * the 7.0.4 output routes.
+ * the 7.0.4 output routes. 7.0.7 (final QA N1): a burst of the same line (a page of thumbnails while another client is
+ * busy) logs once per 10 seconds with the count it held back, through the 7.0.4 routes' own limiter.
  */
-export function logPreviewRefusal(at: LogAt, error: string): void {
+export function logPreviewRefusal(at: LogAt, error: string, now = Date.now()): void {
   if (error === 'preview_not_found') return
   const words = [`reason=${error}`, `provider=${PROVIDERS.has(at.provider) ? at.provider : 'unknown'}`]
   if (at.part && SAFE_WORD.test(at.part)) words.push(`part=${at.part}`)
   if (at.kind && SAFE_WORD.test(at.kind)) words.push(`kind=${at.kind}`)
   if (at.detail && SAFE_WORD.test(at.detail)) words.push(`detail=${at.detail}`)
-  console.warn(`[preview] ${at.route} refused ${words.join(' ')}`)
+  const line = `[preview] ${at.route} refused ${words.join(' ')}`
+  warnPreviewThrottled(line, line, now)
 }
 
 function refuse(res: Response, status: string, at: LogAt) {
