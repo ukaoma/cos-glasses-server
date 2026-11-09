@@ -162,6 +162,7 @@ describe('structureLensAnswer: md() draws the same characters (7.0.7, final QA W
       'Plan: 1. a**b. 2. c**d.',
       'Plan: 1. a*b. 2. c*d.',
       'Note `` x. Plan: 1. a. 2. b` y.',
+      '** Steps: 1. Prep the deck. 2. Ship it. **',
     ]) expect(f(c), c).toBe(c)
     expect(f('Plan: 1. **Prep** the deck. 2. Ship it.')).toBe('Plan:\n\n1. **Prep** the deck.\n2. Ship it.')
     expect(f('Plan: 1. Prep the *deck*. 2. Ship __it__.')).toBe('Plan:\n\n1. Prep the *deck*.\n2. Ship __it__.')
