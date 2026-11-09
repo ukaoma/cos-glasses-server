@@ -163,14 +163,23 @@ html.ta-open #sq-host { display: none; }
 .next-actions:empty { display: none; }
 .next-actions .btn.small { min-height: 44px; }
 /* Prep on every Next up row (Miles 11/09, app.js paintCalendarLater and nextPrepPanelHtml): a quiet Prep at the end of
-   each later row, and one small panel under the row it opens (the COS chat's field and buttons, laid flat in the card). */
-.next-later .later-row { align-items: center; min-height: 32px; }
+   each later row, and one small panel under the row it opens (the COS chat's field and buttons, laid flat in the card).
+   Spacing (Miles 14:15, from the 382 px render): every later row is one height, with or without Prep (the hold row
+   too), and its padding is inside that height, so the Prep link never makes a row taller. The open row and its panel
+   read as ONE block: no rules, the panel attached under its row, and the space under the block equals the space
+   between rows. The gap after Prep me, and the gap above "+N more today", are the same as between rows. One pitch per
+   width: --np-row is the row height, --np-gap the space the rows' own height leaves above and below a line of text,
+   --np-after the space under a button row (a button's box is 2 px taller than its line), measured equal to the row gap. */
+#next-card { --np-row: 36px; --np-gap: 8px; --np-after: calc(var(--np-gap) + 2px); }
+#next-card:has(.next-later:not(.hidden)) .next-actions { padding-bottom: var(--np-after); }
+.next-later .later-row { align-items: center; min-height: var(--np-row); padding: 0; }
 .next-later .later-what { flex: 1; min-width: 0; }
-.next-later .later-prep { flex: none; min-height: 32px; font-size: 14px; font-weight: 500; padding: 0 2px; }
-.next-first-prep { padding: 0 16px 14px; }
+.next-later .later-prep { flex: none; min-height: var(--np-row); font-size: 14px; font-weight: 500; padding: 0 2px; }
+.next-later .later-more { margin-top: 0; padding: 0; min-height: var(--np-row); }
+.next-first-prep { padding: 0 16px var(--np-after); }
 .next-first-prep.hidden { display: none; }
-.next-prep { display: grid; gap: 8px; margin: 4px 0 10px; padding: 10px 0 2px; border-top: 1px solid var(--row-border); border-bottom: 1px solid var(--row-border); }
-.next-first-prep .next-prep { margin: 0; }
+.next-prep { display: grid; gap: 8px; margin: 0 0 var(--np-after); padding: 2px 0 0; }
+.next-first-prep .next-prep { margin: 0; padding: 0; }
 .next-prep .field { width: 100%; min-height: 64px; max-height: 140px; font-size: 15px; resize: none; }
 .next-prep-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .next-prep-files li { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; }
@@ -182,8 +191,11 @@ html.ta-open #sq-host { display: none; }
 .next-prep-add:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .next-prep-acts .cx-btn { height: 40px; }
 .next-prep-acts .link-btn { min-height: 40px; font-size: 14px; }
-@media (max-width: 480px) {
-  .next-later .later-row, .next-later .later-prep, .next-prep-files .link-btn, .next-prep-acts .link-btn { min-height: 44px; }
+/* Phones and short touch screens: 44 px touch rows, on the same query as app.css's 44 px floor for .cx-btn and .field,
+   so the panel's buttons and the rows change height together. */
+@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {
+  #next-card { --np-row: 44px; --np-gap: 12px; }
+  .next-prep-files .link-btn, .next-prep-acts .link-btn { min-height: 44px; }
 }
 /* The Ask sheet's File to Work inbox result, on its own row (app.js fileNoteHtml). */
 .nav-row .note.file-error { color: var(--hot); white-space: normal; }

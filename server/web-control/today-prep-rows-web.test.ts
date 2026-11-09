@@ -301,6 +301,18 @@ describe('Prep on every Next up row (app.js)', () => {
     expect(APP).toContain("if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-next-prep-file')) { addNextPrepFiles(e.target.files); e.target.value = ''; }")
   })
 
+  // Miles 14:15 (the 382 px render): one row height with or without Prep, and the open row and its panel are one block.
+  it('styles: every later row and its Prep share one height; the panel has no rules of its own', () => {
+    const css = readFileSync(join(HERE, 'panes', 'today-actions.css'), 'utf8')
+    expect(css).toContain('.next-later .later-row { align-items: center; min-height: var(--np-row); padding: 0; }')
+    expect(css).toMatch(/\.next-later \.later-prep \{[^}]*min-height: var\(--np-row\);/)
+    const panel = css.match(/\n\.next-prep \{([^}]*)\}/)![1]
+    expect(panel).not.toMatch(/border/)
+    // The phone row height switches on the same query as app.css's 44 px floor for the panel's buttons.
+    expect(css).toContain('@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {\n  #next-card { --np-row: 44px;')
+    expect(readFileSync(join(HERE, 'app.css'), 'utf8')).toContain('@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {\n  .cx-btn, .field { min-height: 44px !important; }')
+  })
+
   it('copy: no em dashes in what the panel says', async () => {
     const t = today()
     await t.paint()
