@@ -120,7 +120,7 @@ describe('Prep me without Prep on the server', () => {
     const h = load()
     await h.ready()
     h.jobs['/api/query-jobs'] = { job: { jobId: 'job_plain', status: 'queued' } }
-    h.jobs['/api/query-jobs/job_plain?generation=1'] = { job: { jobId: 'job_plain', status: 'completed', response: 'ok' } }
+    h.jobs['/api/query-jobs/job_plain?generation=1&trail=1'] = { job: { jobId: 'job_plain', status: 'completed', response: 'ok' } }
     h.tapPrep()
     await flush()
     const asks = h.apiCalls.filter(c => c.path === '/api/query-jobs')
@@ -368,9 +368,9 @@ describe('Prep me runs as an ordinary Ask in the chat', () => {
     expect(asks[0]).toMatchObject({ cid: 'cj-' + run.body.clientRequestId.slice(0, 8), jobId: 'job_1', status: 'queued', query: 'Prep: Weekly marketing sync\nWhat does Gina need from me?', replyKey: '' })
     // The composer closes; the answer is in the chat.
     expect(h.chat._prep()).toBe(null)
-    h.jobs['/api/query-jobs/job_1?generation=1'] = { job: { jobId: 'job_1', status: 'completed', response: 'Here is your prep.', globalMsgNum: 812 } }
+    h.jobs['/api/query-jobs/job_1?generation=1&trail=1'] = { job: { jobId: 'job_1', status: 'completed', response: 'Here is your prep.', globalMsgNum: 812 } }
     await new Promise(r => setTimeout(r, 700)); await flush()
-    expect(h.apiCalls.some(c => c.path === '/api/query-jobs/job_1?generation=1')).toBe(true)
+    expect(h.apiCalls.some(c => c.path === '/api/query-jobs/job_1?generation=1&trail=1')).toBe(true)
     expect(asks[0]).toMatchObject({ status: 'completed', response: 'Here is your prep.', no: 812 })
   })
 

@@ -99,6 +99,24 @@
 .cc-move .cc-choice { font-weight: 500; }
 .cc-fine { margin: 8px 0 0; font-size: 12.5px; color: var(--tertiary); }
 .cc-fine.warn { color: var(--hot); }
+/* 7.0.9: a running answer's steps (its trail), newest last; once it ends, a quiet disclosure. A relayed message names the
+   session it went to. Every line wraps inside the card: the Duo folded is 382 px wide. */
+.cc-steps-slot:empty { display: none; }
+.cc-steps { list-style: none; margin: 8px 0 0; padding: 0 0 0 10px; border-left: 2px solid var(--hairline); display: grid; gap: 3px; min-width: 0; }
+.cc-step { font-size: 13px; line-height: 1.4; color: var(--sub); overflow-wrap: anywhere; min-width: 0; }
+.cc-step.prose { color: var(--ink); }
+.cc-step.more { color: var(--tertiary); }
+.cc-steps.live .cc-step:last-child { color: var(--ink); }
+.cc-steps-done { margin-top: 8px; min-width: 0; }
+.cc-steps-done > summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; font-size: 13px; color: var(--tertiary); }
+.cc-steps-done > summary::-webkit-details-marker { display: none; }
+.cc-steps-done > summary::before { content: ''; width: 0; height: 0; margin-right: 8px; border-style: solid; border-width: 4px 0 4px 6px; border-color: transparent transparent transparent currentColor; transition: transform 160ms ease; }
+.cc-steps-done[open] > summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .cc-steps-done > summary::before { transition: none; } }
+.cc-relay { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--hairline); min-width: 0; }
+.cc-relay-line { margin: 0; font-size: 14px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; }
+.cc-relay-reply { margin: 6px 0 0; font-size: 14px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
+.cc-relay-who { display: block; font-size: 12.5px; color: var(--tertiary); margin-bottom: 2px; }
 .cc-steer { display: flex; gap: 8px; margin-top: 10px; }
 .cc-steer .field { flex: 1; min-width: 0; height: 36px; }
 

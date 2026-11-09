@@ -18,7 +18,7 @@
  *   POST /drops/:id/move  { dest, target?: { id, label, domain? } }                     DropAnswer
  *   POST /drops/:id/ask   { clientJobId, generation }                                   DropAnswer
  *   POST /drops/:id/sent                                                                DropAnswer
- *   GET  /inbox/summary                                                                 { unread, waiting, lastLine, lastAt, version }
+ *   GET  /inbox/summary                                                                 { unread, waiting, asked, yourMove, lastLine, lastAt, version }
  *   GET  /inbox/feed      ?after&limit                                                  { items, version, more }
  *   POST /inbox/read      { through }                                                   { unread, waiting, version }
  *   POST /inbox/action    { itemId, action: 'choose:<id>' | 'undo' }                    DropAnswer
@@ -213,7 +213,7 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
   }))
   router.post('/inbox/read', (req, res) => withService(res, async service => {
     if (!isRecord(req.body) || typeof req.body.through !== 'string') return bad(res, 'invalid_read')
-    let out: { unread: number; waiting: number; version: number }
+    let out: { unread: number; waiting: number; asked: number; version: number }
     try { out = service.markRead(req.body.through) } catch (e) { return send(res, e) }
     // The same `waiting` the summary gives, Work's Your move included.
     const yourMove = await boundedYourMove(deps.yourMove)
