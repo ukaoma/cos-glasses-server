@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>COS approval</title>
+<link rel="stylesheet" href="/signer.css">
+</head>
+<body>
+<main>
+<h1>COS approval</h1>
+
+<section id="loading"><p>Loading.</p></section>
+
+<section id="framed" hidden>
+<p>This page only works when you open it directly. Nothing was signed.</p>
+</section>
+
+<section id="enroll" hidden>
+<h2>Set up this phone</h2>
+<p>This lets you approve messages to your Mac with a user-verified passkey on this phone. Nothing else is needed. The key stays on this phone.</p>
+<p>This phone will show a 6-digit code. Type it in COS Control on your Mac, compare the key fingerprints, then approve with Touch ID.</p>
+<label for="enroll-label">Name for this phone</label>
+<input id="enroll-label" type="text" maxlength="64" autocomplete="off" value="iPhone">
+<button type="button" id="enroll-start">Set up phone approval</button>
+<button type="button" id="enroll-confirm" hidden>Confirm with passkey</button>
+<p class="status" id="enroll-status" role="status"></p>
+</section>
+
+<section id="pending" hidden>
+<h2>Type this code on your Mac</h2>
+<p class="code" id="pending-code"></p>
+<p>Key fingerprint <span class="mono" id="pending-fingerprint"></span></p>
+<p>In COS Control on your Mac, type this code and check that its key fingerprint matches this phone. Then approve with Touch ID. This page updates when you do.</p>
+</section>
+
+<section id="sign" hidden>
+<h2>You are about to approve</h2>
+<p class="label">Words</p>
+<pre id="sign-words"></pre>
+<dl>
+<dt>Sent to</dt><dd id="sign-provider"></dd>
+<dt>Session</dt><dd class="mono" id="sign-session"></dd>
+<dt>What it allows</dt><dd id="sign-scope"></dd>
+</dl>
+<pre id="sign-packet" hidden></pre>
+<button type="button" id="sign-approve">Approve with phone passkey</button>
+<button type="button" id="sign-cancel" class="quiet">Cancel approval</button>
+<p class="status" id="sign-status" role="status"></p>
+</section>
+
+<section id="done" hidden>
+<p id="done-text"></p>
+<p><a id="done-back" href="#">Back to Control</a></p>
+</section>
+
+<section id="idle" hidden>
+<p id="idle-text">This phone has a key. Start an approval from a session in Control.</p>
+<p><span id="key-label"></span> <span class="mono" id="key-fingerprint"></span></p>
+<button type="button" id="key-revoke" class="quiet">Remove this phone&rsquo;s key</button>
+</section>
+
+<section id="problem" hidden>
+<p id="problem-text"></p>
+</section>
+
+<p class="foot"><a id="back" href="#">Back to Control</a></p>
+</main>
+<script src="/signer-proof.js"></script>
+<script src="/signer-store.js"></script>
+<script src="/signer.js"></script>
+</body>
+</html>

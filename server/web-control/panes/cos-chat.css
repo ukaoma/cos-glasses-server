@@ -256,6 +256,11 @@ html.kb-up .cc-kb .cc-model .field { width: 100%; }
   .att-composer > .composer-actions { margin-left: auto; }
 }
 .att-composer .att-files.hidden { display: none; }
+.phone-approval-packet { flex: 1 1 100%; min-width: 0; }
+.phone-approval-packet label { display: block; font-size: 13px; margin-bottom: 4px; }
+.phone-approval-packet select { width: 100%; max-width: 100%; font: inherit; color: inherit; background: var(--card, transparent); }
+.phone-approval-packet pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.4 ui-monospace, monospace; max-height: 11rem; overflow-y: auto; margin: 6px 0; }
+.composer-actions:has([data-phone-offer]) { flex-wrap: wrap; }
 .att-clip, .ta-clip { display: inline-flex; gap: 6px; }
 .att-clip:empty { display: none; }
 .att-clip .cc-attach { height: 38px; width: 42px; border-radius: var(--radius-sm); }

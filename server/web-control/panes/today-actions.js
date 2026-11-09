@@ -537,6 +537,7 @@
       return open(pk === 'wait' ? 'wait' : 'run', id, O.opener, { from: { scroll: lb ? lb.scrollTop || 0 : 0 } });
     }
     if (what === 'send') return sendReply();
+    if (what === 'approve-phone' && K.approvePhone && O.r) return K.approvePhone(phoneApprovalOptions(O.r));
     if (what === 'att-remove' || what === 'att-retry') {
       var fb = filesBox(); if (!fb) return;
       O.note = { text: '', kind: '' }; paintNote();
@@ -829,7 +830,8 @@
       paintFiles();
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
       var kit = KIT(), r0 = O.r;
-      if (kit && !kit.turnFiles()) kit.ensureCaps().then(function () { if (O.r === r0) paintFiles(); }, function () {});
+      paintPhoneOffer(r0);
+      if (kit && !kit.turnFiles()) kit.ensureCaps().then(function () { if (O.r === r0) { paintFiles(); paintPhoneOffer(r0); } }, function () {});
       // Files of a send a reload cut off go again with the same words; say so, since their chips are gone.
       if (O.r.draft && O.r.draft.restored) {
         var nf = O.r.draft.ids.length;
@@ -910,6 +912,14 @@
       '</form>' +
       '<p class="status-line" id="ta-status" role="status" aria-live="polite"></p>';
   }
+
+  // The same exact packet picker and handoff as Sessions. This does not upgrade an ordinary Send.
+  function phoneApprovalOptions(r) {
+    return { r: r, prefix: 'ta', live: function () { return O.r === r && !!O.open; },
+      status: function (text, kind) { if (O.r === r) { O.note = { text: text, kind: kind || '' }; paintNote(); } },
+      files: function () { return filesState(filesBox(r)); } };
+  }
+  function paintPhoneOffer(r) { if (K.phoneOffer) K.phoneOffer(r, phoneApprovalOptions(r)); }
 
   // ── files with a reply or a note (the COS chat's attach kit) ──
   // One box per session, kept while this tab is open, so closing and reopening the sheet keeps what was attached.

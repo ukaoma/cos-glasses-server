@@ -38,11 +38,11 @@ import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds
  * the attachment digest its origin is sealed to. Files whose content cannot be read leave the turn
  * unvouched (it still parks); no files is the empty digest and reads nothing.
  */
-async function sealFiles(ids: readonly string[] | undefined, verdict: OriginVerdict, store: TurnAttachmentStore | undefined): Promise<{ verdict: OriginVerdict; attachments: string }> {
-  if (!Array.isArray(ids) || ids.length === 0) return { verdict, attachments: '' }
+async function sealFiles(ids: readonly string[] | undefined, verdict: OriginVerdict, store: TurnAttachmentStore | undefined): Promise<{ verdict: OriginVerdict; attachments: string; manifest: ReadonlyArray<{ id: string; sha256: string }> | null }> {
+  if (!Array.isArray(ids) || ids.length === 0) return { verdict, attachments: '', manifest: [] }
   const manifest = await turnAttachmentManifest(ids, store)
-  if (!manifest.ok) return { verdict: unvouched(verdict, 'attachments_unsealable'), attachments: '' }
-  return { verdict, attachments: attachmentsDigest(manifest.manifest) }
+  if (!manifest.ok) return { verdict: unvouched(verdict, 'attachments_unsealable'), attachments: '', manifest: null }
+  return { verdict, attachments: attachmentsDigest(manifest.manifest), manifest: manifest.manifest }
 }
 
 export interface ThreadTurnQueueDeps {
@@ -879,7 +879,9 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     // with its content hash), so the drain can carry it (QUEUED_ORIGIN_TTL_MS at most).
     if (deps.provenance && verdict) {
       const sealed = await sealFiles(attach.ids, verdict, deps.turnAttachmentStore)
-      verdict = sealed.verdict
+      // 6.99.31: a signed web turn is judged here, once parking is decided, against this provider and
+      // thread (where it will drain), these exact words and these files. No envelope: unchanged.
+      verdict = deps.provenance.acceptWebKey(sealed.verdict, { provider, sessionId: threadId, turnId: clientTurnId, words: prompt, attachments: sealed.manifest })
       deps.provenance.noteQueued(provider, threadId, clientTurnId, prompt, verdict, sealed.attachments)
     }
 
@@ -990,8 +992,11 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (deps.provenance && resendVerdict) {
       // After the write: the read-modify-write above stays one synchronous step. Sealed to the copy's files.
       const sealed = await sealFiles(copy.attachmentIds, resendVerdict, deps.turnAttachmentStore)
-      deps.provenance.noteQueued(provider, threadId, newId, copy.prompt, sealed.verdict, sealed.attachments)
-      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict: sealed.verdict, provider, sessionId: threadId, via: 'queue-resend', resendOf: original.clientTurnId })
+      // 6.99.31: Send again from the phone needs a fresh signature over the copy (its new id, the words,
+      // the files); without one the copy stays unvouched ('resend_not_reverified').
+      const copyVerdict = deps.provenance.acceptWebKey(sealed.verdict, { provider, sessionId: threadId, turnId: newId, words: copy.prompt, attachments: sealed.manifest })
+      deps.provenance.noteQueued(provider, threadId, newId, copy.prompt, copyVerdict, sealed.attachments)
+      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict: copyVerdict, provider, sessionId: threadId, via: 'queue-resend', resendOf: original.clientTurnId })
     }
     console.log(`[thread-turn-queue] resend provider=${provider} from=${original.clientTurnId} as=${newId} unknown=${original.deliveryState === 'unknown'}`)
     return res.status(200).json(publicRow(copy, queuePosition(admitted.queue, newId)))
@@ -1061,9 +1066,11 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (deps.provenance && verdict) {
       // Sealed to the row's files as they are now (an edit changes only the words).
       const sealed = await sealFiles(row.attachmentIds, verdict, deps.turnAttachmentStore)
-      deps.provenance.noteQueued(provider, threadId, id, prompt, sealed.verdict, sealed.attachments)
+      // 6.99.31: an edit needs a fresh signature over the new words (same id, same files), or it is unvouched.
+      const editVerdict = deps.provenance.acceptWebKey(sealed.verdict, { provider, sessionId: threadId, turnId: id, words: prompt, attachments: sealed.manifest })
+      deps.provenance.noteQueued(provider, threadId, id, prompt, editVerdict, sealed.attachments)
       // The queue's own row, re-judged: it continues the record parked under this id.
-      deps.provenance.record({ turnId: id, prompt, verdict: sealed.verdict, provider, sessionId: threadId, via: 'queue-edit', continues: true })
+      deps.provenance.record({ turnId: id, prompt, verdict: editVerdict, provider, sessionId: threadId, via: 'queue-edit', continues: true })
     }
     return res.json({ updated: true })
   })

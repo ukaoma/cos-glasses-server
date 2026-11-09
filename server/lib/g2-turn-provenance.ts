@@ -56,6 +56,16 @@
 // even one with no origin left to carry, so the drain is the one caller allowed to add to the
 // parked turn's ledger record.
 //
+// WEB-KEY AUTHORITY (6.99.31, behind COS_WEB_KEY_AUTHORITY, default off). A web turn that also
+// carries a `cos-web-turn/1` envelope signed by an enrolled phone key (lib/web-key-authority.ts)
+// can be vouched as `authority: 'web-key'`. originOf only NOTES the envelope headers on a web
+// verdict (`webKeyCandidate`); nothing is vouched until the route, knowing its real target, the
+// exact words and the files, calls acceptWebKey. A route that never calls it leaves the web turn
+// exactly as 6.99.29 left it. Off, no candidate is ever noted, so every web turn is recorded with
+// WEB_UNVOUCHED_REASON and no footer, byte for byte as 6.99.29. A web-key record is self-proving
+// (envelope + signature), so the endpoint can vouch for it after a restart, unlike the in-memory
+// seal; a queued web-key origin is re-checked at its drain (expiry, revocation, epoch, words).
+//
 // TURN IDS ARE NOT REUSABLE. A record this process holds is never replaced by a different turn
 // under the same id (a client-chosen id could otherwise overwrite a vouched record: a denial of
 // service on verification). Only an identical retry (same target, same text, same origin) or the
@@ -67,6 +77,8 @@ import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { turnFooter } from './turn-footer.js'
+import { webKeyCandidateOf, type WebKeyAuthority, type WebKeyCandidate, type WebKeyContext, type WebKeyProof } from './web-key-authority.js'
+import { MESSAGE_SCOPE_MEANING, notAuthorizedFor } from '../../shared/web-turn-envelope.js'
 
 export { FOOTER_LINE_REFUSED_COPY, G2_TURN_FOOTER_RE, g2TurnFooter, hasFooterShapedLine, stripG2TurnFooter, TURN_FOOTER_SHAPED_RE, TURN_ID_IN_USE_COPY, turnFooter, turnFooterTag, withoutTurnFooter } from './turn-footer.js'
 
@@ -134,6 +146,14 @@ export interface OriginVerdict {
   reason?: string | null
   /** When this origin was judged (ms). A queued origin lapses from here, never later. */
   judgedAt?: number
+  /** 6.99.31: set only by acceptWebKey on a signed, accepted web turn. */
+  authority?: 'web-key'
+  /** 6.99.31: the accepted envelope and signature (self-proving). Present only with `authority`. */
+  webKey?: WebKeyProof
+  /** 6.99.31: envelope headers a web request carried, not yet judged (flag on only). Vouches for nothing. */
+  webKeyCandidate?: WebKeyCandidate
+  /** 6.99.31: why a signed web turn was not vouched (the route's acceptWebKey or a drain re-check). */
+  webKeyReason?: string
 }
 
 export interface G2TurnRecord {
@@ -155,6 +175,10 @@ export interface G2TurnRecord {
    * re-audit of 910eb90): the copy is judged by the request that sent it again, nothing is inherited.
    */
   resendOf?: string
+  /** 6.99.31: a vouched web turn signed by an enrolled phone key. */
+  authority?: 'web-key'
+  /** 6.99.31: the envelope bytes and signature that vouch for it (self-proving, so durable). */
+  webKey?: WebKeyProof
 }
 
 /** The shape of an Express request this module reads. Nothing else. */
@@ -186,12 +210,29 @@ export function turnTextSha256(text: string): string {
 export function footerApplies(verdict: OriginVerdict): boolean {
   if (verdict.verifiedOrigin !== true) return false
   const kind = originKindOf(verdict.origin.client)
+  // 6.99.31: a web turn is footed (COS-WEB) only when an enrolled phone key's envelope was accepted.
+  if (kind === 'web') return verdict.authority === 'web-key' && verdict.webKey !== undefined
   return kind === 'g2' || kind === 'phone'
 }
 
-/** The same verdict, never vouched, with the reason why. */
+/** Whether a verdict is a vouched web-key turn (the only vouched web turn there is). */
+function isWebKeyVerdict(verdict: OriginVerdict): boolean {
+  return verdict.verifiedOrigin === true && verdict.authority === 'web-key' && verdict.webKey !== undefined
+}
+
+/**
+ * The same verdict, never vouched, with the reason why. Any web-key authority is dropped; envelope
+ * headers not yet judged stay, so a Send again or an edit can still be judged on its own signature.
+ */
 export function unvouched(verdict: OriginVerdict, reason: string): OriginVerdict {
-  return { ...verdict, verifiedOrigin: false, reason }
+  const { authority: _a, webKey: _w, ...rest } = verdict
+  return { ...rest, verifiedOrigin: false, reason }
+}
+
+/** A signed web turn that was not vouched: unvouched, its envelope spent or dropped, the reason kept. */
+function webKeyRefused(verdict: OriginVerdict, reason: string): OriginVerdict {
+  const { authority: _a, webKey: _w, webKeyCandidate: _c, ...rest } = verdict
+  return { ...rest, verifiedOrigin: false, reason, webKeyReason: reason }
 }
 
 /** The vias of a turn still parked in the queue: the only records a continuation may extend. */
@@ -354,6 +395,11 @@ export interface G2TurnProvenanceDeps {
    * request with no X-Cos-Token header. Absent, or a throw: no turn is ever a web turn.
    */
   webSession?: (req: OriginRequest) => boolean
+  /**
+   * 6.99.31: the enrolled phone key authority. Absent, or its flag off: no envelope is ever read and
+   * every web turn is what 6.99.29 made it.
+   */
+  webKey?: WebKeyAuthority
   now?: () => number
   randomToken?: () => string
 }
@@ -448,12 +494,54 @@ export class G2TurnProvenance {
       verifiedOrigin = paired !== null && paired === clientInstance
       if (!verifiedOrigin) reason = 'not_ring_owner'
     }
+    // 6.99.31: a web request (cookie path, no token, not this Mac) that carries an envelope has it
+    // NOTED, not judged: acceptWebKey judges it once the route knows the target. Flag off: never noted.
+    let webKeyCandidate: WebKeyCandidate | null = null
+    if (client === 'web' && this.webKeyOn()) {
+      try { webKeyCandidate = webKeyCandidateOf(req.headers) } catch { webKeyCandidate = null }
+    }
     return {
       origin: { remote: known ? remote : 'unknown', loopback, ownAddress, clientInstance, client, tokenPresented, webSession },
       verifiedOrigin,
       reason,
       judgedAt: this.now(),
+      ...(webKeyCandidate ? { webKeyCandidate } : {}),
     }
+  }
+
+  private webKeyOn(): boolean {
+    try { return this.deps.webKey?.enabled() === true } catch { return false }
+  }
+
+  /** The web-key authority, when wired (the routes and GET /api/g2-turns read it). */
+  get webKey(): WebKeyAuthority | null { return this.deps.webKey ?? null }
+
+  /**
+   * 6.99.31: judge the envelope a web verdict carries against the route's REAL target, the exact
+   * words and the ordered files. Accepted: vouched, `authority: 'web-key'`, footed COS-WEB. Refused:
+   * unvouched with the specific reason. A verdict with no envelope comes back unchanged, so every
+   * caller can pass every verdict. Never throws.
+   */
+  acceptWebKey(verdict: OriginVerdict, ctx: WebKeyContext): OriginVerdict {
+    const candidate = verdict.webKeyCandidate
+    if (!candidate) return verdict
+    // A fork's receiving child has no id the phone could have signed: never vouched (plan §4.4).
+    if (ctx.fork === true) return webKeyRefused(verdict, 'fork_destination_unbound')
+    if (verdict.origin.client !== 'web' || !this.deps.webKey) return webKeyRefused(verdict, 'web_key_authority_off')
+    const judged = this.deps.webKey.accept(candidate, ctx)
+    if (!judged.ok) {
+      console.warn(`[g2-turn-ledger] web-key turn not vouched turnId=${ctx.turnId} reason=${judged.reason}`)
+      return webKeyRefused(verdict, judged.reason)
+    }
+    const { webKeyCandidate: _c, webKeyReason: _r, ...rest } = verdict
+    return { ...rest, verifiedOrigin: true, reason: null, authority: 'web-key', webKey: judged.proof }
+  }
+
+  /** A held web-key origin still holds at its drain only while recheck passes (plan §4.5). */
+  private reheld(verdict: OriginVerdict, prompt: string, attachments: string): OriginVerdict {
+    if (verdict.authority !== 'web-key' || !verdict.webKey) return verdict
+    const reason = this.deps.webKey ? this.deps.webKey.recheck(verdict.webKey, prompt, attachments) : 'web_key_authority_off'
+    return reason === null ? verdict : webKeyRefused(verdict, reason)
   }
 
   /**
@@ -468,9 +556,10 @@ export class G2TurnProvenance {
 
   private build(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean; resendOf?: string }): G2TurnRecord {
     const originKind = originKindOf(input.verdict.origin.client)
-    // A web turn is never vouched, whatever verdict reached here (header).
-    const verifiedOrigin = input.verdict.verifiedOrigin === true && originKind !== 'web'
-    const reason = verifiedOrigin ? null : (originKind === 'web' ? WEB_UNVOUCHED_REASON : (input.verdict.reason ?? 'unverified'))
+    // A web turn is never vouched unless an enrolled phone key's envelope was accepted (6.99.31).
+    const webKey = originKind === 'web' && isWebKeyVerdict(input.verdict)
+    const verifiedOrigin = input.verdict.verifiedOrigin === true && (originKind !== 'web' || webKey)
+    const reason = verifiedOrigin ? null : (originKind === 'web' ? (input.verdict.webKeyReason ?? WEB_UNVOUCHED_REASON) : (input.verdict.reason ?? 'unverified'))
     return {
       turnId: input.turnId,
       createdAt: new Date(this.now()).toISOString(),
@@ -483,6 +572,7 @@ export class G2TurnProvenance {
       target: { provider: input.provider, sessionId: input.sessionId, ...(input.fork ? { fork: true as const } : {}) },
       via: input.via,
       ...(typeof input.resendOf === 'string' && input.resendOf.length > 0 ? { resendOf: input.resendOf } : {}),
+      ...(webKey && verifiedOrigin ? { authority: 'web-key' as const, webKey: input.verdict.webKey } : {}),
     }
   }
 
@@ -571,7 +661,8 @@ export class G2TurnProvenance {
    * within QUEUED_ORIGIN_TTL_MS of when it was judged. A lapsed origin is forgotten here.
    */
   queuedVerdict(provider: string, threadId: string, clientTurnId: string, prompt: string): OriginVerdict | null {
-    return this.queuedOrigin(provider, threadId, clientTurnId, prompt)?.verdict ?? null
+    const held = this.queuedOrigin(provider, threadId, clientTurnId, prompt)
+    return held ? this.reheld(held.verdict, prompt, held.attachments) : null
   }
 
   private queuedOrigin(provider: string, threadId: string, clientTurnId: string, prompt: string): QueuedOrigin | null {
@@ -613,7 +704,10 @@ export class G2TurnProvenance {
       // The seal rides with the origin: the turn route checks the binding's provider and thread and
       // the files it is about to compose against it, and refuses a vouched turn that no longer matches.
       const seal: QueueSeal | null = held ? { provider: turn.provider, threadId: turn.threadId, attachments: held.attachments } : null
-      this.carries.set(token, { clientTurnId: turn.clientTurnId, verdict: held?.verdict ?? null, seal, textSha256: turnTextSha256(turn.prompt), expiresAt: at + TURN_CARRY_TTL_MS })
+      // 6.99.31: a parked web-key approval is re-checked here, at its drain: expired, revoked, a moved
+      // epoch or changed words carry it unvouched (never re-dated).
+      const verdict = held ? this.reheld(held.verdict, turn.prompt, held.attachments) : null
+      this.carries.set(token, { clientTurnId: turn.clientTurnId, verdict, seal, textSha256: turnTextSha256(turn.prompt), expiresAt: at + TURN_CARRY_TTL_MS })
       return token
     } catch {
       return null
@@ -655,8 +749,18 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
   // Only a record this process wrote and still holds vouches for anything (see the header), never a
   // web turn (its cookie is derivable from the token), and never past G2_TURN_VOUCH_MAX_MS.
   let reason: string | null = null
-  if (originKind === 'web') reason = WEB_UNVOUCHED_REASON
-  else if (record.verifiedOrigin !== true) reason = typeof record.reason === 'string' ? record.reason : 'unverified'
+  // 6.99.31: a web-key record is self-proving (envelope + signature): re-verified here against the
+  // registry, so it vouches after a restart too, and reads revoked the moment its key is revoked.
+  // Flag off: every web record reads WEB_UNVOUCHED_REASON, exactly as 6.99.29.
+  const authority = provenance.webKey
+  const webKeyOn = authority !== null && authority.enabled()
+  const webKeyRecord = originKind === 'web' && record.authority === 'web-key' && record.verifiedOrigin === true && !!record.webKey
+  const webKeyReview = webKeyRecord && webKeyOn && authority ? authority.review(record.webKey as WebKeyProof, { turnId: record.turnId, target: record.target }) : null
+  if (originKind === 'web') {
+    if (webKeyReview === null) reason = webKeyOn && typeof record.reason === 'string' && record.verifiedOrigin !== true ? record.reason : WEB_UNVOUCHED_REASON
+    else if (webKeyReview.reason !== null) reason = webKeyReview.reason
+    else if (ageMs === null || ageMs > G2_TURN_VOUCH_MAX_MS) reason = 'record_too_old'
+  } else if (record.verifiedOrigin !== true) reason = typeof record.reason === 'string' ? record.reason : 'unverified'
   else if (!sealed) reason = 'not_sealed'
   else if (ageMs === null || ageMs > G2_TURN_VOUCH_MAX_MS) reason = 'record_too_old'
   return {
@@ -675,5 +779,20 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
     target: record.target,
     via: record.via,
     ...(typeof record.resendOf === 'string' ? { resendOf: record.resendOf } : {}),
+    ...(webKeyReview !== null && record.webKey ? {
+      authority: 'web-key',
+      kid: record.webKey.kid,
+      scope: record.webKey.scope,
+      // Review B4: what this scope means and what it never authorizes, in the answer itself.
+      scopeMeaning: record.webKey.scope?.kind === 'approve' ? 'approve' : MESSAGE_SCOPE_MEANING,
+      notAuthorized: notAuthorizedFor(record.webKey.scope?.kind === 'approve' ? record.webKey.scope : { kind: 'message' }),
+      envelope: record.webKey.envelope,
+      signature: record.webKey.signature,
+      passkey: record.webKey.passkey ?? null,
+      authId: record.webKey.authId,
+      registryEntry: webKeyReview.entry,
+      // Anchor (B1), epoch and revocations (W5), integrity (W1), consume keys (B3): docs/web-key-verifier-contract.md section 6.
+      ...(webKeyReview.facts ?? {}),
+    } : {}),
   }
 }
