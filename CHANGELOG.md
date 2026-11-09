@@ -1,3 +1,15 @@
+## 7.0.11 - Today knows your calendar, shows more of it, and takes questions
+
+2026-11-09. 7.0.10 (004df50) plus Today round 2. Private on Miles's Mac first.
+
+- **The summary sees the calendar.** The meeting in progress, the next 4 with how long until each, and meetings that ended in the last 2 hours. An upcoming meeting is worked into an existing sentence ("...before your 10:00 forecast call"), never a sentence of its own; still at most three sentences. A session whose recent words name a meeting that already ended is marked so its prep reads as past.
+- **No more "can wait until tomorrow".** The prompt no longer asks for it; the opener already says what can wait.
+- **Calendar API: `/api/calendar/today`.** `next` holds up to 5 meetings (was 3). Duplicate invites (same title and start) and canceled events are dropped before `next`, `remainingCount` and the new `endedRecently` are counted.
+- **Control Web Next up.** The current or next meeting plus up to 4 more, then "+N more today", which opens Meetings.
+- **Ask about this.** A box under the Today summary asks COS about it or tells a session what to do. It sends the typed words plus the summary and one line per session (title, provider, state, last activity, last ask) as quoted data, and COS can relay an instruction to a Claude session by title. Hidden without durable Ask jobs, offline, or before a model summary exists.
+- **The brief view** (GET and POST `/api/today/brief`) gains an optional `sessions` list (at most 12, scrubbed) stored with each summary.
+- **Default-on for every install:** yes: the summary inputs and prompt, Next up rows, and the Ask box. Model, interval, cap, switch and breaker unchanged.
+
 ## 7.0.10 - Today summary describes what is happening now
 
 2026-11-09. 7.0.9 (1b2a8f2) plus one change. Private on Miles's Mac first.
