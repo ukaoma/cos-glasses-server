@@ -974,7 +974,9 @@ app.use('/api', diagRouter)
 app.use('/api', createClientInstanceRouter({ owners: clientInstanceOwners }))
 // G2 authority Tier 1: read-only provenance for one delivered turn (verify_g2_turn.py asks it).
 app.use('/api', createG2TurnsRouter({ provenance: g2Provenance, apiToken: () => API_TOKEN }))
-// 6.99.31: the enrolled phone key registry and ceremony. Not a route at all while COS_WEB_KEY_AUTHORITY is off.
+// 6.99.31: the enrolled phone key registry and ceremony. Not a route at all while COS_WEB_KEY_AUTHORITY is off,
+// except (7.0.9) the anchor status and registration routes with COS_WEB_KEY_ANCHOR_BOOTSTRAP on (routes/web-key.ts).
+// Nothing else in this file reads that switch: the 3144 listener, its integrity and the cookie ports stay on the authority.
 app.use('/api', createWebKeyRouter({
   authority: webKeyAuthority,
   enrollments: webKeyEnrollments,

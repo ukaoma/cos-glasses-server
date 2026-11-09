@@ -284,6 +284,20 @@ describe('B1 anchor registration (COS Control bootstrap)', () => {
     expect(registry.registerAnchor({ ...body, anchorPub: 'AAAA' }, 'control')).toEqual({ ok: false, reason: 'invalid_key' })
     expect(registry.anchor()).toBeNull()
   })
+  it('7.0.9 finding, pinned as-is: re-registering the SAME key resets setAt (the 24 h clock restarts), revokes nothing, keeps the epoch', () => {
+    const phone = p256()
+    seedRegistry(file(), anchor, [anchoredEntry(anchor, phone)], 0, { setAt: clock - WEB_ANCHOR_MATURITY_MS }); open()
+    expect(registry.anchorMature()).toBe(true)
+    const firstSetAt = registry.anchor()?.setAt
+    clock += 60_000
+    const again = registry.registerAnchor(anchorRegistrationBody(anchor, clock), 'control')
+    expect(again).toEqual({ ok: true, spkiSha256: sha256Hex(anchor.der), fingerprint: fingerprintOfSpki(anchor.der), setAt: clock, replaced: false })
+    expect(registry.anchor()?.setAt).toBe(clock)
+    expect(registry.anchor()?.setAt).not.toBe(firstSetAt)
+    expect(registry.anchorMature()).toBe(false)
+    expect(registry.epoch()).toBe(0)
+    expect(registry.entryState(phone.kid, SELF_DNS).ok).toBe(true)
+  })
   it('replacing the anchor revokes every key and bumps the epoch', () => {
     const phone = p256()
     seedRegistry(file(), anchor, [anchoredEntry(anchor, phone)]); open()

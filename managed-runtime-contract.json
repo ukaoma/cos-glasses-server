@@ -118,7 +118,8 @@
     "COS_PROMPT_EDIT_TIMEOUT_MS",
     "COS_WEB_KEY_AUTHORITY",
     "COS_WEB_CONTROL_INTEGRITY",
-    "COS_WEB_KEY_DEVICES"
+    "COS_WEB_KEY_DEVICES",
+    "COS_WEB_KEY_ANCHOR_BOOTSTRAP"
   ],
   "maintenance": {
     "scope": "cross_boot",

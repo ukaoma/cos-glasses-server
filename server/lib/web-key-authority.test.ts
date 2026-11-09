@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { manifestDigest, WebKeyAuthority, wordsDigest, type IntegrityReport, type WebKeyContext } from './web-key-authority.js'
+import { manifestDigest, WebKeyAuthority, webKeyAnchorBootstrapEnabled, webKeyAuthorityEnabled, wordsDigest, type IntegrityReport, type WebKeyContext } from './web-key-authority.js'
 import { WEB_ANCHOR_MATURITY_MS, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from './web-key-registry.js'
 import { anchoredEntry, credentialIdOf, encodeEnvelope, envelopeFor, INTEGRITY_OK, MATURE_ANCHOR_SET_AT, ORIGIN, p256, passkeyHeaderFor, passkeyOf, seedRegistry, SELF_DNS, signJcs, type TestKey } from './__fixtures__/web-key-kit.js'
 import { APPROVE_ACTION_CHANNELS, canonicalJson, MESSAGE_SCOPE_MEANING, notAuthorizedFor, parseWebTurnScope, type WebTurnEnvelope } from '../../shared/web-turn-envelope.js'
@@ -637,5 +637,56 @@ describe('words ending in whitespace (the footer step trims them, so they could 
     expect(authority.accept(candidate(good({ words: `${WORDS} ` })), ctx({ words: `${WORDS} ` }))).toEqual({ ok: false, reason: 'words_trailing_whitespace' })
     expect(authority.accept(candidate(good({ words: `${WORDS}\n` })), ctx({ words: `${WORDS}\r\n` }))).toEqual({ ok: false, reason: 'words_trailing_whitespace' })
     expect(authority.accept(candidate(good({ words: 'a  b\n\nc' })), ctx({ words: 'a  b\n\nc' })).ok).toBe(true)
+  })
+})
+
+// 7.0.9: COS_WEB_KEY_ANCHOR_BOOTSTRAP decides only the routes' mode. Acceptance, recheck and review
+// read enabled() (COS_WEB_KEY_AUTHORITY) alone, so bootstrap-only vouches nothing.
+describe('7.0.9 anchor bootstrap switch', () => {
+  const saved = { a: process.env.COS_WEB_KEY_AUTHORITY, b: process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP }
+  afterEach(() => {
+    if (saved.a === undefined) delete process.env.COS_WEB_KEY_AUTHORITY; else process.env.COS_WEB_KEY_AUTHORITY = saved.a
+    if (saved.b === undefined) delete process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP; else process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = saved.b
+  })
+
+  it('default off; read like COS_WEB_KEY_AUTHORITY (1/true/on, 0/false/off, junk is the default)', () => {
+    expect(webKeyAnchorBootstrapEnabled({})).toBe(false)
+    for (const v of ['1', 'true', 'ON', ' on ']) expect(webKeyAnchorBootstrapEnabled({ COS_WEB_KEY_ANCHOR_BOOTSTRAP: v }), v).toBe(true)
+    for (const v of ['0', 'false', 'off', '', 'yes', '2']) expect(webKeyAnchorBootstrapEnabled({ COS_WEB_KEY_ANCHOR_BOOTSTRAP: v }), v).toBe(false)
+    // It never turns the authority on.
+    expect(webKeyAuthorityEnabled({ COS_WEB_KEY_ANCHOR_BOOTSTRAP: '1' })).toBe(false)
+  })
+
+  it('mode(): authority wins, bootstrap only with the authority off, else off (real env, no overrides)', () => {
+    const real = new WebKeyAuthority({ registry, nonces, packets, integrity: () => integrity, selfDnsName: () => SELF_DNS, expectedOrigin: () => ORIGIN, now: () => clock })
+    const table: Array<[string | undefined, string | undefined, string, boolean]> = [
+      [undefined, undefined, 'off', false], ['0', '0', 'off', false], [undefined, '1', 'bootstrap', false],
+      ['0', '1', 'bootstrap', false], ['1', undefined, 'authority', true], ['1', '1', 'authority', true], ['1', '0', 'authority', true],
+    ]
+    for (const [a, b, mode, on] of table) {
+      if (a === undefined) delete process.env.COS_WEB_KEY_AUTHORITY; else process.env.COS_WEB_KEY_AUTHORITY = a
+      if (b === undefined) delete process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP; else process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = b
+      expect(real.mode(), `${a}/${b}`).toBe(mode)
+      expect(real.enabled(), `${a}/${b}`).toBe(on)
+    }
+  })
+
+  it('a throwing bootstrap reader is off, never on', () => {
+    enabled = false
+    const a = new WebKeyAuthority({ registry, nonces, packets, integrity: () => integrity, selfDnsName: () => SELF_DNS, expectedOrigin: () => ORIGIN, enabled: () => false, bootstrap: () => { throw new Error('x') }, now: () => clock })
+    expect(a.mode()).toBe('off')
+  })
+
+  it('bootstrap only: accept, recheck and review all refuse web_key_authority_off (verified-turn authority stays off)', () => {
+    const proofSource = authority.accept(candidate(good()), ctx())
+    expect(proofSource.ok).toBe(true)
+    if (!proofSource.ok) return
+    delete process.env.COS_WEB_KEY_AUTHORITY
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const boot = new WebKeyAuthority({ registry, nonces, packets, integrity: () => integrity, selfDnsName: () => SELF_DNS, expectedOrigin: () => ORIGIN, now: () => clock })
+    expect(boot.mode()).toBe('bootstrap')
+    expect(boot.accept(candidate(good()), ctx())).toEqual({ ok: false, reason: 'web_key_authority_off' })
+    expect(boot.recheck(proofSource.proof, WORDS, '')).toBe('web_key_authority_off')
+    expect(boot.review(proofSource.proof, REC)).toEqual({ reason: 'web_key_authority_off', entry: null, facts: null })
   })
 })

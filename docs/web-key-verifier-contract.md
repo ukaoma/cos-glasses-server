@@ -58,6 +58,12 @@ The anchor is COS Control's Secure Enclave P-256 key. It reaches the server only
 
 `POST /api/web-key/anchor` (flag on, loopback socket only, `X-Cos-Token` required, no proxy headers)
 
+7.0.9: the same route also answers with `COS_WEB_KEY_ANCHOR_BOOTSTRAP` on and `COS_WEB_KEY_AUTHORITY` off,
+with identical gates and the identical record. In that mode `GET /api/web-key/status` (token only)
+answers `{ ok, enabled: false, mode: "bootstrap", anchorRegistered, anchorMature, anchorSetAt, aud,
+origin, epoch }` and no other web-key route, listener or vouch exists. Nothing in this contract's
+verdicts changes: a bootstrap-only server never vouches a web turn.
+
 ```json
 { "anchorPub": "<SPKI b64url>", "statement": "<b64url of JCS bytes>", "signature": "<P1363 b64url>" }
 ```

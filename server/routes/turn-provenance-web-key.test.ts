@@ -40,7 +40,8 @@ import { TURN_ATTACHMENTS_HEADING, type TurnAttachmentStore } from '../lib/sessi
 import { MediaStoreError } from '../lib/media-store.js'
 import type { MediaAttachmentRef } from '../../shared/media-attachment.js'
 import { WebKeyAuthority } from '../lib/web-key-authority.js'
-import { WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from '../lib/web-key-registry.js'
+import { audOf, WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from '../lib/web-key-registry.js'
+import { fingerprintOfSpki, sha256Hex } from '../lib/web-key-envelope.js'
 import { anchoredEntry, anchorRegistrationBody, coseOf, credentialIdOf, envelopeFor, INTEGRITY_OK, p256, passkeyAssertion, passkeyOf, seedRegistry, SELF_DNS, signB64, signedHeaders, signJcs, type TestKey } from '../lib/__fixtures__/web-key-kit.js'
 import { canonicalJson, type WebTurnEnvelope } from '../../shared/web-turn-envelope.js'
 import { createHash, randomBytes } from 'node:crypto'
@@ -79,6 +80,7 @@ afterEach(async () => {
   for (const c of closers.splice(0)) await c()
   __resetPeerInboxSuspects()
   delete process.env.COS_WEB_KEY_AUTHORITY
+  delete process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP
   HASHES[M1] = 'a1'.repeat(32)
 })
 afterAll(() => {
@@ -104,12 +106,13 @@ interface Stack {
 }
 
 /** The real switch: COS_WEB_KEY_AUTHORITY, read at call time (no `enabled` override). */
-function stack(): Stack {
+function stack(opts: { seed?: boolean } = {}): Stack {
   const dir = mkdtempSync(join(tmpdir(), 'web-key-stack-'))
   roots.push(dir)
   const anchor = p256()
   const phone = p256()
-  seedRegistry(join(dir, 'web-keys.json'), anchor, [anchoredEntry(anchor, phone)])
+  // 7.0.9: `seed: false` starts with no registry file at all (a Mac that never registered an anchor).
+  if (opts.seed !== false) seedRegistry(join(dir, 'web-keys.json'), anchor, [anchoredEntry(anchor, phone)])
   const registry = new WebKeyRegistry(join(dir, 'web-keys.json'), join(dir, 'web-key-audit.jsonl'))
   const nonces = new WebKeyNonces(join(dir, 'web-key-nonces.json'))
   const origin = { value: null as string | null }
@@ -790,5 +793,187 @@ describe.skipIf(!LAN)('flag on: the enrollment endpoints', () => {
     expect((await call(r.lan, 'POST', '/api/web-key/nonce', {}, webHeaders(r.lan))).status).toBe(201)
     expect((await call(r.lan, 'POST', '/api/web-key/revoke-all', {}, webHeaders(r.lan))).body).toMatchObject({ ok: true, epoch: 1 })
     expect(s.registry.activeCount(SELF_DNS)).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// 7.0.9: COS_WEB_KEY_ANCHOR_BOOTSTRAP. With the authority off, only the anchor status and the anchor
+// registration answer; every other surface refuses exactly as with both switches off.
+// ---------------------------------------------------------------------------------------------
+
+/** Every web-key surface except status and anchor, plus the consume route, as [method, path, base, headers kind]. */
+const NON_BOOTSTRAP_ROUTES: ReadonlyArray<readonly [string, string, Record<string, unknown> | undefined]> = [
+  ['POST', '/api/web-key/enroll/start', { spki: 'x', label: 'Phone' }],
+  ['POST', '/api/web-key/enroll/prove', { enrollId: 'x' }],
+  ['GET', '/api/web-key/enroll/status?enrollId=x', undefined],
+  ['GET', '/api/web-key/enroll/pending', undefined],
+  ['POST', '/api/web-key/enroll/approve', { enrollId: 'x', anchorSig: 'x' }],
+  ['GET', '/api/web-key/keys', undefined],
+  ['POST', '/api/web-key/revoke', { kid: 'x' }],
+  ['POST', '/api/web-key/revoke-all', {}],
+  ['POST', '/api/web-key/nonce', {}],
+  ['POST', '/api/web-key/packets', { action: 'publish' }],
+  ['GET', '/api/web-key/packets', undefined],
+  ['POST', '/api/web-key/handoff', {}],
+  ['POST', '/api/web-key/handoff/claim', { handoffId: 'x' }],
+  ['POST', '/api/g2-turns/ctwkAnything1/consume', { session: SID, provider: 'claude' }],
+]
+
+/** Each non-bootstrap route over loopback with the token and over the LAN with the web cookie: [status, text]. */
+async function refusals(r: Rig): Promise<Array<[string, number, string]>> {
+  const out: Array<[string, number, string]> = []
+  for (const [method, path, body] of NON_BOOTSTRAP_ROUTES) {
+    const a = await call(r.loop, method, path, body, tokenHeaders)
+    const b = await call(r.lan, method, path, body, webHeaders(r.lan))
+    out.push([`token ${method} ${path}`, a.status, a.text], [`web ${method} ${path}`, b.status, b.text])
+  }
+  return out
+}
+
+describe.skipIf(!LAN)('anchor bootstrap only (COS_WEB_KEY_ANCHOR_BOOTSTRAP=1, COS_WEB_KEY_AUTHORITY off)', () => {
+  it('bootstrap: enrollment, key list, revoke, nonce, packets, handoff and consume refuse exactly as with both switches off (404 fall-through)', async () => {
+    const off = stack()
+    const offRig = await rig(off)
+    const expected = await refusals(offRig)
+    for (const [, status] of expected) expect(status).toBe(404)
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const s = stack()
+    const before = readFileSync(join(s.ledgerFile, '..', 'web-keys.json'), 'utf8')
+    const r = await rig(s)
+    const got = await refusals(r)
+    // Same codes and same bodies (the rig's port differs; the 404 page names only the path).
+    expect(got).toEqual(expected)
+    // Device changes did not happen: the seeded phone is still active, the epoch and file untouched.
+    expect(s.registry.activeCount(SELF_DNS)).toBe(1)
+    expect(s.registry.epoch()).toBe(0)
+    expect(readFileSync(join(s.ledgerFile, '..', 'web-keys.json'), 'utf8')).toBe(before)
+  })
+
+  it('bootstrap: the status reply is exactly {ok, enabled false, mode bootstrap, anchor fields, aud, origin, epoch}, token only', async () => {
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const s = stack({ seed: false })
+    const r = await rig(s)
+    const empty = await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)
+    expect(empty.status, empty.text).toBe(200)
+    expect(empty.body).toEqual({ ok: true, enabled: false, mode: 'bootstrap', anchorRegistered: false, anchorMature: false, anchorSetAt: null, aud: null, origin: s.origin.value, epoch: 0 })
+    // A web page cannot read it in bootstrap (nothing on the web needs it while no phone can enroll).
+    expect(await call(r.lan, 'GET', '/api/web-key/status', undefined, webHeaders(r.lan))).toMatchObject({ status: 401, body: { error: 'unauthorized' } })
+    expect(await call(r.loop, 'GET', '/api/web-key/status', undefined, webHeaders(r.loop))).toMatchObject({ status: 401, body: { error: 'unauthorized' } })
+  })
+
+  it('bootstrap: anchor registration works (loopback, token, self-signature), records server setAt, and status reports it', async () => {
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const s = stack({ seed: false })
+    const r = await rig(s)
+    const mac = p256()
+    const body = anchorRegistrationBody(mac, Date.now())
+    // The same gates as with the authority on.
+    expect(await call(r.lan, 'POST', '/api/web-key/anchor', body, tokenHeaders)).toMatchObject({ status: 403, body: { error: 'loopback_required' } })
+    expect(await call(r.loop, 'POST', '/api/web-key/anchor', body, webHeaders(r.loop))).toMatchObject({ status: 401, body: { error: 'token_required' } })
+    expect(await call(r.loop, 'POST', '/api/web-key/anchor', body, { ...tokenHeaders, 'x-forwarded-for': '100.64.0.9' })).toMatchObject({ status: 403, body: { error: 'loopback_required' } })
+    expect(await call(r.loop, 'POST', '/api/web-key/anchor', { ...body, signature: anchorRegistrationBody(p256(), Date.now()).signature }, tokenHeaders)).toMatchObject({ status: 403, body: { error: 'anchor_signature_invalid' } })
+    expect(s.registry.anchor()).toBeNull()
+    const t0 = Date.now()
+    const ok = await call(r.loop, 'POST', '/api/web-key/anchor', body, tokenHeaders)
+    expect(ok.status, ok.text).toBe(201)
+    expect(ok.body).toEqual({ ok: true, spkiSha256: sha256Hex(mac.der), fingerprint: fingerprintOfSpki(mac.der), setAt: ok.body.setAt, replaced: false, maturesAt: ok.body.setAt + 86_400_000 })
+    expect(ok.body.setAt).toBeGreaterThanOrEqual(t0)
+    expect(ok.body.setAt).toBeLessThanOrEqual(Date.now())
+    const status = await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)
+    expect(status.body).toEqual({ ok: true, enabled: false, mode: 'bootstrap', anchorRegistered: true, anchorMature: false, anchorSetAt: ok.body.setAt, aud: audOf(mac.der, SELF_DNS), origin: s.origin.value, epoch: 0 })
+  })
+
+  it('bootstrap: a signed web turn is recorded exactly like a cookie-only turn (no vouch, no footer, no nonce spent)', async () => {
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const s = stack()
+    expect(s.authority.enabled()).toBe(false)
+    expect(s.authority.mode()).toBe('bootstrap')
+    const live = await liveSession()
+    const r = await rig(s, { deliverLiveTurn: live.deliverLiveTurn })
+    const issued = s.nonces.issue()
+    if (!issued.ok) throw new Error('nonce')
+    const env = envelopeFor(s.phone, s.anchor, { nonce: issued.nonce, nowS: Math.floor(Date.now() / 1000), origin: s.origin.value!, turnId: 'ctwkBootSign1', sessionId: SID })
+    expect((await turn(r.lan, 'ctwkBootSign1', { ...webHeaders(r.lan), ...signedHeaders(s.phone, env) })).status).toBe(200)
+    expect((await turn(r.lan, 'ctwkBootPlain', webHeaders(r.lan))).status).toBe(200)
+    await framesAtLeast(live.frames, 2)
+    expect(live.frames).toEqual([WORDS, WORDS])
+    const strip = (a: Record<string, unknown> | null) => { const { turnId: _t, createdAt: _c, originJudgedAt: _o, ageMs: _a, ...rest } = a ?? {}; return rest }
+    const signedAnswer = await describeG2Turn(s.p, 'ctwkBootSign1', Date.now())
+    expect(signedAnswer).toMatchObject({ originKind: 'web', verifiedOrigin: false, reason: WEB_UNVOUCHED_REASON })
+    expect(strip(signedAnswer)).toEqual(strip(await describeG2Turn(s.p, 'ctwkBootPlain', Date.now())))
+    for (const line of readFileSync(s.ledgerFile, 'utf8').trim().split('\n').map(l => JSON.parse(l))) {
+      expect(line).not.toHaveProperty('authority')
+      expect(line).not.toHaveProperty('webKey')
+    }
+    expect(s.nonces.consume(issued.nonce, 'probe')).toBe('ok')
+  })
+
+  it('both off (unset, and =0 for either): status and anchor are not routes', async () => {
+    for (const env of [{}, { COS_WEB_KEY_ANCHOR_BOOTSTRAP: '0' }, { COS_WEB_KEY_ANCHOR_BOOTSTRAP: '0', COS_WEB_KEY_AUTHORITY: '0' }, { COS_WEB_KEY_ANCHOR_BOOTSTRAP: 'yes' }]) {
+      delete process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP; delete process.env.COS_WEB_KEY_AUTHORITY
+      Object.assign(process.env, env)
+      const s = stack({ seed: false })
+      const r = await rig(s)
+      const status = await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)
+      expect(status.status, JSON.stringify(env)).toBe(404)
+      expect(status.text).toContain('Cannot GET')
+      const anchor = await call(r.loop, 'POST', '/api/web-key/anchor', anchorRegistrationBody(p256(), Date.now()), tokenHeaders)
+      expect(anchor.status, JSON.stringify(env)).toBe(404)
+      expect(anchor.text).toContain('Cannot POST')
+      expect(s.registry.anchor()).toBeNull()
+    }
+  })
+
+  it('authority on: the status reply is today\'s, byte for byte, whether or not the bootstrap switch is also on', async () => {
+    process.env.COS_WEB_KEY_AUTHORITY = '1'
+    const s = stack()
+    const r = await rig(s)
+    const a = await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)
+    expect(a.status).toBe(200)
+    expect(Object.keys(a.body).sort()).toEqual(['activeKeys', 'anchorMature', 'anchorRefusal', 'anchorRegistered', 'aud', 'enabled', 'epoch', 'nonceStoreReadable', 'ok', 'origin', 'registryReadable'])
+    expect(a.body).toMatchObject({ ok: true, enabled: true, anchorRegistered: true, activeKeys: 1 })
+    expect(a.body).not.toHaveProperty('mode')
+    // The web path still reads it with the authority on (today's behaviour).
+    expect((await call(r.lan, 'GET', '/api/web-key/status', undefined, webHeaders(r.lan))).status).toBe(200)
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const b = await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)
+    expect(b.text).toBe(a.text)
+    expect((await call(r.lan, 'POST', '/api/web-key/nonce', {}, webHeaders(r.lan))).status).toBe(201)
+  })
+
+  it('anchor reuse: the record written under bootstrap is exactly what the authority reads, and it approves a phone with no re-registration', async () => {
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    const s = stack({ seed: false })
+    const r = await rig(s)
+    const mac = p256()
+    const reg = await call(r.loop, 'POST', '/api/web-key/anchor', anchorRegistrationBody(mac, Date.now()), tokenHeaders)
+    expect(reg.status, reg.text).toBe(201)
+    const file = join(s.ledgerFile, '..', 'web-keys.json')
+    const written = readFileSync(file, 'utf8')
+    const boot = (await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)).body
+    // A restart with the authority on: a fresh registry over the same file reads the same anchor.
+    process.env.COS_WEB_KEY_AUTHORITY = '1'
+    const reread = new WebKeyRegistry(file, join(s.ledgerFile, '..', 'web-key-audit.jsonl'))
+    expect(reread.anchor()).toMatchObject({ b64: mac.spki, spkiSha256: sha256Hex(mac.der), fingerprint: fingerprintOfSpki(mac.der), setAt: reg.body.setAt })
+    expect(reread.anchorRefusal()).toBeNull()
+    expect(reread.aud(SELF_DNS)).toBe(boot.aud)
+    const authority = await call(r.loop, 'GET', '/api/web-key/status', undefined, tokenHeaders)
+    expect(authority.body).toMatchObject({ enabled: true, anchorRegistered: true, anchorRefusal: null, anchorMature: false, aud: boot.aud, epoch: 0, activeKeys: 0 })
+    // The mode switch wrote nothing.
+    expect(readFileSync(file, 'utf8')).toBe(written)
+    // And that anchor approves a phone enrollment now, with no second registration.
+    const phone2 = p256()
+    const r2 = randomBytes(32)
+    const start = await call(r.lan, 'POST', '/api/web-key/enroll/start', { spki: phone2.spki, label: 'iPhone', sasCommit: createHash('sha256').update(r2).digest('hex') }, webHeaders(r.lan))
+    expect(start.status, start.text).toBe(201)
+    const pk = passkeyOf(phone2)
+    const msg = WebKeyEnrollments.proofMessage({ ...start.body, phoneNonce: r2.toString('base64url'), passkeyCredentialId: credentialIdOf(phone2), passkeySpkiSha256: createHash('sha256').update(pk.der).digest('hex') })
+    const assertion = passkeyAssertion(pk, createHash('sha256').update(canonicalJson(msg)).digest(), { credentialId: credentialIdOf(phone2), origin: start.body.origin })
+    expect((await call(r.lan, 'POST', '/api/web-key/enroll/prove', { enrollId: start.body.enrollId, signature: signJcs(phone2, msg), phoneNonce: r2.toString('base64url'), passkey: { credentialId: credentialIdOf(phone2), publicKey: coseOf(pk), assertion } }, webHeaders(r.lan))).body).toMatchObject({ ok: true })
+    const pending = await call(r.loop, 'GET', '/api/web-key/enroll/pending', undefined, tokenHeaders)
+    const anchorSig = signB64(mac, Buffer.from(pending.body.pending.approvalJcs, 'base64url'))
+    expect((await call(r.loop, 'POST', '/api/web-key/enroll/approve', { enrollId: start.body.enrollId, anchorSig }, tokenHeaders)).body).toMatchObject({ ok: true, kid: phone2.kid })
+    expect(s.registry.activeCount(SELF_DNS)).toBe(1)
+    expect(s.registry.anchor()?.setAt).toBe(reg.body.setAt)
   })
 })

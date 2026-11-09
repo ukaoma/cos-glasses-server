@@ -25,6 +25,14 @@ describe('health webKeySigner (6.99.31)', () => {
     process.env.COS_WEB_KEY_AUTHORITY = '0'
     expect('webKeySigner' in (await (await fetch(`${base}/api/health`)).json() as object)).toBe(false)
   }, 20_000)
+  it('7.0.9 bootstrap switch alone: still no webKeySigner (Control Web offers nothing)', async () => {
+    delete process.env.COS_WEB_KEY_AUTHORITY
+    process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP = '1'
+    try {
+      const body = await (await fetch(`${base}/api/health`)).json() as object
+      expect('webKeySigner' in body).toBe(false)
+    } finally { delete process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP }
+  }, 20_000)
   it('flag on: webKeySigner 1', async () => {
     process.env.COS_WEB_KEY_AUTHORITY = '1'
     expect(((await (await fetch(`${base}/api/health`)).json()) as { webKeySigner?: number }).webKeySigner).toBe(1)

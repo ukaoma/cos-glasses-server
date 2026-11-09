@@ -22,6 +22,9 @@
 //     listener when `isSignerRequest` is wired (index.ts), so a page on 3143 cannot make a key.
 //   - Phase 3 handoff: the composer creates one on the web path (the destination comes from the
 //     binding, never the body); only the signer page claims it, once, on 3144, naming its origin.
+//   - 7.0.9 anchor bootstrap (COS_WEB_KEY_ANCHOR_BOOTSTRAP on, COS_WEB_KEY_AUTHORITY off): ONLY
+//     GET status (X-Cos-Token only, reply `enabled: false, mode: 'bootstrap'`) and POST anchor (as
+//     above) answer. Every other route falls through exactly as with both switches off.
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
@@ -85,12 +88,36 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     try { return deps.isSignerRequest(req) === true } catch { return false }
   }
 
-  router.use('/web-key', on)
+  // 7.0.9: status and anchor registration answer in either mode; with both switches off they fall
+  // through like every other route. They sit BEFORE `on`, which still gates everything else on the
+  // authority alone.
+  const anchorRoutes = (req: Request, res: Response, next: NextFunction): void => {
+    if (deps.authority.mode() === 'off') { next('router'); return }
+    res.set('Cache-Control', 'private, no-store')
+    next()
+  }
 
-  router.get('/web-key/status', (req, res) => {
-    if (!hasToken(req) && !web(req)) return refuse(res, 401, 'unauthorized')
+  router.get('/web-key/status', anchorRoutes, (req, res) => {
     const registry = deps.authority.registry
     const selfDns = deps.selfDnsName()
+    if (deps.authority.mode() !== 'authority') {
+      // Bootstrap only: COS Control's anchor state, nothing that suggests approvals. Token only:
+      // no web page needs it while no phone can enroll. `enabled: false` keeps older Controls hidden.
+      if (!hasToken(req)) return refuse(res, 401, 'unauthorized')
+      const anchor = registry.anchor()
+      return void res.json({
+        ok: true,
+        enabled: false,
+        mode: 'bootstrap',
+        anchorRegistered: anchor !== null,
+        anchorMature: registry.anchorMature(),
+        anchorSetAt: anchor ? anchor.setAt : null,
+        aud: registry.aud(selfDns),
+        origin: deps.expectedOrigin(),
+        epoch: registry.epoch(),
+      })
+    }
+    if (!hasToken(req) && !web(req)) return refuse(res, 401, 'unauthorized')
     res.json({
       ok: true,
       enabled: true,
@@ -107,7 +134,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     })
   })
 
-  router.post('/web-key/anchor', (req, res) => {
+  router.post('/web-key/anchor', anchorRoutes, (req, res) => {
     // Loopback socket, no forwarding headers (a local proxy makes every caller loopback), and the token.
     const addr = normalizeRemoteIp(req.socket?.remoteAddress ?? '')
     if (!addr || !isLoopbackAddress(addr) || hasProxyForwardedHeaders(req.headers)) return refuse(res, 403, 'loopback_required', { reasonCopy: ANCHOR_REGISTRATION_LOOPBACK_COPY })
@@ -117,6 +144,9 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     if (!result.ok) return refuse(res, result.reason === 'registry_write_failed' || result.reason === 'registry_unreadable' ? 503 : result.reason === 'anchor_signature_invalid' ? 403 : 400, result.reason)
     res.status(201).json({ ...result, maturesAt: result.setAt + WEB_ANCHOR_MATURITY_MS })
   })
+
+  // Everything below: the authority only (bootstrap mode falls through here, as with both off).
+  router.use('/web-key', on)
 
   router.post('/web-key/enroll/start', (req, res) => {
     if (!web(req)) return refuse(res, 403, 'web_origin_required')

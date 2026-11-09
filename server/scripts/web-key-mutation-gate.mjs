@@ -28,13 +28,15 @@ const INTEGT = ['server/lib/web-control-integrity.test.ts']
 const STATICT = ['server/lib/web-control-static.test.ts']
 const ORIGT = ['server/lib/web-key-origin.test.ts']
 const PACKETT = ['shared/web-approval-packets.test.ts']
-const ALL = [...PACKETT, ...AUTHT, ...REGT, ...INTT, ...WEBT, ...INTEGT, ...STATICT, ...ORIGT]
+const BOOTT = ['server/lib/web-key-anchor-bootstrap.test.ts']
+const ALL = [...PACKETT, ...AUTHT, ...REGT, ...INTT, ...WEBT, ...INTEGT, ...STATICT, ...ORIGT, ...BOOTT]
 const AUTH = 'server/lib/web-key-authority.ts', REG = 'server/lib/web-key-registry.ts', ENV = 'server/lib/web-key-envelope.ts'
 const SH = 'shared/web-turn-envelope.ts', PROV = 'server/lib/g2-turn-provenance.ts'
 const BIND = 'server/routes/agent-session-bindings.ts', TQR = 'server/routes/thread-turn-queue.ts'
 const WKR = 'server/routes/web-key.ts', G2R = 'server/routes/g2-turns.ts'
 const INTEG = 'server/lib/web-control-integrity.ts', STATIC = 'server/lib/web-control-static.ts'
 const PK = 'server/lib/web-key-passkey.ts', ORIG = 'server/lib/web-key-origin.ts', LIS = 'server/lib/listener-startup.ts'
+const IDX = 'server/index.ts'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 const drop = (name, file, line, tests) => m(name, file, [line, ''], tests)
 
@@ -244,6 +246,23 @@ const mutations = [
   m('static-no-fallthrough', STATIC, ["      if (integrity) { res.status(404).type('text').send('Not found'); return }\n", ''], INTEGT),
   m('static-verified-bytes-only', STATIC, ['    if (source) return source.get(file) ?? null\n', ''], INTEGT),
   m('static-periodic-recheck', STATIC, ['    if (every > 0) { timer = setInterval(', '    if (false) { timer = setInterval('], INTEGT),
+  // ── 7.0.9 anchor bootstrap (COS_WEB_KEY_ANCHOR_BOOTSTRAP): status and anchor only, nothing else ──
+  m('bootstrap-default-off', AUTH, ['  return readSwitch(env.COS_WEB_KEY_ANCHOR_BOOTSTRAP, false)', '  return readSwitch(env.COS_WEB_KEY_ANCHOR_BOOTSTRAP, true)'], [...AUTHT, ...INTT]),
+  m('bootstrap-mode-authority-wins', AUTH, ["    if (this.enabled()) return 'authority'\n", ''], [...AUTHT, ...INTT]),
+  m('bootstrap-mode-throw-is-off', AUTH, ['catch { bootstrap = false }', 'catch { bootstrap = true }'], AUTHT),
+  m('bootstrap-enabled-ignores-it', AUTH, ['    try { return (this.deps.enabled ?? webKeyAuthorityEnabled)() } catch { return false }', '    try { return (this.deps.enabled ?? webKeyAuthorityEnabled)() || webKeyAnchorBootstrapEnabled() } catch { return false }'], [...AUTHT, ...INTT]),
+  m('bootstrap-routes-off', WKR, ["    if (deps.authority.mode() === 'off') { next('router'); return }", "    if (false) { next('router'); return }"], INTT),
+  m('bootstrap-routes-need-mode', WKR, ["    if (deps.authority.mode() === 'off') { next('router'); return }", "    if (!deps.authority.enabled()) { next('router'); return }"], INTT),
+  m('bootstrap-anchor-route-gated', WKR, ["  router.post('/web-key/anchor', anchorRoutes, (req, res) => {", "  router.post('/web-key/anchor', (req, res) => {"], INTT),
+  m('bootstrap-status-route-gated', WKR, ["  router.get('/web-key/status', anchorRoutes, (req, res) => {", "  router.get('/web-key/status', (req, res) => {"], INTT),
+  m('bootstrap-on-authority-only', WKR, ["    if (!deps.authority.enabled()) { next('router'); return }", "    if (deps.authority.mode() === 'off') { next('router'); return }"], INTT),
+  m('bootstrap-status-branch', WKR, ["    if (deps.authority.mode() !== 'authority') {", '    if (false) {'], INTT),
+  m('bootstrap-status-token-only', WKR, ["      if (!hasToken(req)) return refuse(res, 401, 'unauthorized')\n      const anchor", '      const anchor'], INTT),
+  m('bootstrap-status-enabled-false', WKR, ["        enabled: false,\n        mode: 'bootstrap',", "        enabled: true,\n        mode: 'bootstrap',"], INTT),
+  m('bootstrap-status-setat', WKR, ['        anchorSetAt: anchor ? anchor.setAt : null,', '        anchorSetAt: null,'], INTT),
+  m('bootstrap-no-signer-listener', IDX, ['webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT', "webKeyAuthority: webKeyAuthorityEnabled() || process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP === '1', httpPort: PORT"], BOOTT),
+  m('bootstrap-no-cookie-port', IDX, ['const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() ?', "const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() || webKeyAuthority.mode() !== 'off' ?"], BOOTT),
+  m('bootstrap-no-integrity-default', INTEG, ['  return readSwitch(env.COS_WEB_CONTROL_INTEGRITY, readSwitch(env.COS_WEB_KEY_AUTHORITY, false))', '  return readSwitch(env.COS_WEB_CONTROL_INTEGRITY, readSwitch(env.COS_WEB_KEY_AUTHORITY, readSwitch(env.COS_WEB_KEY_ANCHOR_BOOTSTRAP, false)))'], BOOTT),
 ]
 
 const args = process.argv.slice(2)

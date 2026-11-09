@@ -51,6 +51,21 @@ export function webKeyAuthorityEnabled(env: NodeJS.ProcessEnv = process.env): bo
   return readSwitch(env.COS_WEB_KEY_AUTHORITY, false)
 }
 
+/**
+ * 7.0.9: COS_WEB_KEY_ANCHOR_BOOTSTRAP (default off, read the same way as COS_WEB_KEY_AUTHORITY).
+ * On with the authority off, ONLY GET /api/web-key/status (token only, its own reply shape) and
+ * POST /api/web-key/anchor answer, so COS Control can register the Mac's anchor and start its 24 h
+ * clock. Nothing else changes: enabled() stays false, so no enrollment, key list or revoke route,
+ * no nonce, packet or handoff, no 3144 signer listener, no extra cookie port, no integrity default
+ * and no vouched turn. With the authority on, this switch is irrelevant.
+ */
+export function webKeyAnchorBootstrapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return readSwitch(env.COS_WEB_KEY_ANCHOR_BOOTSTRAP, false)
+}
+
+/** Which web-key surface is served: everything (`authority`), anchor status and registration only (`bootstrap`), or none (`off`). */
+export type WebKeyMode = 'authority' | 'bootstrap' | 'off'
+
 /** The raw headers of a web request that carries an envelope; judged only once the route knows its target. */
 export interface WebKeyCandidate { envelope: string; signature: string | null; requestOrigin: string | null; passkey?: string | null }
 
@@ -120,6 +135,8 @@ export interface WebKeyAuthorityDeps {
   /** Served-asset integrity (review W1). Absent or null: integrity is off, so nothing is vouched. */
   integrity?: () => IntegrityReport | null
   enabled?: () => boolean
+  /** 7.0.9: the anchor bootstrap switch. Absent: COS_WEB_KEY_ANCHOR_BOOTSTRAP, read at call time. */
+  bootstrap?: () => boolean
   now?: () => number
 }
 
@@ -132,6 +149,17 @@ export class WebKeyAuthority {
 
   enabled(): boolean {
     try { return (this.deps.enabled ?? webKeyAuthorityEnabled)() } catch { return false }
+  }
+
+  /**
+   * 7.0.9: the routes' mode. The authority wins; the bootstrap switch matters only with it off.
+   * Never consulted by acceptance, recheck or review: those read enabled() alone.
+   */
+  mode(): WebKeyMode {
+    if (this.enabled()) return 'authority'
+    let bootstrap = false
+    try { bootstrap = (this.deps.bootstrap ?? webKeyAnchorBootstrapEnabled)() === true } catch { bootstrap = false }
+    return bootstrap ? 'bootstrap' : 'off'
   }
 
   get registry(): WebKeyRegistry { return this.deps.registry }
