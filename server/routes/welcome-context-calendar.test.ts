@@ -77,6 +77,15 @@ describe('GET /api/welcome-context calendarRead', () => {
     expect(body.nextEvent).toMatchObject({ title: 'Pipeline review', inMinutes: expect.any(Number) })
   })
 
+  // Prep on every Next up row (Miles 11/09): nextEvent says when it is a hold (calendar-meetings.ts isCalendarHold).
+  it('marks nextEvent hold: true only for a hold or status block', async () => {
+    bridge.answer = () => Promise.resolve({ today_remaining: [{ title: 'Busy', start_time: inMinutes(30) }] })
+    expect((await welcome()).nextEvent).toMatchObject({ title: 'Busy', hold: true })
+    _resetWelcomeContextCachesForTests()
+    bridge.answer = () => Promise.resolve({ today_remaining: [{ title: 'Pipeline review', start_time: inMinutes(30) }] })
+    expect((await welcome()).nextEvent).not.toHaveProperty('hold')
+  })
+
   it('is true for an empty calendar (no more events today is a real answer)', async () => {
     const body = await welcome()
     expect(body).toEqual({ calendarRead: true })

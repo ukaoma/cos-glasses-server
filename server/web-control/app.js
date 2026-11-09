@@ -1852,8 +1852,15 @@
     // Control's Next up (todayPrepButtons): Prep me opens the Prep composer in the COS chat (panes/cos-chat.js prepFor),
     // Open meeting opens Meetings. Without a server to answer, Prep me is not offered.
     var prep = !TODAY.offline && window.COSWeb && window.COSWeb.cosChat && window.COSWeb.cosChat.prepFor;
+    // Prep on every row (Miles 11/09): "Add context" opens the same inline panel the later rows' Prep opens, for this
+    // meeting. Not on a hold (the server's nextEvent.hold), and not while neither Prep nor Ask is on the Mac.
+    var key = nextPrepKey(n.title, d), ctx = !n.hold && nextPrepMode();
+    if (ctx) NEXT_PREP.rows[key] = { title: n.title, start: d.toISOString() };
     $('next-actions').innerHTML = (prep ? '<button type="button" class="btn small primary" data-today-next="prep">Prep me</button>' : '') +
+      (ctx ? '<button type="button" class="link-btn next-prep-open" data-next-prep="' + esc(key) + '" aria-expanded="' + (NEXT_PREP.open === key) + '">Add context</button>' : '') +
       '<button type="button" class="link-btn" data-goto="meetings">Open meeting</button>';
+    NEXT_PREP.firstKey = ctx ? key : '';
+    paintNextPrepSlot($('next-first-prep'), ctx && NEXT_PREP.open === key ? key : '');
     card.classList.remove('hidden');
   }
   // PH plan P1: the rest of today from GET /api/calendar/today (selected calendars), under Next up.
@@ -1863,26 +1870,165 @@
   function loadCalendarLater(n, d) {
     var LATER_ROWS = 4;
     var box = $('next-later'); if (!box) return;
-    if (!n || !n.title || !d) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    if (!n || !n.title || !d) { NEXT_PREP.later = null; clearLater(box); return; }
     var gen = TODAY.gen;
     api('/api/calendar/today').then(function (c) {
       if (gen !== TODAY.gen) return;
-      if (!c || !c.connected) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+      if (!c || !c.connected) { NEXT_PREP.later = null; clearLater(box); return; }
       var same = function (r) { var rd = toDate(r.start); return r.title === n.title && rd && d && Math.abs(rd.getTime() - d.getTime()) < 60000; };
       var list = c.next || [];
       var rows = list.filter(function (r) { return !r.allDay && !same(r); }).slice(0, LATER_ROWS);
-      var asOf = c.stale && c.asOf ? toDate(c.asOf) : null;
-      var html = rows.map(function (r) {
-        var rd = toDate(r.start);
-        return '<div class="later-row"><span class="later-when">' + esc(rd ? clock(rd) : '') + '</span><span class="later-what">' + esc(r.title) + '</span></div>';
-      }).join('');
       // What is left today past the rows on screen (the event above counts when it is one of today's).
       var shown = rows.length + (list.some(same) ? 1 : 0), more = (Number(c.remainingCount) || 0) - shown;
-      if (more > 0) html += '<button type="button" class="link-btn later-more" data-goto="meetings">' + esc('+' + more + ' more today') + '</button>';
-      if (asOf) html += '<div class="later-asof">' + esc('Calendar as of ' + clock(asOf)) + '</div>';
-      box.innerHTML = html;
-      box.classList.toggle('hidden', !html);
-    }, function () { box.classList.add('hidden'); box.innerHTML = ''; });
+      NEXT_PREP.later = { rows: rows, more: more, asOf: c.stale && c.asOf ? toDate(c.asOf) : null };
+      paintCalendarLater();
+    }, function () { NEXT_PREP.later = null; clearLater(box); });
+  }
+  // Emptied, and its last write forgotten, so the next read that has rows writes them again (writeKeepingPrep skips a
+  // write that matches the last one).
+  function clearLater(box) { box.classList.add('hidden'); box.innerHTML = ''; box.cosPrepHtml = ''; }
+  // The later rows from the last calendar read. Each meeting that is not a hold (the server's `hold`) gets a quiet
+  // Prep, and the open row's panel sits under it. Written only when the markup changed, so a poll never takes the words
+  // or the caret from the panel; when it is written, the words, the focus and the caret are put back.
+  function paintCalendarLater() {
+    var box = $('next-later'), L = NEXT_PREP.later; if (!box || !L) return;
+    var mode = nextPrepMode(), openKey = '';
+    var html = L.rows.map(function (r) {
+      var rd = toDate(r.start), key = rd ? nextPrepKey(r.title, rd) : '', can = !!(mode && key && r.hold !== true);
+      if (can) { NEXT_PREP.rows[key] = { title: r.title, start: rd.toISOString() }; if (NEXT_PREP.open === key) openKey = key; }
+      return '<div class="later-row"><span class="later-when">' + esc(rd ? clock(rd) : '') + '</span><span class="later-what">' + esc(r.title) + '</span>' +
+        (can ? '<button type="button" class="link-btn later-prep" data-next-prep="' + esc(key) + '" aria-expanded="' + (NEXT_PREP.open === key) + '">Prep</button>' : '') + '</div>' +
+        (can && NEXT_PREP.open === key ? nextPrepPanelHtml(key, mode) : '');
+    }).join('');
+    if (L.more > 0) html += '<button type="button" class="link-btn later-more" data-goto="meetings">' + esc('+' + L.more + ' more today') + '</button>';
+    if (L.asOf) html += '<div class="later-asof">' + esc('Calendar as of ' + clock(L.asOf)) + '</div>';
+    // Shown before it is written: autoGrow measures the box, and a hidden one measures 0.
+    box.classList.toggle('hidden', !html);
+    writeKeepingPrep(box, html, openKey);
+  }
+
+  // ── Prep on every Next up row (Miles typed 2026-11-09 13:00 CST) ─────────
+  // "Inline options to prep for a given meeting which starts the gotCOS ask and gives us the ability to add in more
+  // context for the prep." Prep on a later row (or Add context beside the first row's Prep me) opens a small panel
+  // under that row: the context box, Add files, Start prep and Cancel. One panel at a time; Escape closes it. The words
+  // and files are kept per meeting (title plus start) while the page polls. Start prep goes to Messages, then COS, and
+  // hands them to cos-chat.js prepStart: the Prep composer for that meeting (the context joins its notes, the files go
+  // up through its own path, then Prep me runs), or, with Prep off on the Mac and Ask on, the plain Ask with the context
+  // as its quoted reference. Neither on (or the Mac not answering): no Prep on any row.
+  var NEXT_PREP = { open: '', rows: {}, drafts: {}, later: null, firstKey: '', busy: false, capsAsked: false };
+  function nextPrepKey(title, d) { return String(title || '') + '|' + (d ? d.toISOString() : ''); }
+  function nextPrepChat() { return typeof window !== 'undefined' && window.COSWeb && window.COSWeb.cosChat || null; }
+  /** 'prep' (Prep on the Mac), 'ask' (Ask only), or '' (neither, the Mac not answering, or not known yet). */
+  function nextPrepMode() {
+    var chat = nextPrepChat();
+    if (TODAY.offline || !chat || !chat.prepStart) return '';
+    if (chat.known && !chat.known()) {
+      // The chat reads /api/health once per page; paint the rows again when it lands.
+      if (!NEXT_PREP.capsAsked && chat.ensureCaps) {
+        NEXT_PREP.capsAsked = true;
+        chat.ensureCaps().then(function () { if (TODAY.welcome) renderNext(TODAY.welcome); paintCalendarLater(); }, function () {});
+      }
+      return '';
+    }
+    if (chat.prepCaps && chat.prepCaps()) return 'prep';
+    return chat.askOn && chat.askOn() ? 'ask' : '';
+  }
+  function nextPrepDraft(key) { return NEXT_PREP.drafts[key] || (NEXT_PREP.drafts[key] = { text: '', files: [] }); }
+  function nextPrepMax() { var chat = nextPrepChat(), c = chat && chat.prepCaps && chat.prepCaps(); return c || { maxFiles: 10, steerChars: 4000 }; }
+  function nextPrepPanelHtml(key, mode) {
+    var row = NEXT_PREP.rows[key] || { title: '' }, dr = nextPrepDraft(key), chat = nextPrepChat();
+    var label = 'Add context for this prep (goals, people, what you want out of it)';
+    var files = mode === 'prep' && dr.files.length ? '<ul class="next-prep-files">' + dr.files.map(function (f, i) {
+      return '<li><span class="next-prep-file">' + esc(f.name || 'File') + '</span><button type="button" class="link-btn" data-next-prep-remove="' + i + '" aria-label="' + esc('Remove ' + (f.name || 'file')) + '">Remove</button></li>';
+    }).join('') + '</ul>' : '';
+    var add = mode === 'prep' ? '<label class="cx-btn quiet next-prep-add" title="Add files to this prep"><svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span>Add files</span>' +
+      '<input type="file" class="cc-file" multiple accept="' + esc((chat && chat.prepAccept) || '') + '" data-next-prep-file aria-label="' + esc('Add files to the prep for ' + row.title) + '"></label>' : '';
+    return '<form class="next-prep" data-next-prep-form data-key="' + esc(key) + '" autocomplete="off" aria-label="' + esc('Prep for ' + row.title) + '">' +
+      '<textarea class="field next-prep-input" rows="2" maxlength="' + (mode === 'prep' ? nextPrepMax().steerChars : 2000) + '" data-next-prep-steer placeholder="' + esc(label) + '" aria-label="' + esc(label) + '"></textarea>' +
+      files +
+      '<div class="next-prep-acts">' + add + '<span class="next-prep-gap"></span>' +
+        '<button type="button" class="link-btn next-prep-cancel" data-next-prep-cancel>Cancel</button>' +
+        '<button type="submit" class="cx-btn primary next-prep-start"' + (NEXT_PREP.busy ? ' disabled' : '') + '>Start prep</button></div>' +
+      '</form>';
+  }
+  // The first row's panel, in its own slot under Prep me and Open meeting.
+  function paintNextPrepSlot(slot, key) {
+    if (!slot) return;
+    var mode = key ? nextPrepMode() : '';
+    // Shown before it is written: autoGrow measures the box, and a hidden one measures 0.
+    slot.classList.toggle('hidden', !(key && mode));
+    writeKeepingPrep(slot, key && mode ? nextPrepPanelHtml(key, mode) : '', key);
+  }
+  /** Writes `html` into `el` unless it is already there, then puts the open panel's words back (and the focus and caret). */
+  function writeKeepingPrep(el, html, key) {
+    if (el.cosPrepHtml === html) return;
+    var doc = typeof document !== 'undefined' ? document : null, active = doc && doc.activeElement;
+    var had = !!(active && el.contains && el.contains(active) && active.hasAttribute && active.hasAttribute('data-next-prep-steer'));
+    var a = had ? active.selectionStart : 0, b = had ? active.selectionEnd : 0;
+    el.innerHTML = html;
+    el.cosPrepHtml = html;
+    var box = key && el.querySelector ? el.querySelector('[data-next-prep-steer]') : null;
+    if (!box) return;
+    box.value = nextPrepDraft(key).text;
+    autoGrow(box);
+    if (had) { box.focus(); try { box.setSelectionRange(a, b); } catch (_e) {} }
+  }
+  function repaintNextPrep() {
+    if (TODAY.welcome && TODAY.welcome.nextEvent) renderNext(TODAY.welcome);
+    paintCalendarLater();
+  }
+  function toggleNextPrep(key) {
+    NEXT_PREP.open = NEXT_PREP.open === key ? '' : key;
+    repaintNextPrep();
+    if (!NEXT_PREP.open || typeof document === 'undefined') return;
+    var box = document.querySelector('[data-next-prep-form] [data-next-prep-steer]');
+    if (box) { box.focus(); if (box.scrollIntoView) box.scrollIntoView({ block: 'nearest' }); }
+  }
+  // Escape closes the panel and keeps the words (they come back when it opens again); Cancel closes it and drops them.
+  function closeNextPrep(drop) {
+    var key = NEXT_PREP.open; if (!key) return false;
+    if (drop) delete NEXT_PREP.drafts[key];
+    NEXT_PREP.open = '';
+    repaintNextPrep();
+    var opener = typeof document !== 'undefined' && typeof CSS !== 'undefined' && CSS.escape ? document.querySelector('[data-next-prep="' + CSS.escape(key) + '"]') : null;
+    if (opener && opener.focus) opener.focus();
+    return true;
+  }
+  function nextPrepInput(box) { var key = NEXT_PREP.open; if (key) nextPrepDraft(key).text = box.value; }
+  function addNextPrepFiles(list) {
+    var key = NEXT_PREP.open; if (!key) return;
+    var dr = nextPrepDraft(key), max = nextPrepMax().maxFiles, chat = nextPrepChat(), refused = [];
+    Array.prototype.slice.call(list || []).forEach(function (f) {
+      if (dr.files.length >= max) { refused.push('A prep holds ' + max + ' files. ' + (f.name || 'A file') + ' was not added.'); return; }
+      var c = chat && chat.classify ? chat.classify(f) : {};
+      if (c && c.refuse) { refused.push(c.refuse); return; }
+      if (c && c.kind === 'video') { refused.push((f.name || 'That video') + ' is a video. Prep reads documents and the text in images.'); return; }
+      dr.files.push(f);
+    });
+    if (refused.length) toast(refused.join(' '));
+    repaintNextPrep();
+  }
+  function removeNextPrepFile(i) {
+    var key = NEXT_PREP.open; if (!key) return;
+    nextPrepDraft(key).files.splice(Number(i), 1);
+    repaintNextPrep();
+  }
+  function startNextPrep() {
+    var key = NEXT_PREP.open, row = key && NEXT_PREP.rows[key], chat = nextPrepChat();
+    if (!row || NEXT_PREP.busy || !chat || !chat.prepStart) return;
+    var mode = nextPrepMode(); if (!mode) return;
+    var dr = nextPrepDraft(key);
+    var extra = { steer: dr.text.trim(), files: mode === 'prep' ? dr.files.slice() : [] };
+    NEXT_PREP.busy = true; NEXT_PREP.open = '';
+    repaintNextPrep();
+    go('messages', ['cos']);
+    // The words and files stay with the meeting until the prep (or the Ask) is on its way; a failure keeps them.
+    chat.prepStart(row.title, row.start, extra).then(function (how) {
+      if (how) delete NEXT_PREP.drafts[key];
+      else toast('Prep is not on for this Mac.');
+    }, function (err) {
+      toast((err && err.message) || 'Prep did not start. Your context is still under the meeting on Today.');
+    }).then(function () { NEXT_PREP.busy = false; });
   }
   function prepNext() {
     var n = TODAY.welcome && TODAY.welcome.nextEvent, d = n && toDate(n.time), chat = window.COSWeb && window.COSWeb.cosChat;
@@ -5981,7 +6127,7 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-today-next],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
+    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
@@ -6014,6 +6160,9 @@
     if (t.hasAttribute('data-open-ask')) return openAsk();
     if (t.hasAttribute('data-today')) return t.getAttribute('data-today') === 'pet' ? petTap(t) : openTodayAction(t);
     if (t.hasAttribute('data-today-next')) return prepNext();
+    if (t.hasAttribute('data-next-prep')) return toggleNextPrep(t.getAttribute('data-next-prep'));
+    if (t.hasAttribute('data-next-prep-cancel')) return closeNextPrep(true);
+    if (t.hasAttribute('data-next-prep-remove')) return removeNextPrepFile(t.getAttribute('data-next-prep-remove'));
     if (t.hasAttribute('data-today-needs')) {
       var which = t.getAttribute('data-today-needs');
       if (which === 'all') TODAY.showAllNeeds = true;
@@ -6082,6 +6231,7 @@
         });
     } else if (f.id === 'session-form') sendSessionTurn(false);
     else if (f.id === 'today-ask') sendTodayAsk();
+    else if (f.hasAttribute && f.hasAttribute('data-next-prep-form')) startNextPrep();
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }
     else if (f.id === 'ask-form') {
       var hits = $('ask-hits'); if (hits && $('ask-q').value.trim().length >= 2) renderAsk();
@@ -6092,6 +6242,7 @@
   document.addEventListener('change', function (e) {
     if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-ask-file')) { addAskFiles(e.target.files); e.target.value = ''; }
     if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-sx-file')) { addReaderFiles(e.target.files); e.target.value = ''; }
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-next-prep-file')) { addNextPrepFiles(e.target.files); e.target.value = ''; }
   });
   // The Sessions reader's box: a pasted screenshot, and files dropped on it.
   document.addEventListener('paste', function (e) {
@@ -6121,6 +6272,7 @@
   document.addEventListener('input', function (e) {
     if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
     if (e.target.id === 'ask-q') renderAsk();
+    if (e.target.hasAttribute && e.target.hasAttribute('data-next-prep-steer')) nextPrepInput(e.target);
     if (e.target.id === 'sessions-q' && !e.target.value.trim()) renderSessionGroups(state.sessions);
   });
   document.addEventListener('keydown', function (e) {
@@ -6128,6 +6280,7 @@
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openAsk(); return; }
     if (e.key === 'Escape' && !$('ask-sheet').classList.contains('hidden')) { closeAsk(); return; }
     if (e.key === 'Escape' && !$('section-menu').classList.contains('hidden')) { closeMenu(); $('section-btn').focus(); return; }
+    if (e.key === 'Escape' && NEXT_PREP.open && closeNextPrep(false)) { e.preventDefault(); return; }
     if (returnSends(e)) { e.preventDefault(); var form = e.target.closest('form'); if (form) form.requestSubmit(); }
   });
   document.querySelectorAll('[data-mode]').forEach(function (b) {

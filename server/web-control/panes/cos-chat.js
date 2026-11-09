@@ -1767,14 +1767,17 @@
     var act = ((item && item.actions) || []).filter(function (a) { return a && a.id === 'prep'; })[0] || {};
     var info = (act.prep && typeof act.prep === 'object' ? act.prep : item.prep && typeof item.prep === 'object' ? item.prep : {}) || {};
     var key = 'item:' + item.id;
-    if (P && P.key === key) { paintPrep(); focusPrep(); return; }
+    // Resolves to this composer once its draft is read (or the read failed, its note set): Today's Start prep waits on it.
+    if (P && P.key === key) { var same = P; paintPrep(); focusPrep(); return (same.loaded || Promise.resolve()).then(function () { return same; }); }
     if (P) closePrep();
     P = { key: key, title: clip(info.title || item.title || 'my next meeting', 200), startsAt: typeof info.startsAt === 'string' ? info.startsAt : null,
       draft: null, steer: '', dirty: false, ups: [], note: '', warn: false, running: false, pending: null, chain: Promise.resolve(), timer: null, conflicts: 0, loading: true };
     paintPrep(true); focusPrep();
     // On a phone the page scrolls: bring the composer up to where the card was tapped.
     var slot = prepSlot(false); if (slot && slot.scrollIntoView && !wide()) slot.scrollIntoView({ block: 'start' });
-    loadPrep(P);
+    var p = P;
+    p.loaded = loadPrep(p);
+    return p.loaded.then(function () { return p; });
   }
   function closePrep() {
     if (!P) return;
@@ -1870,9 +1873,9 @@
 
   // Files: the composer's own upload (uploadMedia), then POST .../files with the draft's revision.
   function addPrepFiles(list) {
-    var p = P; if (!p) return;
+    var p = P; if (!p) return 0;
     var files = Array.prototype.slice.call(list || []), refusals = [];
-    if (!p.draft) { setPrepNote(p, 'This prep is still opening. Add the files again in a moment.', true); return; }
+    if (!p.draft) { setPrepNote(p, 'This prep is still opening. Add the files again in a moment.', true); return files.length; }
     files.forEach(function (file) {
       if (prepFiles(p.draft).length + p.ups.length >= prepMax()) { refusals.push('A prep holds ' + prepMax() + ' files. ' + (file.name || 'A file') + ' was not added.'); return; }
       var c = classify(file);
@@ -1884,6 +1887,7 @@
     });
     setPrepNote(p, refusals.join(' '), !!refusals.length);
     paintPrep();
+    return refusals.length;
   }
   function sendPrepFile(p, t) {
     t.state = t.mediaId ? 'adding' : 'reading'; t.progress = 0; t.error = '';
@@ -1909,7 +1913,7 @@
       });
     }).then(function (r) {
       if (!r || p.ups.indexOf(t) < 0) return;
-      if (r.status >= 200 && r.status < 300) { p.ups = p.ups.filter(function (x) { return x !== t; }); paintPrep(); return; }
+      if (r.status >= 200 && r.status < 300) { p.ups = p.ups.filter(function (x) { return x !== t; }); paintPrep(); return prepUploadsSettled(p); }
       // Refused (a 4xx), so nothing was recorded: Retry is a new operation. No answer or a 5xx: Retry is the same one.
       if (r.status >= 400 && r.status < 500) t.opId = '';
       // The staged copy is gone or differs: Retry uploads the bytes again.
@@ -1918,11 +1922,13 @@
       t.state = 'failed';
       t.error = r.mismatch ? 'Not added: the Mac\u2019s COS server changed. Retry.' : r.status === 409 && code === 'revision_conflict' ? 'Not added: the prep changed. Retry.' : prepErrorText(r);
       paintPrep();
+      prepUploadsSettled(p);
     }).catch(function (err) {
       if (p.ups.indexOf(t) < 0 || (err && err.code === 'aborted')) return;
       t.state = 'failed';
       t.error = err && err.code === 'kept' ? err.message : err && err.status === 401 ? 'Signed out. Sign in, then retry.' : uploadErrorText(err);
       paintPrep();
+      prepUploadsSettled(p);
     });
   }
   function removePrepFile(p, fileId) {
@@ -1949,6 +1955,31 @@
       }
       return postRun(p, p.pending, true);
     }).then(function (r) { return settleRun(p, r, true); });
+  }
+  // Today's Start prep (prepStart): the run waits until every file it added is in the draft. A file that did not upload
+  // stops it, with one line saying so, so a prep never runs without a file the person chose for it.
+  var PREP_FILE_HELD = 'A file did not upload, so this prep has not started. Retry or remove it, then tap Prep me.';
+  function prepUploadsSettled(p) {
+    if (!p || !p.autoRun || P !== p || prepUploading(p)) return;
+    p.autoRun = false;
+    if (p.ups.length) { setPrepNote(p, PREP_FILE_HELD, true); return paintPrep(); }
+    runPrep(p);
+  }
+  // The context typed on Today joins the draft's notes: kept as they are when they already hold it, else added after them.
+  function mergeSteer(old, add) {
+    var a = String(add || '').trim(), o = String(old || '');
+    if (!a) return o;
+    if (!o.trim()) return a.slice(0, prepChars());
+    if (o.indexOf(a) >= 0) return o;
+    return (o.replace(/\s+$/, '') + '\n\n' + a).slice(0, prepChars());
+  }
+  // Prep off on the Mac, Ask on: "Prep me for <title> at <time>", the context typed on Today as the Ask's quoted
+  // reference (data, never instructions; ``` cannot close the fence), as askAbout sends the Today summary.
+  var PREP_ASK_REF = 'Context added for this prep on Today';
+  function prepAskContext(title, when, steer) {
+    var text = aboutText(steer, 2000);
+    if (!text) return '';
+    return ['Meeting: ' + aboutText(title, 200), when ? 'Starts: ' + when : '', 'Added context: ' + text].filter(Boolean).join('\n');
   }
   function runBody(p, run) {
     var body = { clientRequestId: run.rid, revision: p.draft.revision };
@@ -2206,6 +2237,7 @@
       if (up.xhr) { try { up.xhr.abort(); } catch (_e) {} }
       p.ups = p.ups.filter(function (x) { return x !== up; });
       paintPrep();
+      prepUploadsSettled(p);
     }
   }
   function onPrepDrag(e, slot) {
@@ -2452,6 +2484,43 @@
         return '';
       });
     },
+    // Prep on every Next up row (Miles 11/09): Start prep under a row of Today. With Prep on the Mac, the Prep composer
+    // opens for that meeting (the same draft prepFor opens), the typed context joins its notes, the files go up through
+    // the composer's own path (addPrepFiles), and Prep me runs once they are in. Without Prep, the plain Ask "Prep me for
+    // <title> at <time>" with the context as its quoted reference. Resolves to 'prep', 'ask' or '' (neither is on).
+    prepStart: function (title, startsAt, extra) {
+      var steer = String((extra && extra.steer) || '').trim(), files = (extra && extra.files) || [];
+      return ensureCaps().then(function () {
+        var t = String(title || '').trim() || 'my next meeting';
+        if (prepOn()) {
+          var item = { id: 'today-next:' + (startsAt || '') + ':' + t, title: t, prep: { title: t, startsAt: startsAt || null } };
+          return openPrep(item).then(function (p) {
+            if (!p || P !== p || !p.draft) return 'prep';
+            var merged = mergeSteer(p.steer, steer);
+            if (merged !== p.steer) {
+              p.steer = merged; p.dirty = true;
+              var box = prepBox(); if (box && box.value !== p.steer) { box.value = p.steer; W.autoGrow(box); }
+              paintPrepParts(p);
+            }
+            if (files.length && addPrepFiles(files) > 0) return 'prep';
+            p.autoRun = true;
+            prepUploadsSettled(p);
+            return 'prep';
+          });
+        }
+        if (C.caps && C.caps.jobs) {
+          var d = startsAt ? W.toDate(startsAt) : null, when = d ? W.clock(d) : '';
+          var context = prepAskContext(t, when, steer);
+          return new Promise(function (resolve, reject) {
+            submitAsk('Prep me for ' + t + (when ? ' at ' + when : ''), null, function (ok) { if (ok) resolve('ask'); else reject(new Error('Prep did not start. Your context is still under the meeting on Today.')); },
+              context ? { context: context, contextRef: PREP_ASK_REF } : undefined);
+          });
+        }
+        return '';
+      });
+    },
+    // The file types the Prep composer takes (Today's Add files uses the same list).
+    prepAccept: PREP_ACCEPT,
     // The Prep server id to name on a write: the newest from capabilities.prep or any Prep answer (meetings.js reports its own).
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,

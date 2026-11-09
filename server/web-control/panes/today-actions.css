@@ -162,6 +162,29 @@ html.ta-open #sq-host { display: none; }
 .next-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 0 16px 14px; }
 .next-actions:empty { display: none; }
 .next-actions .btn.small { min-height: 44px; }
+/* Prep on every Next up row (Miles 11/09, app.js paintCalendarLater and nextPrepPanelHtml): a quiet Prep at the end of
+   each later row, and one small panel under the row it opens (the COS chat's field and buttons, laid flat in the card). */
+.next-later .later-row { align-items: center; min-height: 32px; }
+.next-later .later-what { flex: 1; min-width: 0; }
+.next-later .later-prep { flex: none; min-height: 32px; font-size: 14px; font-weight: 500; padding: 0 2px; }
+.next-first-prep { padding: 0 16px 14px; }
+.next-first-prep.hidden { display: none; }
+.next-prep { display: grid; gap: 8px; margin: 4px 0 10px; padding: 10px 0 2px; border-top: 1px solid var(--row-border); border-bottom: 1px solid var(--row-border); }
+.next-first-prep .next-prep { margin: 0; }
+.next-prep .field { width: 100%; min-height: 64px; max-height: 140px; font-size: 15px; resize: none; }
+.next-prep-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.next-prep-files li { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; }
+.next-prep-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sub); }
+.next-prep-files .link-btn { min-height: 32px; font-size: 14px; font-weight: 500; }
+.next-prep-acts { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; }
+.next-prep-gap { flex: 1; }
+.next-prep-add { position: relative; cursor: pointer; }
+.next-prep-add:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.next-prep-acts .cx-btn { height: 40px; }
+.next-prep-acts .link-btn { min-height: 40px; font-size: 14px; }
+@media (max-width: 480px) {
+  .next-later .later-row, .next-later .later-prep, .next-prep-files .link-btn, .next-prep-acts .link-btn { min-height: 44px; }
+}
 /* The Ask sheet's File to Work inbox result, on its own row (app.js fileNoteHtml). */
 .nav-row .note.file-error { color: var(--hot); white-space: normal; }
 /* Running card when the session list could not be read (app.js renderRunning). */

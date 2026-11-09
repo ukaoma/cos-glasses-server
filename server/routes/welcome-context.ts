@@ -5,6 +5,7 @@
 import { Router } from 'express'
 import { callPython, pythonBridgeAvailable } from '../lib/python-bridge.js'
 import { calendarToday, readCalendar } from '../lib/calendar-source.js'
+import { isCalendarHold } from '../lib/calendar-meetings.js'
 import { parsePrepOccurrence } from '../lib/prep-store.js'
 import type { PrepOccurrence } from '../../shared/prep.js'
 
@@ -22,7 +23,8 @@ type WeatherPayload = { temp: string; desc: string; location: string }
  * provider, calendar id, event id or external id, and start. The bridge sends no event ids today, so it is absent.
  * It lets a client find a Prep draft for this exact event; it never binds one, and nothing is inferred from the title.
  */
-type NextEventPayload = { title: string; time: string; inMinutes?: number; occurrence?: PrepOccurrence }
+// `hold` (11/09): present, true, only when the title is a hold or status block (calendar-meetings.ts isCalendarHold).
+type NextEventPayload = { title: string; time: string; inMinutes?: number; occurrence?: PrepOccurrence; hold?: true }
 
 /** The bridge event's provider identity, or undefined. snake_case (calendar_context.py) or camelCase is accepted. */
 export function bridgeOccurrence(evt: Record<string, unknown> | null | undefined): PrepOccurrence | undefined {
@@ -364,6 +366,7 @@ export async function fetchNextEvent(): Promise<{ event: NextEventPayload | null
         time: meaningful.start_time || meaningful.start || '',
         ...(minsUntil != null ? { inMinutes: minsUntil } : {}),
         ...(occurrence ? { occurrence } : {}),
+        ...(isCalendarHold(meaningful.title) ? { hold: true as const } : {}),
       }
     } else if (cal?.next_event && !isGenericNoiseEvent(cal.next_event.title || '')) {
       const occurrence = bridgeOccurrence(cal.next_event as Record<string, unknown>)
@@ -372,6 +375,7 @@ export async function fetchNextEvent(): Promise<{ event: NextEventPayload | null
         time: cal.next_event.start_time || '',
         ...(cal.minutes_until_next != null ? { inMinutes: cal.minutes_until_next } : {}),
         ...(occurrence ? { occurrence } : {}),
+        ...(isCalendarHold(cal.next_event.title) ? { hold: true as const } : {}),
       }
     } else {
       cachedNextEvent = null

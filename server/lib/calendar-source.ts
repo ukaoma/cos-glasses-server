@@ -22,7 +22,7 @@
 import { lstatSync, readFileSync } from 'node:fs'
 import { dataPath } from './data-dir.js'
 import { callPython, pythonBridgeAvailable } from './python-bridge.js'
-import { distinctMeetings, type MeetingFields } from './calendar-meetings.js'
+import { distinctMeetings, isCalendarHold, type MeetingFields } from './calendar-meetings.js'
 
 export const SNAPSHOT_FRESH_MS = 2 * 3600_000
 export const SNAPSHOT_MAX_AGE_MS = 24 * 3600_000
@@ -477,7 +477,8 @@ export function countsAsMeeting(row: Record<string, unknown> | null | undefined)
 export const CALENDAR_NEXT_MAX = 5
 export const CALENDAR_ENDED_RECENT_MS = 2 * 3600_000
 export const CALENDAR_ENDED_MAX = 5
-export interface CalendarTodayRow { title: string; start: string; end: string | null; allDay: boolean; calendar: string | null; meetingUrl: string | null }
+/** `hold` (Prep on every Next up row, 11/09): a hold or status block by its title (calendar-meetings.ts isCalendarHold). */
+export interface CalendarTodayRow { title: string; start: string; end: string | null; allDay: boolean; calendar: string | null; meetingUrl: string | null; hold: boolean }
 export interface CalendarEndedRow { title: string; start: string; end: string }
 export interface CalendarTodayView {
   connected: boolean
@@ -501,6 +502,7 @@ export async function calendarToday(now = Date.now()): Promise<CalendarTodayView
     allDay: r.is_all_day === true,
     calendar: typeof r.calendar_name === 'string' ? r.calendar_name : null,
     meetingUrl: typeof r.meeting_url === 'string' ? r.meeting_url : null,
+    hold: isCalendarHold(r.title),
   }))
   const all = connected && Array.isArray(data!.today_events) ? data!.today_events as Array<Record<string, unknown>> : []
   return {

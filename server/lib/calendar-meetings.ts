@@ -44,3 +44,27 @@ export function distinctMeetings<T>(rows: readonly T[], fields: (row: T) => Meet
   }
   return out
 }
+
+/**
+ * Prep on every Next up row (Miles typed 2026-11-09 13:00 CST): a calendar hold or status block is not a meeting to
+ * prep for. ONE list for the server: /api/calendar/today marks each row `hold`, /api/welcome-context marks nextEvent
+ * `hold`, and Control Web and desktop Control read that flag instead of keeping their own copy of the words.
+ *
+ * A title is a hold when, after leading punctuation ("[Hold] ...", "* Busy"), it starts with one of these words or
+ * phrases as a whole word, and it does not name someone with "with" ("Lunch with Jeremy" and "Focus group with the
+ * Jewel360 board" are meetings). Case and repeated spaces do not matter. A false "not a hold" only offers Prep on a hold;
+ * a false "hold" would hide Prep on a real meeting, so the rule stays narrow.
+ */
+export const CALENDAR_HOLD_WORDS: readonly string[] = Object.freeze([
+  'blocked', 'block', 'busy', 'hold', 'holds', 'focus', 'travel', 'personal', 'private', 'ooo', 'out of office', 'lunch',
+  'pto', 'vacation', 'commute', 'dnd', 'do not book', 'do not schedule',
+])
+// Letters and single spaces only, so the words need no escaping.
+const HOLD_START = new RegExp(`^(?:${CALENDAR_HOLD_WORDS.join('|')})(?![a-z0-9])`)
+
+export function isCalendarHold(title: unknown): boolean {
+  if (typeof title !== 'string') return false
+  const t = title.trim().toLowerCase().replace(/\s+/g, ' ').replace(/^[^a-z0-9]+/, '')
+  if (!t || !HOLD_START.test(t)) return false
+  return !/(?:^|[^a-z0-9])with(?![a-z0-9])/.test(t)
+}

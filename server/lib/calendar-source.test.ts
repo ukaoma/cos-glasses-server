@@ -284,6 +284,18 @@ describe('readCalendar through the data dir', () => {
     expect(today.next.map(n => n.title)).toEqual(['Bridge 11', 'Bridge 12'])
   })
 
+  // Prep on every Next up row (Miles 11/09): each row says whether it is a hold, by the one rule in calendar-meetings.ts.
+  it('each row of today carries hold: true for a hold or status block, false for a meeting', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    bridge.available = true
+    const row = (title: string, h: number) => ({ title, start_time: at(h), end_time: at(h, 30), is_all_day: false, calendar_name: 'Work', meeting_url: null })
+    bridge.answer = { today_remaining: [row('Weatherford - CatchUp', 11), row('Blocked', 12), row('Lunch with Jeremy', 13), row('Focus time', 14)] }
+    const today = await mod.calendarToday(NOW)
+    expect(today.next.map(n => [n.title, n.hold])).toEqual([['Weatherford - CatchUp', false], ['Blocked', true], ['Lunch with Jeremy', false], ['Focus time', true]])
+  })
+
   it('no snapshot and no bridge is "not connected", never an empty day', async () => {
     vi.stubEnv('COS_DATA_DIR', dir)
     vi.resetModules()

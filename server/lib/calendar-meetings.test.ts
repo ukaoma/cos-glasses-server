@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { distinctMeetings, isCanceledMeeting, meetingKey } from './calendar-meetings.js'
+import { CALENDAR_HOLD_WORDS, distinctMeetings, isCalendarHold, isCanceledMeeting, meetingKey } from './calendar-meetings.js'
 
 // Today round 2 follow-up: one helper for "is this a distinct, real meeting", shared by the calendar API and the summary.
 describe('calendar-meetings', () => {
@@ -22,5 +22,20 @@ describe('calendar-meetings', () => {
     ]
     expect(distinctMeetings(rows, r => r).map(r => r.start)).toEqual(['2026-11-09T15:30:00.000Z', '2026-11-09T17:30:00Z', '2026-11-09T14:30:00Z'])
     expect(meetingKey({ title: 'A', start: '2026-11-09T15:30:00Z' })).toBe(meetingKey({ title: ' a ', start: Date.parse('2026-11-09T15:30:00Z') }))
+  })
+
+  // Prep on every Next up row (Miles 11/09): no Prep on a hold or status block. One list, read by the API's `hold`.
+  it('a hold: the title starts with a hold word or phrase, whole word, any case, after leading punctuation', () => {
+    for (const t of ['Blocked', 'Busy', 'Hold', 'HOLD - pricing', '[Hold] Weatherford', 'Focus', 'Focus time', 'Travel', 'Travel to Waco',
+      'Personal', 'OOO', 'Out of office', 'Lunch', '  lunch  ', 'Do not book', 'PTO', 'Commute', '* Busy']) expect(isCalendarHold(t), t).toBe(true)
+  })
+  it('not a hold: a real meeting, a hold word inside a longer word or later in the title, or a named "with"', () => {
+    for (const t of ['Weatherford - CatchUp', 'Pipeline review', 'Holdings call', 'Busybody sync', 'Unblocked review', 'Review the hold queue',
+      'Lunch with Jeremy', 'Focus group with the Jewel360 board', 'Travel with Queen', '', '   ']) expect(isCalendarHold(t), t).toBe(false)
+    expect(isCalendarHold(undefined)).toBe(false)
+    expect(isCalendarHold(42)).toBe(false)
+  })
+  it('the list names every status block Miles named', () => {
+    for (const w of ['blocked', 'busy', 'hold', 'focus', 'travel', 'personal', 'ooo', 'lunch']) expect(CALENDAR_HOLD_WORDS).toContain(w)
   })
 })
