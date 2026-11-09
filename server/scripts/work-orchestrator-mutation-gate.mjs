@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const tests = [
   'server/lib/work-orchestrator/orchestrator.test.ts',
+  'server/routes/work-orchestrator-snapshot.test.ts',
   'server/lib/work-orchestrator/usage.test.ts',
   'server/lib/work-orchestrator/hooks.test.ts',
   'server/routes/work-orchestrator.test.ts',
@@ -84,6 +85,12 @@ const mutations = [
   ['snap-guardian-dropped', SN, "      if (isGuardianRow(id, r.title ?? '', r.summary ?? '')) continue\n", ''],
   ['snap-swift-epoch', SN, '(v < 1.5e9 ? v + 978_307_200 : v > 1e11 ? v / 1000 : v)', '(v > 1e11 ? v / 1000 : v)'],
   ['snap-version-gate', SN, "  if (!obj(v) || v.version !== SNAPSHOT_VERSION || ", "  if (!obj(v) || "],
+  ['snap-short-id-skipped', SN, "      if (!id) { droppedLiveRows++; continue }\n", "      if (!id) throw new Error('invalid_live_row')\n"],
+  ['snap-bad-text-skipped', SN, "      if (!str(r.title ?? '', 300) || !str(r.status ?? '', 100) || !str(r.summary ?? '', 2000)) { droppedLiveRows++; continue }\n", "      if (!str(r.title ?? '', 300) || !str(r.status ?? '', 100) || !str(r.summary ?? '', 2000)) throw new Error('invalid_live_row')\n"],
+  ['snap-short-id-counted', SN, "      if (!id) { droppedLiveRows++; continue }\n", "      if (!id) { continue }\n"],
+  ['snap-non-object-row-strict', SN, "      if (!obj(r)) throw new Error('invalid_live_row')\n", "      if (!obj(r)) continue\n"],
+  ['snap-links-strict', SN, "    if (!obj(l) || !sid || !str(l.workID, 256) || !WORK_ID.test(l.workID) || at === null) throw new Error('invalid_link')\n", "    if (!obj(l) || !sid || !str(l.workID, 256) || !WORK_ID.test(l.workID) || at === null) continue\n"],
+  ['snap-receipts-strict', SN, "      || !str(r.provider, 20) || !str(r.status, 40) || createdAt === null) throw new Error('invalid_receipt')\n", "      || !str(r.provider, 20) || !str(r.status, 40) || createdAt === null) continue\n"],
   // Usage.
   ['usage-claude-shape-check', US, "    if (!l || typeof l.kind !== 'string' || !num(l.percent) || l.percent < 0 || l.percent > 1000) return null\n", ''],
   ['usage-codex-allowed-gate', US, "  if (e.reading?.allowed === false) return { ...base, state: 'exhausted'", "  if (false) return { ...base, state: 'exhausted'"],
@@ -120,7 +127,10 @@ const mutations = [
   ['wr-invalid-answer-outcome', WR, "      try { answer=parseWorkChatAnswer(out.text,input) } catch (e) { outcome='invalid_answer'; throw e }", "      answer=parseWorkChatAnswer(out.text,input)"],
   ['wr-log-left-out', WR, '    leftOut: (input.leftOut ?? []).map(l => ({ id: l.id, reason: l.reason })),', '    leftOut: [],'],
   ['or-stores-snapshot', OR, '      deps.putSnapshot(snapshot)\n', ''],
-  ['or-validates-snapshot', OR, "      try { snapshot = parseSnapshot(body.snapshot, deps.now()) } catch (e) { return res.status(400).json({ error: 'invalid_snapshot', reason: (e as Error).message }) }", "      snapshot = body.snapshot as ControlSnapshot"],
+  ['or-validates-snapshot', OR, "      try { ({ snapshot, droppedLiveRows } = parseSnapshotReport(body.snapshot, deps.now())) } catch (e) { return res.status(400).json({ error: 'invalid_snapshot', reason: (e as Error).message }) }", "      snapshot = body.snapshot as ControlSnapshot"],
+  // 7.0.13: a live row Control cannot name is left out and counted; the count reaches both answers.
+  ['or-input-reports-dropped', OR, "      return res.json(droppedLiveRows ? { ...input, droppedLiveRows } : input)", "      return res.json(input)"],
+  ['or-snapshot-reports-dropped', OR, "        ...(droppedLiveRows ? { droppedLiveRows } : {}) })", " })"],
   // Hooks.
   ['bridge-rate-limit-frame', CB, '          if (!keyProfile) noteClaudeRateLimitFrame(event)\n', ''],
   ['boot-guard-in-tests', RT, "  if (env.VITEST || env.NODE_ENV === 'test') return\n", ''],
@@ -146,6 +156,8 @@ try {
   cpSync(join(root, 'server'), join(scratch, 'server'), { recursive: true, filter: src => !(skip.has(basename(src)) && dirname(src) === join(root, 'server')) })
   cpSync(join(root, 'shared'), join(scratch, 'shared'), { recursive: true })
   cpSync(join(root, 'bin'), join(scratch, 'bin'), { recursive: true })
+  // 7.0.13: vitest.config.ts loads test-support/setup-data-home.ts; without it every baseline was red and the gate refused.
+  cpSync(join(root, 'test-support'), join(scratch, 'test-support'), { recursive: true })
   cpSync(join(root, 'vitest.config.ts'), join(scratch, 'vitest.config.ts'))
   cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
   symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'), 'dir')

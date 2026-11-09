@@ -133,6 +133,37 @@ describe('the input route', () => {
       expect(caps.protocolVersion).toBe(1)
     } finally { s.server.close() }
   })
+  // 7.0.13 (2026-11-09): Control 0.5.384 sent a running Claude CLI peer by its 8-character prefix id and every plan on
+  // every card got 400 invalid_snapshot. That live row is left out and counted; links and receipts stay strict.
+  it('skips a live row with a short Claude id, stores the rest, and reports the count', async () => {
+    const put = vi.fn(), input = vi.fn(async (workID: string) => ({ protocolVersion: 1, workID, rows: [], leftOut: [] } as any))
+    const app = express(); app.use(express.json({ limit: '10mb' })); app.use('/api', createWorkOrchestratorRouter({ putSnapshot: put, input, usage: async () => [], now: () => NOW }))
+    const s = await listen(app)
+    const post = (body: unknown) => fetch(s.url + '/work/orchestrator/input', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const liveRow = (id: string) => ({ id, title: 'T', status: 'idle', updatedAt: null, busy: false, waitingOnUser: false, appOwned: false, summary: '' })
+    const snapshot = { version: 1, controlVersion: '0.5.384', sentAt: NOW / 1000, links: [{ sessionID: SBU, workID: CARD, at: NOW / 1000 }], receipts: [],
+      live: { checkedAt: NOW / 1000, rows: [liveRow('claude:deadbeef'), liveRow(SBU)] } }
+    try {
+      const ok = await post({ workID: CARD, meetingWorkIDs: [], snapshot })
+      expect(ok.status).toBe(200)
+      expect(await ok.json()).toEqual({ protocolVersion: 1, workID: CARD, rows: [], leftOut: [], droppedLiveRows: 1 })
+      expect(put).toHaveBeenCalledOnce(); expect(put.mock.calls[0]![0].live.rows.map((r: any) => r.id)).toEqual([SBU])
+      expect(input).toHaveBeenCalledOnce()
+      // Nothing left out: the answer is the input exactly, with no count key.
+      const clean = await post({ workID: CARD, snapshot: { ...snapshot, live: { checkedAt: NOW / 1000, rows: [liveRow(SBU)] } } })
+      expect(await clean.json()).toEqual({ protocolVersion: 1, workID: CARD, rows: [], leftOut: [] })
+      // A bad link or receipt still refuses the whole snapshot, before anything is stored or discovered.
+      for (const [bad, reason] of [
+        [{ ...snapshot, links: [{ sessionID: 'claude:deadbeef', workID: CARD, at: NOW / 1000 }] }, 'invalid_link'],
+        [{ ...snapshot, receipts: [{ id: 'r1', workID: CARD, mode: 'newSession', provider: 'claude', sessionID: null, sourceSessionID: null, forkChildID: null, status: 'sent', createdAt: 0 }] }, 'invalid_receipt'],
+        [{ ...snapshot, live: { checkedAt: NOW / 1000, rows: ['not a row'] } }, 'invalid_live_row'],
+      ] as const) {
+        const refused = await post({ workID: CARD, snapshot: bad })
+        expect(refused.status).toBe(400); expect(await refused.json()).toEqual({ error: 'invalid_snapshot', reason })
+      }
+      expect(put).toHaveBeenCalledTimes(2); expect(input).toHaveBeenCalledTimes(2)
+    } finally { s.server.close() }
+  })
 })
 
 describe('the toadstone journey (2026-10-20)', () => {

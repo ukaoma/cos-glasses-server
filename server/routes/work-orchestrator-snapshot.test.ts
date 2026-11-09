@@ -53,6 +53,19 @@ it('publishes only a validated snapshot bound to this server and canonical revis
   expect(s.board).toHaveBeenCalledOnce(); expect(s.input).not.toHaveBeenCalled(); expect(s.usage).not.toHaveBeenCalled()
   expect(s.release).toHaveBeenCalledOnce()
 })
+it('7.0.13: leaves out a live row with a short Claude id, stores the rest and reports the count; a bad link still refuses', async () => {
+  const s = await setup(), request = body() as any
+  request.snapshot.live.rows.unshift({ ...request.snapshot.live.rows[0], id: 'claude:deadbeef' })
+  const response = await s.post(request)
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ protocolVersion: 1, accepted: true, workID, revision, serverInstanceId, droppedLiveRows: 1 })
+  expect(s.putSnapshot).toHaveBeenCalledOnce(); expect(s.putSnapshot.mock.calls[0]![0].live.rows.map((r: any) => r.id)).toEqual([sessionID])
+  const badLink = body() as any
+  badLink.snapshot.links[0].sessionID = 'claude:deadbeef'
+  const refused = await s.post(badLink)
+  expect(refused.status).toBe(400); expect(await refused.json()).toEqual({ error: 'invalid_snapshot' })
+  expect(s.putSnapshot).toHaveBeenCalledOnce()
+})
 it('rejects injected top-level capability fields and strips non-schema fields from paired-client evidence', async () => {
   const s = await setup()
   expect((await s.post({ ...body(), automatic: true })).status).toBe(400)

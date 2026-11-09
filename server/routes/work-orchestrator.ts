@@ -13,7 +13,7 @@
  *        10 minutes (`refresh=1`: 2 minutes). No timer reads usage unless COS_WORK_USAGE_POLL=1.
  */
 import { Router } from 'express'
-import { parseSnapshot, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
+import { parseSnapshotReport, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
 import type { OrchestratorInput } from '../lib/work-orchestrator/input.js'
 import type { UsageMonitor, UsageView } from '../lib/work-orchestrator/usage.js'
 import { orchestratorInputFor, orchestratorSnapshots, orchestratorUsage } from '../lib/work-orchestrator/runtime.js'
@@ -67,8 +67,8 @@ export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps
       return res.status(400).json({ error: 'invalid_snapshot_binding' })
     }
     if (Buffer.byteLength(JSON.stringify(body)) > ORCHESTRATOR_BODY_BYTES) return res.status(413).json({ error: 'snapshot_too_large' })
-    let snapshot: ControlSnapshot
-    try { snapshot = parseSnapshot(body.snapshot, deps.now()) }
+    let snapshot: ControlSnapshot, droppedLiveRows: number
+    try { ({ snapshot, droppedLiveRows } = parseSnapshotReport(body.snapshot, deps.now())) }
     catch { return res.status(400).json({ error: 'invalid_snapshot' }) }
     const binding = () => {
       const id = deps.serverInstanceId()
@@ -90,7 +90,9 @@ export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps
       // This is the same paired-client evidence cache as /input, not execution authority. parseSnapshot
       // retains only its known fields; arbitrary automatic/forkable/capability fields never enter the cache.
       deps.putSnapshot(snapshot)
-      return res.json({ protocolVersion: 1, accepted: true, workID: body.workID, revision: body.revision, serverInstanceId })
+      if (droppedLiveRows) console.warn(`[work-orchestrator] snapshot work=${body.workID} droppedLiveRows=${droppedLiveRows}`)
+      return res.json({ protocolVersion: 1, accepted: true, workID: body.workID, revision: body.revision, serverInstanceId,
+        ...(droppedLiveRows ? { droppedLiveRows } : {}) })
     } catch (error) {
       if (res.destroyed) return
       const known = error instanceof AskWorkPlanError
@@ -105,16 +107,19 @@ export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps
       || !Array.isArray(meetings) || meetings.length > 20 || !meetings.every(m => typeof m === 'string' && MEETING_ID.test(m))) {
       return res.status(400).json({ error: 'invalid_orchestrator_input' })
     }
+    // 7.0.13: live rows the snapshot left out (a short or malformed session id, or text over a bound). Reported in the
+    // answer and the log line only when a snapshot came with this request and something was left out.
+    let droppedLiveRows = 0
     if ('snapshot' in body) {
       if (Buffer.byteLength(JSON.stringify(body.snapshot)) > ORCHESTRATOR_BODY_BYTES) return res.status(413).json({ error: 'snapshot_too_large' })
       let snapshot: ControlSnapshot
-      try { snapshot = parseSnapshot(body.snapshot, deps.now()) } catch (e) { return res.status(400).json({ error: 'invalid_snapshot', reason: (e as Error).message }) }
+      try { ({ snapshot, droppedLiveRows } = parseSnapshotReport(body.snapshot, deps.now())) } catch (e) { return res.status(400).json({ error: 'invalid_snapshot', reason: (e as Error).message }) }
       deps.putSnapshot(snapshot)
     }
     try {
       const input = await deps.input(body.workID, meetings as string[])
-      console.log(`[work-orchestrator] input work=${body.workID} rows=${input.rows.length} discovered=${input.discovered} leftOut=${input.leftOut.length} snapshotAge=${input.snapshotAgeSec ?? '-'}s liveAge=${input.liveListAgeSec ?? '-'}s scan=${input.logScanComplete ? 'complete' : 'partial'}`)
-      return res.json(input)
+      console.log(`[work-orchestrator] input work=${body.workID} rows=${input.rows.length} discovered=${input.discovered} leftOut=${input.leftOut.length} snapshotAge=${input.snapshotAgeSec ?? '-'}s liveAge=${input.liveListAgeSec ?? '-'}s scan=${input.logScanComplete ? 'complete' : 'partial'}${droppedLiveRows ? ` droppedLiveRows=${droppedLiveRows}` : ''}`)
+      return res.json(droppedLiveRows ? { ...input, droppedLiveRows } : input)
     } catch (e) {
       console.warn(`[work-orchestrator] input failed for ${body.workID}: ${(e as Error).message}`)
       return res.status(503).json({ error: 'orchestrator_input_unavailable' })

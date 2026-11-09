@@ -10,7 +10,7 @@ import { pickupFromTurns, pickupNote, PICKUP_MAX_CHARS } from './pickup.js'
 import { TagIndex, classifyRow, codexKindOf, scanRange } from './tag-index.js'
 import { discoverCardSessions } from './discovery.js'
 import { buildOrchestratorInput, ORCHESTRATOR_MAX_ROWS } from './input.js'
-import { parseSnapshot, isGuardianRow, type ControlSnapshot } from './snapshot.js'
+import { parseSnapshot, parseSnapshotReport, isGuardianRow, type ControlSnapshot } from './snapshot.js'
 import { fakeHome, claudeLog, appendClaude, codexLog, cursorLog, uuid, TEMPLATE_LINE } from './__fixtures__/fake-home.js'
 
 const CARD = 'task:quilt:420a0114f1a9', TAG = '420a0114f1a9'
@@ -321,5 +321,23 @@ describe('the snapshot contract', () => {
     expect(() => parseSnapshot({ version: 2, controlVersion: 'x', links: [], receipts: [] })).toThrow('invalid_snapshot')
     expect(() => parseSnapshot({ version: 1, controlVersion: 'x', links: [{ sessionID: 'claude:nope', workID: CARD, at: 1 }], receipts: [] })).toThrow('invalid_link')
     expect(() => parseSnapshot({ version: 1, controlVersion: 'x', links: [], receipts: [{ ...p.receipts[0], mode: 'teleport' }] })).toThrow('invalid_receipt')
+  })
+  // 7.0.13 (2026-11-09): live rows are evidence; one Control cannot name, or one over a bound, is left out and counted.
+  it('leaves out live rows with a short or malformed id, or text over a bound, and counts each', () => {
+    const base = { version: 1, controlVersion: '0.5.384', sentAt: NOW / 1000, links: [{ sessionID: 'claude:' + uuid(1), workID: CARD, at: NOW / 1000 }], receipts: [] }
+    const rows = [liveRow('claude:deadbeef'), liveRow('gemini:' + uuid(6)), liveRow('claude:' + uuid(7), { title: 'x'.repeat(301) }),
+      liveRow('claude:' + uuid(8), { summary: 'ansi \u001b[31m' }), liveRow('codex:' + uuid(9), { status: 's'.repeat(101) }), liveRow('claude:' + uuid(5))]
+    const r = parseSnapshotReport({ ...base, live: { checkedAt: NOW / 1000, rows } }, NOW)
+    expect(r.droppedLiveRows).toBe(5)
+    expect(r.snapshot.live!.rows.map(x => x.id)).toEqual(['claude:' + uuid(5)])
+    expect(r.snapshot.links).toHaveLength(1)
+    // A guardian row is filtered, not counted as dropped; a clean snapshot reports zero.
+    expect(parseSnapshotReport({ ...base, live: { checkedAt: NOW / 1000, rows: [liveRow('codex:' + uuid(4), { title: 'Guardian review' })] } }, NOW).droppedLiveRows).toBe(0)
+    expect(parseSnapshot({ ...base, live: { checkedAt: NOW / 1000, rows } }, NOW)).toEqual(r.snapshot)
+    // Strict where it decides membership, and for a row that is not an object.
+    expect(() => parseSnapshotReport({ ...base, live: { checkedAt: NOW / 1000, rows: [null] } }, NOW)).toThrow('invalid_live_row')
+    expect(() => parseSnapshotReport({ ...base, links: [{ sessionID: 'claude:deadbeef', workID: CARD, at: NOW / 1000 }], live: null }, NOW)).toThrow('invalid_link')
+    expect(() => parseSnapshotReport({ ...base, receipts: [receipt({ workID: 'Not A Card' })], live: null }, NOW)).toThrow('invalid_receipt')
+    expect(() => parseSnapshotReport({ ...base, live: { checkedAt: NOW / 1000, rows: 'x' } }, NOW)).toThrow('invalid_live')
   })
 })

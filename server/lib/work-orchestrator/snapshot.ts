@@ -34,6 +34,18 @@ export const epochSeconds = (v: unknown): number | null => typeof v === 'number'
 const sidOrNull = (v: unknown): string | null => typeof v === 'string' && SID.test(v.toLowerCase()) ? v.toLowerCase() : null
 
 export function parseSnapshot(v: unknown, now = Date.now()): ControlSnapshot {
+  return parseSnapshotReport(v, now).snapshot
+}
+
+/**
+ * 7.0.13: the snapshot plus how many live rows were left out. Live rows are evidence only (what the session list
+ * showed), so a row COS cannot name by a full session id, or whose text breaks a bound, is skipped and counted instead
+ * of refusing the whole snapshot. Control 0.5.384 sent a running Claude CLI peer as `claude:<8 hex>` (the prefix id
+ * /api/claude-sessions serves) and every Work chat plan on every card failed with 400 invalid_snapshot. A row that is
+ * not an object, and every link and receipt, stay strict: links and receipts decide which sessions belong to a card.
+ */
+export function parseSnapshotReport(v: unknown, now = Date.now()): { snapshot: ControlSnapshot; droppedLiveRows: number } {
+  let droppedLiveRows = 0
   if (!obj(v) || v.version !== SNAPSHOT_VERSION || !str(v.controlVersion, 40) || !Array.isArray(v.links) || v.links.length > SNAPSHOT_MAX_LINKS
     || !Array.isArray(v.receipts) || v.receipts.length > SNAPSHOT_MAX_RECEIPTS) throw new Error('invalid_snapshot')
   const links: SnapshotLink[] = []
@@ -56,15 +68,17 @@ export function parseSnapshot(v: unknown, now = Date.now()): ControlSnapshot {
     if (!obj(v.live) || checkedAt === null || !Array.isArray(v.live.rows) || v.live.rows.length > SNAPSHOT_MAX_LIVE) throw new Error('invalid_live')
     const rows: SnapshotLiveRow[] = []
     for (const r of v.live.rows) {
-      const id = sidOrNull(r?.id)
-      if (!obj(r) || !id || !str(r.title ?? '', 300) || !str(r.status ?? '', 100) || !str(r.summary ?? '', 2000)) throw new Error('invalid_live_row')
+      if (!obj(r)) throw new Error('invalid_live_row')
+      const id = sidOrNull(r.id)
+      if (!id) { droppedLiveRows++; continue }
+      if (!str(r.title ?? '', 300) || !str(r.status ?? '', 100) || !str(r.summary ?? '', 2000)) { droppedLiveRows++; continue }
       if (isGuardianRow(id, r.title ?? '', r.summary ?? '')) continue
       rows.push({ id, title: r.title ?? '', status: r.status ?? '', updatedAt: str(r.updatedAt, 40) ? r.updatedAt : null,
         busy: r.busy === true, waitingOnUser: r.waitingOnUser === true, appOwned: r.appOwned === true, summary: r.summary ?? '' })
     }
     live = { checkedAt, rows }
   }
-  return { version: 1, controlVersion: v.controlVersion, sentAt: epochSeconds(v.sentAt) ?? now / 1000, receivedAt: now / 1000, links, receipts, live }
+  return { snapshot: { version: 1, controlVersion: v.controlVersion, sentAt: epochSeconds(v.sentAt) ?? now / 1000, receivedAt: now / 1000, links, receipts, live }, droppedLiveRows }
 }
 
 /** Codex guardian review threads (canary C3: 17 in the live list) are never offered as work sessions. */
