@@ -54,6 +54,15 @@ describe('web-session status: the signed-in cookie’s own expiry (W1)', () => {
       expect('renewUntil' in body).toBe(false)
     })
   })
+  it('Q1 S1: with two session cookies on the request, the expiry comes from the one the verifier reads (the last)', async () => {
+    await withServer(async port => {
+      const real = mintWebSessionCookieValue(API_TOKEN, Date.now(), WEB_SESSION_TTL_MS)
+      const planted = `${Math.floor(Date.now() / 1000) + 999999}.0.${'c'.repeat(64)}`
+      const body = await (await fetch(`http://127.0.0.1:${port}/api/web-session/status`, { headers: { cookie: `${WEB_SESSION_COOKIE_NAME}=${planted}; ${WEB_SESSION_COOKIE_NAME}=${real.value}` } })).json() as Record<string, unknown>
+      expect(body.authenticated).toBe(true)
+      expect(body.expiresAt).toBe(new Date(Math.floor(real.expiresAtMs / 1000) * 1000).toISOString())
+    })
+  })
   it('webSessionCookieExpiry reads only the session cookie’s first part', () => {
     expect(webSessionCookieExpiry(`other=1; ${WEB_SESSION_COOKIE_NAME}=1794226993.0.${'b'.repeat(64)}`)).toBe(new Date(1794226993000).toISOString())
     expect(webSessionCookieExpiry('other=1794226993.0.x')).toBeNull()

@@ -203,17 +203,16 @@ export function webControlCsp(_requestPath: string): string {
   ].join('; ')
 }
 
-/** The expiry (ISO) carried in the first part of a cos_web_session cookie (`<exp>.<epoch>.<sig>`, or a renewed `<exp>.<epoch>.<orig>.<sig>`). Read only after verification. */
+/**
+ * The expiry (ISO) of the cos_web_session cookie on a request, read from the SAME value the verifier reads (Q1 S1:
+ * `parseCookies` keeps the last of several; another app on this host name can plant an earlier one). Read only after
+ * verification. Shapes: `<exp>.<epoch>.<sig>`, or a renewed `<exp>.<epoch>.<orig>.<sig>`.
+ */
 export function webSessionCookieExpiry(cookieHeader: unknown): string | null {
-  if (typeof cookieHeader !== 'string') return null
-  for (const part of cookieHeader.split(';')) {
-    const eq = part.indexOf('=')
-    if (eq < 0 || part.slice(0, eq).trim() !== WEB_SESSION_COOKIE_NAME) continue
-    const exp = /^(\d{1,15})\./.exec(part.slice(eq + 1).trim())
-    const ms = exp ? Number(exp[1]) * 1000 : NaN
-    return Number.isSafeInteger(ms) && ms > 0 ? new Date(ms).toISOString() : null
-  }
-  return null
+  const value = webSessionCookieFrom(cookieHeader)
+  const exp = typeof value === 'string' ? /^(\d{1,15})\./.exec(value) : null
+  const ms = exp ? Number(exp[1]) * 1000 : NaN
+  return Number.isSafeInteger(ms) && ms > 0 ? new Date(ms).toISOString() : null
 }
 
 export function createWebControlRouter(deps: WebControlRouterDeps): Router {
