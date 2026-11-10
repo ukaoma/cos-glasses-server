@@ -99,6 +99,8 @@ describe('F7: Find a session about this', () => {
     expect(await off.fns.findByMeaning('the pricing page rounding')).toContain('Meaning search is not on here')
     const nokey = meaning({ '/api/decision-provider': DP('jev', false) }, { 'cos.web.meaningConsent': '{"jev":"on"}' })
     expect(await nokey.fns.findByMeaning('the pricing page rounding')).toContain('Meaning search needs a decision model')
+    // Final review V4 (lead 02:14): 0.5.387 moved the Jev and SubQ key rows under Advanced, so the page says how to find them.
+    expect(await nokey.fns.findByMeaning('the pricing page rounding')).toContain('search Settings there for Jev key or SubQ key.')
     expect(off.finds().length + nokey.finds().length).toBe(0)
   })
   it('a refusal from the server is said in its own words', async () => {

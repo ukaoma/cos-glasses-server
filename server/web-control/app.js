@@ -2838,7 +2838,7 @@
   function findByMeaning(q) {
     return meaningSettings(false).then(function (m) {
       if (!m.capable) return emptyBox('Meaning search is not on here', 'This COS server cannot find sessions by meaning. Search by words instead.');
-      if (!m.provider || !m.keyed) return emptyBox('Meaning search needs a decision model', 'Choose Jev or SubQ in Settings, and save its key in COS Control on your Mac.');
+      if (!m.provider || !m.keyed) return emptyBox('Meaning search needs a decision model', 'Choose Jev or SubQ in Settings, then save its key in COS Control on your Mac: search Settings there for Jev key or SubQ key.');
       var choice = meaningChoices()[m.provider];
       if (choice === 'never') return emptyBox('Meaning search is off in this browser', 'You chose Never for ' + MEANING_NAME[m.provider] + '.') +
         '<div class="row-actions"><button type="button" class="btn small" data-action="meaning-consent" data-provider="' + esc(m.provider) + '" data-choice="ask">Ask me again</button></div>';
