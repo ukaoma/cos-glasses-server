@@ -112,6 +112,19 @@ export class WorkReviewRuntime {
       return { review: publicReview(await this.reconcileRow(row, true)), replayed: false }
     })
   }
+  /** S1 (2026-11-09): write a reconciled row only when something other than updatedAt changed.
+   * The 5 s timer reconciles every row; a row whose meeting stays unavailable came back identical
+   * except for a fresh updatedAt, and each put is an fsync'd rewrite of the whole journal. On
+   * Miles's Mac three such rows rewrote the 114 KB journal three times every 5 s (about 68 KB/s,
+   * some 60% of the server's idle disk writes). An unchanged row keeps its original updatedAt. */
+  private saveIfChanged(before: StoredWorkReview, after: StoredWorkReview): StoredWorkReview {
+    const { updatedAt: _a, ...left } = before
+    const { updatedAt: _b, ...right } = after
+    if (JSON.stringify(left) === JSON.stringify(right)) return before
+    after.updatedAt = this.now()
+    this.deps.store.put(after)
+    return after
+  }
   private async reconcileRow(row: StoredWorkReview, allowAdmission: boolean): Promise<StoredWorkReview> {
     if (row.status === 'superseded') return row
     const updated = structuredClone(row)
@@ -119,12 +132,12 @@ export class WorkReviewRuntime {
       const current = await this.deps.resolveMeeting(row.source.descriptor); assertRecord(current, row.source.descriptor)
       if (sourceRevision(current) !== row.source.revision) {
         updated.status = 'superseded'; updated.error = { code: 'meeting_revision_changed', message: 'The saved meeting changed. Request a new review for its current revision.' }
-        updated.updatedAt = this.now(); this.deps.store.put(updated); return updated
+        return this.saveIfChanged(row, updated)
       }
     } catch {
       if (row.status === 'ready' || row.status === 'failed') updated.suspendedTerminal = { status: row.status, ...(row.error ? { error: row.error } : {}) }
       updated.status = 'source_unavailable'; updated.error = { code: 'meeting_source_unavailable', message: 'The original saved source cannot be verified. No new work was started.' }
-      updated.updatedAt = this.now(); this.deps.store.put(updated); return updated
+      return this.saveIfChanged(row, updated)
     }
     if (row.status === 'source_unavailable' && row.suspendedTerminal) {
       // Terminal receipts outlive query-job retention. Restore only after the
@@ -132,7 +145,7 @@ export class WorkReviewRuntime {
       updated.status = row.suspendedTerminal.status
       if (row.suspendedTerminal.error) updated.error = row.suspendedTerminal.error; else delete updated.error
       delete updated.suspendedTerminal
-      updated.updatedAt = this.now(); this.deps.store.put(updated); return updated
+      return this.saveIfChanged(row, updated)
     }
     if (row.status === 'ready' || row.status === 'failed') return row
     try {
@@ -170,7 +183,7 @@ export class WorkReviewRuntime {
       if (updated.status === 'ready') { updated.status = 'source_unavailable'; delete updated.markdown }
       updated.error = { code: e instanceof WorkReviewError ? e.code : 'review_reconciliation_unavailable', message: 'Review reconciliation is unavailable. No automatic duplicate is submitted.' }
     }
-    updated.updatedAt = this.now(); this.deps.store.put(updated); return updated
+    return this.saveIfChanged(row, updated)
   }
   async reconcile(allowAdmission = false): Promise<void> {
     await this.serial(async () => { if (this.stopping) return; for (const row of this.deps.store.list()) await this.reconcileRow(row, allowAdmission) })
