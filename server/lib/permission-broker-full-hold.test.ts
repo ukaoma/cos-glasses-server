@@ -79,7 +79,7 @@ describe('full hold: admission', () => {
     expect(await h.b.admit(ask())).toEqual({ ok: false, reason: 'no_client' })
   })
 
-  it('reads neither the switches nor the registry for a request outside the gates, and the registry only with its kind switch on', async () => {
+  it('never reads the registry with the switches off, and reads it only for the kind whose switch is on', async () => {
     const h = harness({ switches: { questions: false, approvals: false } })
     await h.b.admit(ask())
     await h.b.admit(approval())
@@ -289,6 +289,14 @@ describe('full hold: the web door', () => {
       expect(h.b.answer(id, { clientAnswerId: 'w', handBack: true, presenceAgeMs }, 'web').status).toBe(403)
     }
     expect(h.b.answer(id, { clientAnswerId: 'w', ...ANSWER, presenceAgeMs: 60_000 }, 'web').status).toBe(200)
+  })
+
+  it('a web hand-back with a fresh touch gives the question back to the Mac ({}), and is listed waiting at the Mac', async () => {
+    const h = harness()
+    const { id, sent } = park(h, await h.b.admit(ask()))
+    expect(h.b.answer(id, { clientAnswerId: 'leave', handBack: true, presenceAgeMs: 10 }, 'web').body).toEqual({ ok: true, id, kind: 'question', handedBack: true })
+    expect(sent).toEqual([{}])
+    expect(h.b.settledList()[0]).toMatchObject({ resolution: 'handed_to_desk', waitingAtMac: true })
   })
 
   it('the token door (glasses, phone app, Control through its helper) needs neither step', async () => {
