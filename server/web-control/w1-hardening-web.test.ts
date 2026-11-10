@@ -443,3 +443,53 @@ describe('Settings names the Mac page as COS Control 0.5.387 does (it ships with
     expect(SETTINGS).not.toContain('Glasses and iPhone')
   })
 })
+
+// ── S1 item 7 (lead go 20:11): a refused link on a browser that is still signed in ──
+describe('a refused sign-in link checks whether this browser is still signed in', () => {
+  function bootLink(search: string, answers: Record<string, unknown>) {
+    const boot = block('  function boot() {', '  if (document.readyState')
+    const calls: string[] = []
+    const els: Record<string, any> = { 'auth-code': { value: '' } }
+    const deps = {
+      location: { search, pathname: '/control', hash: '' }, history: { replaceState: () => {} }, URLSearchParams,
+      document: { hidden: false, addEventListener: () => {} },
+      api: (path: string) => { calls.push('api:' + path); const a = answers[path]; return a instanceof Error ? Promise.reject(a) : Promise.resolve(a) },
+      showShell: () => calls.push('shell'), showAuth: (m?: string) => calls.push('auth:' + (m ?? '')), toast: (t: string) => calls.push('toast:' + t),
+      $: (id: string) => els[id] ?? null, setStatus: () => {}, UNREACHABLE_COPY: 'UNREACHABLE', setTimeout: () => 0, clearTimeout: () => {},
+    }
+    // eslint-disable-next-line no-new-func
+    new Function('deps', `with (deps) {\n${boot}\nboot();\n}`)(deps)
+    return { calls, els }
+  }
+  const refused = fail(401, 'That sign-in link expired or was already used.')
+  it('handoff link refused, browser still signed in: opens the app and says the link was old', async () => {
+    const h = bootLink('?handoff=abcDEF123_-xyz0987654321', { '/api/web-session/login': refused, '/api/web-session/status': { authenticated: true } })
+    await flush()
+    expect(h.calls).toEqual(['api:/api/web-session/login', 'api:/api/web-session/status', 'shell', 'toast:That sign-in link was old or already used. This browser is still signed in.'])
+  })
+  it('handoff link refused, browser signed out: the refusal shows as before', async () => {
+    const h = bootLink('?handoff=abcDEF123_-xyz0987654321', { '/api/web-session/login': refused, '/api/web-session/status': { authenticated: false, mode: 'none' } })
+    await flush()
+    expect(h.calls).toEqual(['api:/api/web-session/login', 'api:/api/web-session/status', 'auth:That sign-in link expired or was already used.'])
+  })
+  it('code link refused, signed out: the refusal shows and the code stays in the box', async () => {
+    const h = bootLink('?code=K7P3-QX9M', { '/api/web-session/login': fail(401, 'That code did not match or has expired.'), '/api/web-session/status': { authenticated: false } })
+    await flush()
+    expect(h.calls).toContain('auth:That code did not match or has expired.')
+    expect(h.els['auth-code'].value).toBe('K7P3-QX9M')
+  })
+  it('code link refused, browser still signed in: opens the app', async () => {
+    const h = bootLink('?code=K7P3-QX9M', { '/api/web-session/login': fail(401, 'That code did not match or has expired.'), '/api/web-session/status': { authenticated: true } })
+    await flush()
+    expect(h.calls).toContain('shell')
+    expect(h.calls.some(c => c.startsWith('auth:'))).toBe(false)
+  })
+  it('the status read fails: the refusal shows; the Mac unreachable on the link: no status read', async () => {
+    const a = bootLink('?handoff=abcDEF123_-xyz0987654321', { '/api/web-session/login': refused, '/api/web-session/status': fail(undefined) })
+    await flush()
+    expect(a.calls).toEqual(['api:/api/web-session/login', 'api:/api/web-session/status', 'auth:That sign-in link expired or was already used.'])
+    const b = bootLink('?handoff=abcDEF123_-xyz0987654321', { '/api/web-session/login': fail(undefined) })
+    await flush()
+    expect(b.calls).toEqual(['api:/api/web-session/login', 'auth:That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'])
+  })
+})

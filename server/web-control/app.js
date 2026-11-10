@@ -6952,8 +6952,8 @@
       history.replaceState({}, document.title, location.pathname + location.hash);
       api('/api/web-session/login', { method: 'POST', body: { code: linkCode } }).then(showShell)
         .catch(function (err) {
-          showAuth(err && err.status ? err.message : UNREACHABLE_COPY);
-          var box = $('auth-code'); if (box) box.value = linkCode;
+          if (!(err && err.status)) { showAuth(UNREACHABLE_COPY); var box0 = $('auth-code'); if (box0) box0.value = linkCode; return; }
+          return linkFailed(err.message, function () { var box = $('auth-code'); if (box) box.value = linkCode; });
         });
       return;
     }
@@ -6961,11 +6961,24 @@
     if (handoff) {
       history.replaceState({}, document.title, location.pathname + location.hash);
       api('/api/web-session/login', { method: 'POST', body: { handoff: handoff } }).then(showShell)
-        .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'); });
+        .catch(function (err) {
+          if (!(err && err.status)) return showAuth('That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.');
+          return linkFailed(err.message);
+        });
       return;
     }
     // The status read stays here in boot() itself (routes/web-phone-link.test.ts runs boot alone and pins it).
     api('/api/web-session/status').then(function (st) { return bootAnswer(st); }, function (err) { return bootFail(err); });
+  }
+  // S1 item 7 (lead go, 20:11): a link or code the server refused may be old while this browser is still signed in (an
+  // old QR, a reopened tab). Ask status first: signed in opens the app and says the link was old; signed out shows the
+  // refusal as before, with nothing else changed. A status read that fails also shows the refusal.
+  var OLD_LINK_COPY = 'That sign-in link was old or already used. This browser is still signed in.';
+  function linkFailed(message, after) {
+    return api('/api/web-session/status').then(function (st) {
+      if (st && st.authenticated) { showShell(st); toast(OLD_LINK_COPY); return; }
+      showAuth(message); if (after) after();
+    }, function () { showAuth(message); if (after) after(); });
   }
   // The same read on every retry of the not-answering card.
   function bootStatus() {
