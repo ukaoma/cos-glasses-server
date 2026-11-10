@@ -2,6 +2,7 @@
 // slot used by the installed LaunchAgent before mutable routes or stores load.
 import './env.js'
 import { acquireServerInstanceLock, ServerInstanceActiveError } from './lib/server-instance-lock.js'
+import { diskIoMeterRequested, installDiskIoMeter } from './lib/disk-io-meter.js'
 
 try {
   const instanceLock = acquireServerInstanceLock()
@@ -14,3 +15,7 @@ try {
   console.error('[COS API] Startup refused: single-instance lock failed.', error)
   process.exit(74)
 }
+
+// S1 (2026-11-09): opt-in per-path disk I/O meter (COS_DISK_IO_METER=1, default off). Installed
+// here, before index.ts loads its stores, so module-load writes are counted too.
+if (diskIoMeterRequested()) installDiskIoMeter()
