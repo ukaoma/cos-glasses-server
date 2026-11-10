@@ -33,6 +33,51 @@
   var PROVIDER_NAME = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor', ollama: 'Local model' };
   var MODELS = [['', 'Server default'], ['opus', 'Claude Opus'], ['fable', 'Claude Fable'], ['sonnet', 'Claude Sonnet'],
     ['codex-frontier', 'Codex frontier'], ['codex-balanced', 'Codex balanced']];
+  // ── The models a New session may start on (Q1 P1, P2): COS Control's own catalog rule, ported as is from
+  // HelperSources/main.swift workModelCatalog (b02d1ad) over the same two reads, GET /api/health and GET /api/models.
+  // A slot is available only with durable jobs on, its provider ready and one unambiguous catalog entry (Claude slots
+  // are aliases and need no entry). Read once a minute at most; null when either read failed.
+  var WM_SLOTS = [['sonnet', 'claude', 'Claude Sonnet'], ['opus', 'claude', 'Claude Opus'], ['fable', 'claude', 'Claude Fable'], ['haiku', 'claude', 'Claude Haiku'],
+    ['codex-frontier', 'codex', 'OpenAI via Codex · Frontier'], ['codex-balanced', 'codex', 'OpenAI via Codex · Balanced'],
+    ['cursor-grok', 'cursor', 'Grok via Cursor'], ['cursor-composer', 'cursor', 'Cursor Composer'], ['ollama', 'ollama', 'Ollama']];
+  var WM = { models: null, at: 0, loading: null, failed: false };
+  function workModelCatalog(health, catalog) {
+    var f = (health && health.features) || {}, c = catalog || {};
+    var durable = f.durableQueryJobs === true && f.durableQueryJobsProtocol === 1;
+    var options = Array.isArray(c.options) ? c.options : [];
+    return WM_SLOTS.map(function (slot) {
+      var matches = options.filter(function (o) { return o && o.preference === slot[0]; });
+      var concrete = matches.length === 1 && typeof matches[0].id === 'string' ? matches[0].id : null;
+      var catalogValid = slot[1] === 'claude' || !!(concrete && concrete.length <= 160);
+      var providerReady = f[slot[1]] === true && (slot[1] !== 'cursor' || c.cursorReady === true) && (slot[1] !== 'ollama' || c.ollamaReady === true);
+      return { id: slot[0], provider: slot[1], title: slot[2], available: !!(durable && providerReady && catalogValid) };
+    });
+  }
+  function loadWorkModels(force) {
+    if (WM.loading) return WM.loading;
+    if (!force && WM.at && Date.now() - WM.at < 60000) return Promise.resolve(WM.models);
+    WM.loading = Promise.all([api('/api/health'), api('/api/models')]).then(function (both) {
+      WM.models = workModelCatalog(both[0], both[1]); WM.failed = false;
+    }, function () { WM.models = null; WM.failed = true; }).then(function () { WM.at = Date.now(); WM.loading = null; return WM.models; });
+    return WM.loading;
+  }
+  // WorkOrchestrator.preferredModel: Claude's Opus when it is available, else the provider's first available model.
+  function preferredModel(provider, models) {
+    var open = (models || []).filter(function (m) { return m.provider === provider && m.available; }).map(function (m) { return m.id; });
+    if (provider === 'claude') { var opus = open.indexOf('opus') >= 0 ? 'opus' : open.filter(function (id) { return /opus/i.test(id); })[0]; if (opus) return opus; }
+    return open[0] || '';
+  }
+  // WorkHandoffStore.defaultDraft: a card with no session of its own starts on Claude (Opus), else Codex, whichever has
+  // an available model first.
+  function defaultNewModel(models) {
+    var provider = ['claude', 'codex'].filter(function (p) { return (models || []).some(function (m) { return m.provider === p && m.available; }); })[0];
+    return provider ? preferredModel(provider, models) : '';
+  }
+  // WorkOrchestrator.newSessionProviders: a provider with an available model whose plan usage is not used up.
+  function newSessionProviders(models, usage) {
+    var out = {}; (usage || []).forEach(function (u) { if (u.state === 'exhausted') out[u.provider] = 1; });
+    return ['claude', 'codex'].filter(function (p) { return !out[p] && (models || []).some(function (m) { return m.provider === p && m.available; }); });
+  }
   var MODEL_PROVIDER = { opus: 'claude', fable: 'claude', sonnet: 'claude', haiku: 'claude', 'codex-frontier': 'codex', 'codex-balanced': 'codex' };
   var HELPER = "'/Applications/COS Control.app/Contents/Resources/cos-control-helper'";
   // W1 (7.0.x): no COS server serves the undo or batch routes yet (audit 02 F6), so Undo, Keep and Drop are offered only
@@ -1510,10 +1555,9 @@
       var st = (last.states || {})[a.id] || {};
       return { sessionID: a.sessionID, status: chatClean(CHAT_ASSIGN_WORD[st.state] || 'Not sent', 100), detail: chatClean(st.detail, 2000), result: '' };
     }) : [];
-    var exhausted = {}; input.usage.forEach(function (u) { if (u.state === 'exhausted') exhausted[u.provider] = 1; });
     var body = { workID: wid, revision: str(t.workRevision), question: question, context: chatContext(t, wid), sessions: sessions, history: history, updates: updates,
       mode: 'plan', orchestrator: true, now: new Date().toISOString(), usage: input.usage, leftOut: input.leftOut,
-      newSessionProviders: ['claude', 'codex'].filter(function (p) { return !exhausted[p]; }) };
+      newSessionProviders: newSessionProviders(WM.models, input.usage) };
     var planner = chatPlanner(), effort = chatEffort();
     if (planner) body.planner = planner;   // only when the server advertised a choice, as Control does
     if (effort) body.effort = effort;
@@ -1605,7 +1649,9 @@
       c.phase = 'Finding this task’s sessions…'; chatRepaint(it.wid);
       var meetings = (Array.isArray(it.task.meetingRefs) ? it.task.meetingRefs : []).map(function (m) { return m && typeof m.recordId === 'string' ? 'meeting:' + m.recordId : ''; })
         .filter(function (m) { return m && m.length <= 250 && /^meeting:[^\u0000-\u001f]+$/.test(m); }).slice(0, 20);
-      return api('/api/work/orchestrator/input', { method: 'POST', body: { workID: wid, meetingWorkIDs: meetings }, timeoutMs: CHAT_TIMEOUT.input }).then(function (raw) {
+      return loadWorkModels(false).then(function () {
+        return api('/api/work/orchestrator/input', { method: 'POST', body: { workID: wid, meetingWorkIDs: meetings }, timeoutMs: CHAT_TIMEOUT.input });
+      }).then(function (raw) {
         var input = chatReadInput(raw);
         if (!input || raw.workID !== wid) throw chatOwn('The server’s list of this task’s sessions could not be read. Nothing was sent.');
         var body = chatPlanBody(it, question, input, c, wid);
@@ -1840,7 +1886,10 @@
     r.assignments = [{ id: 'a1', mode: 'newSession', provider: p, prompt: r.question, title: 'New ' + providerName(p) + ' session' }];
     r.offerNewSession = ''; r.state = 'ready'; r.note = chatEmptyNote(p);
     chatTouch(chatOf(it.wid));
-    return chatSend(it, r, ['a1']);
+    // Lead decision (11/09, Q1 W-D1): two taps on the web, like every send here. This tap opens the usual confirm
+    // ("Send to a new Claude session?"), so the round's record, confirm: two-step, is what happened.
+    chatAskSend(it, r, ['a1']);
+    return Promise.resolve(true);
   }
   function chatAgain(it, r) {
     var c = chatOf(it.wid);
@@ -2152,14 +2201,26 @@
     }
     return rows;
   }
+  // Q1 P2: the list a New session picks from is the Mac's available Claude and Codex models, so what shows as picked is
+  // what runs. A saved destination's model stays listed even when it is not offered now; "Server default" shows only for
+  // a saved destination that chose it.
+  function startModelOptions(st) {
+    var list = WM.models ? WM.models.filter(function (m) { return m.available && (m.provider === 'claude' || m.provider === 'codex'); }).map(function (m) { return [m.id, m.title]; })
+      : MODELS.filter(function (m) { return m[0]; });
+    if (st.model && !list.some(function (m) { return m[0] === st.model; })) list.unshift([st.model, (MODELS.filter(function (m) { return m[0] === st.model; })[0] || [st.model, st.model])[1]]);
+    if (!st.model && st.fromSaved) list.unshift(['', 'Server default']);
+    return list;
+  }
   function startState(it) {
     var st = S.start[it.wid];
     if (st) return st;
     var saved = (S.activity[it.wid] || {}).savedDestination, rows = sessionChoices(it);
-    st = { mode: 'newSession', sessionId: '', model: '', note: '', sending: false, request: null, error: '', fromSaved: false };
-    // Control 0.5.386: a card with no session of its own preselects Start a new session, even over a saved Continue or Fork.
+    st = { mode: 'newSession', sessionId: '', model: defaultNewModel(WM.models), note: '', sending: false, request: null, error: '', fromSaved: false, modelPicked: false };
+    // As COS Control 0.5.386 (WorkHandoffStore.swift draft(for:) 910-912, defaultDraft 927-937): a saved destination wins;
+    // without one, a card with a session of its own opens on Continue, and a card with none on Start a new session with
+    // Claude's Opus (else Codex's first model).
     var own = rows.filter(function (c) { return !c.saved; });
-    if (saved && saved.mode && (saved.mode === 'newSession' || own.length)) {
+    if (saved && saved.mode) {
       st.mode = saved.mode; st.sessionId = str(saved.sessionId); st.model = str(saved.model); st.fromSaved = true;
     } else if (own.length) { st.mode = 'continueSession'; st.sessionId = own[0].sessionId; }
     S.start[it.wid] = st;
@@ -2187,6 +2248,11 @@
       return;
     }
     var st = startState(it), blocking = blockingHandoff(it), caps = (S.activity[it.wid] || {}).capabilities || S.openCaps || {};
+    if (!WM.at && !WM.loading) loadWorkModels(false).then(function () {
+      if (!st.fromSaved && !st.modelPicked && st.mode === 'newSession' && !st.request) st.model = defaultNewModel(WM.models) || st.model;
+      var r = W.parseRoute(); if (r.pane === 'work' && r.args[0] === arg && r.args[1] === 'start') renderStart(arg);
+    });
+    if (!WM.models && !WM.failed && !st.model && !st.fromSaved) st.model = 'opus';
     var sessions = sessionChoices(it);
     var problem = startProblem(it, st), taking = caps.requests === 1;
     function choice(mode, title, detail, disabled) {
@@ -2195,7 +2261,8 @@
     }
     var picker = st.mode === 'newSession'
       ? '<label class="wk-pick wk-pick-wide"><span>Model</span><select class="field" data-wk-start="model"' + (st.sending || st.request ? ' disabled' : '') + '>' +
-        MODELS.map(function (m) { return '<option value="' + m[0] + '"' + (m[0] === st.model ? ' selected' : '') + '>' + esc(m[1]) + '</option>'; }).join('') + '</select></label>'
+        startModelOptions(st).map(function (m) { return '<option value="' + esc(m[0]) + '"' + (m[0] === st.model ? ' selected' : '') + '>' + esc(m[1]) + '</option>'; }).join('') + '</select></label>' +
+        (WM.failed ? '<p class="wk-small wk-muted">COS could not read the models on your Mac. These are the usual ones.</p>' : '')
       : '<label class="wk-pick wk-pick-wide"><span>Session</span><select class="field" data-wk-start="session"' + (st.sending || st.request ? ' disabled' : '') + '>' +
         (sessions.length ? '' : '<option value="">No session has worked on this card yet</option>') +
         sessions.filter(function (c) { return st.mode !== 'fork' || FORKABLE[c.provider]; }).map(function (c) {
@@ -2639,7 +2706,7 @@
         var rows = sessionChoices(it).filter(function (c) { return st.mode !== 'fork' || FORKABLE[c.provider]; });
         if (st.mode !== 'newSession' && !rows.some(function (c) { return c.sessionId === st.sessionId; })) st.sessionId = rows.length ? rows[0].sessionId : '';
       } else if (el.getAttribute('data-wk-start') === 'session') { st.sessionId = el.value; st.fromSaved = false; }
-      else if (el.getAttribute('data-wk-start') === 'model') { st.model = el.value; st.fromSaved = false; }
+      else if (el.getAttribute('data-wk-start') === 'model') { st.model = el.value; st.fromSaved = false; st.modelPicked = true; }
       return renderStart(it.id);
     }
     if (el.hasAttribute('data-wk-edit')) { it = current(); if (it) { var ed = editState(it); ed[el.getAttribute('data-wk-edit')] = el.value; renderEdit(it.id); } }
@@ -2755,7 +2822,7 @@
     },
     leave: function () { stopPoll(); stopHandoffPolls(); chatSave(true); },
     // For web-control/work-composer-web.test.ts: Work chat's steps, run against a fake server.
-    _chat: { S: S, of: chatOf, plan: chatPlan, send: chatSend, stop: chatStop, again: chatAgain, poll: chatPoll, caps: loadChatCaps, readCaps: chatReadCaps,
+    _chat: { S: S, WM: WM, catalog: workModelCatalog, of: chatOf, plan: chatPlan, send: chatSend, stop: chatStop, again: chatAgain, poll: chatPoll, caps: loadChatCaps, readCaps: chatReadCaps,
       find: chatFindRound, planBody: chatPlanBody, context: chatContext, meter: chatMeter, readPlan: chatReadPlan, readInput: chatReadInput,
       store: function () { return chatStore; }, save: chatSave, timers: CHAT_TIMERS, render: renderDetail, renderStart: renderStart, sortView: sortView, restore: chatRestored, item: itemFor,
       mergeIn: function () { chatMergeIn(chatReadDisk()); }, limits: { questionChars: CHAT_MAX, pollMaxMs: CHAT_POLL.max } },

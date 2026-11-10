@@ -60,7 +60,9 @@
   var NUDGE_GAP_MS = 1000;
   // Miles's words for a question at the Mac (11/07), one place: Today's Needs you reads them from here too.
   // W1 A5 (Miles 11/09, "there is no ability to answer the question"): said once, and honest that this page cannot answer it.
-  var MAC_LINE = "Answer this at your Mac's prompt. It cannot be answered from here yet.";
+  // Q1 M3 (X1 canary A1; lib/thread-turn-queue.ts:451): a message sent to a session held on its prompt is queued for the
+  // end of the turn. It does not answer the question, and nothing promises a way to answer it here.
+  var MAC_LINE = "Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.";
   // A question that went straight to the Mac's prompt: no route carries its words (the hook keeps none), so say so.
   var MAC_NO_WORDS = "COS cannot read this question's words from here. They show at the Mac's prompt.";
   var ANSWERED_LINE = 'Answered. The session carries on.';

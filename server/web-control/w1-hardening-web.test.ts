@@ -110,38 +110,39 @@ describe('F7: Find a session about this', () => {
   })
 })
 
-// ── F10: Running beyond sessions ───────────────────────────
-const RUNNING = block('  function renderRunning(working, open) {', '  // ── end running beyond sessions')
+// ── F10: Running beyond sessions (Q1 M6: exactly the desktop's job rows, no Stop) ──
+const RUNNING = block('  function renderRunning(working, open) {', '  // ── live state on screen (7.0.1)')
 const JOB = (o: Record<string, unknown>) => ({ jobId: 'j-' + String(o.origin), generation: 1, origin: 'person', state: 'running', elapsedMs: 120000, title: 'A title', ...o })
-function running(answers: Record<string, unknown | ((b: any) => unknown)>) {
+function running(answers: Record<string, unknown | ((b: any) => unknown)>, opts: { hidden?: boolean; pane?: string } = {}) {
   const { api, calls } = fakeApi(answers)
   const els: Record<string, { textContent: string; innerHTML: string; querySelector: () => null }> = { 'run-count': { textContent: '', innerHTML: '', querySelector: () => null }, 'run-list': { textContent: '', innerHTML: '', querySelector: () => null } }
   const TODAY: any = { sessionsState: 'answered', working: [], open: [] }
-  const deps = { api, esc, plain: (s: unknown) => String(s ?? ''), $: (id: string) => els[id], TODAY, state: { pane: 'today' }, document: { hidden: false },
-    setTimeout: () => 0, clearTimeout: () => {}, runRow: (s: any) => `<SESSION ${s.id}>`, countWord: (n: number) => String(n), liveTickStart: undefined }
+  const timers: Array<() => void> = []
+  const deps = { api, esc, plain: (s: unknown) => String(s ?? ''), clock: (d: Date) => `T${d.getHours()}`, $: (id: string) => els[id], TODAY, state: { pane: opts.pane ?? 'today' },
+    document: { hidden: !!opts.hidden }, setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {},
+    runRow: (s: any) => `<SESSION ${s.id}>`, countWord: (n: number) => String(n), liveTickStart: undefined }
   // eslint-disable-next-line no-new-func
-  const fns = new Function('deps', `with (deps) {\n${RUNNING}\nreturn { renderRunning, loadRunJobs, stopRunJob, RUN_JOBS };\n}`)(deps)
-  return { fns, calls, els, TODAY }
+  const fns = new Function('deps', `with (deps) {\n${RUNNING}\nreturn { renderRunning, loadRunJobs, runJobsSchedule, RUN_JOBS };\n}`)(deps)
+  return { fns, calls, els, TODAY, timers, deps }
 }
-const el = (attrs: Record<string, string>) => ({ getAttribute: (n: string) => attrs[n] ?? null })
 
-describe('F10: Today’s Running lists COS’s own jobs', () => {
-  it('shows each in-flight job with what it is, counts it, and offers Stop only on a Work run', async () => {
-    const h = running({ '/api/query-jobs/active': { protocolVersion: 1, enabled: true, items: [JOB({ origin: 'person' }), JOB({ origin: 'routine' }), JOB({ origin: 'task', title: 'Fix the price table' }), JOB({ origin: 'other' })] } })
+describe('F10: Today’s Running lists COS’s own jobs as the Mac does (Q1 M6)', () => {
+  it('a question, a routine and a captured task each get the desktop’s row; a Work session or review (other) gets none; no Stop anywhere', async () => {
+    const h = running({ '/api/query-jobs/active': { protocolVersion: 1, enabled: true, items: [JOB({ origin: 'person', title: '' }), JOB({ origin: 'routine' }), JOB({ origin: 'task', title: 'Fix the price table' }), JOB({ origin: 'other', title: 'Control Work session' })] } })
     await h.fns.loadRunJobs()
     h.fns.renderRunning([{ id: 's1' }], [])
     const html = h.els['run-list']!.innerHTML
-    expect(h.els['run-count']!.textContent).toBe('5')
-    expect(html).toContain('COS is answering')
-    expect(html).toContain('Routine')
+    expect(h.els['run-count']!.textContent).toBe('4')
+    expect(html).toContain('A question to COS')
+    expect(html).toContain('COS is answering, 2 min')
+    expect(html).toContain('running since T')
+    expect(html).toContain('a captured task, on the server, 2 min')
     expect(html).toContain('Fix the price table')
-    expect(html).toContain('Running, 2 min')
+    expect(html).not.toContain('Control Work session')
+    expect(html).not.toMatch(/Stop|cancel|data-job=/)
+    expect(html).toContain('data-goto="messages">Open in Messages')
+    expect(html).toContain('data-goto="sessions">In Sessions')
     expect(html).toContain('<SESSION s1>')
-    expect((html.match(/data-action="run-job-stop"/g) || []).length).toBe(2)
-    expect(html).toContain('data-job="j-task:1"')
-    expect(html).toContain('data-job="j-other:1"')
-    expect(html).not.toContain('data-job="j-person:1"')
-    expect(html).not.toContain('data-job="j-routine:1"')
   })
   it('an older server (no protocol, or an error) adds nothing and says nothing', async () => {
     const old = running({ '/api/query-jobs/active': fail(400, 'invalid_job_id') })
@@ -153,26 +154,6 @@ describe('F10: Today’s Running lists COS’s own jobs', () => {
     off.fns.renderRunning([], [])
     expect(off.els['run-list']!.innerHTML).not.toContain('run-job')
   })
-  it('Stop takes two taps and then cancels that job at its generation through the existing route', async () => {
-    const h = running({ '/api/query-jobs/active': { protocolVersion: 1, enabled: true, items: [JOB({ origin: 'task', generation: 3 })] }, '/api/query-jobs/j-task/cancel': { job: {} } })
-    await h.fns.loadRunJobs()
-    h.fns.renderRunning([], [])
-    h.fns.stopRunJob(el({ 'data-job': 'j-task:3' }))
-    expect(h.els['run-list']!.innerHTML).toContain('Tap again to stop')
-    expect(h.calls.filter(c => c.path.endsWith('/cancel'))).toHaveLength(0)
-    h.fns.stopRunJob(el({ 'data-job': 'j-task:3' }))
-    expect(h.els['run-list']!.innerHTML).toContain('Stopping')
-    await flush()
-    const cancel = h.calls.filter(c => c.path.endsWith('/cancel'))
-    expect(cancel).toEqual([{ path: '/api/query-jobs/j-task/cancel', method: 'POST', body: { generation: 3 }, timeoutMs: 20000 }])
-  })
-  it('a failed Stop says why on the row', async () => {
-    const h = running({ '/api/query-jobs/active': { protocolVersion: 1, enabled: true, items: [JOB({ origin: 'task' })] }, '/api/query-jobs/j-task/cancel': fail(409, 'That job already finished.') })
-    await h.fns.loadRunJobs()
-    h.fns.stopRunJob(el({ 'data-job': 'j-task:1' })); h.fns.stopRunJob(el({ 'data-job': 'j-task:1' }))
-    await flush()
-    expect(h.els['run-list']!.innerHTML).toContain('That job already finished.')
-  })
   it('a session read that failed still shows the jobs and the retry, never "Nothing running"', async () => {
     const h = running({ '/api/query-jobs/active': { protocolVersion: 1, enabled: true, items: [JOB({ origin: 'person' })] } })
     await h.fns.loadRunJobs()
@@ -180,20 +161,35 @@ describe('F10: Today’s Running lists COS’s own jobs', () => {
     h.fns.renderRunning([], [])
     expect(h.els['run-list']!.innerHTML).toContain('COS is answering')
     expect(h.els['run-list']!.innerHTML).toContain('Couldn’t read sessions')
-    expect(h.els['run-list']!.innerHTML).not.toContain('Nothing running')
+  })
+  it('the 15 s re-read runs only while Today is in front and visible (Q1 R5)', async () => {
+    const items = { protocolVersion: 1, enabled: true, items: [JOB({ origin: 'person' })] }
+    const hidden = running({ '/api/query-jobs/active': items }, { hidden: true })
+    await hidden.fns.loadRunJobs()
+    hidden.fns.runJobsSchedule()
+    expect(hidden.timers).toHaveLength(1)
+    hidden.timers[0]!()
+    await flush()
+    expect(hidden.calls.filter(c => c.path === '/api/query-jobs/active'), 'hidden: no read').toHaveLength(1)
+    const other = running({ '/api/query-jobs/active': items }, { pane: 'work' })
+    await other.fns.loadRunJobs(); other.fns.runJobsSchedule(); other.timers[0]!(); await flush()
+    expect(other.calls.filter(c => c.path === '/api/query-jobs/active'), 'another pane: no read').toHaveLength(1)
+    const shown = running({ '/api/query-jobs/active': items })
+    await shown.fns.loadRunJobs(); shown.fns.runJobsSchedule(); shown.timers[0]!(); await flush()
+    expect(shown.calls.filter(c => c.path === '/api/query-jobs/active'), 'in front: reads again').toHaveLength(2)
   })
 })
 
 // ── F3 and F2: the Mac not answering, and the sign-in ending ──
 const CONN = block('  // ── Mac reachability and sign-in lifetime (W1', '  // ── end Mac reachability and sign-in lifetime')
-function conn(opts: { up?: boolean | null; lastUpAt?: number; health?: unknown; seed?: Record<string, string> } = {}) {
+function conn(opts: { up?: boolean | null; lastUpAt?: number; health?: unknown; seed?: Record<string, string>; navigator?: unknown } = {}) {
   const { api, calls } = fakeApi({ '/api/health': opts.health ?? { ok: true } })
   const box = { innerHTML: '', hidden: true }
   const SERVER: any = { up: opts.up ?? true, hooks: [], lastUpAt: opts.lastUpAt ?? 0 }
   let routed = 0
   const timers: Array<() => void> = []
   const deps = { api, esc, clock: (d: Date) => `T${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`, $: (id: string) => (id === 'conn-notice' ? box : null), SERVER,
-    noteServer: (up: boolean) => { SERVER.up = up }, route: () => { routed++ }, document: { hidden: false }, localStorage: store(opts.seed),
+    noteServer: (up: boolean) => { SERVER.up = up }, route: () => { routed++ }, document: { hidden: false }, localStorage: store(opts.seed), navigator: opts.navigator ?? { onLine: true },
     setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {} }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', `with (deps) {\n${CONN}\nreturn { connPaint, connRetry, signinRemember, signinLapsedCopy, CONN };\n}`)(deps)
@@ -206,8 +202,10 @@ describe('F3: the Mac not answering', () => {
     const h = conn({ up: false, lastUpAt: at.getTime() })
     h.fns.connPaint()
     expect(h.box.hidden).toBe(false)
-    expect(h.box.innerHTML).toContain('Your Mac is not answering.')
+    expect(h.box.innerHTML).toContain('COS on your Mac is not answering.')
     expect(h.box.innerHTML).toContain('Last updated T9:05.')
+    // Q1 M1: the page cannot tell a sleeping Mac from this device off the network, so it names both.
+    expect(h.box.innerHTML).toContain('Your Mac may be asleep, or this device may be offline or off Tailscale.')
     expect(h.box.innerHTML).toContain('data-action="conn-retry"')
   })
   it('nothing shows while the Mac answers', () => {
@@ -226,8 +224,14 @@ describe('F3: the Mac not answering', () => {
     const h = conn({ up: false, health: fail(undefined, 'Could not reach COS on your Mac.') })
     await h.fns.connRetry(true)
     expect(h.routed()).toBe(0)
-    expect(h.box.innerHTML).toContain('Your Mac is not answering.')
+    expect(h.box.innerHTML).toContain('COS on your Mac is not answering.')
     expect(h.timers.length).toBe(1)
+  })
+  it('the browser itself says it is offline: the line says so plainly (Q1 M1)', () => {
+    const h = conn({ up: false, navigator: { onLine: false } })
+    h.fns.connPaint()
+    expect(h.box.innerHTML).toContain('This device is offline.')
+    expect(h.box.innerHTML).toContain('Connect to the internet and Tailscale, then try again.')
   })
   it('the page has the place for the line, and every hook repaints it', () => {
     expect(HTML).toContain('<div id="conn-notice" class="conn-notice" hidden></div>')
@@ -286,44 +290,91 @@ describe('F2: sign-in renews while in use, up to 30 days', () => {
   })
 })
 
-describe('F23: a cold open with the Mac unreachable', () => {
-  function bootWith(answer: Error | Record<string, unknown>) {
+describe('F23: a cold open with the Mac unreachable (Q1 M1, M2, S2)', () => {
+  function bootWith(answers: Array<Error | Record<string, unknown>>, opts: { hidden?: boolean; known?: boolean } = {}) {
     const boot = block('  function boot() {', '  if (document.readyState')
     const calls: string[] = []
-    const cls = () => { const set = new Set<string>(['hidden']); return { set, toggle: (c: string, on: boolean) => { if (on) set.add(c); else set.delete(c) }, add: (c: string) => set.add(c) } }
+    const cls = () => { const set = new Set<string>(['hidden']); return { set, toggle: (c: string, on: boolean) => { if (on) set.add(c); else set.delete(c) }, add: (c: string) => set.add(c), contains: (c: string) => set.has(c) } }
     const els: Record<string, { classList: ReturnType<typeof cls>; textContent?: string }> = { 'auth-offline': { classList: cls() }, 'auth-form': { classList: cls() }, 'auth-error': { classList: cls() },
-      'auth-title': { classList: cls(), textContent: 'Connect this browser' }, 'auth-intro': { classList: cls() } }
+      'auth-title': { classList: cls(), textContent: 'Connect this browser' }, 'auth-intro': { classList: cls() }, 'auth-offline-text': { classList: cls(), textContent: '' } }
     els['auth-form']!.classList.set.delete('hidden'); els['auth-intro']!.classList.set.delete('hidden')
+    const timers: Array<() => void> = [], listeners: Record<string, () => void> = {}
+    let n = 0
+    const document = { hidden: !!opts.hidden, addEventListener: (t: string, fn: () => void) => { listeners[t] = fn } }
     const deps = {
-      location: { search: '', pathname: '/control', hash: '' }, history: { replaceState: () => {} }, URLSearchParams,
-      api: () => (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer)),
+      location: { search: '', pathname: '/control', hash: '' }, history: { replaceState: () => {} }, URLSearchParams, document,
+      api: () => { calls.push('status'); const a = answers[Math.min(n++, answers.length - 1)]!; return a instanceof Error ? Promise.reject(a) : Promise.resolve(a) },
       showShell: () => calls.push('shell'), showAuth: (m?: string) => calls.push('auth:' + (m ?? '')),
       $: (id: string) => els[id] ?? null, setStatus: () => {}, UNREACHABLE_COPY: 'Could not reach COS on your Mac.',
+      setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {},
+      signinKnown: () => (opts.known ? { ends: 1, cap: 1 } : null), signinLapsedCopy: () => 'LAPSED',
     }
     // eslint-disable-next-line no-new-func
     const fns = new Function('deps', `with (deps) {\n${boot}\nreturn { boot };\n}`)(deps)
-    return { fns, calls, els }
+    return { fns, calls, els, timers, document, listeners }
   }
-  it('shows the not-answering card with Try again and hides the sign-in form', async () => {
-    const h = bootWith(fail(undefined, 'Could not reach COS on your Mac.'))
+  const down = () => fail(undefined, 'Could not reach COS on your Mac.')
+  it('shows the not-answering card naming both causes, and hides the sign-in form', async () => {
+    const h = bootWith([down()])
     h.fns.boot(); await flush()
-    expect(h.calls).toEqual(['auth:'])
+    expect(h.calls).toEqual(['status', 'auth:'])
     expect(h.els['auth-offline']!.classList.set.has('hidden')).toBe(false)
     expect(h.els['auth-form']!.classList.set.has('hidden')).toBe(true)
-    expect(h.els['auth-title']!.textContent).toBe('Your Mac is not answering')
-    expect(h.els['auth-intro']!.classList.set.has('hidden')).toBe(true)
+    expect(h.els['auth-title']!.textContent).toBe('COS on your Mac is not answering')
+    expect(h.els['auth-offline-text']!.textContent).toBe('Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again every 30 seconds.')
   })
-  it('a Mac that answered with an error is a sign-in matter: the form stays, with the reason', async () => {
-    const h = bootWith(fail(503, 'Not ready.'))
+  it('it really checks again every 30 s while visible, and signs in when the Mac answers (Q1 M2)', async () => {
+    const h = bootWith([down(), down(), { authenticated: true }])
     h.fns.boot(); await flush()
-    expect(h.calls).toEqual(['auth:Not ready.'])
-    expect(h.els['auth-offline']!.classList.set.has('hidden')).toBe(true)
-    expect(h.els['auth-form']!.classList.set.has('hidden')).toBe(false)
+    expect(h.timers).toHaveLength(1)
+    h.timers[0]!(); await flush()
+    expect(h.calls.filter(c => c === 'status')).toHaveLength(2)
+    h.timers[1]!(); await flush()
+    expect(h.calls).toContain('shell')
   })
-  it('the card is in the page, and Try again is wired', () => {
+  it('hidden, it does not check; coming back checks at once', async () => {
+    const h = bootWith([down(), { authenticated: true }])
+    h.fns.boot(); await flush()
+    h.document.hidden = true
+    h.listeners.visibilitychange!()
+    const before = h.calls.filter(c => c === 'status').length
+    h.timers.forEach(fn => fn()); await flush()
+    expect(h.calls.filter(c => c === 'status').length, 'a timer that fires while hidden reads nothing').toBe(before)
+    h.document.hidden = false
+    h.listeners.visibilitychange!(); await flush()
+    expect(h.calls).toContain('shell')
+  })
+  it('a Mac that answered with an error is a sign-in matter: the form stays, with the reason, and nothing retries', async () => {
+    const h = bootWith([fail(503, 'Not ready.')])
+    h.fns.boot(); await flush()
+    expect(h.calls).toEqual(['status', 'auth:Not ready.'])
+    expect(h.els['auth-offline']!.classList.set.has('hidden')).toBe(true)
+    expect(h.timers).toHaveLength(0)
+  })
+  it('a browser that was signed in before learns why on a cold open (Q1 S2)', async () => {
+    const h = bootWith([{ authenticated: false, mode: 'none' }], { known: true })
+    h.fns.boot(); await flush()
+    expect(h.calls).toEqual(['status', 'auth:LAPSED'])
+  })
+  it('the card is in the page, and Try again is wired to the same read', () => {
     expect(HTML).toContain('<button type="button" class="btn primary block" id="auth-retry">Try again</button>')
-    expect(HTML).toContain('COS runs on your Mac, so this page waits for it. Check that the Mac is awake and on Tailscale, then try again.')
-    expect(APP).toContain("if (t.id === 'auth-retry')")
+    expect(APP).toContain("if (t.id === 'auth-retry') { t.disabled = true; t.textContent = 'Checking'; bootStatus()")
+  })
+})
+
+// ── Q1 M4 R1: Never is stored as never, and nothing is sent after it ──
+describe('Q1 R1: Never stays never', () => {
+  it('choosing Never, then searching again, sends nothing to Jev or SubQ', async () => {
+    const h = meaning({ '/api/decision-provider': DP('jev'), '/api/agent-sessions/find': { available: true, rows: [ROW] } })
+    h.fns.meaningChoose('jev', 'never')
+    expect(JSON.parse(h.localStorage.getItem('cos.web.meaningConsent')!)).toEqual({ jev: 'never' })
+    const html = await h.fns.findByMeaning('the pricing page rounding')
+    expect(html).toContain('Meaning search is off in this browser')
+    expect(h.finds()).toHaveLength(0)
+  })
+  it('the consent card says the choice is for this browser only', async () => {
+    const h = meaning({ '/api/decision-provider': DP('jev') })
+    expect(await h.fns.findByMeaning('the pricing page rounding')).toContain('Your choice applies to this browser only.')
   })
 })
 
@@ -346,7 +397,7 @@ describe('A5: the session reader says when its question waits on the Mac', () =>
     expect(h.el.hidden).toBe(false)
     expect(h.el.innerHTML).toContain('Waiting for your answer at the Mac')
     expect(h.el.innerHTML).toContain('<blockquote class="ta-quote sx-mac-q-words">Ship the release notes now?</blockquote>')
-    expect(h.el.innerHTML).toContain("Answer this at your Mac's prompt. It cannot be answered from here yet.")
+    expect(h.el.innerHTML).toContain("Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.")
     expect(h.el.innerHTML).not.toContain('<button')
   })
   it('the server waiting line names the question: that is shown', () => {

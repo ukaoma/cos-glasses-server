@@ -49,6 +49,8 @@ const INPUT = { protocolVersion: 1, workID: WID, now: '2026-11-06T23:00:00.000Z'
 const PLAN = { protocolVersion: 1, answer: 'Continue the pricing session for the fix, and start a Codex session for the test.',
   assignments: [{ sessionID: S1, prompt: 'Fix the price table rounding.' }, { mode: 'newSession', provider: 'codex', prompt: 'Add a test for the rounding.' }],
   model: 'claude:claude-opus-5-5', effort: 'high' }
+const HEALTH = { features: { durableQueryJobs: true, durableQueryJobsProtocol: 1, claude: true, codex: true } }
+const MODELS_CATALOG = { options: [{ preference: 'codex-frontier', id: 'gpt-5.5' }, { preference: 'codex-balanced', id: 'gpt-5.5-mini' }] }
 const RECORDED = { roundId: ROUND, workID: WID, state: 'recorded', control: { connected: true } }
 const view = (state: string, a1: string, a2: string, extra: Record<string, unknown> = {}) => ({ roundId: ROUND, workID: WID, state, inHistory: true, autoSendCard: false, source: 'web',
   assignments: [{ id: 'a1', state: a1, sessionID: S1, ...(a1 === 'delivered' || a1 === 'sent' ? { receiptId: 'r-1' } : {}) },
@@ -117,7 +119,9 @@ type Answer = unknown | ((body: any, method: string) => unknown)
 function load(opts: { answers?: Record<string, Answer>; storage?: Record<string, string>; route?: string[] } = {}) {
   const answers: Record<string, Answer> = { '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : PLAN), [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: ACTIVITY,
     '/api/work/chat/web-plans': WEB_PLANS, '/api/work/orchestrator/input': INPUT, '/api/work/chat/lens-rounds': RECORDED, [`/api/work/chat/lens-rounds/${ROUND}/send`]: { sendRequestId: 'ls_0123456789abcdef', state: 'send_requested' },
-    '/api/work-board/activity/open': { items: [], available: true }, '/api/work-board': { tasks: [TASK], capabilities: {}, complete: true }, ...opts.answers }
+    '/api/work-board/activity/open': { items: [], available: true }, '/api/work-board': { tasks: [TASK], capabilities: {}, complete: true },
+    // The Mac's model catalog (Q1 P1, P2): durable jobs on, Claude and Codex ready, one entry per Codex slot.
+    '/api/health': HEALTH, '/api/models': MODELS_CATALOG, ...opts.answers }
   const calls: Array<{ method: string; path: string; body: any; timeoutMs?: number }> = []
   const storage = opts.storage ?? {}
   let route = { pane: 'work', args: opts.route ?? [ID] }
@@ -970,20 +974,43 @@ describe('W1: an empty card plans one New session, as Control 0.5.386 does', () 
     expect(h.html()).toContain('No session on this task yet. COS will start a new Claude session when you press Send.')
     expect(h.sent('/api/work/chat/lens-rounds')).toHaveLength(0)
   })
-  it('a plan with no assignment offers one tap that sends one New session with the request, once', async () => {
+  it('a plan with no assignment offers the New session; the tap opens the usual confirm, and only the confirm sends, once (lead W-D1)', async () => {
     const h = await planned({ answers: { '/api/work/orchestrator/input': EMPTY_INPUT, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : NO_ASSIGN) } })
     const r = h.card().rounds[0]
     expect(r.state).toBe('answered')
     expect(h.html()).toContain('Start a new Claude session with this request')
     expect(h.html()).toContain('Nothing is sent until you press this.')
     h.tap('chat-start-new', { 'data-key': r.key }); await flush(30)
-    h.tap('chat-start-new', { 'data-key': r.key }); await flush(30)
+    expect(h.sent('/api/work/chat/lens-rounds'), 'the first tap only asks').toHaveLength(0)
+    expect(h.html()).toContain('Send to a new Claude session?')
+    h.tap('chat-confirm', { 'data-key': r.key }); await flush(30)
+    expect(h.sent('/api/work/chat/lens-rounds'), 'a double tap inside the guard time sends nothing').toHaveLength(0)
+    await h.tick(500)
+    h.tap('chat-confirm', { 'data-key': r.key }); await flush(30)
+    h.tap('chat-confirm', { 'data-key': r.key }); await flush(30)
     const saved = h.sent('/api/work/chat/lens-rounds')
     expect(saved).toHaveLength(1)
     expect(saved[0]!.body.assignments).toEqual([{ id: 'a1', mode: 'newSession', provider: 'claude', prompt: 'Fix the rounding on the pricing page and add a test' }])
-    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(1)
-    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)[0]!.body.assignmentIds).toEqual(['a1'])
+    const send = h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)
+    expect(send).toHaveLength(1)
+    expect(send[0]!.body).toMatchObject({ confirm: 'two-step', assignmentIds: ['a1'] })
     expect(h.html()).not.toContain('Start a new Claude session with this request')
+  })
+  it('the offer does nothing while the chat is busy (Q1 R7)', async () => {
+    const h = await planned({ answers: { '/api/work/orchestrator/input': EMPTY_INPUT, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : NO_ASSIGN) } })
+    const r = h.card().rounds[0]
+    h.card().busy = true
+    h.tap('chat-start-new', { 'data-key': r.key }); await flush(30)
+    expect(r.assignments).toEqual([])
+    expect(r.state).toBe('answered')
+  })
+  it('Q1 P1: a provider is offered only when the Mac has an available model for it', async () => {
+    const noCodex = { features: { durableQueryJobs: true, durableQueryJobsProtocol: 1, claude: true, codex: false } }
+    const h = await planned({ answers: { '/api/health': noCodex, '/api/work/orchestrator/input': INPUT } })
+    expect(chatPlanBody(h)[0].newSessionProviders).toEqual(['claude'])
+    const off = { features: { durableQueryJobs: false, claude: true, codex: true } }
+    const h2 = await planned({ answers: { '/api/health': off, '/api/work/orchestrator/input': INPUT } })
+    expect(chatPlanBody(h2)[0].newSessionProviders).toEqual([])
   })
 })
 
@@ -1013,17 +1040,31 @@ describe('W1: Plan again reruns a round that failed before planning, in place', 
   })
 })
 
-describe('W1: Start work on a card with no session of its own preselects Start a new session', () => {
-  it('even over a saved Continue', async () => {
+describe('W1: Start work opens as COS Control 0.5.386 does (Q1 P2, P3)', () => {
+  it('no session of its own and nothing saved: Start a new session on Claude Opus, and Opus is what is sent', async () => {
+    const h = await opened({ route: [ID, 'start'] })
+    h.chat.renderStart(ID); await flush(30)
+    h.chat.renderStart(ID); await flush()
+    const page = h.dom.pane.html as string
+    expect(page).toContain('value="newSession" checked')
+    expect(page).toMatch(/<option value="opus" selected>Claude Opus<\/option>/)
+    expect(page).not.toContain('Server default')
+    expect(page).toContain('OpenAI via Codex · Frontier')
+  })
+  it('Claude has no available model: Codex’s first model', async () => {
+    const h = await opened({ route: [ID, 'start'], answers: { '/api/health': { features: { durableQueryJobs: true, durableQueryJobsProtocol: 1, claude: false, codex: true } } } })
+    h.chat.renderStart(ID); await flush(30)
+    h.chat.renderStart(ID); await flush()
+    expect(h.dom.pane.html).toMatch(/<option value="codex-frontier" selected>/)
+  })
+  it('a saved Continue wins, as on the Mac (WorkHandoffStore.swift draft(for:) 910-912)', async () => {
     const saved = { ...ACTIVITY, savedDestination: { mode: 'continueSession', sessionId: S1 } }
     const h = await opened({ route: [ID, 'start'], answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: saved } })
     h.chat.renderStart(ID); await flush()
-    expect(h.dom.pane.html).toContain('Start work on this card?')
-    expect(h.dom.pane.html).toContain('value="newSession" checked')
-    expect(h.dom.pane.html).not.toContain('value="continueSession" checked')
+    expect(h.dom.pane.html).toContain('value="continueSession" checked')
   })
-  it('a card with its own session still opens on the saved Continue', async () => {
-    const own = { ...ACTIVITY, savedDestination: { mode: 'continueSession', sessionId: S1 },
+  it('a card with its own session opens on Continue', async () => {
+    const own = { ...ACTIVITY,
       activities: [{ id: 'r-1', sessionId: S1, provider: 'claude', sessionTitle: 'Pricing page', status: 'idle', acknowledged: true, createdAt: '2026-11-06T22:00:00.000Z' }] }
     const h = await opened({ route: [ID, 'start'], answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: own } })
     h.chat.renderStart(ID); await flush()

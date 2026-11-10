@@ -379,6 +379,12 @@
   }
   function signinRemember(info) {
     var ends = info && info.expiresAt ? Date.parse(info.expiresAt) : NaN, cap = info && info.renewUntil ? Date.parse(info.renewUntil) : NaN;
+    // Q1: a signed-in answer with no expiry (the token, or an older server) leaves nothing to warn about.
+    if (info && info.authenticated === true && !info.expiresAt) {
+      CONN.signin = null;
+      try { localStorage.removeItem(SIGNIN_STORE); } catch (e) { /* nothing kept */ }
+      return;
+    }
     if (!isFinite(ends) || ends <= 0) return;
     CONN.signin = { ends: ends, cap: isFinite(cap) && cap >= ends ? cap : 0 };
     try { localStorage.setItem(SIGNIN_STORE, JSON.stringify(CONN.signin)); } catch (e) { /* the notice still works for this page */ }
@@ -403,11 +409,19 @@
     if (k && !k.cap && k.ends <= soon) return 'Your sign-in on this browser ended. Sign-ins last 7 days. ' + SIGNIN_HOW;
     return 'This browser is signed out. ' + SIGNIN_HOW;
   }
+  // Q1 M1: a request that never got an answer cannot tell a sleeping Mac from this device being offline or off
+  // Tailscale, so the line names both. Only the browser's own "offline" is certain enough to say alone.
+  function connOffline() { return typeof navigator !== 'undefined' && navigator && navigator.onLine === false; }
+  function connTitle() { return connOffline() ? 'This device is offline.' : 'COS on your Mac is not answering.'; }
+  function connWhy() {
+    return connOffline() ? 'Connect to the internet and Tailscale, then try again.'
+      : 'Your Mac may be asleep, or this device may be offline or off Tailscale.';
+  }
   function connHtml() {
     var html = '';
     if (SERVER.up === false) {
-      html += '<div class="conn-line" role="status"><strong>Your Mac is not answering.</strong><span class="conn-sub">' +
-        esc((SERVER.lastUpAt ? 'Last updated ' + connWhen(SERVER.lastUpAt) + '. ' : '') + 'What is on screen may be out of date. Check that the Mac is awake and on Tailscale.') + '</span>' +
+      html += '<div class="conn-line" role="status"><strong>' + esc(connTitle()) + '</strong><span class="conn-sub">' +
+        esc((SERVER.lastUpAt ? 'Last updated ' + connWhen(SERVER.lastUpAt) + '. ' : '') + 'What is on screen may be out of date. ' + connWhy()) + '</span>' +
         '<button type="button" class="btn small" data-action="conn-retry"' + (CONN.retrying ? ' disabled' : '') + '>' + (CONN.retrying ? 'Checking' : 'Retry') + '</button></div>';
     }
     var ends = signinEndsAt(), left = ends - Date.now();
@@ -1608,16 +1622,23 @@
     list.innerHTML = html;
     if (typeof liveTickStart === 'function' && list.querySelector && list.querySelector('[data-live-since]')) liveTickStart();
   }
-  // ── Running beyond sessions (W1, 7.0.x): audit 02 F10. COS Control's Running lists Work runs, questions COS is answering
-  // and routine runs next to sessions (Models.swift TodayHome, M:14116). The web reads the same server list Control does,
-  // GET /api/query-jobs/active (docs/active-query-jobs.md; titles only, never a prompt or an answer). Stop uses the existing
-  // POST /api/query-jobs/:id/cancel and is offered only where Control offers it: a Work run (origin task, or other, which is a
-  // COS Control Work session or a meeting review). A question being answered stops from Messages; a routine is not stopped here.
-  var RUN_JOB_WORD = { person: 'COS is answering', routine: 'Routine', task: 'Work run', other: 'Work run or review' };
-  var RUN_JOB_STOPPABLE = { task: true, other: true };
-  var RUN_JOBS = { items: null, armed: '', stopping: {}, note: {}, timer: null };
+  // ── Running beyond sessions (W1, 7.0.x): audit 02 F10, Q1 M6. The same job rows COS Control 0.5.386 draws
+  // (Models.swift TodayHome running rows, b02d1ad 14185-14207), from the same server list, GET /api/query-jobs/active
+  // (titles only, never a prompt or an answer):
+  //   person   "A question to COS" row, "COS is answering, N min", Open in Messages
+  //   routine  "Routine" row, "running since 7:30 PM", Open in Messages
+  //   task     "A captured task" row, "a captured task, on the server, N min", In Sessions
+  //   other    never a row: it is a Control Work session or a meeting review, already shown as the row it is
+  // No Stop on any of them, as on the Mac: Control's only Stop is on a Work run it started itself, which lives in the Mac's
+  // own handoff store and is not visible to this page.
+  var RUN_JOB_ROW = {
+    person: { word: 'Question', title: 'A question to COS', open: 'messages', label: 'Open in Messages' },
+    routine: { word: 'Routine', title: 'Routine', open: 'messages', label: 'Open in Messages' },
+    task: { word: 'Work', title: 'A captured task', open: 'sessions', label: 'In Sessions' },
+  };
+  var RUN_JOBS = { items: null, timer: null };
   var RUN_JOBS_POLL_MS = 15000;
-  function runJobValid(j) { return j && typeof j.jobId === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(j.jobId) && Number.isInteger(j.generation) && j.generation > 0; }
+  function runJobValid(j) { return j && typeof j.jobId === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(j.jobId) && RUN_JOB_ROW[j.origin]; }
   function loadRunJobs() {
     return api('/api/query-jobs/active').then(function (d) {
       // An older server answers 400 or no protocol: no jobs row, never an error line (Control keys off the field, not the status).
@@ -1629,41 +1650,26 @@
     if (!RUN_JOBS.items || !RUN_JOBS.items.length) return;
     RUN_JOBS.timer = setTimeout(function () {
       RUN_JOBS.timer = null;
+      // Only while Today is in front: a hidden page reads nothing (it reads again when Today comes back).
       if (state.pane !== 'today' || document.hidden) return;
       loadRunJobs().then(function () { renderRunning(TODAY.working || [], TODAY.open || []); runJobsSchedule(); });
     }, RUN_JOBS_POLL_MS);
   }
+  function runJobMinutes(j) { return Math.max(0, Math.round((Number(j.elapsedMs) || 0) / 60000)); }
   function runJobRow(j) {
-    var word = RUN_JOB_WORD[j.origin] || RUN_JOB_WORD.other;
-    var mins = Math.max(0, Math.round((Number(j.elapsedMs) || 0) / 60000));
-    var meta = (j.state === 'queued' ? 'Waiting to start' : j.state === 'finishing' ? 'Finishing' : 'Running') + (mins ? ', ' + mins + ' min' : '');
-    var stop = '';
-    if (RUN_JOB_STOPPABLE[j.origin]) {
-      var id = j.jobId + ':' + j.generation;
-      stop = RUN_JOBS.stopping[id] ? '<span class="run-meta">Stopping</span>'
-        : '<button type="button" class="link-btn" data-action="run-job-stop" data-job="' + esc(id) + '" aria-label="' + esc('Stop ' + (j.title || word)) + '">' + (RUN_JOBS.armed === id ? 'Tap again to stop' : 'Stop') + '</button>';
-      if (RUN_JOBS.note[id]) stop += '<span class="run-meta">' + esc(RUN_JOBS.note[id]) + '</span>';
-    }
-    return '<div class="run-row run-job"><span class="run-who"><span class="badge work">' + esc(word) + '</span></span>' +
-      '<span class="run-title">' + esc(plain(j.title || '').trim() || word) + '</span>' +
-      '<span class="run-meta">' + esc(meta) + '</span>' + (stop ? '<span class="row-actions">' + stop + '</span>' : '') + '</div>';
+    var kind = RUN_JOB_ROW[j.origin], mins = runJobMinutes(j);
+    var started = new Date(Date.now() - (Number(j.elapsedMs) || 0));
+    var meta = j.origin === 'routine' ? 'running since ' + clock(started)
+      : j.origin === 'person' ? 'COS is answering, ' + mins + ' min'
+      : 'a captured task, on the server, ' + mins + ' min';
+    return '<div class="run-row run-job"><span class="run-who"><span class="badge work">' + esc(kind.word) + '</span></span>' +
+      '<span class="run-title">' + esc(plain(j.title || '').trim() || kind.title) + '</span>' +
+      '<span class="run-meta">' + esc(meta) + '</span>' +
+      '<span class="row-actions"><button type="button" class="link-btn" data-goto="' + kind.open + '">' + esc(kind.label) + '</button></span></div>';
   }
   function runJobsHtml() {
     var items = RUN_JOBS.items || [];
     return { html: items.map(runJobRow).join(''), n: items.length };
-  }
-  function stopRunJob(t) {
-    var id = t.getAttribute('data-job') || '', cut = id.lastIndexOf(':');
-    if (cut < 1 || RUN_JOBS.stopping[id]) return;
-    if (RUN_JOBS.armed !== id) { RUN_JOBS.armed = id; renderRunning(TODAY.working || [], TODAY.open || []); return; }
-    RUN_JOBS.armed = ''; RUN_JOBS.stopping[id] = true; delete RUN_JOBS.note[id];
-    renderRunning(TODAY.working || [], TODAY.open || []);
-    api('/api/query-jobs/' + encodeURIComponent(id.slice(0, cut)) + '/cancel', { method: 'POST', body: { generation: Number(id.slice(cut + 1)) }, timeoutMs: 20000 }).then(function () {
-      return loadRunJobs();
-    }, function (err) { RUN_JOBS.note[id] = (err && err.message) || 'Stop did not go through.'; }).then(function () {
-      delete RUN_JOBS.stopping[id];
-      renderRunning(TODAY.working || [], TODAY.open || []);
-    });
   }
   // ── end running beyond sessions
 
@@ -1881,7 +1887,7 @@
   // Miles 11/09: "when I actually navigate to the session, there is no ability to answer the question." The reader cannot
   // answer a question that waits on the Mac's own prompt either, so it says so at the top, with the words when this page
   // has them (a held question it saw, or the server's waiting line) and plainly when it does not. Nothing here sends.
-  var MAC_Q = { line: "Answer this at your Mac's prompt. It cannot be answered from here yet.", none: "COS cannot read this question's words from here. They show at the Mac's prompt." };
+  var MAC_Q = { line: "Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.", none: "COS cannot read this question's words from here. They show at the Mac's prompt." };
   function readerMacHtml(provider, id, row) {
     var w = whereFor(provider, id);
     if (w.where !== 'mac') return '';
@@ -1899,6 +1905,9 @@
     var html = waiting ? readerMacHtml(r.provider, r.id, row) : '';
     if (el.innerHTML !== html) el.innerHTML = html;
     el.hidden = !html;
+    // Q1 M3: the Send box under it says plainly that a message is not the answer.
+    var box = $('session-input');
+    if (box && box.setAttribute) box.setAttribute('placeholder', html ? 'Message this session. It does not answer the question.' : 'Continue this session…');
   }
   // ── end at the Mac's prompt
 
@@ -2745,7 +2754,9 @@
       (provider === 'subq' ? ' SubQ keeps what it is sent.' : '');
   }
   function meaningConsentHtml(provider) {
-    return '<div class="list meaning-consent"><p class="empty"><strong>Find sessions by meaning with ' + esc(MEANING_NAME[provider]) + '?</strong>' + esc(meaningConsentText(provider)) + '</p>' +
+    // Lead decision (11/09): the choice is kept in this browser only, and the card says so.
+    return '<div class="list meaning-consent"><p class="empty"><strong>Find sessions by meaning with ' + esc(MEANING_NAME[provider]) + '?</strong>' + esc(meaningConsentText(provider)) +
+      ' ' + esc('Your choice applies to this browser only.') + '</p>' +
       '<div class="row-actions"><button type="button" class="btn small primary" data-action="meaning-consent" data-provider="' + esc(provider) + '" data-choice="on">Turn on</button>' +
       '<button type="button" class="btn small" data-action="meaning-consent" data-provider="' + esc(provider) + '" data-choice="never">Never</button></div></div>';
   }
@@ -6377,7 +6388,7 @@
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
     if (t.id === 'section-btn') return openMenu();
-    if (t.id === 'auth-retry') { t.disabled = true; t.textContent = 'Checking'; api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }, function (err) { if (err && err.status) showAuth(err.message); else authOffline(true); }).then(function () { t.disabled = false; t.textContent = 'Try again'; }); return; }
+    if (t.id === 'auth-retry') { t.disabled = true; t.textContent = 'Checking'; bootStatus().then(function () { t.disabled = false; t.textContent = 'Try again'; }); return; }
     if (t.id === 'auth-switch') {
       var toToken = $('auth-token-block').classList.contains('hidden');
       $('auth-token-block').classList.toggle('hidden', !toToken);
@@ -6428,7 +6439,6 @@
     if (t.hasAttribute('data-speakers')) return go('speakers', [t.getAttribute('data-speakers')]);
     var action = t.getAttribute('data-action');
     if (action === 'fork-session') return sendSessionTurn(true);
-    if (action === 'run-job-stop') return stopRunJob(t);
     if (action === 'conn-retry') return connRetry(true);
     if (action === 'conn-hide-signin') { CONN.hideFor = signinEndsAt(); return connPaint(); }
     if (action === 'approve-on-phone') return approveOnPhone();
@@ -6953,19 +6963,45 @@
         .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'); });
       return;
     }
-    api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }).catch(function (err) {
+    bootStatus();
+  }
+  // The status read on a cold open and on every retry of the not-answering card.
+  function bootStatus() {
+    return api('/api/web-session/status').then(function (st) {
+      if (st && st.authenticated) return showShell(st);
+      // Q1 S2: a browser that was signed in before learns why it is not now (the 30 days, a week unused, a sign-out).
+      showAuth(typeof signinKnown === 'function' && signinKnown() ? signinLapsedCopy() : undefined);
+    }).catch(function (err) {
       // F23: a Mac that did not answer is not a sign-in problem. Say so, offer Try again, keep the form out of the way.
       if (err && err.status) showAuth(err.message); else { showAuth(); authOffline(true); }
     });
   }
+  // Q1 M2: the not-answering card checks again every 30 s while the page is in front, and stops while it is hidden.
+  var AUTH_RETRY = { timer: null, ms: 30000 };
+  function authRetrySchedule(on) {
+    if (AUTH_RETRY.timer) { clearTimeout(AUTH_RETRY.timer); AUTH_RETRY.timer = null; }
+    if (!on || document.hidden) return;
+    AUTH_RETRY.timer = setTimeout(function () { AUTH_RETRY.timer = null; if (!document.hidden) bootStatus(); }, AUTH_RETRY.ms);
+  }
+  document.addEventListener('visibilitychange', function () {
+    var box = $('auth-offline');
+    var showing = !!(box && !box.classList.contains('hidden'));
+    if (!showing) return;
+    if (document.hidden) authRetrySchedule(false); else bootStatus();
+  });
   // The sign-in card's "Your Mac is not answering" state (boot only): the form hides until the Mac answers.
   function authOffline(on) {
     var box = $('auth-offline'), form = $('auth-form');
     if (!box || !form) return;
     box.classList.toggle('hidden', !on); form.classList.toggle('hidden', !!on);
     var title = $('auth-title'), intro = $('auth-intro');
-    if (title) title.textContent = on ? 'Your Mac is not answering' : 'Connect this browser';
+    var offline = typeof connOffline === 'function' && connOffline();
+    if (title) title.textContent = on ? (offline ? 'This device is offline' : 'COS on your Mac is not answering') : 'Connect this browser';
     if (intro) intro.classList.toggle('hidden', !!on);
+    var text = $('auth-offline-text');
+    if (text && on) text.textContent = offline ? 'Connect to the internet and Tailscale. This page checks again every 30 seconds.'
+      : 'Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again every 30 seconds.';
+    authRetrySchedule(!!on);
     if (on) { var err = $('auth-error'); if (err) { setStatus(err, '', true); err.classList.add('hidden'); } }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

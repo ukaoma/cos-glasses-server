@@ -1788,7 +1788,7 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
     expect(meta).toContain('Waiting for your answer')
     expect(meta).not.toContain('Paused until you answer')
     // 6.99.26: a Claude session's question that this page does not hold is at the Mac's own prompt: said so, read-only.
-    expect(meta).toContain('Answer this at your Mac&#39;s prompt. It cannot be answered from here yet.')
+    expect(meta).toContain('Answer this at your Mac&#39;s prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.')
     expect(meta).not.toContain('Answer it in a reply below')
     expect(meta).not.toContain('Working')
     expect(h.streams, 'no live peek').toHaveLength(0)
@@ -1833,7 +1833,7 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
   const routes: Routes = { ['GET ' + QP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
   const ASK = 'Ship the pricing page today or wait for Brad?'
   const model = (ask: string) => ({ rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Pricing page review asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'mac', ask }], now: [], later: [], failed: [], settled: true })
-  const MAC = 'Answer this at your Mac&#39;s prompt. It cannot be answered from here yet.'
+  const MAC = 'Answer this at your Mac&#39;s prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.'
   const FAILED = 'Couldn&#39;t load this session&#39;s questions, so one may be waiting here.'.replace(/&#39;/g, '\u2019')
 
   it('at the Mac with no card drawn: the words Today showed stay, read-only, above the Mac line; the reply box stays hidden', async () => {
@@ -1950,7 +1950,7 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
 // ═════════════ 6.99.26: questions on Control Web (Miles 11/07) ═════════════
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
-const MAC_WORDS = 'Answer this at your Mac&#39;s prompt. It cannot be answered from here yet.'
+const MAC_WORDS = 'Answer this at your Mac&#39;s prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.'
 function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown>; reduced?: boolean; fetch?: (url: string) => Promise<unknown> | null; models?: (n: number) => Promise<unknown> | null; vv?: { height: number; offsetTop: number }; innerHeight?: number; session?: Map<string, string> } = {}) {
   const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
     style: { props: {} as Record<string, string>, setProperty(k: string, v: string) { this.props[k] = v } },

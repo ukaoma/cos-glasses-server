@@ -1078,7 +1078,7 @@
     var a = O.wait && O.wait.ask ? String(O.wait.ask).trim() : '';
     return a && !(O.wait.why && String(O.wait.why).trim() === a) ? a : '';
   }
-  function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Answer this at your Mac's prompt. It cannot be answered from here yet."; }
+  function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac."; }
   function macNoWords() { return (W.sessionQuestions && W.sessionQuestions.macNoWords) || "COS cannot read this question's words from here. They show at the Mac's prompt."; }
   // W1 A5: the head line says the state once. At the Mac's prompt the line below says where; the head does not repeat it.
   var GENERIC_WAIT = /^Waiting for (you|your answer)(\. Paused until you answer\.)?$/;
