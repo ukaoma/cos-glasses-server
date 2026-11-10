@@ -1057,6 +1057,13 @@ describe('W1: Start work opens as COS Control 0.5.386 does (Q1 P2, P3)', () => {
     h.chat.renderStart(ID); await flush()
     expect(h.dom.pane.html).toMatch(/<option value="codex-frontier" selected>/)
   })
+  it('with the model list already read, a fresh Start work still opens on Claude Opus (Q1 P2)', async () => {
+    const h = await planned({ route: [ID, 'start'] })      // planning reads the Mac's model list first
+    expect(h.chat.WM.models, 'the list was read before Start work opened').not.toBeNull()
+    h.chat.renderStart(ID); await flush()
+    expect(h.dom.pane.html).toMatch(/<option value="opus" selected>Claude Opus<\/option>/)
+    expect(h.dom.pane.html).not.toContain('Server default')
+  })
   it('a saved Continue wins, as on the Mac (WorkHandoffStore.swift draft(for:) 910-912)', async () => {
     const saved = { ...ACTIVITY, savedDestination: { mode: 'continueSession', sessionId: S1 } }
     const h = await opened({ route: [ID, 'start'], answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: saved } })

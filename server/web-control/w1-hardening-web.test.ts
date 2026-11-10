@@ -382,12 +382,13 @@ describe('Q1 R1: Never stays never', () => {
 const READER_MAC = block("  // ── At the Mac's prompt, in the session reader (W1 A5)", "  // ── end at the Mac's prompt")
 function readerMac(where: { where: string; ask: string }, row: Record<string, unknown> | null, q: Record<string, unknown> | null = null) {
   const el = { innerHTML: '', hidden: true }
-  const deps = { esc, $: (id: string) => (id === 'session-mac-q' ? el : null), whereFor: () => where, sessionQs: () => q,
+  const input = { attrs: {} as Record<string, string>, setAttribute(n: string, v: string) { this.attrs[n] = v } }
+  const deps = { esc, $: (id: string) => (id === 'session-mac-q' ? el : id === 'session-input' ? input : null), whereFor: () => where, sessionQs: () => q,
     askedWhy: (s: any) => (s.waiting_detail ? String(s.waiting_detail) : 'Waiting for your answer'),
     state: { sessions: row ? [row] : [] }, splitSessionId: (p: string, id: string) => ({ provider: p, id }) }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', `with (deps) {\n${READER_MAC}\nreturn { readerMacPaint };\n}`)(deps)
-  return { fns, el }
+  return { fns, el, input }
 }
 const R = { provider: 'claude', id: 'aaaaaaaa-1111-4111-8111-111111111111' }
 describe('A5: the session reader says when its question waits on the Mac', () => {
@@ -411,6 +412,13 @@ describe('A5: the session reader says when its question waits on the Mac', () =>
     h.fns.readerMacPaint(R, true)
     expect(h.el.innerHTML).toContain("COS cannot read this question's words from here. They show at the Mac's prompt.")
     expect(h.el.innerHTML).not.toContain('<blockquote')
+  })
+  it('Q1 M3: the Send box says a message is not the answer while the question is open, and goes back after', () => {
+    const h = readerMac({ where: 'mac', ask: 'Ship it?' }, null)
+    h.fns.readerMacPaint(R, true)
+    expect(h.input.attrs.placeholder).toBe('Message this session. It does not answer the question.')
+    h.fns.readerMacPaint(R, false)
+    expect(h.input.attrs.placeholder).toBe('Continue this session…')
   })
   it('nothing when the session is not waiting, or its question is answerable here', () => {
     const a = readerMac({ where: 'mac', ask: 'x' }, null)
