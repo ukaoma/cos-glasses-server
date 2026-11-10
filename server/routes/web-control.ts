@@ -350,7 +350,8 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       // Every failure counts, the glasses-code one included, so that check cannot be used to
       // probe codes faster than the limiter allows.
       loginLimiter.fail(ip, result.reason)
-      log(`[web-login] fail kind=${result.reason} len=${result.length} ip=${ip}`)
+      // S1 item 7: why a handoff link failed (expired, used, evicted, unknown). The log only; the message is unchanged.
+      log(`[web-login] fail kind=${result.reason}${result.handoff ? ` sub=${result.handoff}` : ''} len=${result.length} ip=${ip}`)
       return res.status(401).json({
         ok: false,
         error: 'invalid_credentials',

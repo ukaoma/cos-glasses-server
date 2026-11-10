@@ -1,0 +1,98 @@
+/**
+ * Why a sign-in link failed (S1 item 7, lead 2026-11-09 20:11). WebHandoffStore says expired, used, evicted or unknown;
+ * the login route logs it as `sub=` and the person sees the same sentence as before for all four. Single use and the
+ * 2-minute life are unchanged. A retired ticket is remembered only as a SHA-256, for an hour, at most 256 of them.
+ */
+import { describe, expect, it } from 'vitest'
+import express from 'express'
+import type { Server } from 'node:http'
+import { WebHandoffStore, WebLoginLimiter, WEB_HANDOFF_MAX_ACTIVE, WEB_HANDOFF_RETIRED_MAX, WEB_HANDOFF_RETIRED_MS, WEB_HANDOFF_TTL_MS, classifyWebLogin } from './web-session-auth.js'
+import { requireApiToken } from './api-auth.js'
+import { createWebControlRouter, WEB_LOGIN_FAILURE_MESSAGE } from '../routes/web-control.js'
+
+const TOKEN = 'handoff-reason-token-0123456789abcdef'
+function clock(start = Date.parse('2026-11-10T12:00:00.000Z')) { let t = start; return { now: () => t, add: (ms: number) => { t += ms } } }
+
+describe('WebHandoffStore: why a ticket did not sign in', () => {
+  it('a good ticket signs in once; the second use is "used"', () => {
+    const c = clock(), s = new WebHandoffStore(c.now)
+    const { ticket } = s.mint()
+    expect(s.consumeWithReason(ticket)).toEqual({ ok: true })
+    expect(s.consumeWithReason(ticket)).toEqual({ ok: false, why: 'used' })
+    expect(s.consume(ticket)).toBe(false)
+  })
+  it('past its 2 minutes it is "expired", whether or not a sweep removed it first', () => {
+    const c = clock(), s = new WebHandoffStore(c.now)
+    const a = s.mint().ticket
+    c.add(WEB_HANDOFF_TTL_MS)
+    expect(s.consumeWithReason(a)).toEqual({ ok: false, why: 'expired' })
+    const b = s.mint().ticket
+    c.add(WEB_HANDOFF_TTL_MS + 1)
+    s.mint()                                                       // a mint sweeps the expired one out first
+    expect(s.consumeWithReason(b)).toEqual({ ok: false, why: 'expired' })
+  })
+  it('pushed out by more than 16 open tickets: "evicted"', () => {
+    const c = clock(), s = new WebHandoffStore(c.now)
+    const first = s.mint().ticket
+    for (let i = 0; i < WEB_HANDOFF_MAX_ACTIVE; i++) s.mint()
+    expect(s.consumeWithReason(first)).toEqual({ ok: false, why: 'evicted' })
+  })
+  it('never issued here, or issued before this server started: "unknown"', () => {
+    const c = clock(), before = new WebHandoffStore(c.now)
+    const ticket = before.mint().ticket
+    const restarted = new WebHandoffStore(c.now)
+    expect(restarted.consumeWithReason(ticket)).toEqual({ ok: false, why: 'unknown' })
+    expect(restarted.consumeWithReason('not a ticket')).toEqual({ ok: false, why: 'unknown' })
+  })
+  it('remembers why for an hour, then says unknown; and at most 256 retired tickets', () => {
+    const c = clock(), s = new WebHandoffStore(c.now)
+    const t = s.mint().ticket
+    s.consume(t)
+    c.add(WEB_HANDOFF_RETIRED_MS - 1)
+    expect(s.consumeWithReason(t).ok === false && (s.consumeWithReason(t) as { why: string }).why).toBe('used')
+    c.add(1)
+    expect(s.consumeWithReason(t)).toEqual({ ok: false, why: 'unknown' })
+    const s2 = new WebHandoffStore(c.now)
+    const oldest = s2.mint().ticket; s2.consume(oldest)
+    for (let i = 0; i < WEB_HANDOFF_RETIRED_MAX; i++) { const x = s2.mint().ticket; s2.consume(x) }
+    expect(s2.consumeWithReason(oldest), 'the oldest of 257 retired tickets is forgotten').toEqual({ ok: false, why: 'unknown' })
+  })
+  it('classifyWebLogin carries the reason; the reason word stays handoff_expired', () => {
+    const c = clock(), s = new WebHandoffStore(c.now)
+    const t = s.mint().ticket
+    s.consume(t)
+    expect(classifyWebLogin({ handoff: t }, TOKEN, s)).toEqual({ ok: false, reason: 'handoff_expired', length: t.length, handoff: 'used' })
+  })
+})
+
+describe('the login route logs the reason and tells the person the same thing as before', () => {
+  async function withLogin(store: WebHandoffStore, fn: (port: number, lines: string[]) => Promise<void>, limiter?: WebLoginLimiter) {
+    const app = express()
+    let port = 0
+    const lines: string[] = []
+    app.use('/api', requireApiToken(TOKEN, { selfDnsName: () => null, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({ apiToken: () => TOKEN, port: () => port, selfDnsName: () => null, handoffStore: store, log: l => lines.push(l), ...(limiter ? { loginLimiter: limiter } : {}) }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    try { await fn(port, lines) } finally { await new Promise(resolve => server.close(resolve)) }
+  }
+  const login = (port: number, body: Record<string, string>) => fetch(`http://127.0.0.1:${port}/api/web-session/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+  it('used, expired and unknown links each log their sub-reason; the answer is the same 401 and sentence', async () => {
+    const c = clock(Date.now()), store = new WebHandoffStore(c.now)
+    await withLogin(store, async (port, lines) => {
+      const used = store.mint().ticket
+      expect((await login(port, { handoff: used })).status).toBe(200)
+      const r = await login(port, { handoff: used })
+      expect(r.status).toBe(401)
+      expect(await r.json()).toMatchObject({ error: 'invalid_credentials', reason: 'handoff_expired', message: WEB_LOGIN_FAILURE_MESSAGE.handoff_expired })
+      const old = store.mint().ticket
+      c.add(WEB_HANDOFF_TTL_MS + 1)
+      await login(port, { handoff: old })
+      await login(port, { handoff: 'A'.repeat(32) })
+      const fails = lines.filter(l => l.startsWith('[web-login] fail'))
+      expect(fails.map(l => /sub=(\w+)/.exec(l)?.[1])).toEqual(['used', 'expired', 'unknown'])
+      expect(fails.every(l => !l.includes(used) && !l.includes(old))).toBe(true)
+    })
+  })
+})

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dirname } from 'node:path'
@@ -313,13 +313,36 @@ interface HandoffRecord {
  * open the user's browser directly into an authenticated session without putting
  * the standing `COS_API_TOKEN` in a URL or touching `PairingState`.
  */
+/**
+ * Why a handoff ticket did not sign in (S1 item 7, lead 20:11). Logged only; the person sees the same sentence for all.
+ *   expired  its 2 minutes ran out        used     it already signed a browser in
+ *   evicted  more than 16 were open        unknown  never issued here, or issued before this server started
+ */
+export type WebHandoffFailure = 'expired' | 'used' | 'evicted' | 'unknown'
+/** A retired ticket is remembered (as a SHA-256, never the ticket) this long and at most this many, only to say why. */
+export const WEB_HANDOFF_RETIRED_MS = 60 * 60_000
+export const WEB_HANDOFF_RETIRED_MAX = 256
+
 export class WebHandoffStore {
   private readonly tickets = new Map<string, HandoffRecord>()
+  private readonly retired = new Map<string, { why: Exclude<WebHandoffFailure, 'unknown'>; at: number }>()
   constructor(private readonly now: () => number = () => Date.now()) {}
+
+  private static digest(ticket: string): string { return createHash('sha256').update(ticket).digest('hex') }
+
+  private retire(ticket: string, why: Exclude<WebHandoffFailure, 'unknown'>, at: number): void {
+    const key = WebHandoffStore.digest(ticket)
+    this.retired.delete(key)
+    this.retired.set(key, { why, at })
+    for (const [k, rec] of this.retired) {
+      if (this.retired.size <= WEB_HANDOFF_RETIRED_MAX && at - rec.at < WEB_HANDOFF_RETIRED_MS) break
+      this.retired.delete(k)
+    }
+  }
 
   private sweep(at: number): void {
     for (const [k, rec] of this.tickets) {
-      if (at >= rec.expiresAtMs) this.tickets.delete(k)
+      if (at >= rec.expiresAtMs) { this.tickets.delete(k); this.retire(k, 'expired', at) }
     }
   }
 
@@ -330,6 +353,7 @@ export class WebHandoffStore {
       const oldest = this.tickets.keys().next().value
       if (!oldest) break
       this.tickets.delete(oldest)
+      this.retire(oldest, 'evicted', at)
     }
     const ticket = randomBytes(24).toString('base64url')
     const expiresAtMs = at + ttlMs
@@ -338,13 +362,23 @@ export class WebHandoffStore {
   }
 
   consume(ticket: unknown): boolean {
+    return this.consumeWithReason(ticket).ok
+  }
+
+  /** As `consume`, and on failure why. Single use and expiry are unchanged. */
+  consumeWithReason(ticket: unknown): { ok: true } | { ok: false; why: WebHandoffFailure } {
     const at = this.now()
     this.sweep(at)
-    if (typeof ticket !== 'string' || !HANDOFF_TICKET_PATTERN.test(ticket)) return false
+    if (typeof ticket !== 'string' || !HANDOFF_TICKET_PATTERN.test(ticket)) return { ok: false, why: 'unknown' }
     const existing = this.tickets.get(ticket)
-    if (!existing) return false
+    if (!existing) {
+      const past = this.retired.get(WebHandoffStore.digest(ticket))
+      return { ok: false, why: past && at - past.at < WEB_HANDOFF_RETIRED_MS ? past.why : 'unknown' }
+    }
     this.tickets.delete(ticket)
-    return at < existing.expiresAtMs
+    if (at >= existing.expiresAtMs) { this.retire(ticket, 'expired', at); return { ok: false, why: 'expired' } }
+    this.retire(ticket, 'used', at)
+    return { ok: true }
   }
 }
 
@@ -353,7 +387,7 @@ export type WebLoginFailure = 'wrong_token' | 'wrong_code' | 'glasses_code' | 'h
 
 export type WebLoginResult =
   | { ok: true; kind: 'token' | 'handoff' | 'code' }
-  | { ok: false; reason: WebLoginFailure; length: number }
+  | { ok: false; reason: WebLoginFailure; length: number; handoff?: WebHandoffFailure }
 
 // What a phone paste drags along with a token: spaces and line breaks (a copy out of a
 // terminal or a note), zero-width and no-break characters, and the quotes around a value
@@ -391,9 +425,10 @@ export function classifyWebLogin(
   }
   if (handoffStore && typeof input.handoff === 'string' && input.handoff.trim().length > 0) {
     const ticket = input.handoff.trim()
-    return handoffStore.consume(ticket)
+    const used = handoffStore.consumeWithReason(ticket)
+    return used.ok
       ? { ok: true, kind: 'handoff' }
-      : { ok: false, reason: 'handoff_expired', length: ticket.length }
+      : { ok: false, reason: 'handoff_expired', length: ticket.length, handoff: used.why }
   }
   if (codeStore && typeof input.code === 'string' && input.code.trim().length > 0) {
     if (codeStore.consume(input.code)) return { ok: true, kind: 'code' }
