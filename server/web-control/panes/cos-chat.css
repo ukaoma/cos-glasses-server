@@ -56,10 +56,12 @@
 /* ── the chat ─────────────────────────────────────────── */
 .cc { --cc-you: color-mix(in srgb, var(--gold) 22%, var(--panel)); }
 .cc-head { display: flex; align-items: center; gap: 12px; padding: 14px 0 12px; border-bottom: 1px solid var(--hairline); flex-wrap: wrap; }
-.cc-head-text { min-width: 0; flex: 1; }
+.cc-head-text { min-width: 0; flex: 1 1 16rem; }
+/* W1 (open Duo, narrow chat column): the description was squeezed to four short lines beside All messages, Mark all read
+   and New thread. Below 16rem for the words, the links wrap beneath them. */
 .cc-title { font: 500 24px/1.1 var(--display); color: var(--ink); margin: 0; }
 .cc-sub { margin: 3px 0 0; font-size: 13px; line-height: 1.35; color: var(--sub); }
-.cc-head-acts { display: flex; gap: 14px; }
+.cc-head-acts { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .cc-head-acts .link-btn { min-height: 36px; font-size: 14px; font-weight: 500; }
 .cc-avatar { flex: none; width: 30px; height: 30px; border-radius: 8px; background: #2b211a; color: var(--gold); display: grid; place-items: center; }
 .cc-avatar .icon { width: 17px; height: 17px; }
@@ -130,7 +132,14 @@
 
 /* ── the composer: two visible buttons, no key needed ─── */
 .cc-composer { position: sticky; bottom: 0; z-index: 5; background: var(--page); border-top: 1px solid var(--hairline); padding: 10px 0 calc(10px + var(--safe-bottom, env(safe-area-inset-bottom, 0px)));
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; align-items: end; }
+  display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; }
+/* W1 (Miles 2026-11-09, open Duo: "Ask COS, or drop a thought, a task, a ..." wrapped and clipped beside the camera,
+   clip, Ask and Drop in the three-column split). The row follows the composer's own width, not the screen: the words need
+   19rem (every composer placeholder is 36 characters or fewer), and when the buttons do not fit beside that they move to
+   the row below, at its right. Panes are resizable, so no breakpoint can know this. Same rule as the reader's box. */
+.cc-composer > .cc-input { flex: 1 1 19rem; min-width: 0; }
+.cc-composer > .cc-buttons { flex: none; margin-left: auto; }
+.cc-composer > .cc-chips, .cc-composer > .cc-foot, .cc-composer > .cc-note { flex: 1 1 100%; min-width: 0; }
 .cc-input { min-height: 44px; max-height: 140px; padding: 11px 12px; font-size: 16px; border-radius: 12px; }
 .cc-buttons { display: flex; gap: 8px; }
 .cc-buttons .cx-btn { height: 44px; padding: 0 16px; font-size: 15px; border-radius: 12px; }
@@ -145,8 +154,8 @@
 .cc-note { grid-column: 1 / -1; margin: 0; font-size: 13px; color: var(--hot); }
 /* A phone at 390 px: the box on its own row, the buttons under it, the menus under those. */
 @media (max-width: 480px) {
-  .cc-composer { grid-template-columns: minmax(0, 1fr); }
-  .cc-buttons { justify-content: flex-end; }
+  .cc-composer > .cc-input { flex-basis: 100%; }
+  .cc-composer > .cc-buttons { flex: 1 1 100%; justify-content: flex-end; }
   .cc-buttons .cx-btn { flex: 1; justify-content: center; }
   .cc-buttons .cc-attach { flex: none; }
 }

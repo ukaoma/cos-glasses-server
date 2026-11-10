@@ -25,6 +25,16 @@ describe('Duo composers: the placeholder sits on one line', () => {
     expect(base, 'the base rule comes first, so the media rule is not overridden by it').toBeLessThan(narrow)
     expect(CHAT_CSS.match(/\.att-composer > textarea \{/g)?.length, 'no later rule undoes either').toBe(2)
   })
+  it('the COS chat composer (and Today ask, a reply) wraps by its own width: words 19rem, the buttons below when they do not fit', () => {
+    expect(CHAT_CSS).toContain('display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; }')
+    expect(CHAT_CSS).toContain('.cc-composer > .cc-input { flex: 1 1 19rem; min-width: 0; }')
+    expect(CHAT_CSS).toContain('.cc-composer > .cc-buttons { flex: none; margin-left: auto; }')
+    expect(CHAT_CSS, 'no grid row that pins the buttons beside the box').not.toContain('grid-template-columns: minmax(0, 1fr) auto;')
+  })
+  it('the COS chat header: the description keeps 16rem; the links wrap beneath it in a narrow column', () => {
+    expect(CHAT_CSS).toContain('.cc-head-text { min-width: 0; flex: 1 1 16rem; }')
+    expect(CHAT_CSS).toContain('.cc-head-acts { display: flex; flex-wrap: wrap; gap: 4px 14px; }')
+  })
   it('the Ask sheet field keeps 15rem; the camera, clip and Cancel move to the row below when they do not fit', () => {
     expect(APP_CSS).toContain('#ask-form { flex-wrap: wrap; }')
     expect(APP_CSS).toContain('#ask-form > .field { flex: 1 1 15rem; min-width: 0; }')
