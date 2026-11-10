@@ -2,9 +2,9 @@
 // A fake Tailscale runner (never the real CLI) and throwaway CA plus leaf pairs minted per run with
 // openssl into a temp dir (no private key is committed). The serving tests do real TLS handshakes
 // against a real https server on 127.0.0.1:0.
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer, type Server } from 'node:https'
 import { connect, type PeerCertificate } from 'node:tls'
 import type { AddressInfo } from 'node:net'
@@ -28,11 +28,14 @@ import {
   SIGNER_TLS_STATUS_TIMEOUT_MS,
   SignerTls,
   signerHttpsOptions,
+  SIGNER_TLS_CLI_ENV_KEYS,
+  signerTlsCliEnv,
+  signerTlsCliRunner,
   signerTlsRenewalDue,
   signerTlsRetryMs,
   type SignerTlsDeps,
 } from './web-key-signer-tls.js'
-import { STATUS_ARGS, type RunResult } from './tailscale-nudge.js'
+import { execFileRunner, STATUS_ARGS, type RunResult } from './tailscale-nudge.js'
 import { WebKeyAuthority } from './web-key-authority.js'
 import { WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from './web-key-registry.js'
 import { createWebKeyRouter } from '../routes/web-key.js'
@@ -93,7 +96,7 @@ afterAll(() => { rmSync(pki, { recursive: true, force: true }) })
 // ── fake Tailscale runner ──
 const ok = (stdout: string): RunResult => ({ code: 0, signal: null, killed: false, stdout, stderr: '', elapsedMs: 3 })
 const statusJson = (over: Record<string, unknown> = {}): string => JSON.stringify({ BackendState: 'Running', Self: { DNSName: `${NAME}.`, TailscaleIPs: ['100.108.149.114'] }, CertDomains: [NAME], Peer: {}, ...over })
-interface Calls { bin: string; args: readonly string[]; timeoutMs: number }
+interface Calls { bin: string; args: readonly string[]; timeoutMs: number; env?: NodeJS.ProcessEnv }
 
 interface Rig {
   tls: SignerTls
@@ -126,8 +129,8 @@ function rig(over: Partial<SignerTlsDeps> & { dir?: string; name?: string | null
     now: () => clock.now,
     log: line => logs.push(line),
     schedule: (_fn, ms) => { scheduled.push(ms); return { cancel: () => {} } },
-    runner: async (bin, args, timeoutMs) => {
-      calls.push({ bin, args, timeoutMs })
+    runner: async (bin, args, timeoutMs, env) => {
+      calls.push({ bin, args, timeoutMs, env })
       const a = args[0] === 'status' ? statusAnswer : certAnswer
       return typeof a === 'function' ? a() : a
     },
@@ -334,6 +337,9 @@ describe('renewal', () => {
     r.clock.now = pairA.notAfterMs
     expect(fp((await handshake(port, { servername: NAME })).peer)).toBe(mkcert.fingerprint)
     expect(r.tls.status()).toMatchObject({ trusted: false, reason: 'cert_expired' })
+    // 7.0.20 pickup: the stored files are the same expired pair, read once and reported as not taken, never as serving.
+    expect(r.logs.filter(l => /serving a stored certificate/.test(l))).toHaveLength(0)
+    expect(r.logs.filter(l => /a stored certificate was not taken/.test(l))).toHaveLength(1)
   })
 
   it('boot: a stored pair serves at once; a fresh one costs no CLI call and the next check is a day out', async () => {
@@ -396,6 +402,147 @@ describe('renewal', () => {
   })
 })
 
+// ── the prompt pickup (7.0.20): a pair placed in the dir by hand or by another process ──
+// The fallback if the server's own fetch fails: every CLI check here times out. The pair is written the way
+// CONTRACT_stored_pair.md says: dir 0700, key 0600 then cert 0644, each by rename.
+const cliTimeout: RunResult = { code: null, signal: 'SIGKILL', killed: true, stdout: '', stderr: '', elapsedMs: SIGNER_TLS_STATUS_TIMEOUT_MS }
+function storePair(dir: string, leaf: Leaf): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  for (const [file, text, mode] of [[SIGNER_TLS_KEY_FILE, leaf.keyPem, 0o600], [SIGNER_TLS_CERT_FILE, `${leaf.certPem}${tailCa.pem}`, 0o644]] as const) {
+    const tmp = join(dir, `.${file}.tmp-${process.pid}`)
+    writeFileSync(tmp, text, { mode })
+    renameSync(tmp, join(dir, file))
+  }
+}
+const pickupLines = (logs: string[], re: RegExp): string[] => logs.filter(l => re.test(l))
+async function statusOverRoute(tls: SignerTls): Promise<Record<string, unknown>> {
+  const base = mkdtempSync(join(tmpdir(), 'signer-tls-pickup-route-'))
+  dirs.push(base)
+  seedRegistry(join(base, 'web-keys.json'), p256())
+  const registry = new WebKeyRegistry(join(base, 'web-keys.json'), join(base, 'a.jsonl'))
+  const authority = new WebKeyAuthority({ registry, nonces: new WebKeyNonces(join(base, 'n.json')), packets: new WebKeyPackets(), integrity: () => INTEGRITY_OK, selfDnsName: () => NAME, expectedOrigin: () => ORIGIN, enabled: () => true })
+  const app = express()
+  // The same wiring as index.ts: `signerTls: () => webKeySignerTls?.status() ?? null`.
+  app.use('/api', createWebKeyRouter({ authority, enrollments: new WebKeyEnrollments(registry, { deviceAllowed: () => true }), isWebRequest: () => false, apiToken: () => 'tok', selfDnsName: () => NAME, expectedOrigin: () => ORIGIN, signerTls: () => tls.status() }))
+  const server = await new Promise<import('node:http').Server>(res => { const s = app.listen(0, '127.0.0.1', () => res(s)) })
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/web-key/status`
+    return (await (await fetch(url, { headers: { 'x-cos-token': 'tok' } })).json() as Record<string, unknown>).signerTls as Record<string, unknown>
+  } finally {
+    await new Promise<void>(res => server.close(() => res()))
+  }
+}
+
+describe('the prompt pickup (7.0.20): a stored pair serves without waiting for the next check', () => {
+  it('pickup by status read: the next /api/web-key/status after a pair is stored says trusted, with no CLI call; the next check confirms it', async () => {
+    const r = rig()
+    r.status(cliTimeout)
+    expect((await r.tls.check()).reason).toBe('tailscale_cli_timeout')
+    expect(r.calls).toHaveLength(1)
+    expect((await statusOverRoute(r.tls)).trusted).toBe(false)
+    storePair(r.dir, pairA)
+    const s = await statusOverRoute(r.tls)
+    // lastError stays the last CHECK's failure until the next check runs.
+    expect(s).toMatchObject({ trusted: true, reason: 'ok', host: NAME, notAfter: new Date(pairA.notAfterMs).toISOString(), lastError: 'tailscale_cli_timeout' })
+    expect(r.calls).toHaveLength(1)
+    expect(pickupLines(r.logs, /serving a stored certificate on 3144 until /)).toHaveLength(1)
+    expect(r.logs.join('\n')).not.toContain(NAME)
+    expect(r.logs.join('\n')).not.toMatch(/PRIVATE KEY|BEGIN /)
+    // The cooldown's check finds the same pair fresh: still no CLI call, lastError cleared, the next check a day out.
+    r.clock.now += signerTlsRetryMs(1)
+    expect(await r.tls.check()).toMatchObject({ trusted: true, reason: 'ok', lastError: null })
+    expect(r.calls).toHaveLength(1)
+    expect(r.scheduled.at(-1)).toBe(SIGNER_TLS_CHECK_INTERVAL_MS)
+  })
+
+  it('pickup by handshake: the first 3144 handshake naming the host after a pair is stored gets it, in that same handshake', async () => {
+    const r = rig()
+    r.status(cliTimeout)
+    await r.tls.check()
+    const port = await serve(r.tls)
+    expect(fp((await handshake(port, { servername: NAME })).peer)).toBe(mkcert.fingerprint)
+    storePair(r.dir, pairA)
+    const first = await handshake(port, { servername: NAME, ca: [tailCa.pem] })
+    expect(first.error).toBeNull()
+    expect(first.authorized).toBe(true)
+    expect(fp(first.peer)).toBe(pairA.fingerprint)
+    expect(r.calls).toHaveLength(1)
+    expect(fp((await handshake(port, { servername: 'localhost' })).peer)).toBe(mkcert.fingerprint)
+    expect(fp((await handshake(port, {})).peer)).toBe(mkcert.fingerprint)
+  })
+
+  it('bounded: files are read only when they change (one read per change, however many triggers), only for this Mac\'s name', async () => {
+    const r = rig()
+    r.status(cliTimeout)
+    await r.tls.check()
+    const port = await serve(r.tls)
+    const notTaken = /a stored certificate was not taken/
+    // Nothing stored: no read, no line.
+    for (let i = 0; i < 3; i++) { r.tls.status(); await handshake(port, { servername: NAME }) }
+    expect(pickupLines(r.logs, /stored certificate/)).toHaveLength(0)
+    // A pair for another Mac's name: read once, never served, never for its own name either.
+    storePair(r.dir, otherHost)
+    for (let i = 0; i < 3; i++) { r.tls.status(); await handshake(port, { servername: NAME }) }
+    expect(r.tls.served()).toBeNull()
+    expect(fp((await handshake(port, { servername: 'other-mac.tail38457f.ts.net' })).peer)).toBe(mkcert.fingerprint)
+    expect(pickupLines(r.logs, notTaken)).toHaveLength(1)
+    // A file removed: no read, no line.
+    rmSync(join(r.dir, SIGNER_TLS_CERT_FILE))
+    r.tls.status()
+    await handshake(port, { servername: NAME })
+    expect(pickupLines(r.logs, notTaken)).toHaveLength(1)
+    // The right pair: read at the next trigger and served.
+    storePair(r.dir, pairA)
+    expect(r.tls.status()).toMatchObject({ trusted: true, host: NAME })
+    expect(r.calls).toHaveLength(1)
+  })
+
+  it('the same checks as boot and the check (parseSignerTlsPair): a wrong-name, an expired or a torn pair dropped in is never served, by status read or handshake', async () => {
+    const r = rig()
+    r.status(cliTimeout)
+    await r.tls.check()
+    const port = await serve(r.tls)
+    const drops: Array<[string, () => void]> = [
+      ['wrong name', () => storePair(r.dir, otherHost)],
+      ['expired', () => { r.clock.now = pairShort.notAfterMs + 1; storePair(r.dir, pairShort) }],
+      ['torn (cert of one, key of another)', () => { storePair(r.dir, pairA); writeFileSync(join(r.dir, SIGNER_TLS_KEY_FILE), pairB.keyPem, { mode: 0o600 }) }],
+    ]
+    for (const [label, drop] of drops) {
+      drop()
+      expect({ label, trusted: r.tls.status().trusted, nothingServed: r.tls.served() === null }).toEqual({ label, trusted: false, nothingServed: true })
+      expect({ label, mkcert: fp((await handshake(port, { servername: NAME })).peer) === mkcert.fingerprint }).toEqual({ label, mkcert: true })
+    }
+    expect(pickupLines(r.logs, /a stored certificate was not taken/)).toHaveLength(drops.length)
+    expect(pickupLines(r.logs, /serving a stored certificate/)).toHaveLength(0)
+    // The positive control: a valid pair for this name, dropped the same way, serves.
+    storePair(r.dir, pairA)
+    expect(r.tls.status()).toMatchObject({ trusted: true, host: NAME })
+    expect(fp((await handshake(port, { servername: NAME, ca: [tailCa.pem] })).peer)).toBe(pairA.fingerprint)
+    expect(r.calls).toHaveLength(1)
+  })
+
+  it('while a trusted pair serves nothing extra runs; a renewal stored in the dir is taken at the next check, with no CLI call', async () => {
+    const r = rig()
+    r.cert(ok(certStdout(pairShort)))
+    await r.tls.check()
+    expect(r.tls.served()?.notAfterMs).toBe(pairShort.notAfterMs)
+    expect(r.calls).toHaveLength(2)
+    // From here the CLI does not answer (the LaunchAgent), and the serving pair is due for renewal.
+    r.status(cliTimeout)
+    r.clock.now = pairShort.notAfterMs - SIGNER_TLS_RENEW_BEFORE_MS + 1
+    storePair(r.dir, pairA)
+    expect(pairA.notAfterMs).toBeGreaterThan(pairShort.notAfterMs)
+    const port = await serve(r.tls)
+    expect(r.tls.status()).toMatchObject({ trusted: true, notAfter: new Date(pairShort.notAfterMs).toISOString() })
+    expect(fp((await handshake(port, { servername: NAME, ca: [tailCa.pem] })).peer)).toBe(pairShort.fingerprint)
+    expect(pickupLines(r.logs, /stored certificate/)).toHaveLength(0)
+    // The check's own re-read takes the longer-lived pair: no CLI call, nothing to report.
+    expect(await r.tls.check()).toMatchObject({ trusted: true, lastError: null, notAfter: new Date(pairA.notAfterMs).toISOString() })
+    expect(r.calls).toHaveLength(2)
+    expect(fp((await handshake(port, { servername: NAME, ca: [tailCa.pem] })).peer)).toBe(pairA.fingerprint)
+  })
+})
+
 describe('the breaker: bounded, backing off, single-flight', () => {
   it('cooldown doubles from SIGNER_TLS_RETRY_BASE_MS to SIGNER_TLS_RETRY_MAX_MS', () => {
     expect(signerTlsRetryMs(1)).toBe(SIGNER_TLS_RETRY_BASE_MS)
@@ -448,6 +595,78 @@ describe('the breaker: bounded, backing off, single-flight', () => {
     const s = await r.tls.check()
     expect(s).toMatchObject({ trusted: true, reason: 'ok', lastError: 'tailscale_cert_failed', host: NAME })
     expect(r.scheduled.at(-1)).toBe(signerTlsRetryMs(1))
+  })
+})
+
+// ── the CLI env (7.0.20): a minimal explicit env with SHLVL=1 on this module's CLI calls only ──
+// probe_tailscale_launchd/RESULT.md: the macsys CLI as a child of the LaunchAgent's node answers "The Tailscale
+// GUI failed to start" with exit 0 unless SHLVL is set. The child must never see this process's env (the API
+// token, provider keys). Children here print ONE variable (printenv), never the whole env, and assertions compare
+// small values, so no value from this process's env can reach a failure message or a mutation report.
+describe('the CLI env (7.0.20): SHLVL=1 in a minimal env, on the signer\'s Tailscale calls only', () => {
+  const GUI_ERROR = 'The Tailscale GUI failed to start. (The operation couldn\'t be completed. (Tailscale.CLIError error 3.))'
+  const ALLOWED = new Set(['HOME', 'PATH', 'TMPDIR', 'USER', 'LANG', 'SHLVL'])
+  const FAKE_TOKEN = 'signer-tls-test-token-not-real'
+  const saved: Record<string, string | undefined> = {}
+  beforeEach(() => {
+    for (const k of ['SHLVL', 'COS_API_TOKEN']) saved[k] = process.env[k]
+    delete process.env.SHLVL
+    process.env.COS_API_TOKEN = FAKE_TOKEN
+  })
+  afterEach(() => {
+    for (const k of ['SHLVL', 'COS_API_TOKEN']) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
+  })
+
+  it('signerTlsCliEnv: SHLVL=1 plus HOME, PATH, TMPDIR, USER and LANG when set; never the token or any other key', () => {
+    const base: NodeJS.ProcessEnv = { HOME: '/h', PATH: '/p', TMPDIR: '/t', USER: 'u', LANG: 'en_US.UTF-8', SHLVL: '5', COS_API_TOKEN: 'x', OPENAI_API_KEY: 'y', NODE_OPTIONS: 'z' }
+    expect(signerTlsCliEnv(base)).toEqual({ HOME: '/h', PATH: '/p', TMPDIR: '/t', USER: 'u', LANG: 'en_US.UTF-8', SHLVL: '1' })
+    expect(signerTlsCliEnv({ HOME: '/h', PATH: '/p', LANG: '' })).toEqual({ HOME: '/h', PATH: '/p', SHLVL: '1' })
+    expect(base.SHLVL).toBe('5')
+    expect(SIGNER_TLS_CLI_ENV_KEYS).toEqual(['HOME', 'PATH', 'TMPDIR', 'USER', 'LANG'])
+    // From this process's env (which holds a token here): only allowed keys, no token.
+    const own = signerTlsCliEnv()
+    expect(Object.keys(own).filter(k => !ALLOWED.has(k)).length).toBe(0)
+    expect('COS_API_TOKEN' in own).toBe(false)
+    expect(own.SHLVL).toBe('1')
+  })
+
+  it('both CLI calls, status and cert, receive that env: SHLVL=1, no COS_API_TOKEN, no key outside the allowlist', async () => {
+    const r = rig()
+    expect((await r.tls.check()).trusted).toBe(true)
+    expect(r.calls.map(c => c.args[0])).toEqual(['status', 'cert'])
+    for (const c of r.calls) {
+      expect({ call: c.args[0], shlvl: c.env?.SHLVL, token: c.env ? 'COS_API_TOKEN' in c.env : 'no env', extra: Object.keys(c.env ?? {}).filter(k => !ALLOWED.has(k)).length })
+        .toEqual({ call: c.args[0], shlvl: '1', token: false, extra: 0 })
+    }
+  })
+
+  it('a real child gets exactly that env: SHLVL=1 and no token; tailscale-nudge\'s runner is unchanged (still no SHLVL)', async () => {
+    const env = signerTlsCliEnv()
+    const shlvl = await signerTlsCliRunner('/usr/bin/printenv', ['SHLVL'], 5_000, env)
+    expect({ code: shlvl.code, out: shlvl.stdout.trim() }).toEqual({ code: 0, out: '1' })
+    const token = await signerTlsCliRunner('/usr/bin/printenv', ['COS_API_TOKEN'], 5_000, env)
+    expect({ code: token.code, empty: token.stdout.trim() === '' }).toEqual({ code: 1, empty: true })
+    const nudge = await execFileRunner('/usr/bin/printenv', ['SHLVL'], 5_000)
+    expect({ code: nudge.code, out: nudge.stdout.trim() }).toEqual({ code: 1, out: '' })
+  })
+
+  it('end to end with a fake CLI that needs SHLVL: the default runner gets the JSON; without SHLVL the answer is reported as tailscale_cli_gui_unavailable', async () => {
+    expect(/\s/.test(process.execPath)).toBe(false)
+    const base = mkdtempSync(join(tmpdir(), 'signer-tls-fakecli-'))
+    dirs.push(base)
+    const bin = join(base, 'Tailscale')
+    writeFileSync(bin, `#!${process.execPath}\nconst a = process.argv.slice(2)\nprocess.stdout.write(a[0] === 'status' && process.env.SHLVL ? ${JSON.stringify(statusJson({ CertDomains: null }))} : ${JSON.stringify(`${GUI_ERROR}\n`)})\n`, { mode: 0o755 })
+    const quiet = { selfDnsName: async () => NAME, resolveBin: () => bin, log: () => {}, schedule: () => ({ cancel: () => {} }) }
+    const viaDefault = new SignerTls({ dir: join(base, 'a'), ...quiet })
+    expect((await viaDefault.check()).reason).toBe('tailnet_https_certs_off')
+    // The nudge's runner: inherits this process's env, which has no SHLVL here.
+    const withoutShlvl = new SignerTls({ dir: join(base, 'b'), ...quiet, runner: (b, args, ms) => execFileRunner(b, args, ms) })
+    expect(await withoutShlvl.check()).toMatchObject({ trusted: false, reason: 'tailscale_cli_gui_unavailable', lastError: 'tailscale_cli_gui_unavailable' })
+    expect(existsSync(join(base, 'a'))).toBe(false)
+    expect(existsSync(join(base, 'b'))).toBe(false)
   })
 })
 

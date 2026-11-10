@@ -23,8 +23,18 @@
 //   - Checks at boot and every SIGNER_TLS_CHECK_INTERVAL_MS (daily); renews when fewer than
 //     SIGNER_TLS_RENEW_BEFORE_MS (30 days) remain. A valid pair with more left calls nothing.
 //   - Each check first re-reads the stored pair: a longer-lived, valid pair for this name written there
-//     by another process (COS Control's helper, say, if the CLI does not answer under this LaunchAgent)
-//     is served from then on, no restart and no CLI call.
+//     by hand or by another process is served from then on, no restart and no CLI call.
+//   - The prompt pickup (7.0.20), the fallback if this server's own fetch fails: a pair written into
+//     the dir by hand (`tailscale cert` in Terminal) or by another process. While nothing trusted
+//     serves, every 3144 handshake and every status read checks the two stored files with `stat` and
+//     re-reads them only when they changed (inode, size, mtime, ctime). So such a pair is served at the
+//     next handshake or status read, with no restart, no CLI call and no write, instead of at the next
+//     check (up to SIGNER_TLS_RETRY_MAX_MS away while failing). While a trusted pair serves, nothing
+//     extra runs. What to write: CONTRACT_stored_pair.md (phone-key build, 2026-11-10).
+//   - Every CLI call gets a minimal explicit env with SHLVL=1 (signerTlsCliEnv, 7.0.20), never this
+//     process's env: without SHLVL the macOS CLI under the LaunchAgent answers "The Tailscale GUI failed
+//     to start" (exit 0) and no certificate is fetched. That answer is reported as
+//     `tailscale_cli_gui_unavailable`.
 //   - Every CLI call has a timeout. Consecutive failures back off SIGNER_TLS_RETRY_BASE_MS doubling
 //     to SIGNER_TLS_RETRY_MAX_MS; no call is made inside the cooldown (the breaker). One check at a
 //     time. Never throws.
@@ -33,7 +43,8 @@
 // NOT HERE: 3143 keeps its single mkcert pair (no SNI selection): Even Hub and every existing client
 // see exactly the certificate they saw before.
 
-import { mkdirSync, chmodSync, existsSync, readFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { mkdirSync, chmodSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { X509Certificate } from 'node:crypto'
 import { createSecureContext, type SecureContext } from 'node:tls'
@@ -41,12 +52,10 @@ import type { ServerOptions as HttpsServerOptions } from 'node:https'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { normalizeTailscaleDnsName } from './network-policy.js'
 import {
-  execFileRunner,
   parseTailscaleStatus,
   resolveTailscaleBin,
   STATUS_ARGS,
   type RunResult,
-  type TailscaleRunner,
 } from './tailscale-nudge.js'
 
 const DAY_MS = 24 * 60 * 60_000
@@ -69,6 +78,60 @@ export const SIGNER_TLS_CERT_MODE = 0o644
 /** Both outputs to stdout ("-"), see the header. The name is a normalised *.ts.net name, never a flag. */
 export const SIGNER_TLS_CERT_ARGS = (name: string): string[] => ['cert', '--cert-file', '-', '--key-file', '-', name]
 
+/** The only variables of this process's env a Tailscale CLI call here may see (each only if set), plus SHLVL. */
+export const SIGNER_TLS_CLI_ENV_KEYS: readonly string[] = Object.freeze(['HOME', 'PATH', 'TMPDIR', 'USER', 'LANG'])
+
+/**
+ * The explicit, minimal env for this module's Tailscale CLI calls (status and cert): HOME, PATH, TMPDIR,
+ * USER and LANG when set, and SHLVL=1. Never this process's env: it carries the .env values (the API token,
+ * provider keys), which the Tailscale child has no need for.
+ *
+ * WHY SHLVL (probe 2026-11-10, operations/personal/wk46_2026/phone_key_build_20261110/
+ * probe_tailscale_launchd/RESULT.md): the macsys Tailscale binary is the GUI app's own executable, and it
+ * decides whether it runs as the CLI from SHLVL. A child of the LaunchAgent's node has none, so it tries to
+ * be the GUI and prints "The Tailscale GUI failed to start (Tailscale.CLIError error 3)" with exit 0 in
+ * 0.04 s; with SHLVL=1 (and only HOME and PATH besides) it answers the JSON in 0.03 s.
+ *
+ * Only this module's calls get it. tailscale-nudge has the same gap and is left unchanged: fixing it changes
+ * behaviour for everyone and needs Miles's go (side finding, COORD 2026-11-10 12:03).
+ */
+export function signerTlsCliEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const key of SIGNER_TLS_CLI_ENV_KEYS) {
+    const value = base[key]
+    if (typeof value === 'string' && value !== '') env[key] = value
+  }
+  env.SHLVL = '1'
+  return env
+}
+
+/** A runner for this module's CLI calls: like tailscale-nudge's TailscaleRunner, plus the env the child gets. */
+export type SignerTlsRunner = (bin: string, args: readonly string[], timeoutMs: number, env: NodeJS.ProcessEnv) => Promise<RunResult>
+
+/**
+ * The default runner: a binary path and an argument array (never a shell), with `env` as the child's whole
+ * env. The result mapping is tailscale-nudge's execFileRunner's, copied so that file stays byte-identical.
+ */
+export const signerTlsCliRunner: SignerTlsRunner = (bin, args, timeoutMs, env) => new Promise(resolve => {
+  const started = Date.now()
+  execFile(bin, [...args], { timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, windowsHide: true, encoding: 'utf8', env },
+    (error, stdout, stderr) => {
+      const err = error as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean; signal?: string }) | null
+      const spawnError = err && typeof err.code === 'string' ? err.code : undefined
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        signal: err?.signal ?? null,
+        killed: !!err?.killed,
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? ''),
+        ...(spawnError ? { spawnError } : {}),
+        elapsedMs: Date.now() - started,
+      })
+    })
+})
+/** What the macOS CLI prints, with exit 0, when it cannot reach the GUI app (no SHLVL; see signerTlsCliEnv). */
+const CLI_GUI_UNAVAILABLE = /Tailscale GUI failed to start|Tailscale\.CLIError error 3\b/i
+
 export type SignerTlsReason =
   | 'ok'
   | 'pending'
@@ -78,6 +141,7 @@ export type SignerTlsReason =
   | 'tailscale_not_running'
   | 'tailscale_cli_missing'
   | 'tailscale_cli_timeout'
+  | 'tailscale_cli_gui_unavailable'
   | 'tailscale_status_failed'
   | 'tailscale_cert_failed'
   | 'cert_invalid'
@@ -113,7 +177,8 @@ export interface SignerTlsDeps {
   dir: string
   /** This Mac's tailnet name (index.ts: tailnetSelf.refresh()). Null: unknown. */
   selfDnsName: () => Promise<string | null>
-  runner?: TailscaleRunner
+  /** Default signerTlsCliRunner. Every call gets signerTlsCliEnv() as the child's env. */
+  runner?: SignerTlsRunner
   resolveBin?: () => string | null
   now?: () => number
   log?: (line: string) => void
@@ -194,7 +259,7 @@ function firstLine(s: string): string {
 
 export class SignerTls {
   private readonly now: () => number
-  private readonly runner: TailscaleRunner
+  private readonly runner: SignerTlsRunner
   private readonly resolveBin: () => string | null
   private readonly log: (line: string) => void
   private readonly schedule: (fn: () => void, ms: number) => Timer
@@ -208,10 +273,12 @@ export class SignerTls {
   private inflight: Promise<SignerTlsStatus> | null = null
   private timer: Timer | null = null
   private stopped = false
+  /** The stored files' `stat` signature the prompt pickup last read (null: never read). */
+  private pickupSeen: string | null = null
 
   constructor(private readonly deps: SignerTlsDeps) {
     this.now = deps.now ?? Date.now
-    this.runner = deps.runner ?? execFileRunner
+    this.runner = deps.runner ?? signerTlsCliRunner
     this.resolveBin = deps.resolveBin ?? (() => resolveTailscaleBin())
     this.log = deps.log ?? (line => console.log(line))
     this.schedule = deps.schedule ?? defaultSchedule
@@ -220,21 +287,66 @@ export class SignerTls {
 
   /** For `https.createServer({ SNICallback })` on 3144. Unmatched: the server's default (mkcert) context. */
   readonly sniCallback = (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void): void => {
+    if (!this.sniMatches(this.current, servername)) this.pickUpStored()
+    // Read again after the pickup: a pair stored just now serves in this same handshake.
     const pair = this.current
-    if (pair && typeof servername === 'string' && servername.toLowerCase() === pair.host && this.now() < pair.notAfterMs) {
+    if (pair && this.sniMatches(pair, servername)) {
       cb(null, pair.context)
       return
     }
     cb(null, undefined)
   }
 
+  private sniMatches(pair: SignerTlsPair | null, servername: string): boolean {
+    return pair !== null && typeof servername === 'string' && servername.toLowerCase() === pair.host && this.now() < pair.notAfterMs
+  }
+
   /** The pair being served, for tests and diagnostics. */
   served(): SignerTlsPair | null { return this.current }
 
+  /** A trusted pair serves: unexpired, and for this Mac's tailnet name once that is known. */
+  private live(at: number): boolean {
+    const pair = this.current
+    return pair !== null && at < pair.notAfterMs && (this.name === null || this.name === pair.host)
+  }
+
+  /**
+   * The prompt pickup (see the header). Only while nothing trusted serves. Two `stat` calls; the files
+   * are read and validated only when their signature changed since the last pickup, so repeated
+   * handshakes or status reads cost no parsing. Scoped to this Mac's name like the check's re-read, and
+   * never a step back (loadStored). Never a CLI call, never a write, never throws.
+   */
+  private pickUpStored(): void {
+    try {
+      if (this.live(this.now())) return
+      const sig = this.storedSignature()
+      if (sig === null || sig === this.pickupSeen) return
+      this.pickupSeen = sig
+      const before = this.current
+      this.loadStored(this.name)
+      const pair = this.current
+      if (pair !== null && pair !== before) this.log(`[signer-tls] serving a stored certificate on 3144 until ${new Date(pair.notAfterMs).toISOString()}`)
+      else this.log('[signer-tls] a stored certificate was not taken: not valid for this Mac\'s tailnet name now (name, expiry or key)')
+    } catch { /* the next handshake, status read or check tries again */ }
+  }
+
+  /** inode, size, mtime and ctime of both stored files; null when either is missing (any other stat error throws to the caller's catch). */
+  private storedSignature(): string | null {
+    const parts: string[] = []
+    for (const file of [SIGNER_TLS_CERT_FILE, SIGNER_TLS_KEY_FILE]) {
+      const st = statSync(join(this.deps.dir, file), { bigint: true, throwIfNoEntry: false })
+      if (!st) return null
+      parts.push(`${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`)
+    }
+    return parts.join('|')
+  }
+
+  /** Also the prompt pickup's second trigger: while nothing trusted serves, a status read looks at the stored files first. */
   status(): SignerTlsStatus {
+    this.pickUpStored()
     const pair = this.current
     const at = this.now()
-    const live = pair !== null && at < pair.notAfterMs && (this.name === null || this.name === pair.host)
+    const live = this.live(at)
     let reason: SignerTlsReason = 'ok'
     if (!live) reason = this.lastError ?? (pair && at >= pair.notAfterMs ? 'cert_expired' : 'pending')
     return {
@@ -314,18 +426,24 @@ export class SignerTls {
     if (this.cooldownUntil !== null && at < this.cooldownUntil) return
     const bin = this.resolveBin()
     if (!bin) { this.fail('tailscale_cli_missing'); return }
+    // The minimal env with SHLVL=1 for both calls (signerTlsCliEnv): never this process's env.
+    const cliEnv = signerTlsCliEnv()
 
-    const st = await this.runner(bin, STATUS_ARGS, SIGNER_TLS_STATUS_TIMEOUT_MS)
+    const st = await this.runner(bin, STATUS_ARGS, SIGNER_TLS_STATUS_TIMEOUT_MS, cliEnv)
     if (st.spawnError) { this.fail('tailscale_cli_missing', `spawn ${st.spawnError}`); return }
     if (st.killed || st.signal) { this.fail('tailscale_cli_timeout', `status killed=${st.killed} signal=${st.signal ?? ''} ${st.elapsedMs}ms`); return }
     const parsed = st.code === 0 ? parseTailscaleStatus(st.stdout, this.now()) : null
-    if (!parsed) { this.fail('tailscale_status_failed', `status code=${st.code} ${firstLine(st.stderr)}`); return }
+    if (!parsed) {
+      // The CLI's "GUI failed to start" answer (exit 0, see signerTlsCliEnv) gets its own reason, so the status names it.
+      this.fail(CLI_GUI_UNAVAILABLE.test(`${st.stdout}\n${st.stderr}`) ? 'tailscale_cli_gui_unavailable' : 'tailscale_status_failed', `status code=${st.code} ${firstLine(st.stderr)}`)
+      return
+    }
     if (parsed.backendState !== 'Running') { this.fail('tailscale_not_running', parsed.backendState); return }
     const domains = parsed.certDomains ?? []
     if (domains.length === 0) { this.fail('tailnet_https_certs_off'); return }
     if (!domains.includes(name)) { this.fail('cert_domain_mismatch'); return }
 
-    const r = await this.runner(bin, SIGNER_TLS_CERT_ARGS(name), SIGNER_TLS_CERT_TIMEOUT_MS)
+    const r = await this.runner(bin, SIGNER_TLS_CERT_ARGS(name), SIGNER_TLS_CERT_TIMEOUT_MS, cliEnv)
     if (r.spawnError || r.killed || r.signal || r.code !== 0) {
       this.fail(classifyCertFailure(r), `cert code=${r.code} killed=${r.killed} signal=${r.signal ?? ''} ${r.elapsedMs}ms ${firstLine(r.stderr)}`)
       return
