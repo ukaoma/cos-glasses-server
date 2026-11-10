@@ -4793,6 +4793,39 @@ describe('X1 contract: the web question block (held, at the Mac, answered)', () 
     expect(el.innerHTML).toContain('Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute.')
     expect(el.innerHTML).toContain('data-sq="send"')
   })
+  // Q1 (D4 card review M2) and the page's api(): a refusal body {error, reason} reaches the pane as an Error whose message is
+  // the error word and whose code is the reason (api() reads `reason` first). These mimic exactly that.
+  const apiErr = (status: number, data: { error: string; reason?: string }) => () =>
+    Promise.reject(Object.assign(new Error(data.error), { status, code: data.reason || data.error }))
+  const outcome = async (fail: () => Promise<unknown>) => {
+    const toasts: string[] = []
+    const q = loadQ(() => ({ enabled: true, items: [{ ...HELD(ID, SID, 'Ship it?'), toolUseId: TU }], settled: [] }), { post: fail })
+    ;(q.W as any).toast = (t: string) => toasts.push(t)
+    await q.start()
+    const el = q.mk(); q.Qs.mount(el, SID)
+    pickFirst(el); tap(el, 'send'); q.later(450); tap(el, 'send')
+    await flush(); await flush()
+    return { toasts, html: el.innerHTML, still: el.innerHTML.includes('data-sq="send"') }
+  }
+  it('answered at the Mac (handed_to_desk, reason retracted): the card goes, and says so in words, never the raw code', async () => {
+    const r = await outcome(apiErr(409, { error: 'handed_to_desk', reason: 'retracted' }))
+    expect(r.toasts).toEqual(['Already answered at the Mac, or the session moved on.'])
+    expect(r.still).toBe(false)
+    expect(r.html).not.toContain('handed_to_desk')
+  })
+  it('the other outcomes: another device, left for the Mac (handed_to_desk, drained), timed out, no longer waiting', async () => {
+    expect((await outcome(apiErr(409, { error: 'already_answered' }))).toasts).toEqual(['Already answered on another device.'])
+    expect((await outcome(apiErr(409, { error: 'handed_to_desk', reason: 'handed_to_desk' }))).toasts).toEqual(['Left for the Mac. Answer it there.'])
+    expect((await outcome(apiErr(409, { error: 'handed_to_desk', reason: 'drained' }))).toasts).toEqual(['Left for the Mac. Answer it there.'])
+    expect((await outcome(apiErr(409, { error: 'expired' }))).toasts).toEqual(['This question timed out here. Answer it at the Mac.'])
+    expect((await outcome(apiErr(410, { error: 'hook_gone' }))).toasts).toEqual(['This question is no longer waiting.'])
+  })
+  it('an invalid answer with a reason keeps the card with the plain line, not "invalid_answer"', async () => {
+    const r = await outcome(apiErr(400, { error: 'invalid_answer', reason: 'client_answer_id' }))
+    expect(r.still).toBe(true)
+    expect(r.html).toContain('That answer was not accepted. Check each question has a choice.')
+    expect(r.html).not.toContain('client_answer_id')
+  })
   it('a stale touch is refused: the card stays, and says to tap the page and answer again', async () => {
     const stale = () => Promise.reject(Object.assign(new Error('touch'), { status: 403, code: 'web_touch_required' }))
     const q = loadQ(() => ({ enabled: true, items: [{ ...HELD(ID, SID, 'Ship it?'), toolUseId: TU, fullHold: true }], settled: [] }), { post: stale })
