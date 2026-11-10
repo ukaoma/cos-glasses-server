@@ -627,7 +627,23 @@
   function closeMenu() { $('section-menu').classList.add('hidden'); }
 
   // ── auth ────────────────────────────────────────────────
+  // 7.0.19: the first paint (index.html #first-paint) ends the moment the sign-in card or the app shows, whichever
+  // comes first, once. One layout report says how long it took, in the phone's own numbers: ms from navigation start to
+  // the browser's first contentful paint (-1 when none was recorded before this point) and to this moment.
+  var FIRST_PAINT = { done: false };
+  function firstPaintDone(via) {
+    if (FIRST_PAINT.done) return false;
+    FIRST_PAINT.done = true;
+    document.documentElement.classList.remove('fp-wait');
+    try {
+      var perf = window.performance, fcp = perf && perf.getEntriesByName ? perf.getEntriesByName('first-contentful-paint')[0] : null;
+      var shown = perf && perf.now ? Math.round(perf.now()) : -1;
+      if (typeof layoutCrumb === 'function') layoutCrumb('open-time', { fcp: fcp ? Math.round(fcp.startTime) : -1, shown: shown, via: via });
+    } catch (_e) { /* timing is a report only */ }
+    return true;
+  }
   function showAuth(message) {
+    if (typeof firstPaintDone === 'function') firstPaintDone('auth');   // harnesses that run this alone have none
     readerImagesStop($('session-turns')); readerImagesStop($('ta-last'));
     if (typeof liveHide === 'function') { liveHide(); liveStopWatch(); LIVE.mode = 'idle'; }
     var alreadyOpen = !$('auth-gate').classList.contains('hidden');
@@ -643,6 +659,7 @@
   }
   function signedInOnce() { var shell = typeof $ === 'function' ? $('app-shell') : null; return !!(shell && !shell.classList.contains('hidden')) || CONN.lapsed; }
   function showShell(info) {
+    if (typeof firstPaintDone === 'function') firstPaintDone('shell');   // harnesses that run this alone have none
     if (typeof signinRemember === 'function') signinRemember(info);
     if (typeof authOffline === 'function') authOffline(false);
     $('auth-gate').classList.add('hidden');

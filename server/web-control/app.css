@@ -106,6 +106,15 @@ a { color: var(--accent); }
 svg.icon { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ── Sign in ─────────────────────────────────────────────── */
+/* 7.0.19 first paint: the mark on the page's background until the sign-in card or the app shows (index.html #first-paint).
+   Fixed, so it is out of the layout and nothing shifts when it goes. Only while theme.js has run (html.fp-wait), so it
+   never shows with JavaScript off. The failsafe hides it after 25 s, longer than the 20 s sign-in check, so it ends the
+   wait only when the scripts never ran; reduced motion shortens durations, not this delay. */
+.first-paint { display: none; }
+html.fp-wait .first-paint { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; background: var(--page); color: var(--ink); pointer-events: none; animation: fp-failsafe 1ms linear 25s forwards; }
+.first-paint .mark { width: 44px; height: 44px; }
+@keyframes fp-failsafe { to { visibility: hidden; } }
+.noscript-note { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px var(--gutter); font-size: 17px; color: var(--ink); text-align: center; }
 .auth-gate { min-height: 100dvh; display: grid; place-items: center; padding: calc(var(--safe-top) + 24px) var(--gutter) calc(var(--safe-bottom) + 24px); }
 .auth-card { width: 100%; max-width: 420px; }
 .auth-card .mark { width: 44px; height: 44px; margin-bottom: 22px; }
