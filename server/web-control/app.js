@@ -6963,18 +6963,21 @@
         .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'); });
       return;
     }
-    bootStatus();
+    // The status read stays here in boot() itself (routes/web-phone-link.test.ts runs boot alone and pins it).
+    api('/api/web-session/status').then(function (st) { return bootAnswer(st); }, function (err) { return bootFail(err); });
   }
-  // The status read on a cold open and on every retry of the not-answering card.
+  // The same read on every retry of the not-answering card.
   function bootStatus() {
-    return api('/api/web-session/status').then(function (st) {
-      if (st && st.authenticated) return showShell(st);
-      // Q1 S2: a browser that was signed in before learns why it is not now (the 30 days, a week unused, a sign-out).
-      showAuth(typeof signinKnown === 'function' && signinKnown() ? signinLapsedCopy() : undefined);
-    }).catch(function (err) {
-      // F23: a Mac that did not answer is not a sign-in problem. Say so, offer Try again, keep the form out of the way.
-      if (err && err.status) showAuth(err.message); else { showAuth(); authOffline(true); }
-    });
+    return api('/api/web-session/status').then(function (st) { return bootAnswer(st); }, function (err) { return bootFail(err); });
+  }
+  function bootAnswer(st) {
+    if (st && st.authenticated) return showShell(st);
+    // Q1 S2: a browser that was signed in before learns why it is not now (the 30 days, a week unused, a sign-out).
+    showAuth(typeof signinKnown === 'function' && signinKnown() ? signinLapsedCopy() : undefined);
+  }
+  function bootFail(err) {
+    // F23: a Mac that did not answer is not a sign-in problem. Say so, offer Try again, keep the form out of the way.
+    if (err && err.status) showAuth(err.message); else { showAuth(); authOffline(true); }
   }
   // Q1 M2: the not-answering card checks again every 30 s while the page is in front, and stops while it is hidden.
   var AUTH_RETRY = { timer: null, ms: 30000 };
