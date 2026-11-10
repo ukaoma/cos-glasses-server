@@ -114,7 +114,8 @@ describe('a failed sign-in link no longer counts toward the per-device lockout; 
     const c = clock(Date.now()), store = new WebHandoffStore(c.now), limiter = new WebLoginLimiter()
     await withLoginL(store, limiter, async port => {
       for (let i = 0; i < 10; i++) {
-        const used = store.mint().ticket; await login(port, { handoff: used })
+        // Used up in the store, not by a sign-in here: a successful sign-in resets the count and would hide a regression.
+        const used = store.mint().ticket; store.consume(used)
         expect((await login(port, { handoff: used })).status, 'used').toBe(401)
         const old = store.mint().ticket; c.add(WEB_HANDOFF_TTL_MS + 1)
         expect((await login(port, { handoff: old })).status, 'expired').toBe(401)
@@ -123,7 +124,7 @@ describe('a failed sign-in link no longer counts toward the per-device lockout; 
         expect((await login(port, { handoff: evicted })).status, 'evicted').toBe(401)
         expect((await login(port, { handoff: 'B'.repeat(32) })).status, 'unknown').toBe(401)
       }
-      expect(limiter.blockedFor('127.0.0.1')).toBe(0)
+      expect(limiter.blockedFor('127.0.0.1'), '40 failed links in a row, no success between them').toBe(0)
       expect((await login(port, { token: TOKEN })).status).toBe(200)
     })
   })
