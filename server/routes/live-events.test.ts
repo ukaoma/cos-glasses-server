@@ -4,7 +4,8 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import express from 'express'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { requireApiToken } from '../lib/api-auth.js'
+import { requireApiToken, streamSignInHolds, WEB_SESSION_RECHECK_LOCAL } from '../lib/api-auth.js'
+import { bumpWebSessionEpoch, mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
 import { LiveEventsHub, type LiveSessionReading, type LiveSources } from '../lib/live-events.js'
 import { createLiveEventsRouter, frameText, liveEventsEnabled, liveEventsHandler, liveReadings, readingFor, realLiveSources, type LiveEventsRouterDeps } from './live-events.js'
 import { readClaudePeerRecords } from './claude-sessions.js'
@@ -432,5 +433,58 @@ describe('readingFor (the same derivation as the list rows)', () => {
     const peer = { sessionId: SID, alive: true, status: 'busy', statusUpdatedAt: T0, startedAt: T0 - 5_000, waitingFor: null, lastActiveAt: T0 } as unknown as ClaudePeerRecord
     expect(readingFor('claude', SID, peer, undefined, T0 + 1_000)).toMatchObject({ state: 'working', source: 'registry', turnStartedAt: T0, startedAt: T0 - 5_000 })
     expect(readingFor('claude', SID, { ...peer, status: 'idle' } as ClaudePeerRecord, undefined, T0 + 1_000).state).toBe('idle')
+  })
+})
+
+// ── Final review S1 (lead 2026-11-10 02:09): an open stream no longer outlives the browser sign-in that opened it ──
+describe('GET /api/events re-checks a browser sign-in on every heartbeat (final review S1)', () => {
+  const cookie = () => ({ Cookie: `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue(TOKEN).value}` })
+  const endsWithin = (r: Opened, ms: number) => Promise.race([r.ended.then(() => true), new Promise<boolean>(res => setTimeout(() => res(false), ms))])
+
+  it('"Sign out every browser" ends an open cookie stream within one heartbeat', async () => {
+    const hub = hubOver(fakeSources([]).sources, { tickMs: 60_000 })
+    const url = await start({ hub, heartbeatMs: 40 })
+    const r = await open(`${url}/api/events`, cookie())
+    expect(r.status).toBe(200)
+    await r.waitFor(d => d.kind === 'heartbeat', 1_000)
+    bumpWebSessionEpoch()
+    expect(await endsWithin(r, 500), 'closed by the next heartbeat').toBe(true)
+  })
+  it('a stream the API token opened is untouched by the same sign-out', async () => {
+    const hub = hubOver(fakeSources([]).sources, { tickMs: 60_000 })
+    const url = await start({ hub, heartbeatMs: 40 })
+    const r = await open(`${url}/api/events`)
+    await r.waitFor(d => d.kind === 'heartbeat', 1_000)
+    bumpWebSessionEpoch()
+    const before = r.frames.length
+    await new Promise(res => setTimeout(res, 200))
+    expect(r.frames.filter(f => f.data.kind === 'heartbeat').length, 'heartbeats keep coming').toBeGreaterThan(0)
+    expect(r.frames.length).toBeGreaterThan(before)
+    expect(await endsWithin(r, 50)).toBe(false)
+    r.close()
+  })
+  it('a cookie that expires while its stream is open: the stream ends at the next heartbeat (checked at that time, not at open)', async () => {
+    const hub = hubOver(fakeSources([]).sources, { tickMs: 60_000 })
+    const url = await start({ hub, heartbeatMs: 40 })
+    const short = mintWebSessionCookieValue(TOKEN, Date.now(), 1_500)
+    const r = await open(`${url}/api/events`, { Cookie: `${WEB_SESSION_COOKIE_NAME}=${short.value}` })
+    expect(r.status).toBe(200)
+    expect(await endsWithin(r, Math.max(0, short.expiresAtMs - Date.now()) + 600), 'closed once the cookie expired').toBe(true)
+  }, 5_000)
+  it('streamSignInHolds: no re-check (the token door, or no gate) holds; a re-check that throws does not', () => {
+    expect(streamSignInHolds({})).toBe(true)
+    expect(streamSignInHolds({ locals: {} })).toBe(true)
+    expect(streamSignInHolds({ locals: { [WEB_SESSION_RECHECK_LOCAL]: () => true } })).toBe(true)
+    expect(streamSignInHolds({ locals: { [WEB_SESSION_RECHECK_LOCAL]: () => false } })).toBe(false)
+    expect(streamSignInHolds({ locals: { [WEB_SESSION_RECHECK_LOCAL]: () => { throw new Error('x') } } })).toBe(false)
+  })
+  it('a cookie stream whose sign-in still verifies stays open across heartbeats', async () => {
+    const hub = hubOver(fakeSources([]).sources, { tickMs: 60_000 })
+    const url = await start({ hub, heartbeatMs: 40 })
+    const r = await open(`${url}/api/events`, cookie())
+    await new Promise(res => setTimeout(res, 250))
+    expect(r.frames.filter(f => f.data.kind === 'heartbeat').length).toBeGreaterThanOrEqual(3)
+    expect(await endsWithin(r, 50)).toBe(false)
+    r.close()
   })
 })

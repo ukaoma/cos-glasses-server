@@ -59,6 +59,7 @@
 // never be mistaken for a user's explicit opt-out. Off answers 503 and the client
 // polls, which is the same code path as a server too old to have this route at all.
 
+import { streamSignInHolds } from '../lib/api-auth.js'
 import { redactLocalPaths } from '../lib/local-path-redact.js'
 import { Router, type Response } from 'express'
 import { stat } from 'node:fs/promises'
@@ -363,6 +364,12 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
     // its own poll is already written and tested, and a socket that stays "live" while
     // producing nothing is worse than no socket at all.
     if (transcriptWatcherDegraded(key)) {
+      teardown()
+      return
+    }
+    // Final review S1: a stream opened by a browser sign-in ends once that sign-in no longer verifies (signed out
+    // everywhere, expired, past the 30-day cap). A token stream never re-checks.
+    if (!streamSignInHolds(res)) {
       teardown()
       return
     }

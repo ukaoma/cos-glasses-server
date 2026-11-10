@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express'
 import { timingSafeTokenEqual } from './token-auth.js'
 import { PAIRING_NONCE_BODY } from './glasses-pairing.js'
-import { formatSetWebSessionCookie, isWebSessionAuthorized, renewWebSessionCookieValue, webSessionCookieFrom } from './web-session-auth.js'
+import { formatSetWebSessionCookie, isWebSessionAuthorized, renewWebSessionCookieValue, verifyWebSessionCookieValue, webSessionCookieFrom } from './web-session-auth.js'
 
 // Recovery/setup clients need these availability surfaces before they have a
 // usable token. Keep private provider state and every mutation route out.
@@ -50,6 +50,25 @@ export const WEB_SESSION_RENEWED_HEADER = 'X-COS-Web-Session'
 /** `res.locals` key the gate sets to `'token'` when the X-COS-Token header matched. */
 export const API_AUTH_BY_LOCAL = 'cosApiAuthBy'
 
+/**
+ * Final review S1 (lead 2026-11-10 02:09): `res.locals` key the gate sets ONLY for a request it let in by the browser's
+ * sign-in cookie: a check that the same cookie still verifies now (its expiry, the epoch "Sign out every browser" bumps,
+ * the 30-day cap). A stream that outlives its opening request calls it on every heartbeat (`streamSignInHolds`).
+ */
+export const WEB_SESSION_RECHECK_LOCAL = 'cosWebSessionRecheck'
+
+/**
+ * For a long-lived stream, on each heartbeat: false once the browser sign-in that opened it no longer verifies, so the
+ * stream tears down. A request the API token let in has no re-check and always holds, as does one that never passed
+ * the gate (a route mounted without it in a test). The browser reconnects with whatever cookie it holds now; a renewed
+ * one verifies there.
+ */
+export function streamSignInHolds(res: { locals?: Record<string, unknown> }): boolean {
+  const recheck = res.locals?.[WEB_SESSION_RECHECK_LOCAL]
+  if (typeof recheck !== 'function') return true
+  try { return recheck() === true } catch { return false }
+}
+
 export function isPublicApiRequest(method: string, path: string): boolean {
   if (PUBLIC_API_PATHS.has(path)) return true
   if (method === 'POST' && path === '/pairing/claim') return true
@@ -95,6 +114,9 @@ export function requireApiToken(apiToken: string, options: RequireApiTokenOption
       allowedPorts: options.allowedPorts?.(),
     })
     if (cookieAuth) {
+      // Final review S1: the cookie this request came in with, checked again by any stream it opens (above).
+      const opened = webSessionCookieFrom(req.headers.cookie)
+      res.locals[WEB_SESSION_RECHECK_LOCAL] = (): boolean => verifyWebSessionCookieValue(opened, apiToken, Date.now())
       // 7.0.x (Miles 2026-11-09, "Renew while in use, 30-day cap"): only here, after the socket, cookie, CSRF and Origin
       // checks above all passed, a cookie in its last 2 days gets a fresh one, never past 30 days from its first sign-in.
       // Appended, so a route's own Set-Cookie (none today on gated routes) is never overwritten. A renewal that cannot

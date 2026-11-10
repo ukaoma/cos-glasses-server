@@ -14,8 +14,10 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, afterAll } from 'vitest'
-import { agentSessionStreamRouter, cursorReplayable, parseAfterCursor } from './agent-session-stream.js'
+import { afterEach, beforeEach, describe, expect, it, afterAll, vi } from 'vitest'
+import http from 'node:http'
+import { WEB_SESSION_RECHECK_LOCAL } from '../lib/api-auth.js'
+import { agentSessionStreamRouter, cursorReplayable, HEARTBEAT_INTERVAL_MS, parseAfterCursor } from './agent-session-stream.js'
 import { __resetSessionStreamBusForTests, beginAttachedTurn, publishSessionStream, RING_EPOCH, sessionStreamKey } from '../lib/session-stream-bus.js'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
@@ -117,13 +119,46 @@ describe('GET /api/agent-sessions/claude/:id/stream (6.48.1)', () => {
     __resetSessionStreamBusForTests()
   })
 
-  async function start(): Promise<string> {
+  async function start(pre?: express.RequestHandler): Promise<string> {
     const app = express()
+    if (pre) app.use('/api', pre)
     app.use('/api', agentSessionStreamRouter)
     const server = await new Promise<ReturnType<typeof app.listen>>(r => { const l = app.listen(0, '127.0.0.1', () => r(l)) })
     closers.push(() => new Promise<void>((res, rej) => server.close(e => e ? rej(e) : res())))
     return `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/agent-sessions/claude/${SID}/stream`
   }
+
+  // Final review S1 (lead 2026-11-10 02:09): the /api gate stores a sign-in re-check for a cookie-admitted request
+  // (lib/api-auth.ts); this middleware stands in for it so the heartbeat guard can be driven alone.
+  it('final review S1: a browser-opened stream ends at the next heartbeat once its sign-in fails; a token stream stays', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const holds = { ok: true }
+      const url = await start((req, res, next) => { if (req.headers['x-test-cookie']) res.locals[WEB_SESSION_RECHECK_LOCAL] = () => holds.ok; next() })
+      const opened = (headers: Record<string, string>) => new Promise<{ ended: Promise<boolean>; first: Promise<void>; close(): void }>((resolve, reject) => {
+        const req = http.get(url, { headers }, res => {
+          let firstDone!: () => void
+          const first = new Promise<void>(r => { firstDone = r })
+          let endDone!: (v: boolean) => void
+          const ended = new Promise<boolean>(r => { endDone = r })
+          res.on('data', () => firstDone())
+          res.on('end', () => endDone(true)); res.on('close', () => endDone(true))
+          resolve({ ended, first, close: () => req.destroy() })
+        })
+        req.on('error', reject)
+      })
+      const within = (p: Promise<boolean>, ms: number) => Promise.race([p, new Promise<boolean>(r => setTimeout(() => r(false), ms))])
+      const browser = await opened({ 'x-test-cookie': '1' }), token = await opened({})
+      await browser.first; await token.first
+      vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS)
+      expect(await within(browser.ended, 150), 'still signed in: stays open').toBe(false)
+      holds.ok = false
+      vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS)
+      expect(await within(browser.ended, 1_000), 'signed out: closed by the next heartbeat').toBe(true)
+      expect(await within(token.ended, 150), 'a token stream never re-checks').toBe(false)
+      token.close()
+    } finally { vi.useRealTimers() }
+  })
 
   it('stamps the derived state on the opening status, seeds the newest prompt, and the shipped parser sees no gap', async () => {
     sessionSignalStore.apply(env(T0 + 1_000, 'SessionStart', { source: 'startup' }))

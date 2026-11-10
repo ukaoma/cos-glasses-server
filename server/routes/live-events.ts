@@ -15,6 +15,7 @@
 // SWITCH: COS_WEB_LIVE_EVENTS. Absent means on. `0` registers no route at all (404), which is also what a client
 // sees from a server older than 7.0.1, so both take the same polling path.
 
+import { streamSignInHolds } from '../lib/api-auth.js'
 import { Router, type Request, type Response } from 'express'
 import { readSwitch } from '../lib/env-switch.js'
 import {
@@ -323,7 +324,11 @@ export function liveEventsHandler(deps: LiveEventsRouterDeps): (req: Request, re
     // or its interval would outlive the stream (review N1).
     if (closed) return
 
-    heartbeat = setInterval(() => write(deps.hub.heartbeatFrame()), heartbeatMs)
+    // Final review S1: each heartbeat first asks whether the browser sign-in that opened the stream still verifies.
+    heartbeat = setInterval(() => {
+      if (!streamSignInHolds(res)) { teardown('signed_out'); return }
+      write(deps.hub.heartbeatFrame())
+    }, heartbeatMs)
     ;(heartbeat as { unref?: () => void }).unref?.()
   }
 }

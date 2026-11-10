@@ -1,3 +1,4 @@
+import { streamSignInHolds } from '../lib/api-auth.js'
 import { Router, type Request, type Response } from 'express'
 import { durableQueryJobsEnabled, messagesSteerEnabled } from '../lib/query-job-feature.js'
 import { ACTIVE_QUERY_JOBS_LIST_MAX, ACTIVE_QUERY_JOBS_PROTOCOL } from '../lib/query-job-active.js'
@@ -429,6 +430,8 @@ export function createQueryJobsRouter(
       if (closed) return
 
       heartbeat = setInterval(() => {
+        // Final review S1: a stream opened by a browser sign-in ends once that sign-in no longer verifies.
+        if (!streamSignInHolds(res)) { finish(); return }
         if (!closed && !res.writableEnded) res.write(': keepalive\n\n')
       }, heartbeatMs)
       heartbeat.unref?.()
