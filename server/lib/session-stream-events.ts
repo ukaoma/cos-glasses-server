@@ -1453,6 +1453,8 @@ export interface DerivedStatusFields {
   state_since: string
   waiting_kind?: string
   waiting_detail?: string
+  waiting_source?: 'turn_end'
+  waiting_choices?: string[]
   failure?: string
   last_reply?: string
 }
@@ -1464,8 +1466,11 @@ export function statusDraftWithDerived(
   derived: DerivedStatusFields | undefined,
 ): StatusDraftWithDerived {
   if (!derived) return draft
+  // 7.0.18 (X1): a turn that ended by asking is finished work, so feeds and pet counts read it idle;
+  // its row fields still say what it asked.
   const state: SessionStreamState =
-    derived.agent_state === 'running' || derived.agent_state === 'waiting' ? 'working'
+    derived.agent_state === 'waiting' && derived.waiting_source === 'turn_end' ? 'idle'
+    : derived.agent_state === 'running' || derived.agent_state === 'waiting' ? 'working'
     : derived.agent_state === 'ended' ? 'done'
     : 'idle'
   return {
@@ -1478,6 +1483,7 @@ export function statusDraftWithDerived(
     state_since: derived.state_since,
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
+    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])] } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(state === 'idle' && derived.last_reply ? { last_reply: derived.last_reply } : {}),
   }

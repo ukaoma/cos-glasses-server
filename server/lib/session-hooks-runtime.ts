@@ -21,6 +21,9 @@ import { HALT_MARKER_TTL_MS, HALT_REARM_UNVERIFIED_MS, clearHaltMarkerOnSessionE
 import { cancelVoidsOpenTurn, threadCancel } from './session-cancel.js'
 import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatus, type HookStatus } from './claude-hooks-installer.js'
 import { codexHooksHealthField, cursorObserverHealthField, type CodexHooksHealth, type CursorObserverHealth } from './provider-observe.js'
+import { readHidIdleSeconds } from './permission-broker.js'
+import { waitingQuestionWordsEnabled } from './full-hold.js'
+import { TurnEndAskTracker, turnEndAsksEnabled, type TurnEndAskCounters } from './turn-end-ask.js'
 
 export function sessionHooksEnabled(): boolean {
   const raw = process.env.COS_SESSION_HOOKS
@@ -256,6 +259,8 @@ export function haltHandedOffTurn(sessionId: string, marker: HaltMarker, turn: {
 let ledger: SessionHookLedger | null = null
 let ingester: SpoolIngester | null = null
 let replayed: { rows: number; applied: number } | null = null
+/** 7.0.18 (X1): the turn-end ask tracker, only while COS_TURN_END_ASKS is on (read once at startup). */
+let turnEndAskTracker: TurnEndAskTracker | null = null
 /** The two-scan memory: consecutive dead observations and when the first one was. */
 const deadById = new Map<string, { scans: number; since: number | null; at: number }>()
 const DEAD_MEMORY_MS = 60 * 60_000
@@ -271,6 +276,18 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   ledger = new SessionHookLedger(dataPath('session-hook-events.jsonl'))
   const enabled = sessionHooksEnabled()
   const since = Date.now() - LEDGER_REPLAY_WINDOW_MS
+  // 7.0.18 (X1): subscribed BEFORE the replay, so an ask asked before a restart is still known after it.
+  // Off (COS_TURN_END_ASKS=0): no tracker, no subscription, no desk reads, every row 7.0.17's.
+  turnEndAskTracker?.stop()
+  turnEndAskTracker = enabled && turnEndAsksEnabled() ? new TurnEndAskTracker({
+    now: () => Date.now(),
+    enabled: () => true,
+    words: () => waitingQuestionWordsEnabled(process.env),
+    readDeskIdleSeconds: readHidIdleSeconds,
+    deskIdleSeconds,
+  }) : null
+  const tracker = turnEndAskTracker
+  const unsubscribeTurnAsk = tracker ? sessionSignalStore.subscribe((signal, env, child) => tracker.observe(env, child, signal)) : () => {}
   const replay = ledger.replay(since, (env, _key, child, entrypoint) => {
     if (!enabled) return
     sessionSignalStore.apply(env, child)
@@ -321,6 +338,8 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
     stop() {
       clearInterval(pruneTimer)
       unsubscribeHalt()
+      unsubscribeTurnAsk()
+      tracker?.stop()
       ingester?.stop()
     },
   }
@@ -472,8 +491,10 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
     prevDeadScans: prev?.scans ?? 0,
     prevDeadSince: prev?.since ?? null,
     attachedTurn: input.attachedTurn === true,
+    ...(turnEndAskTracker ? { turnEndAsk: turnEndAskTracker.visibleAsk(key, now) } : {}),
   })
   if (derived.agent_state === 'ended') {
+    turnEndAskTracker?.sessionRowEnded(key)
     for (const listener of rowEndedListeners) {
       try { listener(key) } catch { /* a listener never breaks a row */ }
     }
@@ -489,7 +510,20 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
   return derived
 }
 
+/** 7.0.18 (X1): the turn-end ask counters for the authenticated stats, or null with the switch off. */
+export function turnEndAskStats(): (TurnEndAskCounters & { tracked: number }) | null {
+  return turnEndAskTracker ? turnEndAskTracker.stats() : null
+}
+
+/** Tests only: the tracker the runtime would build, installed directly. */
+export function __setTurnEndAskTrackerForTests(tracker: TurnEndAskTracker | null): void {
+  turnEndAskTracker?.stop()
+  turnEndAskTracker = tracker
+}
+
 export function __resetSessionHooksForTests(): void {
+  turnEndAskTracker?.stop()
+  turnEndAskTracker = null
   rowEndedListeners.clear()
   sessionSignalStore.__resetForTests()
   deadById.clear()

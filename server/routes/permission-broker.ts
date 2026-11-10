@@ -50,6 +50,7 @@
 
 import express, { Router, type NextFunction, type Request, type Response } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
+import { turnEndAskStats } from '../lib/session-hooks-runtime.js'
 import {
   ANSWERING_CLIENTS,
   CLIENT_LIVE_WINDOW_MS,
@@ -162,6 +163,8 @@ export interface SessionQuestionsRouterDeps {
    * rules: `isWebSessionAuthorized` in production). Absent: only the token opens the list, as before.
    */
   webSessionAuthorized?: (req: Request) => boolean
+  /** 7.0.18 (X1): the turn-end ask counters (lib/turn-end-ask.ts), null while COS_TURN_END_ASKS is off. Defaults to the runtime's. */
+  turnEndAskStats?: () => Record<string, number> | null
   /** Where a counted poll is recorded; `noteQuestionsPoll` in production. */
   notePoll?: (at: number, poll: QuestionsPollFacts) => void
   /** 6.99.26: where COS Control Web's presence is recorded; `noteWebPresence` in production. */
@@ -271,6 +274,12 @@ export function requestFromThisMac(
   return own.some(a => normalizeRemoteIp(String(a)).toLowerCase() === ip)
 }
 
+function turnEndAskCounters(deps: SessionQuestionsRouterDeps): { turnEndAsks?: Record<string, number> } {
+  let counters: Record<string, number> | null = null
+  try { counters = (deps.turnEndAskStats ?? turnEndAskStats)() } catch { counters = null }
+  return counters ? { turnEndAsks: counters } : {}
+}
+
 export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): Router {
   const router = Router()
   const notePoll = deps.notePoll ?? noteQuestionsPoll
@@ -329,6 +338,9 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       // Mac, or just answered), with its words while it waits, and what a web page must send with an answer right now.
       // With both off the response is 7.0.13's, key for key.
       ...(deps.broker.extendedQuestionsView() ? { waiting: deps.broker.waitingList(), webAnswer: deps.broker.webAnswerRules() } : {}),
+      // 7.0.18 (X1), additive and only while COS_TURN_END_ASKS is on: how many turn-end asks armed, were shown,
+      // were answered, were overtaken by a new turn, or aged out. Counts only, never words.
+      ...turnEndAskCounters(deps),
     })
   })
   router.post('/session-questions/:id/answer', (req: Request, res: Response) => {

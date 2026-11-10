@@ -154,6 +154,7 @@
     "!server/scripts/web-key-signer-mutation-gate.mjs",
     "!server/scripts/compact-session-log.ts",
     "!server/scripts/full-hold-mutation-gate.mjs",
+    "!server/scripts/turn-end-ask-mutation-gate.mjs",
     "docs/web-key-verifier-contract.md"
   ],
   "author": "COS Contributors",

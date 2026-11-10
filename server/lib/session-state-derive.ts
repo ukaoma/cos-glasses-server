@@ -23,6 +23,7 @@
 // `running|recent` and Control renders anything else as "Running" (validation round 1).
 
 import type { SessionSignal, WaitingKind } from './session-signal-store.js'
+import { TURN_ASK_BUSY_GRACE_MS, type VisibleTurnAsk } from './turn-end-ask.js'
 
 export type AgentState = 'running' | 'waiting' | 'idle' | 'failed' | 'ended'
 export type StateSource = 'hook' | 'registry' | 'transcript'
@@ -40,6 +41,10 @@ export interface DerivedSessionState {
   pending_permission_id?: string
   /** 6.52.0: the permission broker holds this AskUserQuestion; `GET /api/session-questions` has it. */
   pending_question_id?: string
+  /** 7.0.18 (X1): 'turn_end' when the wait is a turn that ended by asking (lib/turn-end-ask.ts). */
+  waiting_source?: 'turn_end'
+  /** 7.0.18 (X1): with `waiting_source`, the reply-button labels (0 to 2; [] with the words switch off). */
+  waiting_choices?: string[]
   /** Consecutive derives that saw a dead registry pid; carried by the caller between polls. */
   deadScans: number
   /** When the pid was first seen dead, so two observations must also be DEAD_GRACE_MS apart. */
@@ -79,6 +84,12 @@ export interface DeriveInput {
   prevDeadScans?: number
   /** The previous derive's `deadSince`. */
   prevDeadSince?: number | null
+  /**
+   * 7.0.18 (X1): the turn-end ask the tracker shows now (stopped, desk latch passed, not aged out), or
+   * undefined. It only ever turns an IDLE verdict into waiting; it never overrides running, a real wait,
+   * failed or ended. Undefined whenever COS_TURN_END_ASKS is off, so every row is 7.0.17's.
+   */
+  turnEndAsk?: VisibleTurnAsk | null
 }
 
 /** Harness `MISS_LIMIT`: a pid must be dead on two consecutive scans before a row ends. */
@@ -101,6 +112,27 @@ export const OPEN_TURN_CEILING_MS = 30 * 60_000
 const iso = (ms: number) => new Date(ms).toISOString()
 
 export function deriveSessionState(input: DeriveInput): DerivedSessionState {
+  const base = deriveBaseState(input)
+  const ask = input.turnEndAsk
+  if (!ask || base.agent_state !== 'idle') return base
+  const { signal, registry } = input
+  // A print run never shows one (the broker's own rule; the tracker never arms one either).
+  if (signal?.entrypoint === 'sdk-cli') return base
+  // The registry running again after the stop is a new turn, even before its hooks arrive.
+  if (registry?.alive && registry.status === 'busy' && registry.statusUpdatedAt !== null && registry.statusUpdatedAt > ask.stoppedAt + TURN_ASK_BUSY_GRACE_MS) return base
+  return {
+    ...base,
+    agent_state: 'waiting',
+    state_source: 'hook',
+    state_since: iso(ask.stoppedAt),
+    waiting_kind: 'question',
+    waiting_detail: ask.ask,
+    waiting_source: 'turn_end',
+    waiting_choices: [...ask.choices],
+  }
+}
+
+function deriveBaseState(input: DeriveInput): DerivedSessionState {
   const { signal, registry, transcript, now } = input
   const prevDead = input.prevDeadScans ?? 0
   const dead = !!registry && !registry.alive
@@ -228,6 +260,8 @@ export function derivedStatusFields(derived: DerivedSessionState): {
   state_since: string
   waiting_kind?: WaitingKind
   waiting_detail?: string
+  waiting_source?: 'turn_end'
+  waiting_choices?: string[]
   failure?: string
   last_reply?: string
 } {
@@ -237,6 +271,7 @@ export function derivedStatusFields(derived: DerivedSessionState): {
     state_since: derived.state_since,
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
+    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])] } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(derived.agent_state === 'idle' && derived.last_reply ? { last_reply: derived.last_reply } : {}),
   }
@@ -251,6 +286,7 @@ export function derivedRowFields(derived: DerivedSessionState | undefined): Reco
     state_since: derived.state_since,
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
+    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])] } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(derived.last_reply ? { last_reply: derived.last_reply } : {}),
     ...(derived.pending_permission_id ? { pending_permission_id: derived.pending_permission_id } : {}),
