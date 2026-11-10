@@ -507,6 +507,10 @@ describe('whereFor: the Mac line only for a question or approval, words from the
     const w = where({ atMacFor: () => [{ id: 'w:k', fromWaiting: true, questions: [{ question: 'Which color?' }] }] })
     expect(w('claude', 'sid', { waiting_kind: 'question' })).toEqual({ where: 'mac', ask: 'Which color?' })
   })
+  it('words switch off: a waiting-list card with no words gives the Mac line and no words, never a guess', () => {
+    const w = where({ atMacFor: () => [{ id: 'w:k', fromWaiting: true, questions: [] }] })
+    expect(w('claude', 'sid', { waiting_kind: 'question' })).toEqual({ where: 'mac', ask: '' })
+  })
   it('a Claude row waiting on a question or an approval with no card: the Mac line, no words', () => {
     expect(where({})('claude', 'sid', { waiting_kind: 'question' })).toEqual({ where: 'mac', ask: '' })
     expect(where({})('claude', 'sid', { waiting_kind: 'permission' })).toEqual({ where: 'mac', ask: '' })

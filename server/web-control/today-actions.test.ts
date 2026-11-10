@@ -4687,6 +4687,19 @@ describe('X1 contract: the web question block (held, at the Mac, answered)', () 
     expect(el.innerHTML, 'no way to answer from here').not.toContain('data-sq=')
     expect(h.host.innerHTML, 'the top of every pane stays for what can be answered').toBe('')
   })
+  it('words switch off (COS_WAITING_QUESTION_WORDS, default off): an entry without words keeps the honest no-words line, one card, no options', async () => {
+    const NO_WORDS = 'COS cannot read this question&#39;s words from here. They show at the Mac&#39;s prompt.'
+    for (const questions of [[], [{ question: '', header: '', multiSelect: false, options: [{ label: 'Red', description: '' }] }]]) {
+      const h = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC(ID, SID, { toolUseId: TU })], waiting: [WAIT('at_mac', { questions })] }))
+      await h.start()
+      const el = h.mk(); h.Qs.mount(el, SID)
+      expect(el.innerHTML.match(/data-sq-mac=/g), JSON.stringify(questions)).toHaveLength(1)
+      expect(el.innerHTML).toContain(NO_WORDS)
+      expect(el.innerHTML).toContain(MAC_WORDS)
+      expect(el.innerHTML, 'no options without the words').not.toContain('<ul')
+      expect(el.innerHTML).not.toContain('data-sq=')
+    }
+  })
   it('one card per question: a held item gone back to the Mac and its waiting entry share a tool_use_id', async () => {
     const h = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC(ID, SID, { toolUseId: TU })], waiting: [WAIT('at_mac')] }))
     await h.start()
