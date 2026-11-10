@@ -16,7 +16,10 @@ import { SessionSignalStore } from './session-signal-store.js'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { deriveSessionState, derivedRowFields, derivedStatusFields, type RegistryFacts } from './session-state-derive.js'
 import { statusDraftWithDerived } from './session-stream-events.js'
-import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, sessionSignalStore, turnEndAskStats } from './session-hooks-runtime.js'
+import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, sessionSignalStore, startSessionHooksRuntime, turnEndAskStats } from './session-hooks-runtime.js'
+import { dataPath } from './data-dir.js'
+import { DEAD_GRACE_MS } from './session-state-derive.js'
+import { mkdirSync, writeFileSync } from 'node:fs'
 
 const SID = '7a1e0c55-1111-4222-8333-444455556666'
 const PROMPT = 'aebe20a1-0000-4000-8000-00000000c017'
@@ -258,6 +261,15 @@ describe('the tracker: arms, asks, latches', () => {
     r.store.apply(stop(T0 + 2_000), false)
     await r.tracker.tick()
     expect(r.tracker.visibleAsk(SID, T0 + 2_000)?.stoppedAt).toBe(T0 + 2_000)
+  })
+
+  it('a Stop older than the wrap_up, ingested after it, does not ask', async () => {
+    const r = rig()
+    r.store.apply(wrapUp(T0), false)
+    r.store.apply(stop(T0 - 1_000, null), false)
+    r.desk.idle = 300
+    await r.tracker.tick()
+    expect(r.tracker.visibleAsk(SID, T0 + 2_000)).toBeNull()
   })
 
   it('a Stop of the other prompt that came FIRST does not ask either', async () => {
@@ -641,5 +653,77 @@ describe('the runtime: deriveForRow and the counters', () => {
     } finally {
       off()
     }
+  })
+
+  it('a row the registry ends (dead pid on two scans, no SessionEnd) drops its ask', async () => {
+    const tracker = new TurnEndAskTracker({ now: () => T0 + 200_000, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    trackers.push(tracker)
+    __setTurnEndAskTrackerForTests(tracker)
+    const off = sessionSignalStore.subscribe((signal, e, child) => tracker.observe(e, child, signal))
+    try {
+      feed()
+      await tracker.tick()
+      const dead: RegistryFacts = { alive: false, status: 'idle', waitingFor: null, statusUpdatedAt: T0 + 5_000, lastActiveAt: T0 + 5_000 }
+      const t = T0 + 200_000
+      expect(deriveForRow({ sessionId: SID, registry: dead, now: t })?.agent_state).toBe('waiting')
+      expect(deriveForRow({ sessionId: SID, registry: dead, now: t + DEAD_GRACE_MS })?.agent_state).toBe('ended')
+      expect(turnEndAskStats()).toMatchObject({ tracked: 0, clearedByTurn: 1 })
+    } finally {
+      off()
+    }
+  })
+
+  describe('startSessionHooksRuntime: the switch read at startup, and an ask that survives a restart', () => {
+    const savedEnv: Record<string, string | undefined> = {}
+    const KEYS = ['COS_GLASSES_HOME', 'COS_SESSION_HOOKS_SPOOL_DIR', 'COS_CLAUDE_SESSIONS_DIR'] as const
+    let home = ''
+    beforeEach(() => {
+      for (const k of KEYS) savedEnv[k] = process.env[k]
+      home = mkdtempSync(join(tmpdir(), 'x1-turn-ask-runtime-'))
+      process.env.COS_GLASSES_HOME = home
+      process.env.COS_SESSION_HOOKS_SPOOL_DIR = join(home, 'spool')
+      process.env.COS_CLAUDE_SESSIONS_DIR = join(home, 'sessions')
+      mkdirSync(join(home, 'sessions'), { recursive: true })
+    })
+    afterEach(() => {
+      __setTurnEndAsksForTests(null)
+      for (const k of KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k] }
+      rmSync(home, { recursive: true, force: true })
+      try { rmSync(dataPath('session-hook-events.jsonl'), { force: true }) } catch { /* none */ }
+    })
+
+    function ledgerWithAsk(): number {
+      const now = Date.now()
+      const row = (ts: number, event: string, payload: Record<string, unknown>) => JSON.stringify({ key: `${ts}-1-${event}.json`, ts, ppid: 1, event, session_id: SID, entrypoint: 'claude-desktop', payload: { session_id: SID, ...payload } })
+      writeFileSync(dataPath('session-hook-events.jsonl'), [
+        row(now - 60_000, 'UserPromptSubmit', { prompt: 'go', prompt_id: PROMPT }),
+        row(now - 50_000, 'PostToolUse', { tool_name: WRAP_UP_TOOL, prompt_id: PROMPT, turn_ask: { ask: 'Canary: which color?', choices: ['Red', 'Blue'], blocked: false } }),
+        row(now - 45_000, 'Stop', { prompt_id: PROMPT, last_assistant_message: 'done' }),
+      ].join('\n') + '\n')
+      return now - 45_000
+    }
+
+    it('off: no tracker, no counters, the replayed row is idle', () => {
+      __setTurnEndAsksForTests(false)
+      ledgerWithAsk()
+      const runtime = startSessionHooksRuntime({ port: 3141 })
+      try {
+        expect(turnEndAskStats()).toBeNull()
+        expect(deriveForRow({ sessionId: SID })?.agent_state).toBe('idle')
+      } finally {
+        runtime.stop()
+      }
+    })
+
+    it('on: the ask asked before the restart is armed and stopped again from the ledger', () => {
+      __setTurnEndAsksForTests(true)
+      ledgerWithAsk()
+      const runtime = startSessionHooksRuntime({ port: 3141 })
+      try {
+        expect(turnEndAskStats()).toMatchObject({ armed: 1, tracked: 1 })
+      } finally {
+        runtime.stop()
+      }
+    })
   })
 })
