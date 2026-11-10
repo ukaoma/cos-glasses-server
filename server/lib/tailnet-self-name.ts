@@ -10,6 +10,13 @@
 // EXACT NAME ONLY. The answer is normalised by normalizeTailscaleDnsName (lowercase, one
 // trailing dot dropped, must end in .ts.net) and compared for equality; never a suffix match.
 // No answer means no name: the tailnet NAME is refused and the tailnet IP URL keeps working.
+//
+// A MISS IS NOT FINAL (7.0.14). The boot lookup can miss (a startup race), and readers that only
+// call currentSelfDnsName() then saw null forever: /api/web-key/status answered `origin: null` (COS
+// Control hid Phone approvals) and the 3144 signer refused every phone write `origin_refused`, until
+// some other route happened to call refresh(). refreshIfMissing() is for exactly those readers: with
+// a name known it returns it and looks nothing up; with none it joins the lookup in flight or starts
+// ONE, at most once per TAILNET_NAME_ON_DEMAND_MIN_MS, and waits at most a bounded time.
 
 import { Resolver } from 'node:dns/promises'
 import { networkInterfaces } from 'node:os'
@@ -18,6 +25,10 @@ import { normalizeTailscaleDnsName, reachableIpv4Addresses } from './network-pol
 export const TAILNET_NAME_HIT_TTL_MS = 10 * 60_000
 export const TAILNET_NAME_MISS_TTL_MS = 60_000
 export const TAILNET_REVERSE_TIMEOUT_MS = 1_500
+/** refreshIfMissing(): while the name is unknown, at most one lookup it starts per this window. */
+export const TAILNET_NAME_ON_DEMAND_MIN_MS = 30_000
+/** refreshIfMissing(): the longest a request waits for that lookup (the lookup itself is bounded by the resolver timeout). */
+export const TAILNET_NAME_ON_DEMAND_WAIT_MS = 2_000
 const MAGIC_DNS_RESOLVER = '100.100.100.100'
 
 export interface TailnetSelfNameDeps {
@@ -37,6 +48,13 @@ export interface TailnetSelfName {
   refresh(): Promise<string | null>
   /** `SelfDnsSource` for isAllowedCorsOrigin: same as refresh(). */
   queryStatus(): Promise<string | null>
+  /**
+   * For a request that must not act on a stale miss (7.0.14). A name known now: that name, no lookup.
+   * None: joins the lookup in flight, or starts one unless this method started one in the last
+   * TAILNET_NAME_ON_DEMAND_MIN_MS (then null at once). Waits at most `waitMs`; a slower lookup keeps
+   * running and caches its answer for the next reader. Never throws.
+   */
+  refreshIfMissing(waitMs?: number): Promise<string | null>
 }
 
 function defaultTailscaleIpv4(): string | null {
@@ -62,13 +80,8 @@ export function createTailnetSelfName(deps: TailnetSelfNameDeps = {}): TailnetSe
 
   const currentSelfDnsName = (): string | null => fromNudger() ?? cached?.name ?? null
 
-  const refresh = (): Promise<string | null> => {
-    const known = fromNudger()
-    if (known) return Promise.resolve(known)
-    const at = now()
-    if (cached && at - cached.at < (cached.name ? TAILNET_NAME_HIT_TTL_MS : TAILNET_NAME_MISS_TTL_MS)) {
-      return Promise.resolve(cached.name)
-    }
+  // The one lookup (single-flight): every caller below shares the promise in flight.
+  const lookup = (): Promise<string | null> => {
     if (inflight) return inflight
     inflight = (async () => {
       let name: string | null = null
@@ -88,7 +101,40 @@ export function createTailnetSelfName(deps: TailnetSelfNameDeps = {}): TailnetSe
     return inflight
   }
 
-  return { currentSelfDnsName, refresh, queryStatus: refresh }
+  const refresh = (): Promise<string | null> => {
+    const known = fromNudger()
+    if (known) return Promise.resolve(known)
+    const at = now()
+    if (cached && at - cached.at < (cached.name ? TAILNET_NAME_HIT_TTL_MS : TAILNET_NAME_MISS_TTL_MS)) {
+      return Promise.resolve(cached.name)
+    }
+    return lookup()
+  }
+
+  // When refreshIfMissing() last STARTED a lookup. Its own clock: the boot lookup and refresh()'s TTL
+  // do not count, so the first reader after a boot miss looks again at once.
+  let onDemandAt: number | null = null
+  const refreshIfMissing = (waitMs: number = TAILNET_NAME_ON_DEMAND_WAIT_MS): Promise<string | null> => {
+    const known = currentSelfDnsName()
+    if (known) return Promise.resolve(known)
+    let pending: Promise<string | null>
+    if (inflight) {
+      pending = inflight
+    } else {
+      const at = now()
+      if (onDemandAt !== null && at - onDemandAt < TAILNET_NAME_ON_DEMAND_MIN_MS) return Promise.resolve(null)
+      onDemandAt = at
+      pending = lookup()
+    }
+    const wait = Math.max(0, waitMs)
+    return new Promise<string | null>(resolve => {
+      const timer = setTimeout(() => resolve(null), wait)
+      timer.unref?.()
+      pending.then(name => { clearTimeout(timer); resolve(name) }, () => { clearTimeout(timer); resolve(null) })
+    })
+  }
+
+  return { currentSelfDnsName, refresh, queryStatus: refresh, refreshIfMissing }
 }
 
 let singleton: TailnetSelfName | null = null

@@ -92,6 +92,13 @@ export interface WebKeySignerDeps {
   api: (req: IncomingMessage, res: ServerResponse) => void
   /** `https://<MagicDNS name>:3144` (lib/web-key-origin.ts), or null when unknown. */
   origin: () => string | null
+  /**
+   * 7.0.14: called (and awaited) only when origin() is null on an /api request, before the origin
+   * check, so a boot-time miss of the tailnet name does not refuse the phone `origin_refused` until
+   * something else refreshes it (lib/tailnet-self-name.ts refreshIfMissing: bounded, single-flight,
+   * rate-limited). Absent: the null origin stands, as before.
+   */
+  refreshOrigin?: () => Promise<unknown>
   /** How often the signer's files are re-checked. 0: never on a timer (tests call integrity.check()). */
   recheckMs?: number
 }
@@ -128,13 +135,25 @@ export function createWebKeySignerHandler(deps: WebKeySignerDeps): ((req: Incomi
     const method = String(req.method ?? 'GET').toUpperCase()
 
     if (pathname === '/api' || pathname.startsWith('/api/')) {
+      const decide = (expected: string | null): void => {
+        const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined
+        // Another origin's page never drives this one. A write must name this origin outright.
+        if (origin !== undefined && origin !== expected) { json(res, 403, { ok: false, error: 'origin_refused' }); return }
+        if (method !== 'GET' && method !== 'HEAD' && (expected === null || origin !== expected)) { json(res, 403, { ok: false, error: 'origin_refused' }); return }
+        if (!signerApiAllowed(method === 'HEAD' ? 'GET' : method, pathname)) { json(res, 404, { ok: false, error: 'not_found' }); return }
+        deps.api(req, res)
+      }
       const expected = deps.origin()
-      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined
-      // Another origin's page never drives this one. A write must name this origin outright.
-      if (origin !== undefined && origin !== expected) { json(res, 403, { ok: false, error: 'origin_refused' }); return }
-      if (method !== 'GET' && method !== 'HEAD' && (expected === null || origin !== expected)) { json(res, 403, { ok: false, error: 'origin_refused' }); return }
-      if (!signerApiAllowed(method === 'HEAD' ? 'GET' : method, pathname)) { json(res, 404, { ok: false, error: 'not_found' }); return }
-      deps.api(req, res)
+      if (expected !== null || !deps.refreshOrigin) { decide(expected); return }
+      // Name unknown: one bounded lookup, then the same checks against whatever it found (null still refuses).
+      let refreshing: Promise<unknown>
+      try { refreshing = Promise.resolve(deps.refreshOrigin()) } catch { refreshing = Promise.resolve() }
+      const after = (): void => {
+        let found: string | null = null
+        try { found = deps.origin() } catch { found = null }
+        decide(found)
+      }
+      void refreshing.then(after, after)
       return
     }
 

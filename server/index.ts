@@ -1002,6 +1002,8 @@ app.use('/api', createWebKeyRouter({
   isWebRequest: req => g2Provenance.originOf(req).origin.client === 'web',
   apiToken: () => API_TOKEN,
   selfDnsName: webKeySelfDnsName,
+  // 7.0.14: a boot-time miss of the tailnet name is looked up again (bounded) instead of answering `origin: null`.
+  refreshSelfDnsName: () => tailnetSelf.refreshIfMissing(),
   expectedOrigin: () => webKeyAuthority.deps.expectedOrigin(),
   integrityStatus: () => ({ ...(webControlIntegrity?.status() ?? { enabled: false }), signer: webKeySignerIntegrity?.status() ?? null }),
   // Phase 3: the phone's key steps and the handoff claim answer only on the 3144 signer listener.
@@ -1743,7 +1745,7 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
   // Phase 3: 3144 serves the signer page (verified bytes only) and an allowlist of /api routes,
   // never the big app (lib/web-key-signer-app.ts). It exists only with the flag on.
   const handler = entry.label === 'HTTPS signer'
-    ? createWebKeySignerHandler({ integrity: webKeySignerIntegrity, api: app, origin: () => webKeySignerOrigin(webKeySelfDnsName()) })
+    ? createWebKeySignerHandler({ integrity: webKeySignerIntegrity, api: app, origin: () => webKeySignerOrigin(webKeySelfDnsName()), refreshOrigin: () => tailnetSelf.refreshIfMissing() })
     : app
   const server = entry.tls
     ? withRequestTimeout(createHttpsServer({ cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) }, handler))

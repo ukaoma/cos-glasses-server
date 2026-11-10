@@ -43,6 +43,12 @@ export interface WebKeyRouterDeps {
   isWebRequest: (req: Request) => boolean
   apiToken: () => string
   selfDnsName: () => string | null
+  /**
+   * 7.0.14: when selfDnsName() is null, GET status (after its auth check) awaits this before it
+   * answers, so a boot-time miss does not hand COS Control `origin: null` (lib/tailnet-self-name.ts
+   * refreshIfMissing: bounded, single-flight, rate-limited). Never called while a name is known.
+   */
+  refreshSelfDnsName?: () => Promise<unknown>
   expectedOrigin: () => string | null
   /** Served-asset integrity (Phase 6) for Control's audit; absent: not reported. */
   integrityStatus?: () => Record<string, unknown>
@@ -97,13 +103,21 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     next()
   }
 
-  router.get('/web-key/status', anchorRoutes, (req, res) => {
+  // 7.0.14: a request that passed the status route's own auth check, while this Mac's tailnet name is
+  // unknown, waits for one bounded lookup instead of answering a stale miss. Known name: no wait.
+  const learnSelfName = async (): Promise<void> => {
+    if (!deps.refreshSelfDnsName || deps.selfDnsName() !== null) return
+    try { await deps.refreshSelfDnsName() } catch { /* answer with what is known */ }
+  }
+
+  router.get('/web-key/status', anchorRoutes, async (req, res) => {
     const registry = deps.authority.registry
-    const selfDns = deps.selfDnsName()
     if (deps.authority.mode() !== 'authority') {
       // Bootstrap only: COS Control's anchor state, nothing that suggests approvals. Token only:
       // no web page needs it while no phone can enroll. `enabled: false` keeps older Controls hidden.
       if (!hasToken(req)) return refuse(res, 401, 'unauthorized')
+      await learnSelfName()
+      const selfDns = deps.selfDnsName()
       const anchor = registry.anchor()
       return void res.json({
         ok: true,
@@ -118,6 +132,8 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
       })
     }
     if (!hasToken(req) && !web(req)) return refuse(res, 401, 'unauthorized')
+    await learnSelfName()
+    const selfDns = deps.selfDnsName()
     res.json({
       ok: true,
       enabled: true,
