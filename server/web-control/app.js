@@ -401,11 +401,12 @@
   }
   // When this sign-in really ends while it is in use: the 30-day cap where the server renews, else the cookie's own end.
   function signinEndsAt() { var k = signinKnown(); return k ? (k.cap || k.ends) : 0; }
-  // Why the sign-in gate opened after this page had been signed in: the 30 days, a week without use, or a sign-out.
+  // Why the sign-in gate opened after this page had been signed in: the 30 days, no use in the cookie's last 2 days (its
+  // only renewal window, so a browser used on day 4 still ends on day 7), or a sign-out. Q1 R-3.
   function signinLapsedCopy() {
     var k = signinKnown(), soon = Date.now() + 60000;
     if (k && k.cap && k.cap <= soon) return 'Your sign-in on this browser reached its 30 days. ' + SIGNIN_HOW;
-    if (k && k.cap && k.ends <= soon) return 'Your sign-in on this browser ended after a week without use. ' + SIGNIN_HOW;
+    if (k && k.cap && k.ends <= soon) return 'Your sign-in on this browser ended because COS was not used here in its last 2 days. ' + SIGNIN_HOW;
     if (k && !k.cap && k.ends <= soon) return 'Your sign-in on this browser ended. Sign-ins last 7 days. ' + SIGNIN_HOW;
     return 'This browser is signed out. ' + SIGNIN_HOW;
   }
@@ -6972,7 +6973,7 @@
   }
   function bootAnswer(st) {
     if (st && st.authenticated) return showShell(st);
-    // Q1 S2: a browser that was signed in before learns why it is not now (the 30 days, a week unused, a sign-out).
+    // Q1 S2: a browser that was signed in before learns why it is not now (the 30 days, no use in its last 2 days, a sign-out).
     showAuth(typeof signinKnown === 'function' && signinKnown() ? signinLapsedCopy() : undefined);
   }
   function bootFail(err) {

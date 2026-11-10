@@ -262,12 +262,12 @@ describe('F2: sign-in renews while in use, up to 30 days', () => {
     far.fns.connPaint()
     expect(far.box.hidden).toBe(true)
   })
-  it('the sign-in card says why it ended: the 30 days, a week without use, or a sign-out', () => {
+  it('the sign-in card says why it ended: the 30 days, no use in its last 2 days, or a sign-out', () => {
     const past = new Date(Date.now() - 1000).toISOString(), later = new Date(Date.now() + 10 * D).toISOString()
     const cap = conn(); cap.fns.signinRemember({ expiresAt: past, renewUntil: past })
     expect(cap.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser reached its 30 days\. On your Mac, open COS Control Settings and choose Open COS on your phone\./)
     const idle = conn(); idle.fns.signinRemember({ expiresAt: past, renewUntil: later })
-    expect(idle.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser ended after a week without use\./)
+    expect(idle.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser ended because COS was not used here in its last 2 days\./)
     const out = conn(); out.fns.signinRemember({ expiresAt: later, renewUntil: later })
     expect(out.fns.signinLapsedCopy()).toMatch(/^This browser is signed out\./)
     expect(CONN).not.toMatch(/Glasses and iPhone|Glasses, phone and web/)
