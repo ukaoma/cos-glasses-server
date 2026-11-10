@@ -354,7 +354,7 @@
         (threadOn() ? '<button type="button" class="link-btn" data-cos="new-thread">New thread</button>' : '') + '</div>' +
         (threadOn() ? '<p class="cc-thread" data-cos-thread role="status">' + esc(threadLine()) + '</p>' : '') + '</header>' +
       '<div class="cc-feed" data-cos-feed aria-live="polite"></div>' +
-      composerHtml(CHAT, { drop: drop, placeholder: drop ? 'Ask COS, or drop a thought, a task, a reminder' : 'Ask COS anything', label: 'Message to COS' }) +
+      composerHtml(CHAT, { drop: drop, placeholder: drop ? 'Ask COS or drop a thought' : 'Ask COS anything', label: 'Message to COS' }) +
       '</section>';
   }
   function mount(host, visible) {

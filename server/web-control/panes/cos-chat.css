@@ -275,11 +275,17 @@ html.kb-up .cc-kb .cc-model .field { width: 100%; }
    their own above the words, Take photo and the clip beside Fork and Send, and the limits in plain words under the chips. */
 .att-composer { flex-wrap: wrap; }
 .att-composer .att-files { flex: 1 1 100%; padding: 2px 0 4px; }
+/* W1 (Miles 2026-11-09 21:24, closed Duo screenshot: "Continue this session" wrapped onto two lines, the second
+   clipped). The phone's real width did not trip the 430 px rule below, so the row now follows the space the box itself
+   has: the words need at least 19rem (the longest placeholder, "Message this session (not an answer)", is about 277 px
+   in the kit font), and when the buttons do not fit beside that they move to the row below, at its right. Wide panes
+   keep the one-row layout. Measured in WebKit at 382, 440, 520 and 951 px: lanes/W1_evidence/duo_layout_*. */
+.att-composer > textarea { flex: 1 1 19rem; min-width: 0; }
+.att-composer > .composer-actions { margin-left: auto; }
 /* 6.99.30 (canary): the folded Sessions reader squeezed the box to about 101 px beside Fork, the clip and Send. Under
    430 px the words get their own full row and the buttons sit on the row below, at its right. */
 @media (max-width: 429px) {
   .att-composer > textarea { flex: 1 1 100%; }
-  .att-composer > .composer-actions { margin-left: auto; }
 }
 .att-composer .att-files.hidden { display: none; }
 .phone-approval-packet { flex: 1 1 100%; min-width: 0; }
