@@ -1,9 +1,7 @@
 // Session endpoints — recent list, full history, existence check, client-format messages, context breaks, end
 import { Router } from 'express'
-import { readFileSync } from 'fs'
-import { join } from 'path'
 import { getRecentSessions, getHistory, sessionExists, addContextBreak, endSession, getSessionRaw, getActiveSessions, resolveExchangePairModel, ensureArchiveMirrorForDay } from '../lib/conversation.js'
-import { buildSessionLogEntry, writeSessionLog } from '../lib/session-log.js'
+import { buildSessionLogEntry, readSessionLogRanges, writeSessionLogIfChanged } from '../lib/session-log.js'
 import { getArchiveDayMessages, listArchiveDateStrings } from '../lib/archive.js'
 import { recentMessagesLimit, selectRecentMessages } from '../lib/recent-messages.js'
 import { localDay } from '../lib/local-day.js'
@@ -135,7 +133,7 @@ sessionsRouter.get('/sessions/:id/messages', (req, res) => {
 // instead of waiting for the 2hr TTL expiry.
 // POST /api/sessions/lookup — batch resolve timestamps to session IDs
 // Used to retroactively stamp messages that predate the sessionId feature
-sessionsRouter.post('/sessions/lookup', (req, res) => {
+sessionsRouter.post('/sessions/lookup', async (req, res) => {
   const { timestamps } = req.body as { timestamps: number[] }
   if (!timestamps || !Array.isArray(timestamps)) {
     res.status(400).json({ error: 'timestamps[] required' })
@@ -143,7 +141,6 @@ sessionsRouter.post('/sessions/lookup', (req, res) => {
   }
 
   // Build time ranges from BOTH JSONL history AND live server sessions
-  const logPath = join(process.env.COS_SCRIPTS_DIR || '', '.glasses_sessions.jsonl')
   const sessionRanges: Array<{ sid: string; start: number; end: number }> = []
 
   // 1. Live server sessions (always current — no snapshot lag)
@@ -155,25 +152,19 @@ sessionsRouter.post('/sessions/lookup', (req, res) => {
     }
   }
 
-  // 2. JSONL history (ended sessions + snapshots)
+  // 2. JSONL history (ended sessions + snapshots), one widest range per session.
+  // S1 (2026-11-09): streamed and incremental (session-log.ts readSessionLogRanges). The old
+  // readFileSync().toString() threw on the 1.94 GB ledger and the catch read that as "no file".
   try {
-    const lines = readFileSync(logPath, 'utf-8').trim().split('\n')
-    for (const line of lines) {
-      const d = JSON.parse(line)
-      if (d.session_id && d.created_at) {
-        const start = new Date(d.created_at).getTime()
-        const end = d.ended_at ? new Date(d.ended_at).getTime() : start + 7200_000
-        // Live sessions take priority. For JSONL, keep the widest (latest) time range per session.
-        const existing = sessionRanges.find(s => s.sid === d.session_id)
-        if (!existing) {
-          sessionRanges.push({ sid: d.session_id, start, end })
-        } else if (end > existing.end && !getSessionRaw(d.session_id)) {
-          // Widen the JSONL range (but don't overwrite live sessions which extend to NOW)
-          existing.end = end
-        }
-      }
+    const live = new Set(sessionRanges.map(s => s.sid))
+    const history = await readSessionLogRanges()
+    for (const [sid, range] of history) {
+      if (live.has(sid)) continue // live sessions take priority (they extend to NOW)
+      sessionRanges.push({ sid, start: range.start, end: range.end })
     }
-  } catch { /* no log file */ }
+  } catch (err) {
+    console.warn('[sessions] lookup could not read the session ledger:', err instanceof Error ? err.message : err)
+  }
 
   // Match each timestamp to a session (live sessions checked first, then JSONL)
   const results: Record<number, string | null> = {}
@@ -242,7 +233,7 @@ sessionsRouter.post('/sessions/:id/snapshot', (req, res) => {
     slug: `[LIVE] ${(session.exchanges.find(e => e.role === 'user')?.content ?? '').slice(0, 50)}`,
   })
 
-  const logged = writeSessionLog(entry)
+  const logged = writeSessionLogIfChanged(entry, 'snapshot') !== 'failed'
   res.json({
     ok: true,
     logged,
