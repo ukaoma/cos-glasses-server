@@ -7,6 +7,10 @@
 - **Question words on rows (Miles 22:10, "Yes, show by default").** A session waiting on a question now says the first 80 characters of its first question, everywhere a waiting row shows: the glasses, the phone app, COS Control and any signed-in Control Web browser. Only the first question's text: never an option, a description, a header, a second question or an answer. Control and format characters are replaced, whitespace collapsed, cut at 80 with an ellipsis. Stored in the session-hook ledger on disk (`session-hook-events.jsonl`, rotated once at 10 MB; the last 6 hours replay at boot) and in `waiting_detail` until the question settles. Never in the broker's logs. `COS_WAITING_QUESTION_WORDS=0` restores 7.0.15 exactly.
 - **The Today summary is rewritten less (T1).** A material change (a session opened or closed, a message typed into one, Needs you, Work cards, meetings, the read state, a recording) rewrites after the existing 10 minutes; anything else (a reply, a state flip, sub-agents, durations) only once the shown summary is 30 minutes old. The count sentence before the paragraph changes only after a new count holds 5 minutes. An ask that could not read the session list never replaces today's summary. Replay over two busy hours: 12 model calls down to 4, 44 shown-text changes down to 4. Model, daily cap, switch, breaker, forced Refresh and the reconnect exception are unchanged.
 
+### Package
+
+- The npm package no longer carries `server/scripts/compact-session-log.ts` (the compaction tool, not ready) or `server/scripts/full-hold-mutation-gate.mjs` (a test gate).
+
 ### Off by default (X1)
 
 - **`COS_QUESTION_FULL_HOLD`:** a session question is held for the whole hook wait (3590 s after Reinstall hooks), whether or not a COS device is live when it is asked, on an engine proven to keep its own dialog up while the hook waits (CLI 2.1.321 and later in a terminal, not a print run; the desktop app 2.1.317 and later). The Mac's dialog is up at once; the first answer wins, from the Mac, the glasses, the phone app, COS Control or Control Web. A question shows on devices once the desk has been idle 90 s; before that it is not answerable by id (409 `not_shown`).
@@ -15,15 +19,19 @@
 
 ### Control Web (W1)
 
+- **Open streams end with the sign-in (final review S1).** A live stream a browser opened (a session's view, the live events, a COS answer) now ends at its next heartbeat once that browser's sign-in no longer verifies: Sign out every browser, the cookie's expiry, or the 30-day cap. The browser reconnects with the cookie it holds now. Streams the API token opened (the glasses, the phone app, COS Control) are unchanged.
+- **Meaning search** says where the Jev and SubQ keys are now: search Settings in COS Control for Jev key or SubQ key.
 - **Today's summary holds still:** it stays through a pending or failed session read (the age line names what could not be read; the Ask box stays), keeps the tallest height it has had and shrinks only on a new day, a width change, Refresh or the switch toggled; unchanged words are not written again.
 - **Question block on X1's final contract:** reads `webAnswer`; with `confirmApprovals` an approval is confirmed first and answered once; a 409 `not_shown` keeps the card with "Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute." With both hold switches off the server sends neither, and nothing changes.
 - **Question refusals in words:** when an answer is refused, the card now says what happened: "Already answered on another device.", "Already answered at the Mac, or the session moved on.", "Left for the Mac. Answer it there.", "This question timed out here. Answer it at the Mac." or "This question is no longer waiting." Before, a refusal that carried a reason (answered at the Mac, a drain, an invalid answer id) kept the card and showed a raw code with a retry. Present since 6.99.x, including 7.0.15.
 
-**Default-on for every install:** yes: the question words on rows, the Today summary cadence, and on the web the Today summary hold. The full hold and its web rules are off unless a hold switch is on.
+**Default-on for every install:** yes: the question words on rows, the Today summary cadence, on the web the Today summary hold, and browser streams ending when their sign-in does. The full hold and its web rules are off unless a hold switch is on.
 
 ### If you roll back
 
-- A browser whose sign-in was renewed by 7.0.15 or later holds the four-part cookie, and a server rolled back to 7.0.13 makes that browser sign in again. Nothing is lost.
+- A browser whose sign-in was renewed by 7.0.15 or later holds the four-part cookie, and a server rolled back to 7.0.13 or earlier, including 7.0.7, makes that browser sign in again. Nothing is lost.
+- Back on 7.0.7, questions older than 7 days count as waiting again (7.0.9 had stopped counting them).
+- The inbox: the first start of 7.0.9 or later marks every unread inbox item read, once. 7.0.7 drops that marker when it writes, so after a rollback to 7.0.7 and a later update, everything that arrived unread under 7.0.7 is marked read again.
 
 ## 7.0.15 - Control Web for the phone, and server hardening from runtime evidence
 
@@ -58,7 +66,9 @@
 
 ### If you roll back
 
-- A browser whose sign-in was renewed by 7.0.15 or later holds the four-part cookie, and a server rolled back to 7.0.13 makes that browser sign in again. Nothing is lost.
+- A browser whose sign-in was renewed by 7.0.15 or later holds the four-part cookie, and a server rolled back to 7.0.13 or earlier, including 7.0.7, makes that browser sign in again. Nothing is lost.
+- Back on 7.0.7, questions older than 7 days count as waiting again (7.0.9 had stopped counting them).
+- The inbox: the first start of 7.0.9 or later marks every unread inbox item read, once. 7.0.7 drops that marker when it writes, so after a rollback to 7.0.7 and a later update, everything that arrived unread under 7.0.7 is marked read again.
 
 ## 7.0.13 - Work chat Plan no longer fails on a short session id
 
