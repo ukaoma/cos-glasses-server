@@ -20,12 +20,14 @@
 ### Control Web (W1)
 
 - **Open streams end with the sign-in (final review S1).** A live stream a browser opened (a session's view, the live events, a COS answer) now ends at its next heartbeat once that browser's sign-in no longer verifies: Sign out every browser, the cookie's expiry, or the 30-day cap. The browser reconnects with the cookie it holds now. Streams the API token opened (the glasses, the phone app, COS Control) are unchanged.
+- **Sign out every browser also ends sign-in links and codes (final review V7).** A sign-in link or code made before the sign-out no longer signs a browser in after it; one made after it works as before.
+- **Display-stream tickets only for the token door (final review S8).** `/api/models` hands a display-stream ticket only to a caller the API token let in (the glasses, the phone app, COS Control), never to a browser signed in by cookie. Control Web never used it.
 - **Meaning search** says where the Jev and SubQ keys are now: search Settings in COS Control for Jev key or SubQ key.
 - **Today's summary holds still:** it stays through a pending or failed session read (the age line names what could not be read; the Ask box stays), keeps the tallest height it has had and shrinks only on a new day, a width change, Refresh or the switch toggled; unchanged words are not written again.
 - **Question block on X1's final contract:** reads `webAnswer`; with `confirmApprovals` an approval is confirmed first and answered once; a 409 `not_shown` keeps the card with "Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute." With both hold switches off the server sends neither, and nothing changes.
 - **Question refusals in words:** when an answer is refused, the card now says what happened: "Already answered on another device.", "Already answered at the Mac, or the session moved on.", "Left for the Mac. Answer it there.", "This question timed out here. Answer it at the Mac." or "This question is no longer waiting." Before, a refusal that carried a reason (answered at the Mac, a drain, an invalid answer id) kept the card and showed a raw code with a retry. Present since 6.99.x, including 7.0.15.
 
-**Default-on for every install:** yes: the question words on rows, the Today summary cadence, on the web the Today summary hold, and browser streams ending when their sign-in does. The full hold and its web rules are off unless a hold switch is on.
+**Default-on for every install:** yes: the question words on rows, the Today summary cadence, on the web the Today summary hold, browser streams ending when their sign-in does, Sign out every browser also ending sign-in links and codes, and no display-stream ticket for a signed-in browser. The full hold and its web rules are off unless a hold switch is on.
 
 ### If you roll back
 
