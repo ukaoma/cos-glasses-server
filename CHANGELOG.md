@@ -20,6 +20,10 @@
 
 **Default-on for every install:** yes: the question words on rows, the Today summary cadence, and on the web the Today summary hold. The full hold and its web rules are off unless a hold switch is on.
 
+### If you roll back
+
+- A browser whose sign-in was renewed by 7.0.15 or later holds the four-part cookie, and a server rolled back to 7.0.13 makes that browser sign in again. Nothing is lost.
+
 ## 7.0.15 - Control Web for the phone, and server hardening from runtime evidence
 
 2026-11-09. 7.0.13 (97402b4) plus the production hardening pass, web lane (W1) and server lane (S1). Private on Miles's Mac first. Does not contain 7.0.14 (the tailnet fix), X1's question hold or T1's Today work; those ride a later build.
@@ -50,6 +54,10 @@
 - **Tests:** two flaky tests made deterministic, six bounded.
 
 **Default-on for every install:** yes. Web: the off-Tailscale page, sign-in renewal and its notices, the not-answering card and its 30 s health check, Today re-reading `/api/query-jobs/active` every 15 s while COS jobs run, the at-Mac question copy, Running rows, Start work defaults, meaning-search consent, the Sort cuts, the Duo layout and the two placeholders. Server: ledger dedupe and its state file, the lookup rule, SIGKILL on shutdown, the work-review save rule, the stall monitor and the new log lines, the secret-guard paths. The question block draws nothing new with this server.
+
+### If you roll back
+
+- A browser whose sign-in was renewed by 7.0.15 or later holds the four-part cookie, and a server rolled back to 7.0.13 makes that browser sign in again. Nothing is lost.
 
 ## 7.0.13 - Work chat Plan no longer fails on a short session id
 
