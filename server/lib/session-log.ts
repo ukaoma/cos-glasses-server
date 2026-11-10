@@ -2,7 +2,7 @@
 // so COS can query Glasses sessions by original UUID, date, domain, or content.
 // Fires on: TTL expiry, explicit /api/sessions/:id/end, server shutdown.
 
-import { appendFileSync, chmodSync, closeSync, createReadStream, fstatSync, mkdirSync, openSync, statSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, createReadStream, fstatSync, mkdirSync, openSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { resolve, dirname } from 'node:path'
 import type { Exchange } from './conversation.js'
@@ -383,12 +383,13 @@ export function lookupRangesFromHistory(
 
 /** Index lines in [from, to) of the file into `ranges`. Returns the offset just past the
  * last complete line, so a half-written last line is read again next time. */
-async function indexBytes(path: string, from: number, to: number, ranges: Map<string, SessionLogRange>): Promise<number> {
+async function indexBytes(fd: number, from: number, to: number, ranges: Map<string, SessionLogRange>): Promise<number> {
   if (to <= from) return from
   let offset = from
   let carry: Buffer[] = []
   let carryLen = 0
-  const stream = createReadStream(path, { start: from, end: to - 1, highWaterMark: 1 << 20 })
+  // Reads the descriptor readSessionLogRanges opened and checked (a regular file), never the path again.
+  const stream = createReadStream('', { fd, autoClose: false, start: from, end: to - 1, highWaterMark: 1 << 20 })
   for await (const raw of stream) {
     let chunk = raw as Buffer
     let nl = chunk.indexOf(10)
@@ -418,21 +419,32 @@ export async function readSessionLogRanges(path: string | null = sessionLogPath(
   if (!path) return new Map()
   if (rangeIndexBuild) return rangeIndexBuild
   rangeIndexBuild = (async () => {
-    let size: number
-    let ino: number
+    // O_NONBLOCK (hazard-invariants ratchet): openSync on a FIFO with no writer never returns, and it runs on
+    // the server's only JS thread. Not O_NOFOLLOW: the append writer follows a symlinked ledger, and the reader
+    // must read what the writer writes. fstat follows the link, so a link to a FIFO or folder is refused below.
+    const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0
+    let fd: number
     try {
-      const fd = openSync(path, 'r')
-      try { const st = fstatSync(fd); size = st.size; ino = st.ino } finally { closeSync(fd) }
+      fd = openSync(path, fsConstants.O_RDONLY | nonBlock)
     } catch {
       rangeIndex = null
       return new Map<string, SessionLogRange>()
     }
-    if (!rangeIndex || rangeIndex.logPath !== path || rangeIndex.ino !== ino || rangeIndex.offset > size) {
-      rangeIndex = { logPath: path, ino, offset: 0, ranges: new Map() }
+    try {
+      const st = fstatSync(fd)
+      if (!st.isFile()) {
+        rangeIndex = null
+        return new Map<string, SessionLogRange>()
+      }
+      if (!rangeIndex || rangeIndex.logPath !== path || rangeIndex.ino !== st.ino || rangeIndex.offset > st.size) {
+        rangeIndex = { logPath: path, ino: st.ino, offset: 0, ranges: new Map() }
+      }
+      const index = rangeIndex
+      index.offset = await indexBytes(fd, index.offset, st.size, index.ranges)
+      return index.ranges
+    } finally {
+      closeSync(fd)
     }
-    const index = rangeIndex
-    index.offset = await indexBytes(path, index.offset, size, index.ranges)
-    return index.ranges
   })()
   try {
     return await rangeIndexBuild
