@@ -7036,10 +7036,11 @@
   }
   function lrMatch(q) { try { return !!window.matchMedia(q).matches; } catch (_e) { return false; } }
   // The page wider than the screen (the Duo, 11/10: scale 0.85, scroll width 449 for a 382 screen). Two causes look the
-  // same from outside, and these numbers tell them apart: cw, the layout viewport; dw, the width this device shows at
-  // scale 1; scw, the document's scroll width. A browser or phone setting widens the layout viewport itself (cw = scw,
-  // both above dw): nothing on the page is wider than its container, so nothing is named and nothing is scanned. Our
-  // page overflowing leaves the layout at the device width and the document wider (scw above cw): then `wide` names the
+  // same from outside; these numbers narrow it: cw, the layout viewport; dw, the width this device shows at scale 1;
+  // scw, the document's scroll width. cw = scw, both above dw, says only that the layout viewport itself is wider: a
+  // browser or phone setting, or iOS widening the layout to fit content (Q1 15:27); nothing is named or scanned then, so
+  // '' is not proof of a setting. Our page overflowing a layout that stayed at the device width shows as scw above cw
+  // (the Duo's 11/10 rows: scroll width 449 while the width was 382 at scale 1): then `wide` names the
   // element that sticks out, the first in page order whose right edge passes cw. Page order puts a parent before its
   // children, so that element's parent ends within cw: it is the one that sticks out of its container, never a
   // stretched container (those end at cw; Q1 15:20). One scan per layout (cached by cw and scw), at most 4000 elements.
