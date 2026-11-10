@@ -15,6 +15,7 @@
 
 - **`COS_QUESTION_FULL_HOLD`:** a session question is held for the whole hook wait (3590 s after Reinstall hooks), whether or not a COS device is live when it is asked, on an engine proven to keep its own dialog up while the hook waits (CLI 2.1.321 and later in a terminal, not a print run; the desktop app 2.1.317 and later). The Mac's dialog is up at once; the first answer wins, from the Mac, the glasses, the phone app, COS Control or Control Web. A question shows on devices once the desk has been idle 90 s; before that it is not answerable by id (409 `not_shown`).
 - **`COS_APPROVAL_FULL_HOLD`:** the same for a tool approval, only while the desk stays idle, never ExitPlanMode. A web answer needs a touch within 60 s and a server-issued confirm for that item and decision. Keep it off until the phone key lands.
+- The three switches are listed in `.env.example` and the managed-runtime contract, and work on a COS Control install through `~/.cos-glasses/.env` (final review S6).
 - With both switches off, admission, deadlines, hook output, the questions response (key for key), `~/.claude/settings.json` and the hook block equal 7.0.15; `/confirm` answers 404. Turning a switch on: `~/.cos-glasses/.env`, restart, then Reinstall hooks in Control. There is no Control switch for them.
 
 ### Control Web (W1)
