@@ -3,8 +3,8 @@
 2026-11-10. 7.0.16 (d2de7ee) plus one change to Control Web, on Miles's go (06:25, "Yes, start it"). Private on Miles's Mac first.
 
 - **The problem (Miles, 06:17):** in the Control Web app on the Duo, the page zoomed in and out around the keyboard and the layout stayed wrong. His phone's own layout report showed the page at 2.12x with the keyboard down on the unfolded Duo: a double-tap zoom fitting a column. Every field was already 16 px, so it was not the focus zoom.
-- **Double-tap zoom is off:** the page root says `touch-action: manipulation`. Scrolling and pinch to zoom still work. The Sessions splitter and the charts keep their stricter touch rules.
-- **On iPhone and iPad only,** the page's viewport is capped at its normal scale (`maximum-scale=1`), once, as it loads. Never while the page is already zoomed, so the zoom never changes under your fingers. Android, the Mac and other browsers keep the viewport as it was.
+- **Double-tap zoom is off:** the page root says `touch-action: manipulation`. Scrolling still works. The Sessions splitter and the charts keep their stricter touch rules.
+- **On iPhone and iPad only,** the page's viewport is capped at its normal scale (`maximum-scale=1`), once, as it loads. Never while the page is already zoomed, so the zoom never changes under your fingers. Android, the Mac and other browsers keep the viewport as it was. The cost: in the Control Web app added to the Home Screen, pinch to zoom no longer works at all; in a Safari tab it still does (Apple keeps pinch there). Elsewhere pinch is unchanged.
 - **The 16 px floor** on touch screens also covers any element that types without being a field (none exists today).
 - **A layout report** when the zoom crosses 1.01 either way: the scale, the pane, the focused element's kind (never its text) and how long since the last touch, inside the existing report limits, so the next one is diagnosed from numbers.
 - **Not proven off the device:** the tests and WebKit show each rule is in place; only the phone can show the zoom has stopped.
