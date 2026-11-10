@@ -236,3 +236,59 @@ describe('redactLocalPathsDeep: command fields (7.0.4 W5)', () => {
     expect(redactLocalPathsDeep(row)).toEqual({ waiting_detail: 'rm -rf [home]/Documents', failure: "tool_error at '[home]/x.ts'", latest_reply: 'Edited x.ts' })
   })
 })
+
+/** S1 (2026-11-09) adversarial read: more ordinary text that must never change, more private paths that must always be
+ * hidden, and the limits as they stand (each written down so a change to them is a decision, not a surprise). */
+describe('S1 adversarial: must not change', () => {
+  const unchanged = [
+    'Add 1/2 cup and 3/4 tsp; 16/9 and 4/3 screens; 24/7 support; he/him, they/them; q3/q4 plan',
+    'w/o, n/a, I/O, 50/50, ~1/3, ~80/100',
+    'echo x > /dev/null && /usr/bin/true',
+    'see https://example.com/Users/jane/x?y=1 and http://localhost:3141/api/sessions',
+    'https://x.com/a?next=%2Fdashboard and https://en.wikipedia.org/wiki/A_(B)',
+    '[docs](https://a.com/b/c), [rel](./src/app.ts) and [site](/api/x)',
+    'cd ~ && ls; $HOME is set; the path /private; the folder /Volumes',
+    'git diff HEAD~1 and HEAD~2/x',
+    '```\nls /tmp/x\n```',
+    'email jane@example.com, ssh git@github.com:org/repo.git',
+    // Approval-style command text that names only system paths: never rewritten anywhere.
+    'Allow: rm -rf /tmp/cos-build && chmod 600 /etc/hosts?',
+  ]
+  for (const text of unchanged) it(JSON.stringify(text).slice(0, 70), () => expect(redactLocalPaths(text)).toBe(text))
+})
+
+describe('S1 adversarial: must hide the person', () => {
+  const cases = [
+    '/USERS/JANE/x.txt', '//Users/jane/x', '/Users/josé/x.txt', '<a href="/Users/jane/x.html">', 'path=/Users/jane/x',
+    'file:/Users/jane/x', 'ssh host:/Users/jane/x', 'git@host:/Users/jane/repo', '--dir=/Users/jane/x', '"/Users/jane"',
+    '/Users/jane%20doe/x.txt', '\u201c/Users/jane/q.md\u201d', '**/Users/jane/b.md**', '[x](</Users/jane/a b.md>)',
+    '<file:///Users/jane/x.md>', 'vscode://file/Users/jane/a.ts:3', 'cursor://file/Users/jane/b.ts',
+    'https://evil.com#/Users/jane/x', 'https://x.com/o?p=%2FUsers%2Fjane%2Fa.pdf', '~jane/notes.txt', '${HOME}/.aws/credentials',
+    '/private/var/folders/ab/T/x', 'export HOME=/Users/jane', 'at /Users/jane:', 'C:/Users/jane/x.txt',
+  ]
+  for (const text of cases) it(JSON.stringify(text).slice(0, 70), () => {
+    const out = redactLocalPaths(JSON.parse(`"${text.replace(/"/g, '\\"')}"`))
+    expect(out).not.toMatch(/jane|josé/i)
+  })
+  it('command fields keep the path and mark the home folder, in any letter case', () => {
+    expect(redactLocalPathsDeep({ waiting_detail: 'rm -rf /Users/jane/Documents', failure: 'ENOENT //users/JANE/y' }))
+      .toEqual({ waiting_detail: 'rm -rf [home]/Documents', failure: 'ENOENT [home]/y' })
+  })
+})
+
+describe('S1 adversarial: limits as they stand (not defects fixed in this pass)', () => {
+  it('a path glued to a letter, a dot, a dash or an underscore is read as relative and kept (JSON-escaped and URL-encoded prose too)', () => {
+    for (const text of ['x/Users/jane/y', '.../Users/jane/x', '-/Users/jane/x', '_/Users/jane/y',
+      'json {"p":"\\/Users\\/jane\\/x"}', 'encoded %2FUsers%2Fjane%2Fx in prose']) expect(redactLocalPaths(text)).toBe(text)
+  })
+  it('~name/ followed by a space reads as a home shorthand: "~half/ the" loses its slash, and so does ~/', () => {
+    expect(redactLocalPaths('about ~half/ the leads')).toBe('about ~half the leads')
+    expect(redactLocalPaths('Use ~/ to mean home')).toBe('Use ~ to mean home')
+  })
+  it('a colon-joined list after a private head reads as one path: PATH=/Users/jane/bin:/usr/bin becomes PATH=bin', () => {
+    expect(redactLocalPaths('PATH=/Users/jane/bin:/usr/bin')).toBe('PATH=bin')
+  })
+  it('a folder name of more than five spaced words keeps its words (the head is still removed)', () => {
+    expect(redactLocalPaths('path: /Users/jane/A B C D E F G/file.txt')).toBe('path: A B C D E F G/file.txt')
+  })
+})

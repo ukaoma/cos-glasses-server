@@ -149,3 +149,31 @@ describe('isDeniedSecretPath: after canonicalising', () => {
     expect(isDeniedSecretPath(at('out', 'alias.png'))).toBe(false)
   })
 })
+
+/** S1 (2026-11-09): every file COS itself keeps a credential in, at its real place under a home folder. Found by listing
+ * ~/.cos-glasses for key, token, secret, credential and auth names: data/key-secrets/provider-keys.json (the provider
+ * key store) was served by name before this, which a session started in the home folder could link or preview. */
+describe('isDeniedSecretPath: COS\'s own credential files (S1)', () => {
+  const home = (...parts: string[]) => join(root, 'home', ...parts)
+  const cos = [
+    ['.cos-glasses', '.env'], ['.cos-glasses', '.env.bak-pre-gate-20261018'], ['.cos-glasses', '.env.PRECUTOVER-1784894146'],
+    ['.cos-glasses', 'app', '.env'], ['.cos-glasses', 'hook-token'], ['.cos-glasses', 'certs', 'key.pem'],
+    ['.cos-glasses', 'secrets', 'openrouter-test.key'], ['.cos-glasses', 'data', 'openai-key.json'],
+    ['.cos-glasses', 'data', 'subq-key.json'], ['.cos-glasses', 'data', 'jev-key.json'], ['.cos-glasses', 'data', 'fireflies-key.json'],
+    ['.cos-glasses', 'data', 'key-secrets', 'provider-keys.json'], ['.cos-profile.json'],
+    ['.claude', '.credentials.json'], ['.codex', 'auth.json'],
+  ]
+  for (const parts of cos) it(`${parts.join('/')} is denied`, () => { expect(isDeniedSecretPath(home(...parts))).toBe(true) })
+  it('the key store is denied by its folder AND by its name, each on its own', () => {
+    expect(isDeniedSecretPath(home('anywhere', 'provider-keys.json'))).toBe(true)
+    expect(isDeniedSecretPath(home('.cos-glasses', 'data', 'key-secrets', 'renamed.json'))).toBe(true)
+  })
+  it('COS files that hold no secret still preview, and look-alike names are ordinary', () => {
+    for (const parts of [
+      ['.cos-glasses', 'data', 'key-lanes.json'], ['.cos-glasses', 'data', 'web-keys.json'], ['.cos-glasses', 'token-audit.jsonl'],
+      ['.cos-glasses', 'app', 'public', 'tokens.css'], ['.cos-glasses', 'app', '.env.example'.replace('.env', 'env')],
+      ['repo', 'keynote.pdf'], ['repo', 'monkey.png'], ['repo', 'hotkeys.json'], ['repo', 'key-secrets-guide.md'],
+      ['repo', 'provider-keys.md'], ['repo', 'keyboard-shortcuts.json'],
+    ]) expect(isDeniedSecretPath(home(...parts)), parts.join('/')).toBe(false)
+  })
+})
