@@ -6907,7 +6907,7 @@
   // through COSWeb.onKeyboard; COSWeb.keyboardUp says whether it is up now. Which composer the keyboard is for is the
   // pane's to mark (panes/cos-chat.js sets html.kb-chat and .cc-kb).
   var KB_UP_PX = 120, KB_AFTER_MS = 300;
-  var LR = { up: false, frame: 0, after: 0, cycle: 0, focusN: 0, device: false, field: null, hooks: [], box: '' };
+  var LR = { up: false, frame: 0, after: 0, cycle: 0, focusN: 0, device: false, field: null, hooks: [], box: '', zoomed: false, touchAt: 0 };
   function lrPane() { var r = parseRoute(); return String(r.pane + (r.args[0] === 'cos' ? '.cos' : '')).slice(0, 24); }
   function lrKind(a) {
     var tag = String((a && a.tagName) || '').toLowerCase();
@@ -6965,9 +6965,21 @@
     layoutCrumb('kb-after', { pane: lrPane(), n: LR.cycle, gap: gap, sy: s.sy, smax: s.smax, over: s.sy > s.smax, gapNow: lrGap(viewportFit()), syNow: s2.sy,
       dvh: lrProbe('height:100dvh', 'h'), svh: lrProbe('height:100svh', 'h'), lvh: lrProbe('height:100lvh', 'h'), lh: v.layoutH });
   }
+  // 7.0.17: when the page's zoom crosses 1.01 either way, one breadcrumb (inside layoutCrumb's caps): the scale, the
+  // pane, the focused element's tag (never its text or value) and how long since the last touch. A double-tap zoom
+  // reads as a few hundred ms after a touch with no field focused; a focus zoom as an INPUT or TEXTAREA. Read only:
+  // nothing here changes the zoom.
+  function zoomCrumb(v) {
+    var zoomed = !!(v && v.zoomed);
+    if (zoomed === LR.zoomed) return false;
+    LR.zoomed = zoomed;
+    var a = document.activeElement, tag = a && a !== document.body && a.tagName ? String(a.tagName).toLowerCase().slice(0, 24) : 'none';
+    return layoutCrumb(zoomed ? 'zoom-in' : 'zoom-out', { pane: lrPane(), scale: v.scale, tag: tag, sinceTouch: LR.touchAt ? Date.now() - LR.touchAt : -1 });
+  }
   function lrApply() {
     LR.frame = 0;
     var v = viewportFit(), de = document.documentElement;
+    zoomCrumb(v);
     // Written only when they change: a pinch or pan fires this every frame, and each write restyles the page.
     var box = v.top + '|' + v.height + '|' + v.dock, moved = box !== LR.box;
     if (moved && de && de.style && de.style.setProperty) {
@@ -6995,9 +7007,24 @@
     if (vv && vv.addEventListener) { vv.addEventListener('resize', lrFit); vv.addEventListener('scroll', lrFit); }
     window.addEventListener('resize', lrFit); window.addEventListener('orientationchange', lrFit); window.addEventListener('pageshow', lrFit);
     document.addEventListener('focusin', function () { lrFocus(); lrFit(); });
+    // 7.0.17: when the last touch landed, for the zoom breadcrumb only. Passive: it never blocks a gesture.
+    document.addEventListener('touchstart', function () { LR.touchAt = Date.now(); }, { capture: true, passive: true });
     document.addEventListener('focusout', function () { setTimeout(lrFit, 0); });
     shellHooks.push(function () { lrDevice(); lrFit(); });
   })();
+  // 7.0.17 (Miles 2026-11-10, the Duo web app zooming in and out around the keyboard): on iOS only, the viewport is
+  // capped at maximum-scale=1, once, as the page loads. Other platforms keep the viewport exactly as it is. Never while
+  // the page is already zoomed (a reload mid-zoom), so the zoom is never changed under the person's fingers; nothing
+  // calls this again after load.
+  function viewportCap(meta, ua, vv) {
+    if (!meta || ua.os !== 'ios') return false;
+    if (vv && vv.scale > 1.01) return false;
+    var content = String(meta.getAttribute('content') || '');
+    if (/maximum-scale\s*=/.test(content)) return false;
+    meta.setAttribute('content', content + (content ? ', ' : '') + 'maximum-scale=1');
+    return true;
+  }
+  try { viewportCap(document.querySelector('meta[name="viewport"]'), uaClass(), window.visualViewport); } catch (_e) { /* the viewport stays as it is */ }
   window.COSWeb.keyboardUp = function () { return LR.up; };
   window.COSWeb.onKeyboard = function (fn) { if (typeof fn === 'function') LR.hooks.push(fn); };
   // ── end layout reports

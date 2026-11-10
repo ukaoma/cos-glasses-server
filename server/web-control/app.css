@@ -590,7 +590,15 @@ select.field {
 @media (any-pointer: coarse) {
   input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']):not([type='button']):not([type='submit']):not([type='reset']):not([type='image']):not([type='hidden']),
   select, textarea { font-size: 16px !important; }
+  /* 7.0.17 (Miles 2026-11-10, Duo web app zooming): the same floor for any element that types without being a field.
+     None exists in Control Web today (work.js only names the selector); this keeps a future editor from zooming. */
+  [contenteditable]:not([contenteditable='false']) { font-size: 16px !important; }
 }
+/* 7.0.17 (Miles 2026-11-10: "a lot of zooming in and out as I'm opening and closing keyboard"; the Duo's own breadcrumb
+   showed vvs=2.12 with the keyboard down, a double-tap zoom fitting a column). manipulation keeps pan and pinch and
+   turns off double-tap zoom. On the root only: touch-action is the intersection down the tree, so the splitter's
+   none and the charts' pan-y stay exactly as strict as they were. */
+html { touch-action: manipulation; }
 /* Folded phones: every button and field is at least 44 px tall (design QA: .cx-btn came in six heights from 30 px). A
    minimum only, so it grows the compact ones and leaves the taller ones; the per-pane phone heights that fought it are
    gone. */
