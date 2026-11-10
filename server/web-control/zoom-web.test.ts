@@ -40,7 +40,8 @@ describe('7.0.17: double-tap zoom is off, and the stricter touch rules are untou
 })
 
 describe('7.0.17: iOS caps the viewport at maximum-scale=1, once, at load', () => {
-  const SRC = block('  function viewportCap(meta, ua, vv) {', '  try { viewportCap(')
+  // Ends at the next statement that is not the call, so a missing call fails the call-site test by name.
+  const SRC = block('  function viewportCap(meta, ua, vv) {', '  window.COSWeb.keyboardUp = ').replace(/\n  try \{ viewportCap\([^\n]*\n/, '\n')
   // eslint-disable-next-line no-new-func
   const cap = new Function(`${SRC}\nreturn viewportCap;`)() as (meta: unknown, ua: { os: string }, vv?: { scale: number }) => boolean
   const meta = (content = 'width=device-width, initial-scale=1, viewport-fit=cover') => ({ content, getAttribute() { return this.content }, setAttribute(_n: string, v: string) { this.content = v } })
