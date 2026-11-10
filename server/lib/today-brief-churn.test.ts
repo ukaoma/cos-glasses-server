@@ -171,6 +171,28 @@ describe.skipIf(REPORT_ONLY)('T1 guards', () => {
     expect(h.prompts).toHaveLength(2)
     expect(v.text.startsWith('Two things need you.')).toBe(true)
   })
+  it('an ask that could not read the session list never replaces today\'s summary, even forced', async () => {
+    const h = harness()
+    const first = await h.brief.ask(base())
+    const unread = { ...base({ extra: true, need: 'Approve the candidate' }), sessionsRead: false }
+    h.clock.t += 40 * MIN
+    const v = await h.brief.ask(unread)
+    expect(v).toMatchObject({ state: 'stale', reason: 'interval' })
+    expect(v.text).toBe(first.text)
+    h.clock.t += 1 * MIN
+    expect((await h.brief.ask(unread, '', { force: true })).text).toBe(first.text)
+    expect(h.prompts).toHaveLength(1)
+    // Readable again: the material change writes.
+    expect((await h.brief.ask(base({ extra: true, need: 'Approve the candidate' }))).state).toBe('fresh')
+    expect(h.prompts).toHaveLength(2)
+  })
+  it('with no summary today, an unread session list may still write one (it says it may be incomplete)', async () => {
+    const h = harness()
+    const v = await h.brief.ask({ ...base(), sessionsRead: false })
+    expect(v.state).toBe('fresh')
+    expect(h.prompts).toHaveLength(1)
+    expect(h.prompts[0]).toContain('the session list could not be read')
+  })
   it('a forced refresh still writes at once (the person asked)', async () => {
     const h = harness()
     await h.brief.ask(base())

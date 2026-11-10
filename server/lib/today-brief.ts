@@ -1253,6 +1253,10 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       if (!force && cache && cache.fingerprint === fingerprint) return view(fingerprint)
       // T1: only routine changes since the summary shown, and it is under 30 minutes old: it stays (stale, as before).
       if (!force && cache && !rewriteDue(cache, inputs)) return view(fingerprint, 'interval')
+      // T1 (lead 22:02): an ask that could not read the session list never replaces today's summary, forced or not (it
+      // would say "the session list could not be read" over one written from a list that was read). With no summary
+      // today, it may still write, and that summary says honestly that it may be incomplete.
+      if (cache && !inputs.sessionsRead) return view(fingerprint, 'interval')
       // Concurrent asks share one generation, whichever inputs started it.
       if (inflight) { await inflight; return view(fingerprint, todaysCache(load())?.fingerprint === fingerprint ? undefined : 'interval') }
       if (!hasBriefInputs(inputs)) return view(fingerprint, 'empty_inputs')
