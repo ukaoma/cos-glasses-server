@@ -1458,8 +1458,10 @@
   // the server (lib/today-brief.ts). Today sends what it already read: session titles, states, how long, each session's
   // latest line and what needs you. The server decides whether a new one is written (off unless switched on, only when
   // the inputs changed, 10 minutes apart, the Summaries per day cap, a breaker). Today never waits for it: the counts line paints at once
-  // and the summary replaces it when one arrives. Never shown over a session list that was not read.
-  var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0, reconnect: false };
+  // and the summary replaces it when one arrives. T1 spec (lead 23:04, same rule as Control 0.5.388): today's summary
+  // stays through a pending or failed session read (its age line already says what could not be read), the block keeps
+  // its tallest height so nothing under it moves while Miles reads, and unchanged text is never written again.
+  var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0, reconnect: false, heldPx: 0, heldDay: '', heldWidth: -1, shownKind: '', shownText: '', shownEl: null };
   // 6.99.26 QA: the same rows are asked about again only after five minutes (a Today that sits open still learns what
   // the server reads itself: sub-agents and Work cards); changed rows are asked about at once, one ask at a time.
   var BRIEF_RESEND_MS = 5 * 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000, BRIEF_TICK_MS = 60000, BRIEF_LIVE_GAP_MS = 60000;
@@ -1520,14 +1522,43 @@
       if (TODAY.model && state.pane === 'today') renderStory(TODAY.model);
     });
   }
-  /** The summary to show, or null: only with text, only over a session list that was read. */
+  /** The summary to show, or null: only with text, fresh or stale, and written today. T1 spec 0: a session read that is
+   *  pending or failed no longer swaps it for the counts line (an offline Today still hides it, in renderStory). */
   function briefShown() {
     var v = BRIEF.view;
-    if (!v || !v.text || (v.state !== 'fresh' && v.state !== 'stale') || TODAY.sessionsState !== 'answered') return null;
+    if (!v || !v.text || (v.state !== 'fresh' && v.state !== 'stale')) return null;
+    var at = toDate(v.at);
+    if (!at || at.toDateString() !== new Date().toDateString()) return null;
     return v;
   }
-  // Forget the summary (Settings turned it on or off): the next Today paint asks at once.
-  function resetBrief() { BRIEF.view = null; BRIEF.sentKey = ''; BRIEF.sentAt = 0; }
+  // Forget the summary (Settings turned it on or off): the next Today paint asks at once, and the block may shrink.
+  function resetBrief() { BRIEF.view = null; BRIEF.sentKey = ''; BRIEF.sentAt = 0; BRIEF.heldPx = 0; }
+  // T1 spec 1 and 2: #today-story keeps the tallest height it has had, so a shorter rewrite, or the fall back to the
+  // counts line, never pulls the page up under Miles. It may shrink on a new local day, when its width changes (resize,
+  // Duo fold or unfold, rotation reflow the text anyway), after Refresh lands and after resetBrief; never on a rewrite.
+  function storyHold(el) {
+    if (!el || !el.style || typeof el.getBoundingClientRect !== 'function') return;
+    var day = new Date().toDateString(), w = el.clientWidth || 0;
+    if (BRIEF.heldDay !== day || Math.abs(w - BRIEF.heldWidth) >= 1) { BRIEF.heldPx = 0; BRIEF.heldDay = day; BRIEF.heldWidth = w; }
+    el.style.minHeight = '';
+    var h = Math.ceil(el.getBoundingClientRect().height || 0);
+    if (h > BRIEF.heldPx) BRIEF.heldPx = h;
+    el.style.minHeight = BRIEF.heldPx ? BRIEF.heldPx + 'px' : '';
+  }
+  // T1 spec 3: Today repaints on every session move; the same words are not written again (no reflow, no aria-live
+  // re-announcement). Only the age line under a summary moves on.
+  function storyWrite(el, kind, text, when) {
+    if (BRIEF.shownEl !== el || BRIEF.shownKind !== kind || BRIEF.shownText !== text) {
+      if (kind === 'brief') el.innerHTML = esc(text) + '<span class="story-when">' + esc(when) + '</span>';
+      else el.textContent = text;
+      BRIEF.shownEl = el; BRIEF.shownKind = kind; BRIEF.shownText = text;
+    } else if (kind === 'brief') {
+      var w = typeof document !== 'undefined' && document.querySelector ? document.querySelector('#today-story .story-when') : null;
+      if (w) { if (w.textContent !== when) w.textContent = when; }
+      else el.innerHTML = esc(text) + '<span class="story-when">' + esc(when) + '</span>';
+    }
+    storyHold(el);
+  }
   // Every minute while Today is on screen: "Updated N min ago" moves on, and an unchanged Today asks again once its
   // five minutes are up (requestBrief's own throttle). Hidden or another pane: nothing.
   setInterval(function () {
@@ -1552,7 +1583,11 @@
     // Today round 2: "Ask about this" shows under a model summary only (paintTodayAsk, below the Today block). The test
     // harnesses that run this block alone do not have it, so it is looked up, never assumed.
     var askBox = typeof paintTodayAsk === 'function' ? paintTodayAsk : function () {};
-    if (TODAY.offline) { askBox(null); el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
+    // The harnesses that run this block alone have no storyWrite either: a plain write there.
+    var write = typeof storyWrite === 'function' ? storyWrite : function (e, kind, text, when) {
+      if (kind === 'brief') e.innerHTML = esc(text) + '<span class="story-when">' + esc(when) + '</span>'; else e.textContent = text;
+    };
+    if (TODAY.offline) { askBox(null); write(el, 'offline', 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'); return; }
     // The model's summary when there is one (it never blocks: the counts line below shows until it lands). The test
     // harnesses that run this block alone have no requestBrief, so it is looked up, never assumed.
     askBox(null);
@@ -1560,7 +1595,7 @@
       requestBrief(m);
       var brief = briefShown();
       askBox(brief);
-      if (brief) { el.innerHTML = esc(brief.text) + '<span class="story-when">' + esc(briefWhen(brief, m)) + '</span>'; return; }
+      if (brief) { write(el, 'brief', brief.text, briefWhen(brief, m)); return; }
     }
     var first = '';
     if (m.sessionsWaiting > 0) first = countWord(m.sessionsWaiting) + ' ' + plural(m.sessionsWaiting, 'session is', 'sessions are') + ' waiting on you';
@@ -1584,7 +1619,7 @@
     var others = m.failed.filter(function (n) { return n !== 'sessions'; });
     if (!m.settled && !m.now.length && !m.later.length) out += (unread ? others : m.failed).length ? ' Couldn\u2019t read ' + listWords(unread ? others : m.failed) + ', so this may not be everything.' : unread ? ' This may not be everything that needs you.' : ' Still reading what needs you.';
     else if (unread) out += ' This may not be everything that needs you.';
-    el.textContent = out;
+    write(el, 'counts', out);
   }
   function listWords(names) { return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]; }
   function runRow(s, activeNow) {
@@ -1765,6 +1800,8 @@
         BRIEF.inflight = false;
         if (v && typeof v === 'object') { BRIEF.view = v; BRIEF.sentAt = Date.now(); }
         if (v && v.reason === 'refresh_throttled') TR.retryAt = Date.now() + Math.max(1000, Number(v.retryAfterMs) || 30000);
+        // T1 spec 2: Refresh re-fits the block to what it now holds.
+        BRIEF.heldPx = 0;
         if (TODAY.model && state.pane === 'today') renderStory(TODAY.model);
         return done(refreshWords(v));
       }, function (err) {
@@ -2256,7 +2293,8 @@
       TODAY.askCaps = true;
       chat.ensureCaps().then(function () { if (TODAY.model && state.pane === 'today') renderStory(TODAY.model); }, function () {});
     }
-    var on = !!(brief && !TODAY.offline && TODAY.sessionsState === 'answered' && chat && chat.askAbout && chat.askOn && chat.askOn());
+    // T1 spec 0: the box stays while a session read is pending or failed; briefShown decides whether there is a summary.
+    var on = !!(brief && !TODAY.offline && chat && chat.askAbout && chat.askOn && chat.askOn());
     form.classList.toggle('hidden', !on);
   }
   // The sessions the summary read: the server's own list with the summary (7.0.10+ round 2 `sessions`: title, provider,
