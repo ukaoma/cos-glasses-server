@@ -764,18 +764,65 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
 /**
  * Gracefully stop whisper-server (called on process exit).
  */
-export function stopWhisperServer(): void {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM')
+/** How whisper-server is stopped, and why it is never SIGTERM (S1, 2026-11-09).
+ * whisper-server's own SIGTERM/SIGINT handler calls exit(); exit runs static destructors,
+ * and ggml's Metal device teardown aborts in ggml_metal_rsets_free. Nine crash reports
+ * 11/03 to 11/08 show exactly that stack (signal_handler, exit, __cxa_finalize_ranges,
+ * ggml_metal_device_free, ggml_abort), each in the minute of a COS server restart, with the
+ * parent already launchd because node exited without waiting. The daemon holds no state
+ * worth flushing (the model is on disk, requests are retried by their callers), so SIGKILL
+ * stops it without running that teardown and leaves no crash report. The stop then waits
+ * for the close, so node never exits first and orphans the child. */
+export const WHISPER_STOP_SIGNAL: NodeJS.Signals = 'SIGKILL'
+export const WHISPER_STOP_WAIT_MS = 2_000
+
+/** Resolve true when `child` has closed, false after `timeoutMs`. */
+export function waitForChildClose(child: Pick<ChildProcess, 'exitCode' | 'signalCode' | 'once' | 'off'>, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  return new Promise(resolvePromise => {
+    let settled = false
+    const finish = (closed: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.off('close', onClose)
+      resolvePromise(closed)
+    }
+    const onClose = () => finish(true)
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    timer.unref?.()
+    child.once('close', onClose)
+  })
+}
+
+export interface WhisperStopResult { stopped: boolean; exited: boolean; waitedMs: number; hqChildren: number }
+
+export async function stopWhisperServer(options: { waitMs?: number } = {}): Promise<WhisperStopResult> {
+  const waitMs = options.waitMs ?? WHISPER_STOP_WAIT_MS
+  const started = Date.now()
+  const waits: Array<Promise<boolean>> = []
+  const child = serverProcess
+  if (child) {
     serverProcess = null
     serverAvailable = false
-    console.log('[whisper-local] whisper-server stopped')
+    try { child.kill(WHISPER_STOP_SIGNAL) } catch { /* already exited */ }
+    waits.push(waitForChildClose(child, waitMs))
   }
-  for (const proc of ownedHqChildren) {
+  const hq = [...ownedHqChildren]
+  for (const proc of hq) {
     try { proc.kill('SIGKILL') } catch { /* already exited */ }
+    waits.push(waitForChildClose(proc, waitMs))
   }
   ownedHqChildren.clear()
   serverStartupState = 'stopped'
+  const closed = await Promise.all(waits)
+  const exited = closed.every(Boolean)
+  const waitedMs = Date.now() - started
+  if (child || hq.length) {
+    console.log(`[whisper-local] whisper-server stopped (${WHISPER_STOP_SIGNAL}, ${hq.length} HQ child(ren)): ` +
+      (exited ? `exited in ${waitedMs} ms` : `did not exit within ${waitMs} ms`))
+  }
+  return { stopped: Boolean(child), exited, waitedMs, hqChildren: hq.length }
 }
 
 export function isWhisperLocalAvailable(): boolean {

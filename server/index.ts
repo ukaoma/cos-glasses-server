@@ -1615,8 +1615,13 @@ async function gracefulShutdown(): Promise<void> {
     if (parakeet.killed || parakeet.removed) console.log(`[stt] shutdown: killed ${parakeet.killed} Parakeet run(s), removed ${parakeet.removed} temp dir(s)`)
   } catch { /* best effort */ }
   stopCodexModelCatalogRefresh()
-  stopWhisperServer()
-  await stopWhisperPreviewServer({ final: true })
+  // S1 (2026-11-09): both whisper-server children are stopped with SIGKILL and waited for
+  // (about 2 s at most each, inside the 8 s force exit), so an update restart leaves no
+  // Metal-teardown crash report and no orphan reparented to launchd.
+  await Promise.all([
+    stopWhisperServer().catch(err => console.error('[shutdown] whisper-server stop:', err)),
+    stopWhisperPreviewServer({ final: true }),
+  ])
   stopLocalTtsServer()
   clearTimeout(forceExit)
   process.exit(0)

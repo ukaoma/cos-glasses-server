@@ -434,6 +434,15 @@ describe('the meeting preview recovers from a failed request (6.50.2)', () => {
     await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(4))
   })
 
+  it('S1: the shutdown stop kills the sidecar with SIGKILL (never SIGTERM) and waits for it', async () => {
+    const { preview, children } = await bootTurbo(async () => ok('text'))
+    let closed = false
+    children[0].once('close', () => { closed = true })
+    await preview.stopWhisperPreviewServer({ final: true })
+    expect(children[0].kill.mock.calls.map(c => c[0])).toEqual(['SIGKILL'])
+    expect(closed).toBe(true)
+  })
+
   it('after the server\'s shutdown stop, no request revives the sidecar', async () => {
     const { preview, spawn, children } = await bootTurbo(async () => ok('text'))
     // The skeptic's case: the sidecar had ALREADY failed when shutdown began, so a request
