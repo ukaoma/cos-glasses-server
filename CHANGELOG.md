@@ -12,14 +12,14 @@
 - **Meaning search** asks consent per browser before anything is sent (off until Turn on).
 - **Sort** no longer shows Keep, Drop or Undo (no server routes behind them).
 - **A question waiting at the Mac's prompt:** Today's card and the session reader say it once, with the words when the server has them and an honest "COS cannot read this question's words from here" line when it does not, and offer nothing that pretends to answer. A Claude session waiting on a question reads "Waiting for your answer".
-- **Question block (X1 contract v1):** when the server sends `waiting` (only with a hold switch or the words switch on), the web draws held, at the Mac (words and options, one card per question) and answered (2 minutes). Answers send how recently the page was touched; an approval the server wants confirmed is confirmed and sent once more; the three new refusals keep the card with a retry line. The cards sit above the reader's Send box, which reads "Message this session (not an answer)" while a question is open. With no `waiting` key nothing changes.
+- **Question block (X1 contract v1):** the web is ready for a later server's question list (`waiting`); 7.0.15's server sends none, so nothing changes with this server. With a server that sends it, the web draws held, at the Mac (words and options, one card per question) and answered (2 minutes). Answers send how recently the page was touched; an approval the server wants confirmed is confirmed and sent once more; the three new refusals keep the card with a retry line. The cards sit above the reader's Send box, which reads "Message this session (not an answer)" while a question is open. With no `waiting` key nothing changes.
 - **Duo layout:** every composer keeps its placeholder on one line at any width. The session reply box, COS chat, Today ask and a thread reply put their buttons on the row below when the words have less than 19rem; the Ask sheet's buttons wrap under its field; the COS chat header's links wrap under its description. Two placeholders are shorter: "Ask COS or drop a thought" (Drop it on) and "Ask about this or steer a session" (Today). Measured in WebKit at 382, 440, 520 and 951 px wide and at the narrowest chat column; not yet checked on the phone.
 - **Copy:** the web names the Mac's Settings page "Glasses, phone and web" (Control 0.5.387).
 
 ### Server (S1)
 
 - **Session ledger:** an unchanged session is not appended again (adds `data/session-log-state.json`, tied to the ledger's inode); one re-append per session on the first boot after the update. The ledger reader streams, opens with `O_NONBLOCK` and reads only a regular file. `/api/sessions/lookup` answers from history again on a large ledger (old range rule); its first call per boot streams the whole ledger. The compaction tool is not ready and is not offered.
-- **whisper-server and the preview sidecar** are stopped with SIGKILL plus a bounded wait on shutdown, ending the crash reports at restart.
+- **whisper-server and the preview sidecar** are stopped with SIGKILL plus a bounded wait on shutdown, and the preview sidecar also when it restarts, ending the crash reports at restart.
 - **Work reviews** are saved only when something besides `updatedAt` changed.
 - **Instrumentation:** an event-loop stall monitor (a line only on a stall over 2 s, at most 1 per 10 s); `[cors] blocked origin=...` once per origin per hour; the stop log names what was running; extended HQ timeout lines.
 - **No ledger configured:** one "said once" line per process instead of per-session lines; the session-cache warning is said once.
@@ -27,7 +27,7 @@
 - **Opt-in, off by default:** progressive HQ no longer retries a timed-out checkpoint (`COS_MEETING_PROGRESSIVE_HQ=1`); a per-path disk I/O meter (`COS_DISK_IO_METER=1`).
 - **Tests:** two flaky tests made deterministic, six bounded.
 
-**Default-on for every install:** yes. Web: the off-Tailscale page, sign-in renewal and its notices, the not-answering card and its 30 s health check, the at-Mac question copy, Running rows, Start work defaults, meaning-search consent, the Sort cuts, the Duo layout and the two placeholders. Server: ledger dedupe and its state file, the lookup rule, SIGKILL on shutdown, the work-review save rule, the stall monitor and the new log lines, the secret-guard paths. The question block draws nothing new unless a hold or words switch is on.
+**Default-on for every install:** yes. Web: the off-Tailscale page, sign-in renewal and its notices, the not-answering card and its 30 s health check, Today re-reading `/api/query-jobs/active` every 15 s while COS jobs run, the at-Mac question copy, Running rows, Start work defaults, meaning-search consent, the Sort cuts, the Duo layout and the two placeholders. Server: ledger dedupe and its state file, the lookup rule, SIGKILL on shutdown, the work-review save rule, the stall monitor and the new log lines, the secret-guard paths. The question block draws nothing new with this server.
 
 ## 7.0.13 - Work chat Plan no longer fails on a short session id
 
