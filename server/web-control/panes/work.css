@@ -323,3 +323,6 @@
   .wk-detail.split-side > .split-handle { display: flex; }
 }
 @media (min-width: 1300px) { .wk-detail.split-side { grid-template-columns: minmax(0, 1fr) 22px 452px; } }
+
+/* W1 (0.5.386 parity): the empty card's one-tap New session button wraps on a folded phone instead of running off the card. */
+.wk-start-new { white-space: normal; max-width: 100%; height: auto; min-height: 40px; text-align: center; line-height: 1.3; padding-top: 8px; padding-bottom: 8px; }

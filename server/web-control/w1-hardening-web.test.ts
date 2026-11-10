@@ -241,7 +241,7 @@ describe('F2: the 7-day sign-in', () => {
     h.fns.signinRemember({ expiresAt: new Date(Date.now() + 5 * 3600000).toISOString() })
     h.fns.connPaint()
     expect(h.box.innerHTML).toContain('Sign-in here ends ')
-    expect(h.box.innerHTML).toContain('Open COS on your phone')
+    expect(h.box.innerHTML).toContain('Sign in again before then from COS Control on your Mac: Open COS on your phone.')
     expect(h.box.innerHTML).toContain('data-action="conn-hide-signin"')
   })
   it('more than a day away: nothing', () => {
@@ -269,8 +269,9 @@ describe('F23: a cold open with the Mac unreachable', () => {
     const boot = block('  function boot() {', '  if (document.readyState')
     const calls: string[] = []
     const cls = () => { const set = new Set<string>(['hidden']); return { set, toggle: (c: string, on: boolean) => { if (on) set.add(c); else set.delete(c) }, add: (c: string) => set.add(c) } }
-    const els: Record<string, { classList: ReturnType<typeof cls> }> = { 'auth-offline': { classList: cls() }, 'auth-form': { classList: cls() }, 'auth-error': { classList: cls() } }
-    els['auth-form']!.classList.set.delete('hidden')
+    const els: Record<string, { classList: ReturnType<typeof cls>; textContent?: string }> = { 'auth-offline': { classList: cls() }, 'auth-form': { classList: cls() }, 'auth-error': { classList: cls() },
+      'auth-title': { classList: cls(), textContent: 'Connect this browser' }, 'auth-intro': { classList: cls() } }
+    els['auth-form']!.classList.set.delete('hidden'); els['auth-intro']!.classList.set.delete('hidden')
     const deps = {
       location: { search: '', pathname: '/control', hash: '' }, history: { replaceState: () => {} }, URLSearchParams,
       api: () => (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer)),
@@ -287,6 +288,8 @@ describe('F23: a cold open with the Mac unreachable', () => {
     expect(h.calls).toEqual(['auth:'])
     expect(h.els['auth-offline']!.classList.set.has('hidden')).toBe(false)
     expect(h.els['auth-form']!.classList.set.has('hidden')).toBe(true)
+    expect(h.els['auth-title']!.textContent).toBe('Your Mac is not answering')
+    expect(h.els['auth-intro']!.classList.set.has('hidden')).toBe(true)
   })
   it('a Mac that answered with an error is a sign-in matter: the form stays, with the reason', async () => {
     const h = bootWith(fail(503, 'Not ready.'))
@@ -297,7 +300,7 @@ describe('F23: a cold open with the Mac unreachable', () => {
   })
   it('the card is in the page, and Try again is wired', () => {
     expect(HTML).toContain('<button type="button" class="btn primary block" id="auth-retry">Try again</button>')
-    expect(HTML).toContain('Your Mac is not answering. COS runs on your Mac, so this page waits for it.')
+    expect(HTML).toContain('COS runs on your Mac, so this page waits for it. Check that the Mac is awake and on Tailscale, then try again.')
     expect(APP).toContain("if (t.id === 'auth-retry')")
   })
 })

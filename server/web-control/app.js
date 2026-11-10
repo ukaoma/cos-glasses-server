@@ -398,7 +398,7 @@
     var ends = signinEndsAt(), left = ends - Date.now();
     if (ends && left > 0 && left <= SIGNIN_WARN_MS && CONN.hideFor !== ends) {
       html += '<div class="conn-line" role="status"><strong>Sign-in here ends ' + esc(connWhen(ends)) + '.</strong><span class="conn-sub">' +
-        esc('To keep using COS on this browser, sign in again before then. ' + SIGNIN_HOW) + '</span>' +
+        esc('Sign in again before then from COS Control on your Mac: Open COS on your phone.') + '</span>' +
         '<button type="button" class="btn small" data-action="conn-hide-signin">Hide</button></div>';
     }
     return html;
@@ -6919,6 +6919,9 @@
     var box = $('auth-offline'), form = $('auth-form');
     if (!box || !form) return;
     box.classList.toggle('hidden', !on); form.classList.toggle('hidden', !!on);
+    var title = $('auth-title'), intro = $('auth-intro');
+    if (title) title.textContent = on ? 'Your Mac is not answering' : 'Connect this browser';
+    if (intro) intro.classList.toggle('hidden', !!on);
     if (on) { var err = $('auth-error'); if (err) { setStatus(err, '', true); err.classList.add('hidden'); } }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();

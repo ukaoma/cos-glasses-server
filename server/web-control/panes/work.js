@@ -1959,7 +1959,7 @@
     } else if (r.state === 'quiet') {
       actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-check" data-key="' + esc(r.key) + '">Check again</button></div>';
     } else if (r.state === 'answered' && !r.assignments.length && r.offerNewSession) {
-      actions = '<div class="wk-row wk-wrap wk-round-actions"><button type="button" class="cx-btn primary" data-wk="chat-start-new" data-key="' + esc(r.key) + '"' + (r.sending || c.busy ? ' disabled' : '') + '>' +
+      actions = '<div class="wk-row wk-wrap wk-round-actions"><button type="button" class="cx-btn primary wk-start-new" data-wk="chat-start-new" data-key="' + esc(r.key) + '"' + (r.sending || c.busy ? ' disabled' : '') + '>' +
         esc(chatStartNewTitle(r.offerNewSession)) + '</button></div>' +
         '<p class="wk-fine">No session on this task yet, and the plan did not start one. Nothing is sent until you press this.</p>';
     } else if (chatCanPlanAgain(r)) {
