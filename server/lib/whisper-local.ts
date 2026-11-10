@@ -999,6 +999,36 @@ export function parseWhisperCliFullJson(raw: string): { text: string; words: Whi
   }
 }
 
+/** S1 (2026-11-09): an HQ decode that hit its wall-clock ceiling. The message keeps the
+ * historical prefix ("whisper-cli HQ timeout (240s, model=large-v3)") that log scans count,
+ * then names what settles why: the audio length, the device and why, the thread count and
+ * whether the child ran at background QoS (taskpolicy -b, which keeps it off the
+ * performance cores). Field evidence 10/26 to 11/09: 290 progressive-checkpoint timeouts
+ * against 190 successes, every one on CPU at background QoS. */
+export class WhisperHqTimeoutError extends Error {
+  readonly hqTimeout = true
+  constructor(
+    readonly timeoutMs: number,
+    readonly model: 'large-v3' | 'turbo',
+    readonly details: { audioSeconds: number; device: 'metal' | 'cpu'; reason: string; threads: number; backgroundQos: boolean; elapsedMs: number },
+  ) {
+    super(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${model}) `
+      + `audio=${details.audioSeconds.toFixed(1)}s device=${details.device} reason=${details.reason} `
+      + `threads=${details.threads} qos=${details.backgroundQos ? 'background' : 'default'} elapsed=${details.elapsedMs}ms`)
+    this.name = 'WhisperHqTimeoutError'
+  }
+}
+
+export function isWhisperHqTimeout(error: unknown): error is WhisperHqTimeoutError {
+  return error instanceof WhisperHqTimeoutError
+    || (typeof error === 'object' && error !== null && (error as { hqTimeout?: boolean }).hqTimeout === true)
+}
+
+/** Seconds of audio in a 16 kHz mono 16-bit WAV (the only shape the HQ path decodes). */
+export function wavAudioSeconds(buffer: Buffer): number {
+  return Math.max(0, buffer.length - 44) / 32_000
+}
+
 /**
  * High-quality transcription for batch/post-meeting use.
  * Uses the full Whisper large-v3 (32-layer) decoder + Silero VAD + beam search.
@@ -1199,7 +1229,14 @@ export async function transcribeHighQuality(
           return
         }
         if (timedOut) {
-          reject(new Error(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${useLargeV3 ? 'large-v3' : 'turbo'})`))
+          reject(new WhisperHqTimeoutError(timeoutMs, useLargeV3 ? 'large-v3' : 'turbo', {
+            audioSeconds: wavAudioSeconds(audioBuffer),
+            device: decision.device,
+            reason: decision.reason,
+            threads: (isBatch && !useMetal) ? requestedThreads : 16,
+            backgroundQos: useBackgroundTaskPolicy,
+            elapsedMs: Date.now() - start,
+          }))
           return
         }
         if (code !== 0) {
@@ -1262,7 +1299,8 @@ export async function transcribeHighQuality(
     const modelTag = useLargeV3 ? 'large-v3' : 'turbo'
     console.log(
       `[whisper-hq] Batch transcribed in ${elapsed}ms ` +
-      `(${modelTag}${useVad ? '+vad' : ''}${captureWords ? '+words' : ''}` +
+      // S1: the audio length makes the real-time factor readable from the log.
+      `(${modelTag}${useVad ? '+vad' : ''}${captureWords ? '+words' : ''}, audio=${wavAudioSeconds(audioBuffer).toFixed(1)}s` +
       `${words ? `, ${words.length} words` : ''}` +
       // Device forensics: without these, "why is polish slow today" is
       // unanswerable after the fact.

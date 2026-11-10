@@ -16,6 +16,7 @@ import {
   transcribeHighQuality,
   type HighQualityTranscriptionResult,
   type WhisperWord,
+  isWhisperHqTimeout,
 } from './whisper-local.js'
 import { asrFrontEnd } from './stt-live.js'
 import { measureSpeechSeconds } from './vad-silero.js'
@@ -412,6 +413,7 @@ export const __progressiveHqTesting = {
   segmentRangeIsComplete,
   nextMissingSealedSegment,
   progressiveFailureIdentity,
+  recordProgressiveFailure,
   resolveProgressiveHqPolicy,
   progressiveSessionIsIdle,
   yieldIdleProgressiveSessions,
@@ -1091,6 +1093,30 @@ function yieldIdleProgressiveSessions(activeSessionId: string, now = Date.now())
   }
 }
 
+/** Attempts a progressive checkpoint gets before it waits for the save-time job. */
+const PROGRESSIVE_MAX_ATTEMPTS = 3
+const PROGRESSIVE_RETRY_BACKOFF_MS = [60_000, 120_000, 300_000]
+
+/** S1 (2026-11-09): what one failed checkpoint decode means for its retries.
+ * A timeout is not retried. The retry would run the same audio on the same CPU lane at the
+ * same background QoS against the same 240 s ceiling: 10/26 to 11/09, 112 segments timed out
+ * and 85 of them timed out on all three attempts, so 178 of 290 timeouts (about 12 h of
+ * CPU during meetings) were retries. The checkpoint is disposable; the save-time job decodes
+ * that window. Any other failure keeps the 60/120/300 s backoff. Returns whether it is terminal. */
+function recordProgressiveFailure(
+  state: Pick<ProgressiveSessionState, 'failedIdentity' | 'failedAttempts' | 'retryAfter'>,
+  identity: string,
+  error: unknown,
+  now = Date.now(),
+): { terminal: boolean; timedOut: boolean } {
+  const timedOut = isWhisperHqTimeout(error)
+  const attempts = state.failedIdentity === identity ? state.failedAttempts + 1 : 1
+  state.failedAttempts = timedOut ? Math.max(attempts, PROGRESSIVE_MAX_ATTEMPTS) : attempts
+  state.failedIdentity = identity
+  state.retryAfter = now + PROGRESSIVE_RETRY_BACKOFF_MS[Math.min(PROGRESSIVE_RETRY_BACKOFF_MS.length - 1, state.failedAttempts - 1)]
+  return { terminal: state.failedAttempts >= PROGRESSIVE_MAX_ATTEMPTS, timedOut }
+}
+
 function segmentRangeIsComplete(segment: BatchSegment, completedIndices: number[]): boolean {
   const completed = new Set(completedIndices)
   for (let index = segment.startChunkIdx; index <= segment.endChunkIdx; index++) {
@@ -1111,7 +1137,7 @@ function nextMissingSealedSegment(
     if (!cached) {
       const identity = progressiveFailureIdentity(state.audioDir, segment, previousText)
       if (!identity) return null
-      if (state.failedIdentity === identity && (state.failedAttempts >= 3 || Date.now() < state.retryAfter)) return null
+      if (state.failedIdentity === identity && (state.failedAttempts >= PROGRESSIVE_MAX_ATTEMPTS || Date.now() < state.retryAfter)) return null
       return { segment, previousText }
     }
     previousText = cached.text
@@ -1191,12 +1217,13 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
       if ((error as Error)?.name !== 'AbortError') {
         const identity = progressiveFailureIdentity(state.audioDir, pending.segment, pending.previousText)
         if (!identity) return
-        state.failedAttempts = state.failedIdentity === identity ? state.failedAttempts + 1 : 1
-        state.failedIdentity = identity
-        state.retryAfter = Date.now() + [60_000, 120_000, 300_000][Math.min(2, state.failedAttempts - 1)]
+        const outcome = recordProgressiveFailure(state, identity, error)
         console.warn(
           `[meeting-hq-checkpoint] ${sessionId} ${pending.segment.startChunkIdx}-${pending.segment.endChunkIdx}: `
-          + `${error instanceof Error ? error.message : String(error)}`,
+          + `${error instanceof Error ? error.message : String(error)}`
+          + (outcome.terminal
+            ? (outcome.timedOut ? ' (timeout: not retried; the save-time job decodes this window)' : ' (attempts exhausted; the save-time job decodes this window)')
+            : ` (attempt ${state.failedAttempts} of ${PROGRESSIVE_MAX_ATTEMPTS})`),
         )
       }
     } finally {
