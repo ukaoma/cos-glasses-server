@@ -819,8 +819,9 @@ export async function stopWhisperServer(options: { waitMs?: number } = {}): Prom
   const exited = closed.every(Boolean)
   const waitedMs = Date.now() - started
   if (child || hq.length) {
-    console.log(`[whisper-local] whisper-server stopped (${WHISPER_STOP_SIGNAL}, ${hq.length} HQ child(ren)): ` +
-      (exited ? `exited in ${waitedMs} ms` : `did not exit within ${waitMs} ms`))
+    // Q1 S4: name what was actually running.
+    const what = child ? `whisper-server stopped (${WHISPER_STOP_SIGNAL}, ${hq.length} HQ child(ren))` : `${hq.length} HQ child(ren) stopped (SIGKILL; whisper-server was not running)`
+    console.log(`[whisper-local] ${what}: ` + (exited ? `exited in ${waitedMs} ms` : `did not exit within ${waitMs} ms`))
   }
   return { stopped: Boolean(child), exited, waitedMs, hqChildren: hq.length }
 }

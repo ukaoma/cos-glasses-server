@@ -61,6 +61,24 @@ describe('an HQ timeout names what settles it', () => {
     expect(message).toMatch(/audio=30\.0s device=cpu reason=progressive_checkpoint threads=6 qos=(background|default) elapsed=\d+ms/)
   })
 
+  it('S1 (Q1 S1): a shutdown stop SIGKILLs an in-flight HQ child and waits for it', async () => {
+    const children: FakeCli[] = []
+    vi.doMock('node:child_process', () => ({
+      spawn: vi.fn(() => { const c = new FakeCli(); children.push(c); return c }),
+      execFile: vi.fn((_f: string, _a: string[], _o: unknown, cb: (e: any, o: string, er: string) => void) => cb(null, '', '')),
+    }))
+    vi.doMock('node:fs', async importOriginal => ({ ...(await importOriginal<typeof import('node:fs')>()), existsSync: () => true }))
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const whisper = await import('./whisper-local.js')
+    const pending = whisper.transcribeHighQuality(wav(1), undefined, { priority: 'batch', forceCpu: true, timestamps: false }).catch(() => null)
+    await vi.waitFor(() => expect(children).toHaveLength(1))
+    const result = await whisper.stopWhisperServer({ waitMs: 1_000 })
+    expect(children[0]!.kill.mock.calls.map(c => c[0])).toEqual(['SIGKILL'])
+    expect(result).toMatchObject({ stopped: false, exited: true, hqChildren: 1 })
+    expect(log.mock.calls.some(c => /1 HQ child\(ren\) stopped \(SIGKILL; whisper-server was not running\): exited in/.test(String(c[0])))).toBe(true)
+    await pending
+  })
+
   it('wavAudioSeconds reads a 16 kHz mono 16-bit WAV', async () => {
     const { wavAudioSeconds } = await import('./whisper-local.js')
     expect(wavAudioSeconds(wav(30))).toBeCloseTo(30, 5)

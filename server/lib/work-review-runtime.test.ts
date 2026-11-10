@@ -244,9 +244,12 @@ it('S1: reconciling unchanged rows writes nothing, and keeps their updatedAt', a
 
 })
 
-it('S1: a real change after quiet reconciles is still written', async () => {
+it('S1: a real change after quiet reconciles is still written, with a fresh updatedAt', async () => {
   const s = setup()
+  let clock = Date.parse('2026-11-09T20:00:00Z')
+  ;(s.deps as any).now = () => new Date(clock)
   const first = await s.runtime.request({ meeting: descriptor, model: 'ollama' })
+  clock += 60_000
   for (let i = 0; i < 3; i++) await s.runtime.reconcile(true)
   const put = vi.spyOn(s.deps.store, 'put')
   const job = s.jobs.get(first.review.clientJobId)!
@@ -256,5 +259,5 @@ it('S1: a real change after quiet reconciles is still written', async () => {
   const ready = s.runtime.peek(first.review.id)!
   expect(ready.status).toBe('ready')
   expect(ready.markdown).toBe('Done review')
-  expect(Date.parse(ready.updatedAt)).toBeGreaterThanOrEqual(Date.parse(first.review.updatedAt))
+  expect(ready.updatedAt).toBe('2026-11-09T20:01:00.000Z') // the change is stamped when it lands (Q1 S1: was >=)
 })
