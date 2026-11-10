@@ -387,6 +387,9 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   router.post('/web-session/revoke-all', (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
     const epoch = bumpWebSessionEpoch()
+    // Final review V7: a sign-in link or code made before the sign-out no longer signs a browser in after it.
+    handoffStore.revokeAll()
+    deviceCodes.revokeAll()
     res.setHeader('Set-Cookie', formatClearWebSessionCookie(req.secure))
     res.json({ ok: true, epoch })
   })

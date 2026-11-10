@@ -318,7 +318,7 @@ interface HandoffRecord {
  *   expired  its 2 minutes ran out        used     it already signed a browser in
  *   evicted  more than 16 were open        unknown  never issued here, or issued before this server started
  */
-export type WebHandoffFailure = 'expired' | 'used' | 'evicted' | 'unknown'
+export type WebHandoffFailure = 'expired' | 'used' | 'evicted' | 'revoked' | 'unknown'
 /** A retired ticket is remembered (as a SHA-256, never the ticket) this long and at most this many, only to say why. */
 export const WEB_HANDOFF_RETIRED_MS = 60 * 60_000
 export const WEB_HANDOFF_RETIRED_MAX = 256
@@ -379,6 +379,18 @@ export class WebHandoffStore {
     if (at >= existing.expiresAtMs) { this.retire(ticket, 'expired', at); return { ok: false, why: 'expired' } }
     this.retire(ticket, 'used', at)
     return { ok: true }
+  }
+
+  /**
+   * Final review V7 (lead 2026-11-10 02:18): "Sign out every browser" also ends every sign-in link not yet used, so
+   * one made just before it cannot sign a browser in after it. Each is remembered as `revoked` for the log. Returns
+   * how many it ended.
+   */
+  revokeAll(): number {
+    const at = this.now()
+    const live = [...this.tickets.keys()]
+    for (const ticket of live) { this.tickets.delete(ticket); this.retire(ticket, 'revoked', at) }
+    return live.length
   }
 }
 
@@ -535,6 +547,13 @@ export class WebDeviceCodeStore {
     if (!this.codes.has(code)) return false
     this.codes.delete(code)
     return true
+  }
+
+  /** Final review V7: "Sign out every browser" also ends every sign-in code not yet typed. Returns how many it ended. */
+  revokeAll(): number {
+    const n = this.codes.size
+    this.codes.clear()
+    return n
   }
 }
 

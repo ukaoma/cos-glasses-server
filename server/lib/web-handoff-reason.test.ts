@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import express from 'express'
 import type { Server } from 'node:http'
-import { WebHandoffStore, WebLoginLimiter, WEB_HANDOFF_MAX_ACTIVE, WEB_HANDOFF_RETIRED_MAX, WEB_HANDOFF_RETIRED_MS, WEB_HANDOFF_TTL_MS, classifyWebLogin } from './web-session-auth.js'
+import { WebDeviceCodeStore, WebHandoffStore, WebLoginLimiter, WEB_HANDOFF_MAX_ACTIVE, WEB_HANDOFF_RETIRED_MAX, WEB_HANDOFF_RETIRED_MS, WEB_HANDOFF_TTL_MS, classifyWebLogin } from './web-session-auth.js'
 import { requireApiToken } from './api-auth.js'
 import { createWebControlRouter, WEB_LOGIN_FAILURE_MESSAGE } from '../routes/web-control.js'
 
@@ -135,5 +135,60 @@ describe('a failed sign-in link no longer counts toward the per-device lockout; 
       expect((await login(port, { code: 'K7P3-QX9M' })).status).toBe(429)
       expect((await login(port, { handoff: store.mint().ticket })).status, 'the lockout check itself is unchanged').toBe(429)
     })
+  })
+})
+
+// ── Final review V7 (lead 2026-11-10 02:18): Sign out every browser also ends links and codes made before it ──
+describe('Sign out every browser also ends the sign-in links and codes made before it (final review V7)', () => {
+  async function withRevoke(fn: (port: number, stores: { links: WebHandoffStore; codes: WebDeviceCodeStore }, lines: string[]) => Promise<void>) {
+    const app = express()
+    let port = 0
+    const lines: string[] = []
+    const links = new WebHandoffStore(), codes = new WebDeviceCodeStore()
+    app.use('/api', requireApiToken(TOKEN, { selfDnsName: () => null, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({ apiToken: () => TOKEN, port: () => port, selfDnsName: () => null, handoffStore: links, deviceCodeStore: codes, loginLimiter: new WebLoginLimiter(), log: l => lines.push(l) }))
+    const server: Server = await new Promise(resolve => { const srv = app.listen(0, '127.0.0.1', () => resolve(srv)) })
+    port = (server.address() as { port: number }).port
+    try { await fn(port, { links, codes }, lines) } finally { await new Promise(resolve => server.close(resolve)) }
+  }
+  const post = (port: number, path: string, body: Record<string, string> = {}, headers: Record<string, string> = {}) =>
+    fetch(`http://127.0.0.1:${port}/api${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
+  const asMac = { 'X-COS-Token': TOKEN }
+
+  it('a link and a code made before are refused after it; a code made after it works; the caller\'s cookie is still cleared', async () => {
+    await withRevoke(async (port, { links }) => {
+      const link = links.mint().ticket
+      const before = await (await post(port, '/web-session/device-code', {}, asMac)).json() as { code: string }
+      const r = await post(port, '/web-session/revoke-all', {}, asMac)
+      expect(r.status).toBe(200)
+      expect(r.headers.get('set-cookie') ?? '', 'the caller\'s own cookie is cleared').toMatch(/cos_web_session=;.*Max-Age=0/)
+      expect((await post(port, '/web-session/login', { handoff: link })).status, 'link made before: refused').toBe(401)
+      expect((await post(port, '/web-session/login', { code: before.code })).status, 'code made before: refused').toBe(401)
+      const after = await (await post(port, '/web-session/device-code', {}, asMac)).json() as { code: string }
+      expect((await post(port, '/web-session/login', { code: after.code })).status, 'code made after: works').toBe(200)
+      const linkAfter = links.mint().ticket
+      expect((await post(port, '/web-session/login', { handoff: linkAfter })).status, 'link made after: works').toBe(200)
+    })
+  })
+  it('the server log says a refused link was revoked, never the link', async () => {
+    await withRevoke(async (port, { links }, lines) => {
+      const link = links.mint().ticket
+      await post(port, '/web-session/revoke-all', {}, asMac)
+      await post(port, '/web-session/login', { handoff: link })
+      const fail = lines.find(l => l.startsWith('[web-login] fail')) ?? ''
+      expect(fail).toContain('sub=revoked')
+      expect(fail).not.toContain(link)
+    })
+  })
+  it('the stores on their own: revokeAll ends every live link and code and says how many', () => {
+    const c = clock(), links = new WebHandoffStore(c.now), codes = new WebDeviceCodeStore(c.now)
+    const a = links.mint().ticket, b = links.mint().ticket
+    const code = codes.mint().code
+    expect(links.revokeAll()).toBe(2)
+    expect(codes.revokeAll()).toBe(1)
+    expect(links.consumeWithReason(a)).toEqual({ ok: false, why: 'revoked' })
+    expect(links.consumeWithReason(b)).toEqual({ ok: false, why: 'revoked' })
+    expect(codes.consume(code)).toBe(false)
+    expect(links.revokeAll()).toBe(0)
   })
 })
