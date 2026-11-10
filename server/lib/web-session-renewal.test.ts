@@ -167,3 +167,55 @@ describe('the /api gate renews only a request that passed every check', () => {
     })
   })
 })
+
+// ── Threat cases (lead, 19:5x: re-read as an attacker). Each pins one property in the handoff's threat note. ──
+describe('threat cases', () => {
+  it('a renewal chain, or a stolen copy renewing on its own, never passes the same 30-day cap', () => {
+    const owner = mintWebSessionCookieValue(TOKEN, NOW, WEB_SESSION_TTL_MS, 0)
+    const cap = (sec(NOW) + sec(WEB_SESSION_MAX_LIFE_MS)) * 1000
+    let cookie = owner.value, t = NOW, last = 0, renewals = 0
+    for (let i = 0; i < 20; i++) {
+      t += 6 * D                                                   // used once in each cookie's last 2 days
+      if (!verifyWebSessionCookieValue(cookie, TOKEN, t, 0)) break
+      const r = renewWebSessionCookieValue(cookie, TOKEN, t, 0)
+      if (!r) break
+      expect(r.expiresAtMs).toBeLessThanOrEqual(cap)
+      expect(r.capAtMs).toBe(cap)
+      cookie = r.value; last = r.expiresAtMs; renewals++
+    }
+    expect(renewals).toBeGreaterThan(2)
+    expect(last).toBe(cap)
+    expect(verifyWebSessionCookieValue(cookie, TOKEN, cap, 0)).toBe(false)
+    // A copy of the original cookie taken by someone else renews to the very same cap, not a later one.
+    const copy = renewWebSessionCookieValue(owner.value, TOKEN, NOW + 6 * D, 0)!
+    expect(copy.capAtMs).toBe(cap)
+  })
+  it('a renewed cookie with its original-time field removed does not verify as an old cookie', () => {
+    const r = renewWebSessionCookieValue(mintWebSessionCookieValue(TOKEN, NOW, WEB_SESSION_TTL_MS, 0).value, TOKEN, NOW + 6 * D, 0)!
+    const [e, ep, , g] = r.value.split('.')
+    expect(readWebSessionCookie(`${e}.${ep}.${g}`, TOKEN, NOW + 6 * D, 0)).toBeNull()
+  })
+  it('the Mac clock moving back: an hour is harmless; past the first sign-in, the cookie fails closed', () => {
+    const r = renewWebSessionCookieValue(mintWebSessionCookieValue(TOKEN, NOW, WEB_SESSION_TTL_MS, 0).value, TOKEN, NOW + 6 * D, 0)!
+    expect(verifyWebSessionCookieValue(r.value, TOKEN, NOW + 6 * D - 3600 * S, 0)).toBe(true)
+    // A clock set to before the first sign-in makes orig "in the future": refused, so the person signs in again.
+    expect(verifyWebSessionCookieValue(r.value, TOKEN, NOW - 60 * S, 0)).toBe(false)
+  })
+  it('two requests renewing at once: both cookies work, both end at the same cap, and neither renews again soon', () => {
+    const c = mintWebSessionCookieValue(TOKEN, NOW, WEB_SESSION_TTL_MS, 0).value
+    const t = NOW + 6 * D
+    const a = renewWebSessionCookieValue(c, TOKEN, t, 0)!, b = renewWebSessionCookieValue(c, TOKEN, t + S, 0)!
+    expect(verifyWebSessionCookieValue(a.value, TOKEN, t + 2 * S, 0)).toBe(true)
+    expect(verifyWebSessionCookieValue(b.value, TOKEN, t + 2 * S, 0)).toBe(true)
+    expect(a.capAtMs).toBe(b.capAtMs)
+    expect(Math.abs(a.expiresAtMs - b.expiresAtMs)).toBeLessThanOrEqual(S)
+    expect(renewWebSessionCookieValue(a.value, TOKEN, t + 2 * S, 0)).toBeNull()
+    expect(renewWebSessionCookieValue(b.value, TOKEN, t + 2 * S, 0)).toBeNull()
+  })
+  it('the old cookie stays valid until its own end after a renewal (no one-time use); it is never extended past it', () => {
+    const c = mintWebSessionCookieValue(TOKEN, NOW, WEB_SESSION_TTL_MS, 0)
+    renewWebSessionCookieValue(c.value, TOKEN, NOW + 6 * D, 0)
+    expect(verifyWebSessionCookieValue(c.value, TOKEN, NOW + 6 * D + S, 0)).toBe(true)
+    expect(verifyWebSessionCookieValue(c.value, TOKEN, sec(c.expiresAtMs) * 1000, 0)).toBe(false)
+  })
+})
