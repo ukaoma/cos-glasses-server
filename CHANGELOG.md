@@ -1,3 +1,25 @@
+## 7.0.16 - Questions held for the whole wait (off by default), question words on rows, and a Today summary that holds still
+
+2026-11-09. 7.0.15 (ffcb6f9) plus X1's full hold (claude/server-question-hold 053d01c), T1's Today cadence (claude/server-today-stable 18b4031) and W1's web follow-ups (claude/server-web-hardening ed32418). Each reviewed by Q1. Not installed: this build changes the permission path, and its private install waits for Miles's own go. Does not contain 7.0.14 (the tailnet fix) or f4f309f.
+
+### Named default-on changes
+
+- **Question words on rows (Miles 22:10, "Yes, show by default").** A session waiting on a question now says the first 80 characters of its first question, everywhere a waiting row shows: the glasses, the phone app, COS Control and any signed-in Control Web browser. Only the first question's text: never an option, a description, a header, a second question or an answer. Control and format characters are replaced, whitespace collapsed, cut at 80 with an ellipsis. Stored in the session-hook ledger on disk (`session-hook-events.jsonl`, rotated once at 10 MB; the last 6 hours replay at boot) and in `waiting_detail` until the question settles. Never in the broker's logs. `COS_WAITING_QUESTION_WORDS=0` restores 7.0.15 exactly.
+- **The Today summary is rewritten less (T1).** A material change (a session opened or closed, a message typed into one, Needs you, Work cards, meetings, the read state, a recording) rewrites after the existing 10 minutes; anything else (a reply, a state flip, sub-agents, durations) only once the shown summary is 30 minutes old. The count sentence before the paragraph changes only after a new count holds 5 minutes. An ask that could not read the session list never replaces today's summary. Replay over two busy hours: 12 model calls down to 4, 44 shown-text changes down to 4. Model, daily cap, switch, breaker, forced Refresh and the reconnect exception are unchanged.
+
+### Off by default (X1)
+
+- **`COS_QUESTION_FULL_HOLD`:** a session question is held for the whole hook wait (3590 s after Reinstall hooks), whether or not a COS device is live when it is asked, on an engine proven to keep its own dialog up while the hook waits (CLI 2.1.321 and later in a terminal, not a print run; the desktop app 2.1.317 and later). The Mac's dialog is up at once; the first answer wins, from the Mac, the glasses, the phone app, COS Control or Control Web. A question shows on devices once the desk has been idle 90 s; before that it is not answerable by id (409 `not_shown`).
+- **`COS_APPROVAL_FULL_HOLD`:** the same for a tool approval, only while the desk stays idle, never ExitPlanMode. A web answer needs a touch within 60 s and a server-issued confirm for that item and decision. Keep it off until the phone key lands.
+- With both switches off, admission, deadlines, hook output, the questions response (key for key), `~/.claude/settings.json` and the hook block equal 7.0.15; `/confirm` answers 404. Turning a switch on: `~/.cos-glasses/.env`, restart, then Reinstall hooks in Control. There is no Control switch for them.
+
+### Control Web (W1)
+
+- **Today's summary holds still:** it stays through a pending or failed session read (the age line names what could not be read; the Ask box stays), keeps the tallest height it has had and shrinks only on a new day, a width change, Refresh or the switch toggled; unchanged words are not written again.
+- **Question block on X1's final contract:** reads `webAnswer`; with `confirmApprovals` an approval is confirmed first and answered once; a 409 `not_shown` keeps the card with "Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute." With both hold switches off the server sends neither, and nothing changes.
+
+**Default-on for every install:** yes: the question words on rows, the Today summary cadence, and on the web the Today summary hold. The full hold and its web rules are off unless a hold switch is on.
+
 ## 7.0.15 - Control Web for the phone, and server hardening from runtime evidence
 
 2026-11-09. 7.0.13 (97402b4) plus the production hardening pass, web lane (W1) and server lane (S1). Private on Miles's Mac first. Does not contain 7.0.14 (the tailnet fix), X1's question hold or T1's Today work; those ride a later build.
