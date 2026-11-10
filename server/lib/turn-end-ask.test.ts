@@ -405,6 +405,18 @@ describe('never for print runs, COS-spawned children or sub-agents', () => {
     expect(r.tracker.visibleAsk(SID)?.ask).toBe('Canary: which color?')
   })
 
+  it('an ask armed while on is not shown once the switch reads off', async () => {
+    const on = { v: true }
+    const tracker = new TurnEndAskTracker({ now: () => T0 + 200, enabled: () => on.v, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    trackers.push(tracker)
+    tracker.observe(wrapUp(T0), false)
+    tracker.observe(stop(T0 + 100), false)
+    await tracker.tick()
+    expect(tracker.visibleAsk(SID)?.ask).toBe('Canary: which color?')
+    on.v = false
+    expect(tracker.visibleAsk(SID)).toBeNull()
+  })
+
   it('the tracker does nothing at all while its switch reads off', async () => {
     const tracker = new TurnEndAskTracker({ now: () => T0, enabled: () => false, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90 })
     trackers.push(tracker)
@@ -551,6 +563,9 @@ describe('the row: an idle verdict becomes the asked-you wait, nothing else does
     expect(row).toMatchObject({ agent_state: 'waiting', waiting_source: 'turn_end', waiting_choices: ['Red', 'Blue'] })
     expect('pending_question_id' in row || 'pending_permission_id' in row).toBe(false)
     expect(derivedStatusFields(derived)).toMatchObject({ waiting_source: 'turn_end', waiting_choices: ['Red', 'Blue'] })
+    // The wait is dated by the ask's own stop, not by whatever the idle verdict was dated by.
+    const other = deriveSessionState({ signal: idleSignal(), registry: undefined, transcript: undefined, now, turnEndAsk: { ...ask, stoppedAt: T0 + 1_234 } })
+    expect(other.state_since).toBe(new Date(T0 + 1_234).toISOString())
   })
 
   it('without an ask the row is exactly the idle one (7.0.17)', () => {
