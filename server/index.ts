@@ -155,6 +155,7 @@ import {
   stopCodexModelCatalogRefresh,
 } from './lib/codex-model-catalog.js'
 import { startWhisperServer, stopWhisperServer } from './lib/whisper-local.js'
+import { noteCorsRejection } from './lib/cors-reject-log.js'
 import { startWhisperPreviewServer, stopWhisperPreviewServer } from './lib/whisper-preview.js'
 import { startLocalTtsServer, stopLocalTtsServer } from './lib/tts-local.js'
 import { initSileroVAD } from './lib/vad-silero.js'
@@ -319,9 +320,10 @@ app.use(cors({
     if (!origin || origin === 'null') return cb(null, true)
     // Async only for an unrecognised *.ts.net origin (see isAllowedCorsOrigin); every other
     // origin is decided from cached state, as before.
+    // S1 (2026-11-09): the rejected origin is logged (origin only, once per origin per hour).
     isAllowedCorsOrigin(origin, getTailnetSelfName()).then(
-      ok => ok ? cb(null, true) : cb(new Error('CORS blocked')),
-      () => cb(new Error('CORS blocked')),
+      ok => { if (ok) return cb(null, true); noteCorsRejection(origin, 'not_allowed'); cb(new Error('CORS blocked')) },
+      () => { noteCorsRejection(origin, 'check_failed'); cb(new Error('CORS blocked')) },
     )
   },
   // Without this, a cross-origin reader sees only the CORS-safelisted response
