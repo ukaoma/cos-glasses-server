@@ -169,38 +169,58 @@ describe('the open-time report splits the time: dcl, boot, rtt', () => {
   })
 })
 
-describe('the device and focus reports: is the page wider than the screen, and what is', () => {
-  const SRC = slice(APP, '  function lrWide() {', '  function lrDevice() {')
-  function run(o: { cw: number; vvw: number; scale: number; scw: number; els?: Array<{ tag: string; id?: string; cls?: string; right: number; width?: number }> }) {
-    const els = (o.els ?? []).map(e => ({ tagName: e.tag.toUpperCase(), id: e.id ?? '', className: e.cls ?? '', getBoundingClientRect: () => ({ right: e.right, width: e.width ?? 10 }) }))
-    let scanned = 0
+describe('the device and focus reports: our overflow or a setting, and what sticks out (Q1 15:20)', () => {
+  const SRC = slice(APP, "  var LR_WIDE = { key: '', out: null };", '  function lrDevice() {')
+  type Node = { tag: string; id?: string; cls?: string; right: number; kids?: Node[] }
+  // A page as the browser lays it out: html > body > div#app-shell > main > ..., each with its right edge.
+  function page(o: { cw: number; scw: number; dw: number; tree: Node }) {
+    const flat: any[] = []
+    const make = (n: Node, parent: any) => {
+      const el: any = { tagName: n.tag.toUpperCase(), id: n.id ?? '', className: n.cls ?? '', parentElement: parent, getBoundingClientRect: () => ({ right: n.right, width: 10 }) }
+      flat.push(el); (n.kids ?? []).forEach(k => make(k, el))
+    }
+    const body: any = { getBoundingClientRect: () => ({ right: o.cw, width: o.cw }) }
+    make(o.tree, body)
+    let scans = 0
+    body.getElementsByTagName = () => { scans++; return flat }
     const deps = {
-      document: { documentElement: { clientWidth: o.cw }, scrollingElement: { scrollWidth: o.scw }, body: { getElementsByTagName: () => { scanned++; return els } } },
-      window: { visualViewport: { width: o.vvw, scale: o.scale }, innerWidth: o.vvw, scrollX: 0 },
+      document: { documentElement: { clientWidth: o.cw }, scrollingElement: { scrollWidth: o.scw }, body },
+      window: { visualViewport: { width: o.dw, scale: 1 }, innerWidth: o.dw, scrollX: 0 },
     }
     // eslint-disable-next-line no-new-func
     const fn = new Function('deps', `with (deps) {\n${SRC}\nreturn lrWide;\n}`)(deps) as () => Record<string, unknown>
-    return { out: fn(), scanned: () => scanned }
+    return { fn, scans: () => scans }
   }
-  it('the page fits (the layout is the device width): no scan, nothing named', () => {
-    const h = run({ cw: 382, vvw: 382, scale: 1, scw: 382, els: [{ tag: 'div', id: 'x', right: 900 }] })
-    expect(h.out).toEqual({ cw: 382, dw: 382, scw: 382, wide: '' })
-    expect(h.scanned()).toBe(0)
+  const shell = (w: number, inner: Node[]): Node => ({ tag: 'div', id: 'app-shell', right: w, kids: [{ tag: 'main', cls: 'workspace', right: w, kids: inner }] })
+  it('our overflow: the layout stays at the device width, a table is wider; the table is named, never its stretched containers', () => {
+    const h = page({ cw: 382, scw: 449, dw: 382, tree: shell(382, [{ tag: 'section', right: 382 }, { tag: 'table', cls: 'wk-grid big', right: 449, kids: [{ tag: 'td', right: 449 }] }]) })
+    expect(h.fn()).toEqual({ cw: 382, dw: 382, scw: 449, wide: 'table.wk-grid' })
   })
-  it('the Duo case, layout 449 for a 382 screen: names the element reaching furthest right', () => {
-    const h = run({ cw: 449, vvw: 449, scale: 0.85, scw: 449, els: [{ tag: 'div', id: 'small', right: 300 }, { tag: 'table', cls: 'wk-grid big', right: 449 }, { tag: 'span', right: 420 }] })
-    expect(h.out).toEqual({ cw: 449, dw: 382, scw: 449, wide: 'table.wk-grid' })
+  it('a setting: the layout viewport itself is 449 and every container stretches to it; nothing named, nothing scanned', () => {
+    const h = page({ cw: 449, scw: 449, dw: 382, tree: shell(449, [{ tag: 'section', right: 449 }, { tag: 'table', cls: 'wk-grid', right: 449 }]) })
+    expect(h.fn()).toEqual({ cw: 449, dw: 382, scw: 449, wide: '' })
+    expect(h.scans()).toBe(0)
   })
-  it('layout 449 with nothing past 382 (a browser setting, not the page): nothing named', () => {
-    expect(run({ cw: 449, vvw: 449, scale: 0.85, scw: 449, els: [{ tag: 'div', right: 380 }] }).out.wide).toBe('')
+  it('the page fits: nothing named, nothing scanned', () => {
+    const h = page({ cw: 382, scw: 382, dw: 382, tree: shell(382, [{ tag: 'table', right: 382 }]) })
+    expect(h.fn().wide).toBe('')
+    expect(h.scans()).toBe(0)
+  })
+  it('one scan per layout: a second report with the same widths reuses the answer', () => {
+    const h = page({ cw: 382, scw: 449, dw: 382, tree: shell(382, [{ tag: 'pre', id: 'log', right: 449 }]) })
+    expect(h.fn().wide).toBe('pre#log'); expect(h.fn().wide).toBe('pre#log')
+    expect(h.scans()).toBe(1)
   })
   it('an id wins over a class; the label is at most 24 characters; no width is ever undefined', () => {
-    expect(run({ cw: 449, vvw: 449, scale: 0.85, scw: 449, els: [{ tag: 'section', id: 'a-very-long-identifier-name-here', cls: 'c', right: 449 }] }).out.wide).toBe('section#a-very-long-iden')
+    const h = page({ cw: 382, scw: 449, dw: 382, tree: shell(382, [{ tag: 'section', id: 'a-very-long-identifier-name-here', cls: 'c', right: 449 }]) })
+    expect(h.fn().wide).toBe('section#a-very-long-iden')
+    // eslint-disable-next-line no-new-func
     const bare = new Function('deps', `with (deps) {\n${SRC}\nreturn lrWide;\n}`)({ document: { documentElement: {}, scrollingElement: {}, body: null }, window: {} }) as () => Record<string, unknown>
     expect(Object.values(bare()).every(v => v === null || typeof v === 'string' || typeof v === 'number')).toBe(true)
   })
-  it('both reports carry the numbers', () => {
+  it('both reports carry the numbers; a focus past its budget never scans', () => {
     expect(APP).toContain('phone: isPhone(), cw: w.cw, dw: w.dw, scw: w.scw, wide: w.wide });')
     expect(APP).toContain("n: ++LR.focusN, cw: w.cw, dw: w.dw, wide: w.wide });")
+    expect(APP).toContain("var w = typeof crumbs === 'object' && crumbs && crumbs.focus >= LAYOUT_FOCUS_MAX ? { cw: null, dw: null, wide: '' } : lrWide();")
   })
 })

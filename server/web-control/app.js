@@ -7035,10 +7035,15 @@
     return typeof v === 'number' && isFinite(v) ? v : null;
   }
   function lrMatch(q) { try { return !!window.matchMedia(q).matches; } catch (_e) { return false; } }
-  // The page wider than the screen (the Duo, 11/10: layout 449 on a 382 screen, iOS fitting it at 0.85): the layout
-  // viewport (cw), the width this device would show at scale 1 (dw), the scroll width (scw), and the widest element whose
-  // right edge passes dw ('' when none). An element named means the page overflows; none, with cw above dw, means
-  // something outside the page (a browser setting). The scan runs only when cw is above dw, on at most 4000 elements.
+  // The page wider than the screen (the Duo, 11/10: scale 0.85, scroll width 449 for a 382 screen). Two causes look the
+  // same from outside, and these numbers tell them apart: cw, the layout viewport; dw, the width this device shows at
+  // scale 1; scw, the document's scroll width. A browser or phone setting widens the layout viewport itself (cw = scw,
+  // both above dw): nothing on the page is wider than its container, so nothing is named and nothing is scanned. Our
+  // page overflowing leaves the layout at the device width and the document wider (scw above cw): then `wide` names the
+  // element that sticks out, the first in page order whose right edge passes cw while its parent's does not. Stretched
+  // containers end at cw and are never named (Q1 15:20). One scan per layout (cached by cw and scw), at most 4000
+  // elements.
+  var LR_WIDE = { key: '', out: null };
   function lrWide() {
     var num = function (v) { return typeof v === 'number' && isFinite(v) ? Math.round(v) : null; };
     var de = document.documentElement, vv = window.visualViewport, out = { cw: num(de && de.clientWidth), dw: null, scw: null, wide: '' };
@@ -7046,13 +7051,19 @@
       var se = document.scrollingElement || de;
       out.scw = num(se && se.scrollWidth);
       out.dw = vv ? num(vv.width * vv.scale) : num(window.innerWidth);
-      if (!(out.cw && out.dw && out.cw > out.dw + 1)) return out;
-      var all = document.body ? document.body.getElementsByTagName('*') : [], best = null, bestRight = out.dw + 1;
+      if (!(out.cw && out.scw && out.scw > out.cw + 1)) return out;
+      var key = out.cw + 'x' + out.scw;
+      if (LR_WIDE.key === key && LR_WIDE.out) { out.wide = LR_WIDE.out.wide; return out; }
+      var all = document.body ? document.body.getElementsByTagName('*') : [], edge = out.cw + 1, sx = window.scrollX || 0;
       for (var i = 0; i < all.length && i < 4000; i++) {
-        var r = all[i].getBoundingClientRect();
-        if (r.width > 0 && r.right + window.scrollX > bestRight) { bestRight = r.right + window.scrollX; best = all[i]; }
+        var el = all[i], r = el.getBoundingClientRect();
+        if (!(r.width > 0 && r.right + sx > edge)) continue;
+        var par = el.parentElement, pr = par && par.getBoundingClientRect ? par.getBoundingClientRect() : null;
+        if (pr && pr.right + sx > edge) continue;
+        out.wide = (el.tagName.toLowerCase() + (el.id ? '#' + el.id : (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/)[0] : ''))).slice(0, 24);
+        break;
       }
-      if (best) out.wide = (best.tagName.toLowerCase() + (best.id ? '#' + best.id : (typeof best.className === 'string' && best.className.trim() ? '.' + best.className.trim().split(/\s+/)[0] : ''))).slice(0, 24);
+      LR_WIDE.key = key; LR_WIDE.out = { wide: out.wide };
     } catch (_e) { /* a report only */ }
     return out;
   }
@@ -7072,7 +7083,8 @@
     if (!lrMatch('(pointer: coarse)')) return;
     try { fs = parseFloat(getComputedStyle(a).fontSize); } catch (_e) { fs = null; }
     var s = lrScroll();
-    var w = lrWide();
+    // The width numbers only when this focus line will be sent (its own budget), so a capped page never scans.
+    var w = typeof crumbs === 'object' && crumbs && crumbs.focus >= LAYOUT_FOCUS_MAX ? { cw: null, dw: null, wide: '' } : lrWide();
     layoutCrumb('focus', { pane: lrPane(), field: lrKind(a), fs: fs, sy: s.sy, smax: s.smax, scw: s.sw, kb: LR.up, n: ++LR.focusN, cw: w.cw, dw: w.dw, wide: w.wide });
   }
   function lrHooks(what, v) { LR.hooks.forEach(function (fn) { try { fn(what, v); } catch (err) { console.error(err); } }); }
