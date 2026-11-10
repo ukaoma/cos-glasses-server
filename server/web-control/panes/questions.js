@@ -33,6 +33,7 @@
     capAt: 0,
     items: [],            // pending items, oldest first
     waiting: [],          // X1 contract: the questions live sessions wait on (held, at_mac, answered)
+    webAnswer: null,      // X1 final contract: what an answer from this page must carry right now (only with a hold switch on)
     picks: {},            // id -> [{ labels: [], other: '' }] per question
     armed: {},            // id -> 'send' | 'allow' | 'deny'
     armedAt: {},          // id -> when it was armed (COSWeb.confirmReady)
@@ -182,7 +183,7 @@
           // the sheets still hear that the failure is over.
           var was = Q.load;
           Q.load = 'ok';
-          take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : [], Array.isArray(d.waiting) ? d.waiting : null);
+          take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : [], Array.isArray(d.waiting) ? d.waiting : null, d.webAnswer);
           if (was !== 'ok') tellMounts();
           var every = Number(d.pollIntervalMs) > 0 ? Number(d.pollIntervalMs) : DEFAULT_POLL_MS;
           schedule(nextWait(every));
@@ -227,9 +228,14 @@
       answerable: w.answerable === true && w.state === 'held', heldId: typeof w.heldId === 'string' && /^pq_[a-f0-9]{24}$/.test(w.heldId) ? w.heldId : null,
       questions: qs, askedAt: Date.parse(w.askedAt) || 0, answeredAt: Date.parse(w.answeredAt) || 0 };
   }
-  function take(items, settled, waiting) {
+  function take(items, settled, waiting, webAnswer) {
     // An older server sends no `waiting`: keep the last list only for a moment's read, never invent one.
     Q.waiting = Array.isArray(waiting) ? waiting.map(waitingEntry).filter(Boolean) : [];
+    // X1 final contract (`webAnswer`, sent with `waiting` while a hold switch is on): { touchRequired, touchMaxMs,
+    // confirmApprovals }. Absent: the page learns any rule from a refusal, as before.
+    Q.webAnswer = webAnswer && typeof webAnswer === 'object'
+      ? { touchRequired: webAnswer.touchRequired === true, touchMaxMs: Number(webAnswer.touchMaxMs) > 0 ? Number(webAnswer.touchMaxMs) : 60000, confirmApprovals: webAnswer.confirmApprovals === true }
+      : null;
     var pending = items.filter(function (i) { return i && i.answerable !== false && (i.kind === 'question' || i.kind === 'approval'); });
     var atMac = (settled || []).filter(function (i) { return i && i.waitingAtMac === true && (i.kind === 'question' || i.kind === 'approval'); });
     var before = Q.items.map(function (i) { return i.id; }).join('|') + '/' + Q.atMac.map(function (i) { return i.id; }).join('|');
@@ -521,9 +527,11 @@
     not_found: 'This question is gone.', invalid_answer: 'That answer was not accepted. Check each question has a choice.',
     // X1 contract, web door with a full-hold flag on: none of these settle the card; the person taps again.
     web_touch_required: 'Not sent: tap anywhere on this page, then answer again.',
+    // X1 final contract (Q1 O1): held, but not on your devices yet (the Mac has not been idle long enough). Not settled.
+    not_shown: 'Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute.',
     confirm_required: 'Not sent: tap again to confirm.', confirm_invalid: 'Not sent: that confirmation ran out. Tap again to confirm.'
   };
-  var KEEPS_CARD = { invalid_answer: 1, web_touch_required: 1, confirm_required: 1, confirm_invalid: 1 };
+  var KEEPS_CARD = { invalid_answer: 1, web_touch_required: 1, confirm_required: 1, confirm_invalid: 1, not_shown: 1 };
   // QA round 1: an answer that never reached the server (no HTTP status: offline, a dropped link, a timeout) says so in
   // plain words, with the button to tap; the retry goes under the same clientAnswerId, so the server replays it.
   function unreachable(item, what) {
@@ -562,6 +570,9 @@
     });
   }
   function post(id, body, doneLine) {
+    // X1 final contract: when the server says approvals need a confirm, get it first rather than learn it from a refused
+    // answer. It still follows the person's second tap; a 403 confirm_required below stays the fallback.
+    if (body.decision && !body.confirmId && Q.webAnswer && Q.webAnswer.confirmApprovals) return confirmThen(id, body, doneLine);
     Q.sending[id] = 1; Q.armed[id] = ''; Q.notes[id] = '';
     if (!Q.answerIds[id]) Q.answerIds[id] = answerId();
     body.clientAnswerId = Q.answerIds[id];
