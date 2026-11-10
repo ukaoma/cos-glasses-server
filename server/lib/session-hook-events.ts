@@ -208,7 +208,12 @@ function canonicalJson(value: unknown): string {
 export function toolTarget(toolInput: unknown, max = 80): string {
   if (!toolInput || typeof toolInput !== 'object') return ''
   const i = toolInput as Record<string, unknown>
-  const candidate = [i.command, i.file_path, i.path, i.url, i.pattern, i.query, i.prompt, i.description]
+  // X1: an AskUserQuestion carries only `questions`; its target is the first question's words, so a
+  // row waiting on a question says what it asks (it read "Waiting for you" with nothing before).
+  const firstQuestion = Array.isArray(i.questions) && i.questions.length > 0 && i.questions[0] && typeof i.questions[0] === 'object'
+    ? (i.questions[0] as Record<string, unknown>).question
+    : undefined
+  const candidate = [i.command, i.file_path, i.path, i.url, i.pattern, i.query, i.prompt, i.description, firstQuestion]
     .find(v => typeof v === 'string' && v.trim().length > 0)
   const text = typeof candidate === 'string' ? candidate.replace(/\s+/g, ' ').trim() : ''
   return text.length > max ? text.slice(0, max - 1) + '…' : text

@@ -55,6 +55,9 @@ import {
   wirePermissionBrokerToSignals,
 } from './lib/permission-broker.js'
 import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './routes/permission-broker.js'
+// X1: the full hold's switches and the engine gate's registry read (kept on their own lines, apart from other lanes' imports).
+import { fullHoldSwitches, waitingQuestionWordsEnabled } from './lib/full-hold.js'
+import { registryRecordSync } from './lib/session-hooks-runtime.js'
 import { lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs, webPresenceAgeMs } from './lib/client-liveness.js'
 import {
   createAgentSessionBindingsRouter,
@@ -369,6 +372,19 @@ const permissionBroker = new PermissionBroker({
     return !!signal && !signal.ended && signal.waiting?.fingerprint === fingerprint
   },
   signals: brokerSignalSink(sessionSignalStore),
+  // X1: the full hold (lib/full-hold.ts). Both switches default OFF; the registry is read only while one is on.
+  fullHold: () => fullHoldSwitches(process.env),
+  engineFor: sessionId => {
+    const record = registryRecordSync(sessionId)
+    return record ? { entrypoint: record.entrypoint, version: record.version ?? null } : null
+  },
+  waitingWords: () => waitingQuestionWordsEnabled(process.env),
+  // X1: per kind once the PermissionRequest hook is split; the one number while it is not. Read only by the full hold.
+  installedHookTimeoutForKindS: kind => {
+    const status = cachedHookStatus()
+    const perKind = status.permissionHookTimeouts ? status.permissionHookTimeouts[kind] : undefined
+    return perKind === undefined ? status.permissionHookTimeoutS : perKind
+  },
 })
 registerPermissionBroker(permissionBroker)
 wirePermissionBrokerToSignals(permissionBroker, sessionSignalStore)

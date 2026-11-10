@@ -115,6 +115,8 @@ export interface RegistryRecordFacts {
   entrypoint: string | null
   status: string | null
   statusUpdatedAt: number | null
+  /** X1: the engine's own version (`version`, e.g. `2.1.321`), for the full-hold engine gate. */
+  version?: string | null
 }
 
 /**
@@ -137,6 +139,7 @@ export function registryRecordSync(sessionId: string, dir = claudeSessionsDir())
         entrypoint: typeof raw.entrypoint === 'string' && raw.entrypoint ? raw.entrypoint : null,
         status: typeof raw.status === 'string' ? raw.status : null,
         statusUpdatedAt: typeof raw.statusUpdatedAt === 'number' ? raw.statusUpdatedAt : null,
+        version: typeof raw.version === 'string' && raw.version ? raw.version.slice(0, 32) : null,
       }
       if (isCosSpawnedPid(record.pid)) { childRecord ??= record; continue }
       return record

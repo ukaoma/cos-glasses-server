@@ -325,6 +325,10 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       // forgotten (the server started then, or dropped it while it still waited). Missing from
       // `settled` and settled after it: the session moved past it.
       waitingAtMacForgottenBefore: new Date(deps.broker.waitingAtMacForgottenBeforeMs()).toISOString(),
+      // X1, additive and only while a full-hold switch or COS_WAITING_QUESTION_WORDS is on: every question a live
+      // session waits on (held, at the Mac, or just answered), with its words while it waits, and what a web page must
+      // send with an answer right now. With all of them off the response is 7.0.13's, key for key.
+      ...(deps.broker.extendedQuestionsView() ? { waiting: deps.broker.waitingList(), webAnswer: deps.broker.webAnswerRules() } : {}),
     })
   })
   router.post('/session-questions/:id/answer', (req: Request, res: Response) => {
@@ -335,6 +339,16 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     try { expected = deps.apiToken() } catch { expected = '' }
     const by = timingSafeTokenEqual(req.headers['x-cos-token'], expected) ? 'app' : 'web'
     const result = deps.broker.answer(String(req.params.id ?? ''), req.body, by)
+    res.status(result.status).json(result.body)
+  })
+  // X1: the web door's confirm step for an approval (lib/permission-broker.ts `confirm`). The /api gate let the
+  // request in; the door is labelled exactly as for an answer, and only the web door gets a confirm id.
+  router.post('/session-questions/:id/confirm', (req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    let expected = ''
+    try { expected = deps.apiToken() } catch { expected = '' }
+    const by = timingSafeTokenEqual(req.headers['x-cos-token'], expected) ? 'app' : 'web'
+    const result = deps.broker.confirm(String(req.params.id ?? ''), req.body, by)
     res.status(result.status).json(result.body)
   })
   return router
