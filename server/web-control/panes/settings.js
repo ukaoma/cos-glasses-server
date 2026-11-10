@@ -16,7 +16,7 @@
   var CATEGORIES = [
     { id: 'general', title: 'General', summary: 'How COS Control opens, its shortcut, Today and the setup guide.', mac: ['App', 'Activity home', 'Setup guide'] },
     { id: 'ai', title: 'AI and accounts', summary: 'The AI apps COS works through, your keys and the models behind Work.', mac: ['Your AI apps', 'Local model', 'Your own key', 'Search'] },
-    { id: 'glasses', title: 'Glasses and iPhone', summary: 'Pair your glasses and phone, and how videos reach this Mac.', mac: ['Devices', 'Video uploads'] },
+    { id: 'glasses', title: 'Glasses, phone and web', summary: 'Pair your glasses and phone, and how videos reach this Mac.', mac: ['Devices', 'Video uploads'] },
     { id: 'meetings', title: 'Meetings', summary: 'Recording, the meeting assistant, live cues and your meeting library.', mac: ['Recording', 'Meeting assistant', 'Library and sync'] },
     { id: 'dictation', title: 'Dictation', summary: 'Type by voice into any Mac app: shortcuts, sounds, text and AI polish.', mac: ['Dictation', 'Microphone', 'Shortcuts', 'Sounds and audio', 'Text', 'AI polish', 'History'] },
     { id: 'voice', title: 'Transcription and voice', summary: 'The engines and models that turn speech into text on this Mac.', mac: ['Voice setup', 'Models', 'Performance'] },

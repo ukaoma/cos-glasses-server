@@ -376,3 +376,11 @@ describe('A5: the session reader says when its question waits on the Mac', () =>
     expect(APP).toContain("if (typeof readerMacPaint === 'function') readerMacPaint(r, waiting);")
   })
 })
+
+describe('Settings names the Mac page as COS Control 0.5.387 does (it ships with this server)', () => {
+  it('the "On your Mac" list says Glasses, phone and web', () => {
+    const SETTINGS = readFileSync(join(HERE, 'panes', 'settings.js'), 'utf8')
+    expect(SETTINGS).toContain("{ id: 'glasses', title: 'Glasses, phone and web',")
+    expect(SETTINGS).not.toContain('Glasses and iPhone')
+  })
+})
