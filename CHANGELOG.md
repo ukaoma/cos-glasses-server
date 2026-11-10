@@ -17,6 +17,7 @@
 
 - **Today's summary holds still:** it stays through a pending or failed session read (the age line names what could not be read; the Ask box stays), keeps the tallest height it has had and shrinks only on a new day, a width change, Refresh or the switch toggled; unchanged words are not written again.
 - **Question block on X1's final contract:** reads `webAnswer`; with `confirmApprovals` an approval is confirmed first and answered once; a 409 `not_shown` keeps the card with "Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute." With both hold switches off the server sends neither, and nothing changes.
+- **Question refusals in words:** when an answer is refused, the card now says what happened: "Already answered on another device.", "Already answered at the Mac, or the session moved on.", "Left for the Mac. Answer it there.", "This question timed out here. Answer it at the Mac." or "This question is no longer waiting." Before, a refusal that carried a reason (answered at the Mac, a drain, an invalid answer id) kept the card and showed a raw code with a retry. Present since 6.99.x, including 7.0.15.
 
 **Default-on for every install:** yes: the question words on rows, the Today summary cadence, and on the web the Today summary hold. The full hold and its web rules are off unless a hold switch is on.
 
