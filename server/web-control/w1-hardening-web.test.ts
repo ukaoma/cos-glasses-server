@@ -304,3 +304,53 @@ describe('F23: a cold open with the Mac unreachable', () => {
     expect(APP).toContain("if (t.id === 'auth-retry')")
   })
 })
+
+// ── A5: the Mac-prompt question at the top of the session reader ──
+const READER_MAC = block("  // ── At the Mac's prompt, in the session reader (W1 A5)", "  // ── end at the Mac's prompt")
+function readerMac(where: { where: string; ask: string }, row: Record<string, unknown> | null, q: Record<string, unknown> | null = null) {
+  const el = { innerHTML: '', hidden: true }
+  const deps = { esc, $: (id: string) => (id === 'session-mac-q' ? el : null), whereFor: () => where, sessionQs: () => q,
+    askedWhy: (s: any) => (s.waiting_detail ? String(s.waiting_detail) : 'Waiting for your answer'),
+    state: { sessions: row ? [row] : [] }, splitSessionId: (p: string, id: string) => ({ provider: p, id }) }
+  // eslint-disable-next-line no-new-func
+  const fns = new Function('deps', `with (deps) {\n${READER_MAC}\nreturn { readerMacPaint };\n}`)(deps)
+  return { fns, el }
+}
+const R = { provider: 'claude', id: 'aaaaaaaa-1111-4111-8111-111111111111' }
+describe('A5: the session reader says when its question waits on the Mac', () => {
+  it('words known: shown, with the one Mac line and no button', () => {
+    const h = readerMac({ where: 'mac', ask: 'Ship the release notes now?' }, null)
+    h.fns.readerMacPaint(R, true)
+    expect(h.el.hidden).toBe(false)
+    expect(h.el.innerHTML).toContain('Waiting for your answer at the Mac')
+    expect(h.el.innerHTML).toContain('<blockquote class="ta-quote sx-mac-q-words">Ship the release notes now?</blockquote>')
+    expect(h.el.innerHTML).toContain("Answer this at your Mac's prompt. It cannot be answered from here yet.")
+    expect(h.el.innerHTML).not.toContain('<button')
+  })
+  it('the server waiting line names the question: that is shown', () => {
+    const h = readerMac({ where: 'mac', ask: '' }, { provider: 'claude', session_id: R.id, waiting_detail: 'Which branch should I use?' })
+    h.fns.readerMacPaint(R, true)
+    expect(h.el.innerHTML).toContain('Which branch should I use?')
+    expect(h.el.innerHTML).not.toContain('sx-mac-q-none')
+  })
+  it('no words anywhere: says COS cannot read them', () => {
+    const h = readerMac({ where: 'mac', ask: '' }, { provider: 'claude', session_id: R.id })
+    h.fns.readerMacPaint(R, true)
+    expect(h.el.innerHTML).toContain("COS cannot read this question's words from here. They show at the Mac's prompt.")
+    expect(h.el.innerHTML).not.toContain('<blockquote')
+  })
+  it('nothing when the session is not waiting, or its question is answerable here', () => {
+    const a = readerMac({ where: 'mac', ask: 'x' }, null)
+    a.fns.readerMacPaint(R, false)
+    expect(a.el.hidden).toBe(true)
+    const b = readerMac({ where: 'here', ask: 'x' }, null)
+    b.fns.readerMacPaint(R, true)
+    expect(b.el.hidden).toBe(true)
+    expect(b.el.innerHTML).toBe('')
+  })
+  it('the reader has the slot and paints it on open and on every status', () => {
+    expect(APP).toContain('<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>')
+    expect(APP).toContain("if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');")
+    expect(APP).toContain("if (typeof readerMacPaint === 'function') readerMacPaint(r, waiting);")
+  })
+})

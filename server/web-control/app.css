@@ -621,3 +621,8 @@ select.field {
 .conn-line .btn { margin: 0; }
 .auth-offline p { color: var(--sub); }
 .meaning-consent .row-actions { padding: 0 16px 14px; }
+/* W1 A5: a question waiting on the Mac's own prompt, at the top of the session reader. */
+.sx-mac-q { margin: 8px 0 12px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--panel-border); background: var(--panel); }
+.sx-mac-q[hidden] { display: none; }
+.sx-mac-q .sx-mac-q-title { margin: 0 0 6px; }
+.sx-mac-q .sx-note { margin: 6px 0 0; }

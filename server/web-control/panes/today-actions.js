@@ -1030,12 +1030,14 @@
       // A session waiting on you: what it waits on, its question to answer here when the Mac holds one for this page;
       // when the Mac's own prompt has it, that, read-only; else (a reply is the answer) the reply box below. No live
       // peek and no Stop: it is not at work (W4-r2).
-      html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : 'claude') + ' <span>' + esc(O.wait ? O.wait.why : 'Waiting for you') + '</span></p>';
       var where = waitWhere();
+      html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : 'claude') + ' <span>' + esc(waitWhy(where)) + '</span></p>';
       // W13 (QA week of 11/01-11/08): the words Today's row showed for it (its `ask`) stay here, read-only, when no card
       // draws them: the Mac line and a failed read alike. Never twice: not when the line above already says them.
       var ask = waitAsk();
       if (ask && (where === 'mac' || where === 'failed') && !O.macCount) html += '<blockquote class="ta-quote ta-mac-ask">' + esc(ask) + '</blockquote>';
+      // W1 A5: no words anywhere (a question that went straight to the Mac): say that, rather than a card with nothing in it.
+      if (!ask && where === 'mac' && !O.macCount && !askInWhy()) html += '<p class="ta-sub ta-mac-nowords">' + esc(macNoWords()) + '</p>';
       // The Mac card says it itself when there is one; say it here only when there is none.
       if (where === 'mac' && !O.macCount) html += '<p class="ta-sub ta-mac-line">' + esc(macLine()) + '</p>';
       // W13: the questions could not be read, so whether one waits here is unknown. Say so, never "at the Mac", and read again.
@@ -1076,7 +1078,17 @@
     var a = O.wait && O.wait.ask ? String(O.wait.ask).trim() : '';
     return a && !(O.wait.why && String(O.wait.why).trim() === a) ? a : '';
   }
-  function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens)."; }
+  function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Answer this at your Mac's prompt. It cannot be answered from here yet."; }
+  function macNoWords() { return (W.sessionQuestions && W.sessionQuestions.macNoWords) || "COS cannot read this question's words from here. They show at the Mac's prompt."; }
+  // W1 A5: the head line says the state once. At the Mac's prompt the line below says where; the head does not repeat it.
+  var GENERIC_WAIT = /^Waiting for (you|your answer)(\. Paused until you answer\.)?$/;
+  function waitWhy(where) {
+    var why = O.wait ? String(O.wait.why || '') : '';
+    if (!why) return 'Waiting for you';
+    return where === 'mac' && GENERIC_WAIT.test(why) ? 'Waiting for your answer' : why;
+  }
+  // The head line already carries the question's words (the server named them in the waiting line).
+  function askInWhy() { return !!(O.wait && O.wait.why && !GENERIC_WAIT.test(String(O.wait.why))); }
 
   // ═════════════ The pet's sessions ═════════════
   // The same sessions the pet's caption counts (app.js petPlay): waiting on you, running, then done today. Each row

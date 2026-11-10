@@ -1836,7 +1836,8 @@
       return d.indexOf('[home]') >= 0 ? 'Wants to run (home folder hidden) ' + shown : 'Wants to run ' + shown;
     }
     if (s.waiting_kind === 'question' && d) return d.length > 160 ? d.slice(0, 159) + '…' : d;
-    return 'Waiting for you' + (sxProvider(s.provider) === 'claude' ? '. Paused until you answer.' : '');
+    // W1 A5: a Claude session waits on its own prompt; the card under it says where, once.
+    return sxProvider(s.provider) === 'claude' ? 'Waiting for your answer' : 'Waiting for you';
   }
   // 6.99.26: where a waiting session's question can be answered. 'here': this page holds it (panes/questions.js), as
   // cards in its waiting sheet. 'mac': a Claude session's own prompt (or a held one that went back to the Mac), which
@@ -1861,6 +1862,31 @@
     if (mac.length || sxProvider(provider) === 'claude') return { where: 'mac', ask: ask };
     return { where: '', ask: '' };
   }
+  // ── At the Mac's prompt, in the session reader (W1 A5) ──
+  // Miles 11/09: "when I actually navigate to the session, there is no ability to answer the question." The reader cannot
+  // answer a question that waits on the Mac's own prompt either, so it says so at the top, with the words when this page
+  // has them (a held question it saw, or the server's waiting line) and plainly when it does not. Nothing here sends.
+  var MAC_Q = { line: "Answer this at your Mac's prompt. It cannot be answered from here yet.", none: "COS cannot read this question's words from here. They show at the Mac's prompt." };
+  function readerMacHtml(provider, id, row) {
+    var w = whereFor(provider, id);
+    if (w.where !== 'mac') return '';
+    var q = sessionQs();
+    var why = row ? askedWhy(row) : '';
+    var words = w.ask || (why && !/^Waiting for (you|your answer)/.test(why) ? why : '');
+    return '<p class="sx-mac-q-title"><strong>Waiting for your answer at the Mac</strong></p>' +
+      (words ? '<blockquote class="ta-quote sx-mac-q-words">' + esc(words) + '</blockquote>' : '<p class="sx-note sx-mac-q-none">' + esc((q && q.macNoWords) || MAC_Q.none) + '</p>') +
+      '<p class="sx-note sx-mac-q-line">' + esc((q && q.macLine) || MAC_Q.line) + '</p>';
+  }
+  function readerMacPaint(r, waiting) {
+    var el = $('session-mac-q');
+    if (!el || !r) return;
+    var row = (state.sessions || []).filter(function (s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider === r.provider && String(k.id).toLowerCase() === String(r.id).toLowerCase(); })[0] || null;
+    var html = waiting ? readerMacHtml(r.provider, r.id, row) : '';
+    if (el.innerHTML !== html) el.innerHTML = html;
+    el.hidden = !html;
+  }
+  // ── end at the Mac's prompt
+
   function needsModel() {
     var states = { sessions: TODAY.sessionsState, work: TODAY.workState, voices: TODAY.voices.state, memories: TODAY.memories.state };
     var rows = [], seen = {};
@@ -3135,6 +3161,7 @@
         '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2>' + sxFullButton() + '</div>' +
           '<p class="sx-subtitle">' + esc(sxSubtitle(d, provider, turns, r.more)) + '</p></div>' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
+        '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
         (trunc ? '<p class="sx-note">' + esc(trunc) + '</p>' : '') +
         '<div class="turns sx-turns" id="session-turns">' + renderTurns(turns, d) + '</div>' +
         '<div class="sx-foot"><button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button>' +
@@ -3154,6 +3181,7 @@
       readerImagesMount($('session-turns'), r);
       sxNoteList(r, d);
       setLive({});
+      if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
       paintReaderFiles();
       paintWebKeyOffer(r);
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
@@ -3429,6 +3457,7 @@
         var waiting = !working && (e.state === 'waiting' || e.state === 'needs_input' || e.agent_state === 'waiting');
         var el = $('session-state');
         if (el) el.textContent = working ? 'Working now' : waiting ? 'Waiting for you' : 'Open';
+        if (typeof readerMacPaint === 'function') readerMacPaint(r, waiting);
         if (wasWorking && !working) { refreshTurns(provider, id); replyEnded(r); }
         wasWorking = working;
         // Gone to waiting: its question may be parked for this page now (6.99.27).

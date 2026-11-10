@@ -59,7 +59,10 @@
   // A nudge (a session that just went to waiting, Today coming on screen) never reads more often than this.
   var NUDGE_GAP_MS = 1000;
   // Miles's words for a question at the Mac (11/07), one place: Today's Needs you reads them from here too.
-  var MAC_LINE = "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens).";
+  // W1 A5 (Miles 11/09, "there is no ability to answer the question"): said once, and honest that this page cannot answer it.
+  var MAC_LINE = "Answer this at your Mac's prompt. It cannot be answered from here yet.";
+  // A question that went straight to the Mac's prompt: no route carries its words (the hook keeps none), so say so.
+  var MAC_NO_WORDS = "COS cannot read this question's words from here. They show at the Mac's prompt.";
   var ANSWERED_LINE = 'Answered. The session carries on.';
   var ANSWERED_MS = 120000;
 
@@ -362,6 +365,7 @@
     var body = item.kind === 'approval'
       ? (words.summary ? '<pre class="sq-command">' + esc(words.summary) + '</pre>' : '')
       : words.questions.map(function (q) { return '<p class="sq-q-text sq-mac-q">' + esc(q) + '</p>'; }).join('');
+    if (!body) body = '<p class="sq-mac-nowords">' + esc(MAC_NO_WORDS) + '</p>';
     return '<article class="sq-card sq-mac" data-sq-mac="' + esc(item.id) + '" data-kind="' + esc(item.kind) + '">' +
       '<header class="sq-head"><h2 class="sq-title">' + esc(title) + '</h2></header>' + body +
       '<p class="sq-mac-line">' + esc(MAC_LINE) + '</p></article>';
@@ -726,6 +730,6 @@
   if (W.onRoute) W.onRoute(function (r) { if (r && r.pane === 'today') nudge(); });
 
   W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, _fitKeyboard: fitKeyboard, poll: poll, nudge: nudge, mount: mount,
-    itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, answeredLine: ANSWERED_LINE,
+    itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, macNoWords: MAC_NO_WORDS, answeredLine: ANSWERED_LINE,
     loadState: function () { return Q.load; }, retry: function () { nudge(); } };
 })();

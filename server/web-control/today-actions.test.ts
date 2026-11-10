@@ -1407,7 +1407,7 @@ describe('Needs you lists every source, and the headline, count and rail agree (
     const n = needsRegion({ at: WED_2PM, sessions: [asking] })
     expect(n.els['needs-list']!.innerHTML).toContain('Gong personas asked you a question')
     expect(n.els['needs-list']!.innerHTML).not.toContain('AskUserQuestion')
-    expect(n.els['needs-list']!.innerHTML).toContain('Waiting for you. Paused until you answer.')
+    expect(n.els['needs-list']!.innerHTML).toContain('Waiting for your answer')
   })
 
   it('a waiting session with no title reads "A session", never its folder or id (Control\u2019s TodayHome)', () => {
@@ -1784,9 +1784,11 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
     await flush()
     expect(h.els['ta-title']!.textContent).toBe('Gong personas team update asked you a question')
     const meta = h.els['ta-meta']!.innerHTML
-    expect(meta).toContain('Waiting for you. Paused until you answer.')
+    // W1 A5: said once. The head says the state; the line under it says where.
+    expect(meta).toContain('Waiting for your answer')
+    expect(meta).not.toContain('Paused until you answer')
     // 6.99.26: a Claude session's question that this page does not hold is at the Mac's own prompt: said so, read-only.
-    expect(meta).toContain('Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).')
+    expect(meta).toContain('Answer this at your Mac&#39;s prompt. It cannot be answered from here yet.')
     expect(meta).not.toContain('Answer it in a reply below')
     expect(meta).not.toContain('Working')
     expect(h.streams, 'no live peek').toHaveLength(0)
@@ -1831,7 +1833,7 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
   const routes: Routes = { ['GET ' + QP('?turns=6&cards=1')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
   const ASK = 'Ship the pricing page today or wait for Brad?'
   const model = (ask: string) => ({ rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Pricing page review asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'mac', ask }], now: [], later: [], failed: [], settled: true })
-  const MAC = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
+  const MAC = 'Answer this at your Mac&#39;s prompt. It cannot be answered from here yet.'
   const FAILED = 'Couldn&#39;t load this session&#39;s questions, so one may be waiting here.'.replace(/&#39;/g, '\u2019')
 
   it('at the Mac with no card drawn: the words Today showed stay, read-only, above the Mac line; the reply box stays hidden', async () => {
@@ -1856,6 +1858,39 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
     h.ta.open('wait', 'claude|' + QSID, h.opener())
     await flush()
     expect(h.els['ta-meta']!.innerHTML.split(esc(ASK)).length - 1).toBe(1)
+  })
+
+  // W1 A5 (Miles 11/09): the Mac-prompt card says the state once, says where once, is honest when it has no words, and
+  // offers nothing that pretends to answer. "Open session" stays the only action.
+  it('W1 A5: words known: head, words, one Mac line, Open session only', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes, model: model(ASK), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('<span>Waiting for your answer</span>')
+    expect(meta).not.toContain('Paused until you answer')
+    expect(meta.split("Mac&#39;s prompt").length - 1).toBe(1)
+    expect(meta).not.toContain('ta-mac-nowords')
+    expect(meta.match(/<button/g)).toEqual(['<button'])
+    expect(meta).toContain('data-ta="open-session">Open session</button>')
+  })
+  it('W1 A5: no words anywhere (a question that went straight to the Mac): says COS cannot read them, once', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes, model: model(''), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('<p class="ta-sub ta-mac-nowords">COS cannot read this question&#39;s words from here. They show at the Mac&#39;s prompt.</p>')
+    expect(meta).toContain(MAC)
+    expect(meta).not.toContain('ta-mac-ask')
+    expect(meta.match(/<button/g)).toEqual(['<button'])
+  })
+  it('W1 A5: words already in the head line: no "cannot read" line', async () => {
+    const m = { ...model(''), rows: [{ ...model('').rows[0]!, why: ASK }] }
+    const h = load({ data: { sessions: [QROW] }, routes, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).toContain('<span>' + esc(ASK) + '</span>')
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('ta-mac-nowords')
   })
 
   it('a failed questions read never says "at the Mac": it says so, keeps the words, and Retry reads again', async () => {
@@ -1915,7 +1950,7 @@ describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words,
 // ═════════════ 6.99.26: questions on Control Web (Miles 11/07) ═════════════
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
-const MAC_WORDS = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
+const MAC_WORDS = 'Answer this at your Mac&#39;s prompt. It cannot be answered from here yet.'
 function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown>; reduced?: boolean; fetch?: (url: string) => Promise<unknown> | null; models?: (n: number) => Promise<unknown> | null; vv?: { height: number; offsetTop: number }; innerHeight?: number; session?: Map<string, string> } = {}) {
   const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
     style: { props: {} as Record<string, string>, setProperty(k: string, v: string) { this.props[k] = v } },
@@ -2226,7 +2261,7 @@ describe('6.99.26: Needs you says where each waiting session can be answered', (
     const o = load({ model: m })
     const text = o.ta.summary()
     expect(text).toContain('A session asked you a question. Waiting for you. Paused until you answer. It can be answered from Today.')
-    expect(text).toContain('Release QA asked you a question. Waiting for you. Paused until you answer. It waits on the Mac’s own prompt.')
+    expect(text).toContain('Release QA asked you a question. Waiting for your answer. It waits on the Mac’s own prompt.')
     expect(text).not.toContain('Rename the export file?')
   })
 })
