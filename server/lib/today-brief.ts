@@ -85,6 +85,26 @@ export const TODAY_BRIEF_DAILY_CAP_MAX = 100
 export const TODAY_BRIEF_RECONNECT_MIN_MS = 10 * 60 * 1000
 /** 7.0.1: a forced refresh (the Today refresh button) at most once per this, on top of the daily cap. */
 export const TODAY_BRIEF_FORCE_MIN_MS = 30_000
+/**
+ * T1 (Miles 2026-11-09 21:34, "The title keeps changing (probably every minutes) which creates alot of bouncing"). With
+ * ten sessions working, every reply changes a session's line and latest reply, so the inputs changed on every ask (once a
+ * minute from each open Today; measured live 21:38 to 21:40, a new fingerprint every minute) and the summary was rewritten
+ * as often as the 10-minute interval let it (19:41 to 20:22: five rewrites 10.0 to 10.5 minutes apart).
+ *
+ * Now the summary is rewritten after the 10-minute interval only when something a person would care about changed (a
+ * MATERIAL change, todayBriefMaterialKey: a session opened or closed, a message the person typed into one, Needs you,
+ * Work, a meeting starting or ending, the session list or Needs you becoming readable or not, a recording). Anything
+ * else (a reply, a state flip between working and idle, a waiting question, sub-agent counts, minutes passing) rewrites
+ * it only once the summary shown is this old. The daily cap, the switch, the breaker and the forced refresh are unchanged.
+ */
+export const TODAY_BRIEF_ROUTINE_MIN_MS = 30 * 60 * 1000
+/**
+ * T1: the server's count sentence ("Two things need you.") is shown before the cached paragraph. It was recomputed on
+ * every ask, so a session flipping in and out of waiting re-flowed the whole paragraph without any model call, and two
+ * Todays with different counts (the desktop and the web) took turns. A new count now replaces the shown one only after
+ * it has held for this long, or at once when a new summary is written from it.
+ */
+export const TODAY_BRIEF_OPENER_SETTLE_MS = 5 * 60 * 1000
 export const TODAY_BRIEF_BREAKER_FAILURES = 3
 export const TODAY_BRIEF_BREAKER_MS = 60 * 60 * 1000
 /** The fenced data block's bound. Four characters a token: about 3,000 tokens, with the system prompt about 3,300. */
@@ -468,6 +488,24 @@ export function todayBriefFingerprint(inputs: TodayBriefInputs): string {
   const calOf = (kind: string, list: BriefEvent[]) => list.map(e => [kind, e.title, e.start, e.end, minutesBucket(e.minutes)].join('\u001f'))
   const calendar = cal ? [...calOf('in', cal.inProgress), ...calOf('next', cal.next), ...calOf('ended', cal.ended)] : []
   return createHash('sha256').update(JSON.stringify([3, sessions, needs, inputs.later, work, inputs.sessionsRead, inputs.needsComplete, [...inputs.unread].sort(), inputs.recording, calendar])).digest('hex')
+}
+
+/**
+ * T1: what counts as a MATERIAL change (TODAY_BRIEF_ROUTINE_MIN_MS): which sessions are open (by source and title), the
+ * messages the person typed into them within the day, Needs you, the Work cards (title, stage, an agent on it), which
+ * meetings are in progress or ended and which is next, whether the session list and every Needs you source were read,
+ * and whether a meeting records. Not in it, on purpose: a session's state, its line and latest reply, its waiting
+ * question, its sub-agents, messages sent in from another screen or session, and every duration.
+ */
+export function todayBriefMaterialKey(inputs: TodayBriefInputs): string {
+  const sessions = inputs.sessions.map(s => s.provider + '\u001f' + s.title).sort()
+  const typed = inputs.sessions.flatMap(s => (s.asks ?? []).filter(a => a.via === 'typed').map(a => s.title + '\u001f' + a.text)).sort()
+  const needs = inputs.needs.map(n => n.title + '\u001f' + n.why).sort()
+  const work = inputs.work.map(w => w.title + '\u001f' + w.stage + '\u001f' + w.running).sort()
+  const cal = inputs.calendar
+  const calendar = cal ? [...cal.inProgress.map(e => 'in\u001f' + e.title + '\u001f' + e.start), ...cal.ended.map(e => 'ended\u001f' + e.title + '\u001f' + e.start),
+    ...cal.next.slice(0, 1).map(e => 'next\u001f' + e.title + '\u001f' + e.start)].sort() : []
+  return createHash('sha256').update(JSON.stringify([1, sessions, typed, needs, inputs.later, work, inputs.sessionsRead, inputs.needsComplete, inputs.recording, calendar])).digest('hex')
 }
 
 export function hasBriefInputs(inputs: TodayBriefInputs): boolean {
@@ -854,7 +892,9 @@ interface BriefCache { text: string; at: number; day: string; fingerprint: strin
   /** Today round 2: the sessions it was written from ("Ask about this"). */
   read?: BriefReadRow[]
   /** The fingerprint of the page's rows alone, for an ask answered before the server's own reads (a gated ask). */
-  pageFingerprint?: string }
+  pageFingerprint?: string
+  /** T1: todayBriefMaterialKey of the inputs it was written from. Absent on an older cache (treated as changed). */
+  material?: string }
 interface BriefFile {
   schema: 1
   day: string
@@ -876,9 +916,12 @@ interface BriefFile {
   /** When the last call failed and its code, for the Settings status line. */
   lastFailAt: number
   lastFailCode: string
+  /** T1: a count sentence that differs from the one shown, and since when every ask has given it (TODAY_BRIEF_OPENER_SETTLE_MS). */
+  pendingOpener: string
+  pendingOpenerSince: number
   cache: BriefCache | null
 }
-const emptyFile = (day: string): BriefFile => ({ schema: 1, day, count: 0, lastStartAt: 0, lastForceAt: 0, lastReconnectAt: 0, failures: 0, openedAt: 0, lastAskFingerprint: '', lastOpener: '', lastFailAt: 0, lastFailCode: '', cache: null })
+const emptyFile = (day: string): BriefFile => ({ schema: 1, day, count: 0, lastStartAt: 0, lastForceAt: 0, lastReconnectAt: 0, failures: 0, openedAt: 0, lastAskFingerprint: '', lastOpener: '', lastFailAt: 0, lastFailCode: '', pendingOpener: '', pendingOpenerSince: 0, cache: null })
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
 
 function readJson(file: string): unknown {
@@ -897,6 +940,7 @@ function parseFile(raw: unknown, day: string): BriefFile {
   const cache: BriefCache | null = c && typeof c.text === 'string' && c.text && typeof c.fingerprint === 'string' && typeof c.day === 'string'
     ? { text: c.text.slice(0, TODAY_BRIEF_TEXT_MAX_CHARS), at: num(c.at), day: c.day, fingerprint: c.fingerprint, basis: typeof c.basis === 'string' ? c.basis : '', model: typeof c.model === 'string' ? c.model : TODAY_BRIEF_MODEL,
       ...(typeof c.pageFingerprint === 'string' ? { pageFingerprint: c.pageFingerprint } : {}),
+      ...(typeof c.material === 'string' ? { material: c.material } : {}),
       ...(Array.isArray(c.read) ? { read: parseReadRows(c.read) } : {}) }
     : null
   return {
@@ -912,6 +956,8 @@ function parseFile(raw: unknown, day: string): BriefFile {
     lastOpener: typeof raw.lastOpener === 'string' ? raw.lastOpener.slice(0, 200) : '',
     lastFailAt: num(raw.lastFailAt),
     lastFailCode: typeof raw.lastFailCode === 'string' ? raw.lastFailCode.slice(0, 40) : '',
+    pendingOpener: typeof raw.pendingOpener === 'string' ? raw.pendingOpener.slice(0, 200) : '',
+    pendingOpenerSince: num(raw.pendingOpenerSince),
     cache,
   }
 }
@@ -959,6 +1005,10 @@ export interface TodayBriefDeps {
   generate: (prompt: string, systemPrompt: string, model: string) => Promise<string>
   audit?: (row: TodayBriefAuditRow) => void
   minIntervalMs?: number
+  /** T1: TODAY_BRIEF_ROUTINE_MIN_MS, for tests. */
+  routineMinMs?: number
+  /** T1: TODAY_BRIEF_OPENER_SETTLE_MS, for tests. */
+  openerSettleMs?: number
   dailyCap?: number
   /** Why no call may start now, apart from the brief's own gates: a live recording or a server drain. */
   blocked?: () => 'recording' | 'maintenance' | null
@@ -1003,6 +1053,8 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
   const now = deps.now ?? Date.now
   const env = deps.env ?? (() => process.env)
   const minInterval = deps.minIntervalMs ?? TODAY_BRIEF_MIN_INTERVAL_MS
+  const routineMin = deps.routineMinMs ?? TODAY_BRIEF_ROUTINE_MIN_MS
+  const openerSettle = deps.openerSettleMs ?? TODAY_BRIEF_OPENER_SETTLE_MS
   /** A test's fixed cap, else the saved setting (read live), else 100. */
   const dailyCap = (): number => deps.dailyCap ?? savedCap() ?? TODAY_BRIEF_DAILY_CAP
   let state: BriefFile | null = null
@@ -1107,7 +1159,11 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
         const g = load()
         g.failures = 0
         g.openedAt = 0
-        g.cache = { text, at: now(), day: g.day, fingerprint, basis: todayBriefBasis(inputs), model: TODAY_BRIEF_MODEL, ...(pageFingerprint ? { pageFingerprint } : {}), read: briefReadRows(inputs, started) }
+        g.cache = { text, at: now(), day: g.day, fingerprint, basis: todayBriefBasis(inputs), model: TODAY_BRIEF_MODEL, ...(pageFingerprint ? { pageFingerprint } : {}), read: briefReadRows(inputs, started), material: todayBriefMaterialKey(inputs) }
+        // T1: a new summary shows with the count it was written after (the model was told that sentence comes first).
+        g.lastOpener = todayBriefOpener(inputs)
+        g.pendingOpener = ''
+        g.pendingOpenerSince = 0
         save()
       }, (error: unknown) => {
         const code = errorCode(error)
@@ -1146,9 +1202,32 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     return { ...sw, status, dailyCap: dailyCap() }
   }
   const capView = (): TodayBriefCapView => ({ dailyCap: dailyCap(), min: TODAY_BRIEF_DAILY_CAP_MIN, max: TODAY_BRIEF_DAILY_CAP_MAX, default: TODAY_BRIEF_DAILY_CAP, usedToday: load().count })
+  /**
+   * The last ask's fingerprint (fresh or stale for GET), and the count sentence shown before the paragraph. T1: with no
+   * summary today the count shows at once (first paint); otherwise a different count replaces the shown one only after
+   * every ask has given it for TODAY_BRIEF_OPENER_SETTLE_MS, so a session flipping in and out of waiting, or two Todays
+   * that count differently, never re-flow the paragraph.
+   */
   const remember = (f: BriefFile, fingerprint: string, opener: string) => {
-    if (f.lastAskFingerprint !== fingerprint || f.lastOpener !== opener) { f.lastAskFingerprint = fingerprint; f.lastOpener = opener; save() }
+    let changed = false
+    if (f.lastAskFingerprint !== fingerprint) { f.lastAskFingerprint = fingerprint; changed = true }
+    if (opener === f.lastOpener) {
+      if (f.pendingOpener || f.pendingOpenerSince) { f.pendingOpener = ''; f.pendingOpenerSince = 0; changed = true }
+    } else if (!todaysCache(f)) {
+      f.lastOpener = opener; f.pendingOpener = ''; f.pendingOpenerSince = 0; changed = true
+    } else if (opener !== f.pendingOpener || !f.pendingOpenerSince) {
+      f.pendingOpener = opener; f.pendingOpenerSince = now(); changed = true
+    } else if (!within(now() - f.pendingOpenerSince, openerSettle)) {
+      f.lastOpener = opener; f.pendingOpener = ''; f.pendingOpenerSince = 0; changed = true
+    }
+    if (changed) save()
   }
+  /**
+   * T1: whether changed inputs may be rewritten now. A material change may (the 10-minute interval still applies); a
+   * routine one only once the summary shown is TODAY_BRIEF_ROUTINE_MIN_MS old. A cache from before T1 has no key: changed.
+   */
+  const rewriteDue = (cache: BriefCache, inputs: TodayBriefInputs): boolean =>
+    cache.material === undefined || cache.material !== todayBriefMaterialKey(inputs) || !within(now() - cache.at, routineMin)
 
   return {
     peek() {
@@ -1172,6 +1251,12 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       const cache = todaysCache(f)
       // A forced refresh writes again even when nothing changed: the person asked for a fresh summary.
       if (!force && cache && cache.fingerprint === fingerprint) return view(fingerprint)
+      // T1: only routine changes since the summary shown, and it is under 30 minutes old: it stays (stale, as before).
+      if (!force && cache && !rewriteDue(cache, inputs)) return view(fingerprint, 'interval')
+      // T1 (lead 22:02): an ask that could not read the session list never replaces today's summary, forced or not (it
+      // would say "the session list could not be read" over one written from a list that was read). With no summary
+      // today, it may still write, and that summary says honestly that it may be incomplete.
+      if (cache && !inputs.sessionsRead) return view(fingerprint, 'interval')
       // Concurrent asks share one generation, whichever inputs started it.
       if (inflight) { await inflight; return view(fingerprint, todaysCache(load())?.fingerprint === fingerprint ? undefined : 'interval') }
       if (!hasBriefInputs(inputs)) return view(fingerprint, 'empty_inputs')
