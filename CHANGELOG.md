@@ -1,3 +1,23 @@
+## 7.0.18 - A question a session ends its turn with reaches the glasses, Control Web and the desktop
+
+2026-11-10. 7.0.17 (7313e50) plus X1's server half (claude/server-7018-turn-end-ask) and W1's Control Web card (claude/server-7018-web-turn-end), on Miles's go (07:14, "fold this in to the latest update so I can respond from glasses, web app and desktop"). Pairs with COS Control 0.5.389. Private on Miles's Mac first.
+
+- **The problem (Miles, 07:02):** a Claude session in the desktop app that ended its turn with a question and reply buttons read as idle. It never asked through AskUserQuestion, so nothing on the glasses or the web said a session was waiting on him.
+- **The server now sees it:** the session's last next-step call (`mcp__ccd_turn__wrap_up`) carries the question and its reply buttons. Once that turn has stopped, the session's row reads as waiting on a question (`waiting_source: 'turn_end'`), with the question (80 characters) and up to two reply labels (40 each). Only a question with at least one reply button, or one marked blocked, counts. App buttons such as commit or create PR are never offered as choices.
+- **Quiet while you are at the Mac:** the row shows only after the Mac has been idle for the same threshold as held questions (never under 30 seconds). Once shown, it stays shown until it clears. At the Mac, the Claude app's own box is the answer.
+- **It clears itself** on any reply, a new turn, the session ending, or after 8 hours.
+- **The words** follow the existing switch for question words (`COS_WAITING_QUESTION_WORDS`). With it off, the row still says a question waits, with no words and no choices.
+- **Control Web:** Today's row reads "<session> asked: <question>". The session reader and Today's sheet show the question, a button per choice, and one line: "A choice or a reply here reaches the session as a message from COS, not typed in the session, and the session may ask you to confirm." The reply box stays for your own answer.
+- **What an answer sends:** a tap, or a typed reply, goes through the session's existing Continue as "Answer sent from COS Control Web through COS, not typed in this session: <your choice>". It never reads as typed at the desk, so the session may ask you to confirm. If the question was answered on another screen first, nothing is sent and it says so.
+- **Logs and counts:** the session ledger adds only the question, its labels and the blocked mark on that one tool's rows; never the session's recap. The authenticated question status adds counts (armed, shown, cleared, aged out), never words.
+- **Not proven off the device:** tests and WebKit show each rule; only the glasses, the phone and the desktop app can show the full loop.
+
+**Default-on for every install:** yes: turn-end questions (`COS_TURN_END_ASKS`, on unless set to 0 and restarted), their words where question words are already on, and the Control Web card.
+
+### If you roll back
+
+- To 7.0.17: sessions that end their turn with a question read as idle again. The extra ledger key (`turn_ask`) is carried in the row but 7.0.17 never reads it. Nothing else is stored.
+
 ## 7.0.17 - Control Web stops zooming in and out on the phone
 
 2026-11-10. 7.0.16 (d2de7ee) plus one change to Control Web, on Miles's go (06:25, "Yes, start it"). Private on Miles's Mac first.
