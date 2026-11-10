@@ -245,6 +245,7 @@ import { webControlOffnetResponse } from './lib/web-control-offnet-page.js'
 import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
+import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -440,6 +441,10 @@ const webKeySignHandoffs = new WebKeySignHandoffs()
 const webKeySignerIntegrity: WebControlIntegrity | null = webKeyAuthorityEnabled()
   ? new WebControlIntegrity(path.join(path.dirname(fileURLToPath(import.meta.url)), 'web-signer'), { log: line => console.error(line.replace('[web-control-integrity]', '[web-signer-integrity]').replace('/control is', 'the 3144 signer is')) })
   : null
+// B2 (QA 2026-11-09): the 3144 signer's trusted Tailscale certificate (lib/web-key-signer-tls.ts). Built in the
+// listener loop below ONLY when the 3144 listener is (flag on at boot, HTTPS available); otherwise null, and no
+// Tailscale call, file or listener change happens. 3143 is never given SNI selection.
+let webKeySignerTls: SignerTls | null = null
 // Review W6: enrollment starts only from a device on COS_WEB_KEY_DEVICES (empty: none).
 const webKeyEnrollments = new WebKeyEnrollments(webKeyRegistry, { deviceAllowed: deviceAllowlistFrom() })
 // The ports a COS Control Web cookie is honoured on. Flag off: exactly 6.99.29's [3141, 3143].
@@ -1006,6 +1011,7 @@ app.use('/api', createWebKeyRouter({
   refreshSelfDnsName: () => tailnetSelf.refreshIfMissing(),
   expectedOrigin: () => webKeyAuthority.deps.expectedOrigin(),
   integrityStatus: () => ({ ...(webControlIntegrity?.status() ?? { enabled: false }), signer: webKeySignerIntegrity?.status() ?? null }),
+  signerTls: () => webKeySignerTls?.status() ?? null,
   // Phase 3: the phone's key steps and the handoff claim answer only on the 3144 signer listener.
   isSignerRequest: req => req.socket?.localPort === WEB_KEY_SIGNER_PORT,
   handoffs: webKeySignHandoffs,
@@ -1602,6 +1608,7 @@ async function gracefulShutdown(): Promise<void> {
   stopMorningBriefScheduler()
   stopRoutineScheduler()
   tailscaleNudger.stop()
+  webKeySignerTls?.stop()
   await workReviewRuntime?.close()
   dropP2.stop()
   workIntakeStore?.close()
@@ -1744,16 +1751,27 @@ if (!httpsAvailable) console.log('[COS API] No certs found — HTTPS disabled (d
 for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT, httpsPort: HTTPS_PORT, signerPort: WEB_KEY_SIGNER_PORT })) {
   // Phase 3: 3144 serves the signer page (verified bytes only) and an allowlist of /api routes,
   // never the big app (lib/web-key-signer-app.ts). It exists only with the flag on.
-  const handler = entry.label === 'HTTPS signer'
+  const signer = entry.label === 'HTTPS signer'
+  const handler = signer
     ? createWebKeySignerHandler({ integrity: webKeySignerIntegrity, api: app, origin: () => webKeySignerOrigin(webKeySelfDnsName()), refreshOrigin: () => tailnetSelf.refreshIfMissing() })
     : app
-  const server = entry.tls
-    ? withRequestTimeout(createHttpsServer({ cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) }, handler))
+  // B2: on 3144 only, the trusted Tailscale pair for exactly this Mac's tailnet name (SNI), mkcert for anything else.
+  if (signer) {
+    webKeySignerTls = createSignerTlsForBoot({ authorityEnabled: webKeyAuthorityEnabled(), signerListener: true }, {
+      dir: dataPath(SIGNER_TLS_DIR),
+      selfDnsName: () => tailnetSelf.refresh(),
+    })
+  }
+  const mkcertPair = entry.tls ? { cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) } : null
+  const server = mkcertPair
+    ? withRequestTimeout(createHttpsServer(signer ? signerHttpsOptions(mkcertPair, webKeySignerTls) : mkcertPair, handler))
     : withRequestTimeout(createHttpServer(app))
   listeners.push({ server, port: entry.port, host: BIND_HOST, label: entry.label })
 }
 
 listenRequiredServers(listeners).then(() => {
+  // B2: the boot check of the 3144 certificate, then daily (null unless the signer listener exists).
+  webKeySignerTls?.start()
   const serverInstanceId = initializeServerInstanceId()
   const startupAdmissionsOpen = maintenanceAdmissionsOpen()
   if (listeners.some(listener => listener.label === 'HTTPS')) {

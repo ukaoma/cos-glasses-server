@@ -53,6 +53,12 @@ export interface WebKeyRouterDeps {
   /** Served-asset integrity (Phase 6) for Control's audit; absent: not reported. */
   integrityStatus?: () => Record<string, unknown>
   /**
+   * B2: whether 3144 presents a publicly trusted certificate for this Mac's tailnet name, and why not
+   * (lib/web-key-signer-tls.ts SignerTlsStatus, e.g. `tailnet_https_certs_off`). Authority mode only;
+   * absent or null (no 3144 listener): not reported.
+   */
+  signerTls?: () => object | null
+  /**
    * Phase 3: whether this request reached the 3144 signer listener (index.ts: the socket's local
    * port). Given, the phone's key steps (enroll start and prove, nonce) and the handoff claim answer
    * only there, so a page on 3143 can neither make a key nor fetch a handoff. Absent (tests that
@@ -110,6 +116,12 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     try { await deps.refreshSelfDnsName() } catch { /* answer with what is known */ }
   }
 
+  const signerTlsField = (): { signerTls?: object } => {
+    let state: object | null = null
+    try { state = deps.signerTls?.() ?? null } catch { state = null }
+    return state ? { signerTls: state } : {}
+  }
+
   router.get('/web-key/status', anchorRoutes, async (req, res) => {
     const registry = deps.authority.registry
     if (deps.authority.mode() !== 'authority') {
@@ -147,6 +159,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
       epoch: registry.epoch(),
       activeKeys: registry.activeCount(selfDns),
       ...(deps.integrityStatus ? { integrity: deps.integrityStatus() } : {}),
+      ...signerTlsField(),
     })
   })
 
