@@ -1874,14 +1874,22 @@
     return q && q.question ? clipWords(q.question, 160) : '';
   }
   function clipWords(text, n) { var t = String(text || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; }
-  function whereFor(provider, id) {
+  function whereFor(provider, id, row) {
     var q = sessionQs();
     var held = q ? q.itemsFor(id) : [], mac = q && q.atMacFor ? q.atMacFor(id) : [];
     if (held.length) return { where: 'here', ask: askedHere(held) };
     if (q && q.answeredFor && q.answeredFor(id)) return { where: 'answered', ask: '' };
-    var words = mac.length && q.wordsOf ? q.wordsOf(mac[0].id) : null;
+    // X1 contract: a card built from the server's `waiting` list carries its own words; a held one gone back to the Mac
+    // has the words this page saw while it was held.
+    var first = mac[0];
+    var words = first && first.fromWaiting ? { questions: (first.questions || []).map(function (x) { return x.question; }), summary: '' }
+      : first && q.wordsOf ? q.wordsOf(first.id) : null;
     var ask = words ? clipWords(words.questions[0] || (words.summary ? 'Wants to run ' + words.summary : ''), 160) : '';
-    if (mac.length || sxProvider(provider) === 'claude') return { where: 'mac', ask: ask };
+    if (mac.length) return { where: 'mac', ask: ask };
+    // DESIGN.md step 4 #5: the Mac line only for a Claude row that waits on a question or an approval, never for any
+    // waiting Claude session. A row the page has not read says nothing about it, so it keeps the Mac line as before.
+    var kind = row ? String(row.waiting_kind || '') : '';
+    if (sxProvider(provider) === 'claude' && (!row || kind === 'question' || kind === 'permission')) return { where: 'mac', ask: ask };
     return { where: '', ask: '' };
   }
   // ── At the Mac's prompt, in the session reader (W1 A5) ──
@@ -1890,8 +1898,12 @@
   // has them (a held question it saw, or the server's waiting line) and plainly when it does not. Nothing here sends.
   var MAC_Q = { line: "Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.", none: "COS cannot read this question's words from here. They show at the Mac's prompt." };
   function readerMacHtml(provider, id, row) {
-    var w = whereFor(provider, id);
+    var w = whereFor(provider, id, row);
     if (w.where !== 'mac') return '';
+    // X1 contract: when the server listed this question (`waiting`), the shared card list mounted above draws it, with
+    // its options. This block is only for a question it did not list (an older server, or asked before a restart).
+    var qs0 = sessionQs();
+    if (qs0 && qs0.atMacFor && qs0.atMacFor(id).length) return '';
     var q = sessionQs();
     var why = row ? askedWhy(row) : '';
     var words = w.ask || (why && !/^Waiting for (you|your answer)/.test(why) ? why : '');
@@ -1902,13 +1914,16 @@
   function readerMacPaint(r, waiting) {
     var el = $('session-mac-q');
     if (!el || !r) return;
+    r.waitingNow = !!waiting;
     var row = (state.sessions || []).filter(function (s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider === r.provider && String(k.id).toLowerCase() === String(r.id).toLowerCase(); })[0] || null;
     var html = waiting ? readerMacHtml(r.provider, r.id, row) : '';
     if (el.innerHTML !== html) el.innerHTML = html;
     el.hidden = !html;
-    // Q1 M3: the Send box under it says plainly that a message is not the answer.
+    // Q1 M3: the Send box under it says plainly that a message is not the answer, whichever block shows the question
+    // (this one, a Mac card or a held card above).
+    var qs1 = sessionQs(), open = !!html || !!(qs1 && ((qs1.itemsFor && qs1.itemsFor(r.id).length) || (qs1.atMacFor && qs1.atMacFor(r.id).length)));
     var box = $('session-input');
-    if (box && box.setAttribute) box.setAttribute('placeholder', html ? 'Message this session. It does not answer the question.' : 'Continue this session…');
+    if (box && box.setAttribute) box.setAttribute('placeholder', open ? 'Message this session (not an answer)' : 'Continue this session…');
   }
   // ── end at the Mac's prompt
 
@@ -1919,7 +1934,7 @@
       if (sxKeepWarm(s) || sxState(s) !== 'waiting') return;
       var k = splitSessionId(s.provider, s.session_id || s.id);
       seen[k.provider + '|' + String(k.id).toLowerCase()] = 1;
-      var w = whereFor(k.provider, k.id);
+      var w = whereFor(k.provider, k.id, s);
       rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id, where: w.where, ask: w.ask });
     });
     // A question this page holds for a session the list has not shown waiting yet: its own row, so every held
@@ -3195,6 +3210,9 @@
           '<span class="sx-foot-note">Kickstart brief for another agent. Not a Claude Code resume.</span></div>' +
         '<p class="sx-copy-note hidden" id="session-copy-note" role="status"></p>' +
         '<div class="sx-chat">' +
+          // DESIGN.md step 4 #3: this session's question cards (held and answerable, or at the Mac with its words), above
+          // the verdict and the Send box, the same component Today's sheet mounts, so the full hold lights up here.
+          '<div class="sx-questions" id="session-questions"></div>' +
           '<div id="session-verdict"></div>' +
           '<form class="composer att-composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
             '<div class="cc-chips att-files hidden" id="session-files"></div>' +
@@ -3209,6 +3227,8 @@
       sxNoteList(r, d);
       setLive({});
       if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
+      var qk = window.COSWeb.sessionQuestions, qhost = $('session-questions');
+      if (qk && qk.mount && qhost) r.qMount = qk.mount(qhost, id, function () { if (state.reading === r && typeof readerMacPaint === 'function') readerMacPaint(r, r.waitingNow); });
       paintReaderFiles();
       paintWebKeyOffer(r);
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.

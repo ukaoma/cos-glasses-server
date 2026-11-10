@@ -416,7 +416,7 @@ describe('A5: the session reader says when its question waits on the Mac', () =>
   it('Q1 M3: the Send box says a message is not the answer while the question is open, and goes back after', () => {
     const h = readerMac({ where: 'mac', ask: 'Ship it?' }, null)
     h.fns.readerMacPaint(R, true)
-    expect(h.input.attrs.placeholder).toBe('Message this session. It does not answer the question.')
+    expect(h.input.attrs.placeholder).toBe('Message this session (not an answer)')
     h.fns.readerMacPaint(R, false)
     expect(h.input.attrs.placeholder).toBe('Continue this session…')
   })
@@ -491,5 +491,45 @@ describe('a refused sign-in link checks whether this browser is still signed in'
     const b = bootLink('?handoff=abcDEF123_-xyz0987654321', { '/api/web-session/login': fail(undefined) })
     await flush()
     expect(b.calls).toEqual(['api:/api/web-session/login', 'auth:That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'])
+  })
+})
+
+// ── X1 contract + DESIGN.md step 4 #5: where a waiting session's question is answered ──
+describe('whereFor: the Mac line only for a question or approval, words from the server’s waiting list', () => {
+  const WHERE = block('  function sessionQs() {', "  // ── At the Mac's prompt, in the session reader (W1 A5)")
+  function where(q: Record<string, unknown> | null) {
+    const deps = { window: { COSWeb: q ? { sessionQuestions: { itemsFor: () => [], atMacFor: () => [], answeredFor: () => false, wordsOf: () => null, ...q } } : {} },
+      sxProvider: (p: string) => p || 'claude' }
+    // eslint-disable-next-line no-new-func
+    return new Function('deps', `with (deps) {\n${WHERE}\nreturn whereFor;\n}`)(deps) as (p: string, id: string, row?: unknown) => { where: string; ask: string }
+  }
+  it('a waiting-list card at the Mac gives its words', () => {
+    const w = where({ atMacFor: () => [{ id: 'w:k', fromWaiting: true, questions: [{ question: 'Which color?' }] }] })
+    expect(w('claude', 'sid', { waiting_kind: 'question' })).toEqual({ where: 'mac', ask: 'Which color?' })
+  })
+  it('a Claude row waiting on a question or an approval with no card: the Mac line, no words', () => {
+    expect(where({})('claude', 'sid', { waiting_kind: 'question' })).toEqual({ where: 'mac', ask: '' })
+    expect(where({})('claude', 'sid', { waiting_kind: 'permission' })).toEqual({ where: 'mac', ask: '' })
+  })
+  it('H5: a Claude row waiting on nothing in particular, or a Codex row, is never at the Mac', () => {
+    expect(where({})('claude', 'sid', { waiting_kind: 'input' }).where).toBe('')
+    expect(where({})('claude', 'sid', { waiting_kind: '' }).where).toBe('')
+    expect(where({})('codex', 'sid', { waiting_kind: 'question' }).where).toBe('')
+  })
+  it('held here wins; answered next', () => {
+    expect(where({ itemsFor: () => [{ kind: 'question', questions: [{ question: 'Ship?' }] }] })('claude', 'sid', null)).toEqual({ where: 'here', ask: 'Ship?' })
+    expect(where({ answeredFor: () => true })('claude', 'sid', { waiting_kind: 'question' }).where).toBe('answered')
+  })
+})
+
+describe('the session reader mounts its question cards above the verdict and the Send box (DESIGN.md step 4 #3)', () => {
+  it('one #session-questions, inside the chat block, before #session-verdict, mounted with the shared component', () => {
+    const host = `'<div class="sx-questions" id="session-questions"></div>' +`
+    expect(APP.split(host).length - 1, 'exactly one host').toBe(1)
+    const chat = APP.indexOf(`'<div class="sx-chat">' +`), at = APP.indexOf(host), verdict = APP.indexOf(`'<div id="session-verdict"></div>' +`)
+    expect(chat).toBeGreaterThan(-1)
+    expect(at, 'inside the chat block').toBeGreaterThan(chat)
+    expect(at, 'above the verdict and the Send box').toBeLessThan(verdict)
+    expect(APP).toContain("r.qMount = qk.mount(qhost, id, function () {")
   })
 })
