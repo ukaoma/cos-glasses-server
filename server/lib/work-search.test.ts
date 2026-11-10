@@ -190,8 +190,11 @@ describe('WorkSearcher with a fake Jev', () => {
   })
 
   it('keeps at most 200 cached searches', async () => {
-    const f = vi.fn(async () => answer({ t0: 0.5, none: 0.5 }, 1))
-    const { search } = searcher(f)
+    // S1 (2026-11-09): an in-memory decision client. Through the real Jev client each of the 201
+    // searches also wrote the usage ledger, so this test took 2.2 to 2.9 s alone and timed out at
+    // 5 s under suite load (7.0.5, 7.0.6, 7.0.7 runs). The cache is what is under test here.
+    const f = vi.fn(async () => ({ answers: { c: { probabilities: { t0: 0.5, none: 0.5 } } }, inputTokens: 1, provider: 'jev' as const }))
+    const search = new WorkSearcher({ provider: 'jev', ask: f } as never, () => Date.parse('2026-10-06T23:00:00Z'))
     for (let i = 0; i <= WORK_SEARCH_LIMITS.cacheEntries; i++) await search.search(`query ${i}`, rows)
     expect(f).toHaveBeenCalledTimes(201)
     expect(await search.search('query 200', rows)).toMatchObject({ cached: true })

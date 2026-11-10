@@ -38,7 +38,8 @@ function withEnv(values: Record<string, string>) {
 }
 
 describe('canary 1: replay', () => {
-  it(`files ${REPLAY.length} labelled drops: at most 5% wrong, at most 40% asked`, async () => {
+  // S1 (2026-11-09): its own bound. 35 drops through the real durable drop and inbox stores. Alone 1.5 to 2.0 s; under a full parallel suite plus a Swift compile it passed 5 s (7.0.5 red run, 11/09 rerun 5.1 s), and passed only on a serial rerun. A hang still fails at 30 s.
+  it(`files ${REPLAY.length} labelled drops: at most 5% wrong, at most 40% asked`, { timeout: 30_000 }, async () => {
     expect(REPLAY.length).toBeGreaterThanOrEqual(30)
     const { drops, feed } = stores()
     const client = scriptedDecisionClient()
