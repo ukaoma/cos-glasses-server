@@ -276,11 +276,12 @@ describe('7.0.5: Summaries per day and reconnect', () => {
     await start(true)
     await post('/today/brief', ASK)
     expect(prompts).toHaveLength(1)
-    const changed = { ...ASK, sessions: [{ ...ASK.sessions[0], waiting: 'Wants to publish 7.0.5' }] }
+    // T1: a waiting question alone is a routine change; a new Needs you row is a material one, which the spacing governs.
+    const changed = { ...ASK, sessions: [{ ...ASK.sessions[0], waiting: 'Wants to publish 7.0.5' }], needs: [{ title: 'Approve 7.0.5', why: '' }] }
     expect((await (await post('/today/brief', changed)).json()).reason).toBe('interval')
     expect((await (await post('/today/brief', { ...changed, reason: 'reconnect' })).json()).state).toBe('fresh')
     expect(prompts).toHaveLength(2)
-    const third = { ...ASK, sessions: [{ ...ASK.sessions[0], waiting: 'Wants a third thing' }] }
+    const third = { ...ASK, sessions: [{ ...ASK.sessions[0], waiting: 'Wants a third thing' }], needs: [{ title: 'A third thing', why: '' }] }
     expect((await (await post('/today/brief', { ...third, reason: 'reconnect' })).json()).reason).toBe('interval')
     expect(prompts).toHaveLength(2)
     expect((await post('/today/brief', { ...ASK, reason: 'because' })).status).toBe(400)

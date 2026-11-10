@@ -55,7 +55,9 @@ function inputs(over: Partial<TodayBriefInputs> = {}, lineTag = 'a'): TodayBrief
       { title: 'Today summary build', provider: 'claude', state: 'working', minutes: 25, line: 'Writing the route' },
       { title: 'Speaker cleanup', provider: 'codex', state: 'open', minutes: 200, line: 'Merged two profiles' },
     ],
-    needs: [{ title: 'Review 3 memories', why: 'Learned from your meetings.' }],
+    // T1: a tag other than the default also lands in the Needs you row, so a tagged change is MATERIAL (the gate tests
+    // below vary the tag to exercise the interval, the cap and the reconnect, which govern material changes).
+    needs: [{ title: 'Review 3 memories', why: 'Learned from your meetings.' + (lineTag === 'a' ? '' : ' ' + lineTag) }],
     sessionsRead: true, needsComplete: true, unread: [], recording: false,
     ...over,
   })
