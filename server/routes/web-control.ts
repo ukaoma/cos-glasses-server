@@ -25,6 +25,9 @@ import {
   WebGlassesCodeProbeBudget,
   WEB_SESSION_TTL_MS,
   WEB_SESSION_COOKIE_NAME,
+  WEB_SESSION_MAX_LIFE_MS,
+  readWebSessionCookie,
+  webSessionCookieFrom,
   WebHandoffStore,
   WebLoginLimiter,
   WebDeviceCodeStore,
@@ -200,7 +203,7 @@ export function webControlCsp(_requestPath: string): string {
   ].join('; ')
 }
 
-/** The expiry (ISO) carried in the first part of a cos_web_session cookie, `<exp unix s>.<epoch>.<sig>`. Read only after verification. */
+/** The expiry (ISO) carried in the first part of a cos_web_session cookie (`<exp>.<epoch>.<sig>`, or a renewed `<exp>.<epoch>.<orig>.<sig>`). Read only after verification. */
 export function webSessionCookieExpiry(cookieHeader: unknown): string | null {
   if (typeof cookieHeader !== 'string') return null
   for (const part of cookieHeader.split(';')) {
@@ -305,12 +308,16 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     // Only after the cookie verified (its signature covers the expiry), only for cookie mode, and nothing a caller without
     // that cookie can read. The 7-day lifetime itself is unchanged.
     const expiresAt = cookieOk && !headerOk ? webSessionCookieExpiry(req.headers.cookie) : null
+    // Renewal (Miles 2026-11-09): the latest this sign-in can last while in use, 30 days from its first sign-in.
+    const read = cookieOk && !headerOk ? readWebSessionCookie(webSessionCookieFrom(req.headers.cookie), token) : null
+    const renewUntil = read ? new Date((read.origUnixSec + Math.floor(WEB_SESSION_MAX_LIFE_MS / 1000)) * 1000).toISOString() : null
     res.json({
       authenticated: true,
       mode: headerOk ? 'header' : 'cookie',
       serverName: hostname().replace(/\.local$/i, ''),
       ownerName: getOwnerName(),
       ...(expiresAt ? { expiresAt } : {}),
+      ...(renewUntil ? { renewUntil } : {}),
     })
   })
 
@@ -359,6 +366,8 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     return res.json({
       ok: true,
       expiresAt: new Date(minted.expiresAtMs).toISOString(),
+      // Renewal (Miles 2026-11-09): while in use this sign-in renews up to 30 days from now (lib/web-session-auth.ts).
+      renewUntil: new Date((Math.floor(minted.expiresAtMs / 1000) - Math.floor(WEB_SESSION_TTL_MS / 1000) + Math.floor(WEB_SESSION_MAX_LIFE_MS / 1000)) * 1000).toISOString(),
       serverName: hostname().replace(/\.local$/i, ''),
       ownerName: getOwnerName(),
     })

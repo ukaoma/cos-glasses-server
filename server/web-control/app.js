@@ -266,6 +266,9 @@
       if (timer && o.responseType !== 'blob') clearTimeout(timer);
       sxNoteClock(res, sentAt);
       noteServer(true);
+      // A request that renewed this browser's sign-in says so (lib/api-auth.ts): `<new expiry> <30-day cap>`.
+      var renewedTo = res.headers && typeof res.headers.get === 'function' ? res.headers.get('X-COS-Web-Session') : null;
+      if (renewedTo && typeof signinRemember === 'function') { var rt = String(renewedTo).split(' '); signinRemember({ expiresAt: rt[0], renewUntil: rt[1] }); }
       if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(typeof signinLapsedCopy === 'function' && signedInOnce() ? signinLapsedCopy() : undefined); var gone = new Error('Signed out. Connect this browser again.'); gone.status = 401; throw gone; }
       if (o.responseType === 'blob' && res.ok) return res.blob();
       return res.text().then(function (text) {
@@ -361,9 +364,11 @@
   // F3: with no offline shell (that needs a service worker, so HTTPS), an open page says plainly when the Mac stops answering,
   // when it last heard from it, and offers Retry, instead of spinners. Retry asks GET /api/health (public, no state) and then
   // reloads the pane on screen. While the Mac is down it asks again every 30 s, only while the page is visible.
-  // F2: the sign-in cookie lasts 7 days and is not renewed (lib/web-session-auth.ts). GET /api/web-session/status and the
+  // F2: a sign-in lasts 7 days and, since 7.0.x, renews while in use up to 30 days (lib/web-session-auth.ts). Status and the
   // login answer carry this browser's own expiresAt; within a day of it the page says when it ends and how to sign in again.
-  var CONN = { timer: null, retrying: false, signinEnds: 0, hideFor: 0, lapsed: false };
+  // Sign-in (7.0.x, Miles 2026-11-09 "Renew while in use, 30-day cap"): `ends` is this cookie's expiry, `cap` the latest a
+  // renewal can reach (30 days from the first sign-in). A server without renewal sends no cap: then the cookie's end is the end.
+  var CONN = { timer: null, retrying: false, signin: null, hideFor: 0, lapsed: false };
   var CONN_RETRY_MS = 30000, SIGNIN_WARN_MS = 24 * 3600000, SIGNIN_STORE = 'cos.web.signinEnds';
   // Names the row, never the Settings page: that page was renamed in COS Control 0.5.387, and a phone may pair with either build.
   var SIGNIN_HOW = 'On your Mac, open COS Control Settings and choose Open COS on your phone. Or get a code from another signed-in browser, or from the COS Glasses app.';
@@ -373,21 +378,30 @@
     return same ? clock(d) : d.toLocaleDateString(undefined, { weekday: 'short' }) + ' ' + clock(d);
   }
   function signinRemember(info) {
-    var at = info && info.expiresAt ? Date.parse(info.expiresAt) : NaN;
-    if (!isFinite(at) || at <= 0) return;
-    CONN.signinEnds = at;
-    try { localStorage.setItem(SIGNIN_STORE, String(at)); } catch (e) { /* the notice still works for this page */ }
+    var ends = info && info.expiresAt ? Date.parse(info.expiresAt) : NaN, cap = info && info.renewUntil ? Date.parse(info.renewUntil) : NaN;
+    if (!isFinite(ends) || ends <= 0) return;
+    CONN.signin = { ends: ends, cap: isFinite(cap) && cap >= ends ? cap : 0 };
+    try { localStorage.setItem(SIGNIN_STORE, JSON.stringify(CONN.signin)); } catch (e) { /* the notice still works for this page */ }
+    if (typeof connPaint === 'function') connPaint();
   }
-  function signinEndsAt() {
-    if (CONN.signinEnds) return CONN.signinEnds;
-    try { var v = Number(localStorage.getItem(SIGNIN_STORE)); return isFinite(v) && v > 0 ? v : 0; } catch (e) { return 0; }
+  function signinKnown() {
+    if (CONN.signin) return CONN.signin;
+    try {
+      var raw = localStorage.getItem(SIGNIN_STORE), v = raw ? JSON.parse(raw) : null;
+      if (typeof v === 'number' && v > 0) return { ends: v, cap: 0 };   // the earlier page kept the expiry alone
+      if (v && typeof v.ends === 'number' && v.ends > 0) return { ends: v.ends, cap: typeof v.cap === 'number' ? v.cap : 0 };
+    } catch (e) { /* nothing known */ }
+    return null;
   }
-  // Why the sign-in gate opened after this page had been signed in: the 7 days ran out, or the browser was signed out.
+  // When this sign-in really ends while it is in use: the 30-day cap where the server renews, else the cookie's own end.
+  function signinEndsAt() { var k = signinKnown(); return k ? (k.cap || k.ends) : 0; }
+  // Why the sign-in gate opened after this page had been signed in: the 30 days, a week without use, or a sign-out.
   function signinLapsedCopy() {
-    var ends = signinEndsAt();
-    return ends && ends <= Date.now() + 60000
-      ? 'Your sign-in on this browser ended. Sign-ins last 7 days. ' + SIGNIN_HOW
-      : 'This browser is signed out. ' + SIGNIN_HOW;
+    var k = signinKnown(), soon = Date.now() + 60000;
+    if (k && k.cap && k.cap <= soon) return 'Your sign-in on this browser reached its 30 days. ' + SIGNIN_HOW;
+    if (k && k.cap && k.ends <= soon) return 'Your sign-in on this browser ended after a week without use. ' + SIGNIN_HOW;
+    if (k && !k.cap && k.ends <= soon) return 'Your sign-in on this browser ended. Sign-ins last 7 days. ' + SIGNIN_HOW;
+    return 'This browser is signed out. ' + SIGNIN_HOW;
   }
   function connHtml() {
     var html = '';
@@ -399,7 +413,7 @@
     var ends = signinEndsAt(), left = ends - Date.now();
     if (ends && left > 0 && left <= SIGNIN_WARN_MS && CONN.hideFor !== ends) {
       html += '<div class="conn-line" role="status"><strong>Sign-in here ends ' + esc(connWhen(ends)) + '.</strong><span class="conn-sub">' +
-        esc('Sign in again before then from COS Control on your Mac: Open COS on your phone.') + '</span>' +
+        esc('Sign in again before then from COS Control Settings on your Mac: Open COS on your phone.') + '</span>' +
         '<button type="button" class="btn small" data-action="conn-hide-signin">Hide</button></div>';
     }
     return html;

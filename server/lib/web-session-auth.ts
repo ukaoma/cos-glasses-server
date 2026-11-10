@@ -19,6 +19,12 @@ import { CROCKFORD_ALPHABET, PAIRING_CODE_ATTEMPT_LIMIT, PAIRING_CODE_LENGTH } f
 export const WEB_SESSION_COOKIE_NAME = 'cos_web_session'
 export const WEB_CSRF_HEADER = 'x-cos-web'
 export const WEB_SESSION_TTL_MS = 7 * 24 * 60 * 60_000
+/**
+ * 7.0.x sign-in renewal (Miles 2026-11-09, "Renew while in use, 30-day cap"). A browser that is used in the last
+ * RENEW_WINDOW of its cookie gets a fresh one, never running past MAX_LIFE from the time it first signed in.
+ */
+export const WEB_SESSION_RENEW_WINDOW_MS = 2 * 24 * 60 * 60_000
+export const WEB_SESSION_MAX_LIFE_MS = 30 * 24 * 60 * 60_000
 export const WEB_HANDOFF_TTL_MS = 2 * 60_000
 export const WEB_HANDOFF_MAX_ACTIVE = 16
 
@@ -40,6 +46,17 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 function signSession(apiToken: string, expUnixSec: number, epoch: number): string {
   return createHmac('sha256', `cos_web_session_v2:${apiToken}`)
     .update(`${expUnixSec}:${epoch}`)
+    .digest('hex')
+}
+
+/**
+ * A RENEWED cookie also carries the time the browser first signed in (`orig`), so no renewal can pass the 30-day cap.
+ * Same key as above (derived from the API token: no new secret); the signed text starts with `v3:` and names `orig`,
+ * so a 3-part signature can never stand for a 4-part cookie, and `orig` cannot be edited without breaking it.
+ */
+function signRenewedSession(apiToken: string, expUnixSec: number, epoch: number, origUnixSec: number): string {
+  return createHmac('sha256', `cos_web_session_v2:${apiToken}`)
+    .update(`v3:${expUnixSec}:${epoch}:${origUnixSec}`)
     .digest('hex')
 }
 
@@ -117,19 +134,66 @@ export function verifyWebSessionCookieValue(
   nowMs = Date.now(),
   epoch = currentWebSessionEpoch(),
 ): boolean {
-  if (typeof cookieValue !== 'string' || !apiToken) return false
+  return readWebSessionCookie(cookieValue, apiToken, nowMs, epoch) !== null
+}
+
+/**
+ * The verified cookie's expiry and first sign-in time (unix seconds), or null for any cookie that does not verify.
+ * Two shapes verify:
+ *   `<exp>.<epoch>.<sig>`         minted at sign-in (unchanged). Its first sign-in time is its issue time, exp minus 7 days.
+ *   `<exp>.<epoch>.<orig>.<sig>`  minted by a renewal; exp may never pass orig plus 30 days, and orig is never in the future.
+ */
+export function readWebSessionCookie(
+  cookieValue: string | undefined,
+  apiToken: string,
+  nowMs = Date.now(),
+  epoch = currentWebSessionEpoch(),
+): { expUnixSec: number; origUnixSec: number; renewed: boolean } | null {
+  if (typeof cookieValue !== 'string' || !apiToken) return null
   const parts = cookieValue.split('.')
-  if (parts.length !== 3) return false
-  const [expPart, epochPart, sigPart] = parts
-  if (!/^\d{1,15}$/.test(expPart) || !/^\d{1,12}$/.test(epochPart) || !/^[0-9a-f]{64}$/.test(sigPart)) return false
+  if (parts.length !== 3 && parts.length !== 4) return null
+  const renewed = parts.length === 4
+  const expPart = parts[0], epochPart = parts[1], origPart = renewed ? parts[2] : null, sigPart = parts[parts.length - 1]
+  if (!/^\d{1,15}$/.test(expPart) || !/^\d{1,12}$/.test(epochPart) || !/^[0-9a-f]{64}$/.test(sigPart)) return null
+  if (origPart !== null && !/^\d{1,15}$/.test(origPart)) return null
   const expUnixSec = Number(expPart)
-  if (!Number.isSafeInteger(expUnixSec) || expUnixSec * 1000 <= nowMs) return false
+  if (!Number.isSafeInteger(expUnixSec) || expUnixSec * 1000 <= nowMs) return null
+  const origUnixSec = origPart !== null ? Number(origPart) : expUnixSec - Math.floor(WEB_SESSION_TTL_MS / 1000)
+  if (!Number.isSafeInteger(origUnixSec)) return null
+  if (renewed && (origUnixSec * 1000 > nowMs || expUnixSec > origUnixSec + Math.floor(WEB_SESSION_MAX_LIFE_MS / 1000))) return null
   // The signature covers the CURRENT epoch, so a cookie from before "Sign out every browser"
   // (or one whose epoch digits were edited) fails here; epochPart is only shape-checked.
-  const expected = signSession(apiToken, expUnixSec, epoch)
+  const expected = renewed ? signRenewedSession(apiToken, expUnixSec, epoch, origUnixSec) : signSession(apiToken, expUnixSec, epoch)
   const left = Buffer.from(sigPart, 'utf8')
   const right = Buffer.from(expected, 'utf8')
-  return left.length === right.length && timingSafeEqual(left, right)
+  if (left.length !== right.length || !timingSafeEqual(left, right)) return null
+  return { expUnixSec, origUnixSec, renewed }
+}
+
+/**
+ * The renewal for a cookie that ALREADY verified, or null. Only in the last 2 days of its life, and never past 30 days
+ * from its first sign-in: the new expiry is the earlier of now plus 7 days and that cap, and a renewal that would not
+ * move the expiry later is not made. The caller (the /api gate) calls this only after every other check passed.
+ */
+export function renewWebSessionCookieValue(
+  cookieValue: string | undefined,
+  apiToken: string,
+  nowMs = Date.now(),
+  epoch = currentWebSessionEpoch(),
+): { value: string; expiresAtMs: number; capAtMs: number } | null {
+  const read = readWebSessionCookie(cookieValue, apiToken, nowMs, epoch)
+  if (!read) return null
+  if (read.expUnixSec * 1000 - nowMs > WEB_SESSION_RENEW_WINDOW_MS) return null
+  const capUnixSec = read.origUnixSec + Math.floor(WEB_SESSION_MAX_LIFE_MS / 1000)
+  const expUnixSec = Math.min(Math.floor((nowMs + WEB_SESSION_TTL_MS) / 1000), capUnixSec)
+  if (expUnixSec <= read.expUnixSec) return null
+  const sig = signRenewedSession(apiToken, expUnixSec, epoch, read.origUnixSec)
+  return { value: `${expUnixSec}.${epoch}.${read.origUnixSec}.${sig}`, expiresAtMs: expUnixSec * 1000, capAtMs: capUnixSec * 1000 }
+}
+
+/** The raw session cookie on a request header, for the renewal (lib/api-auth.ts) and the status route. */
+export function webSessionCookieFrom(cookieHeader: unknown): string | undefined {
+  return parseCookies(typeof cookieHeader === 'string' ? cookieHeader : undefined)[WEB_SESSION_COOKIE_NAME]
 }
 
 export function formatSetWebSessionCookie(value: string, maxAgeSec: number, secure = false): string {

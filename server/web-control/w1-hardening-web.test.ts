@@ -197,7 +197,7 @@ function conn(opts: { up?: boolean | null; lastUpAt?: number; health?: unknown; 
     setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {} }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', `with (deps) {\n${CONN}\nreturn { connPaint, connRetry, signinRemember, signinLapsedCopy, CONN };\n}`)(deps)
-  return { fns, box, SERVER, calls, routed: () => routed, timers }
+  return { fns, box, SERVER, calls, routed: () => routed, timers, localStorage: deps.localStorage }
 }
 
 describe('F3: the Mac not answering', () => {
@@ -235,31 +235,52 @@ describe('F3: the Mac not answering', () => {
   })
 })
 
-describe('F2: the 7-day sign-in', () => {
-  it('within a day of the end it says when, and how to sign in again', () => {
+describe('F2: sign-in renews while in use, up to 30 days', () => {
+  const H = 3600000, D = 24 * H
+  it('with a cap: no notice while it can still renew, a notice in the last day before the cap', () => {
     const h = conn()
-    h.fns.signinRemember({ expiresAt: new Date(Date.now() + 5 * 3600000).toISOString() })
+    h.fns.signinRemember({ expiresAt: new Date(Date.now() + 5 * H).toISOString(), renewUntil: new Date(Date.now() + 20 * D).toISOString() })
+    h.fns.connPaint()
+    expect(h.box.hidden, 'the cookie ends soon but the next request renews it').toBe(true)
+    h.fns.signinRemember({ expiresAt: new Date(Date.now() + 5 * H).toISOString(), renewUntil: new Date(Date.now() + 5 * H).toISOString() })
     h.fns.connPaint()
     expect(h.box.innerHTML).toContain('Sign-in here ends ')
-    expect(h.box.innerHTML).toContain('Sign in again before then from COS Control on your Mac: Open COS on your phone.')
+    expect(h.box.innerHTML).toContain('Sign in again before then from COS Control Settings on your Mac: Open COS on your phone.')
     expect(h.box.innerHTML).toContain('data-action="conn-hide-signin"')
   })
-  it('more than a day away: nothing', () => {
+  it('a server without renewal (no cap): the cookie end is the end, as before', () => {
     const h = conn()
-    h.fns.signinRemember({ expiresAt: new Date(Date.now() + 3 * 24 * 3600000).toISOString() })
+    h.fns.signinRemember({ expiresAt: new Date(Date.now() + 5 * H).toISOString() })
     h.fns.connPaint()
-    expect(h.box.hidden).toBe(true)
+    expect(h.box.innerHTML).toContain('Sign-in here ends ')
+    const far = conn()
+    far.fns.signinRemember({ expiresAt: new Date(Date.now() + 3 * D).toISOString() })
+    far.fns.connPaint()
+    expect(far.box.hidden).toBe(true)
   })
-  it('the expiry is kept for the next load, and the sign-in card says the 7 days ran out', () => {
-    const h = conn()
-    h.fns.signinRemember({ expiresAt: new Date(Date.now() - 1000).toISOString() })
-    const next = conn({ seed: { 'cos.web.signinEnds': h.fns.CONN.signinEnds ? String(h.fns.CONN.signinEnds) : '' } })
-    expect(next.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser ended\. Sign-ins last 7 days\. On your Mac, open COS Control Settings and choose Open COS on your phone\./)
+  it('the sign-in card says why it ended: the 30 days, a week without use, or a sign-out', () => {
+    const past = new Date(Date.now() - 1000).toISOString(), later = new Date(Date.now() + 10 * D).toISOString()
+    const cap = conn(); cap.fns.signinRemember({ expiresAt: past, renewUntil: past })
+    expect(cap.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser reached its 30 days\. On your Mac, open COS Control Settings and choose Open COS on your phone\./)
+    const idle = conn(); idle.fns.signinRemember({ expiresAt: past, renewUntil: later })
+    expect(idle.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser ended after a week without use\./)
+    const out = conn(); out.fns.signinRemember({ expiresAt: later, renewUntil: later })
+    expect(out.fns.signinLapsedCopy()).toMatch(/^This browser is signed out\./)
     expect(CONN).not.toMatch(/Glasses and iPhone|Glasses, phone and web/)
-    const unknown = conn()
-    expect(unknown.fns.signinLapsedCopy()).toMatch(/^This browser is signed out\. On your Mac/)
   })
-  it('a 401 after the page was signed in opens the card with that reason; the login and status answers feed the expiry', () => {
+  it('what it knew is kept for the next load, and the earlier page’s stored expiry still reads', () => {
+    const h = conn()
+    h.fns.signinRemember({ expiresAt: new Date(Date.now() - 1000).toISOString(), renewUntil: new Date(Date.now() - 1000).toISOString() })
+    const next = conn({ seed: { 'cos.web.signinEnds': h.localStorage.getItem('cos.web.signinEnds')! } })
+    expect(next.fns.signinLapsedCopy()).toMatch(/reached its 30 days/)
+    const old = conn({ seed: { 'cos.web.signinEnds': String(Date.now() - 1000) } })
+    expect(old.fns.signinLapsedCopy()).toMatch(/^Your sign-in on this browser ended\. Sign-ins last 7 days\./)
+  })
+  it('a renewed response feeds the notice; the card tells the truth about how long', () => {
+    expect(APP).toContain("res.headers.get('X-COS-Web-Session')")
+    expect(APP).toContain("signinRemember({ expiresAt: rt[0], renewUntil: rt[1] })")
+    expect(HTML).toContain('You stay signed in while you use COS here, for up to 30 days.')
+    expect(HTML).not.toContain('stays connected for 7 days')
     expect(APP).toContain("showAuth(typeof signinLapsedCopy === 'function' && signedInOnce() ? signinLapsedCopy() : undefined)")
     expect(APP).toContain("if (typeof signinRemember === 'function') signinRemember(info);")
   })

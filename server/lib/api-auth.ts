@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express'
 import { timingSafeTokenEqual } from './token-auth.js'
 import { PAIRING_NONCE_BODY } from './glasses-pairing.js'
-import { isWebSessionAuthorized } from './web-session-auth.js'
+import { formatSetWebSessionCookie, isWebSessionAuthorized, renewWebSessionCookieValue, webSessionCookieFrom } from './web-session-auth.js'
 
 // Recovery/setup clients need these availability surfaces before they have a
 // usable token. Keep private provider state and every mutation route out.
@@ -43,6 +43,9 @@ const DISPLAY_STREAM_CAPABILITY_PATH = /^\/display-stream\/\d{1,15}\.[0-9a-f]{64
 //   the poll to the claim's socket IP, and the token is released only after Allow.
 // Minting, status and decisions stay behind the token AND a loopback socket.
 const PAIRING_POLL_PATH = new RegExp(`^/pairing/claim/${PAIRING_NONCE_BODY}$`)
+
+/** Set on a response whose request renewed its browser sign-in: `<new expiry ISO> <30-day cap ISO>`. The page reads it. */
+export const WEB_SESSION_RENEWED_HEADER = 'X-COS-Web-Session'
 
 /** `res.locals` key the gate sets to `'token'` when the X-COS-Token header matched. */
 export const API_AUTH_BY_LOCAL = 'cosApiAuthBy'
@@ -92,6 +95,17 @@ export function requireApiToken(apiToken: string, options: RequireApiTokenOption
       allowedPorts: options.allowedPorts?.(),
     })
     if (cookieAuth) {
+      // 7.0.x (Miles 2026-11-09, "Renew while in use, 30-day cap"): only here, after the socket, cookie, CSRF and Origin
+      // checks above all passed, a cookie in its last 2 days gets a fresh one, never past 30 days from its first sign-in.
+      // Appended, so a route's own Set-Cookie (none today on gated routes) is never overwritten. A renewal that cannot
+      // be made (outside the window, at the cap) changes nothing.
+      try {
+        const renewed = renewWebSessionCookieValue(webSessionCookieFrom(req.headers.cookie), apiToken)
+        if (renewed) {
+          res.append('Set-Cookie', formatSetWebSessionCookie(renewed.value, Math.floor((renewed.expiresAtMs - Date.now()) / 1000), req.secure))
+          res.setHeader(WEB_SESSION_RENEWED_HEADER, new Date(renewed.expiresAtMs).toISOString() + ' ' + new Date(renewed.capAtMs).toISOString())
+        }
+      } catch { /* a failed renewal leaves the request and the old cookie as they were */ }
       return next()
     }
     return res.status(401).json({
