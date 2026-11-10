@@ -140,6 +140,7 @@ import { randomBytes } from 'node:crypto'
 import { boundForRedaction } from './activity-preview.js'
 import { inferHookProvider, toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
 import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signal-store.js'
+import { WEB_ANSWER_TOUCH_MAX_MS, WEB_CONFIRM_TTL_MS, engineProvenForFullHold, type EngineFacts, type FullHoldSwitches } from './full-hold.js'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -825,6 +826,31 @@ export interface PermissionBrokerDeps {
   pollMs?: number
   newId?: () => string
   log?: (line: string) => void
+  /**
+   * X1: the two full-hold switches (`COS_QUESTION_FULL_HOLD`, `COS_APPROVAL_FULL_HOLD`), read per
+   * request and per tick. Absent or throwing: both off, and nothing below reads the registry.
+   */
+  fullHold?(): FullHoldSwitches
+  /**
+   * X1 (Q1 O2): the facts of the engine that ran THIS hook: its own registry record (the hook's
+   * `ppid`), only when that record names the session, and where it runs (`lib/full-hold-engine.ts`).
+   * Read only while a switch is on and the request is otherwise eligible. Absent: not proven.
+   */
+  engineFor?(sessionId: string, ppid: number | null): EngineFacts | null | Promise<EngineFacts | null>
+  /**
+   * X1: our PermissionRequest `timeout` for this kind once the hook is split (question block vs the
+   * rest); the one number while it is not. Read only by the full hold. Absent: `installedHookTimeoutS`.
+   */
+  installedHookTimeoutForKindS?(kind: BrokerItemKind): number | null
+  /**
+   * X1 round 3: the status of the engine process that asked (`lib/full-hold-engine.ts`
+   * `registryStatusForPid`): null when its record is gone or names another session. Read each tick for
+   * full-hold items only, so a held item whose settling hook event was lost does not sit to its
+   * deadline. Absent: the tick check is off.
+   */
+  engineStatus?(sessionId: string, pid: number): { status: string | null; statusUpdatedAt: number | null } | null
+  /** X1: a new confirm id (tests). Absent: `pc_` and 24 random hex. */
+  newConfirmId?: () => string
 }
 
 /** 6.60.0: how a parked request's deadline was decided, logged once per request. Numbers only. */
@@ -853,6 +879,8 @@ export interface HoldFacts {
   webOnly?: true
   /** 6.99.26: the age of that touch, present only with `webOnly`. */
   webPresenceAgeMs?: number
+  /** X1: held for the whole hook wait (`fullHold`); absent for every other request. */
+  fullHold?: true
 }
 
 /**
@@ -886,6 +914,10 @@ export interface ParkRequest {
   lensVisible?: boolean
   /** 6.99.26: admitted for COS Control Web's recent touch alone (see THE AWAY HOLD). */
   webOnly?: boolean
+  /** X1: held for the whole hook wait under a full-hold switch (`lib/full-hold.ts`). */
+  fullHold?: boolean
+  /** X1 round 3: the engine process that asked (the hook's ppid), for the registry tick check. */
+  enginePid?: number | null
   hold?: HoldFacts
 }
 
@@ -923,6 +955,10 @@ interface BrokerItem {
   webOnly: boolean
   toolUseId: string | null
   questionFingerprint: string
+  /** X1: held for the whole hook wait (`ParkRequest.fullHold`). */
+  fullHold: boolean
+  /** X1 round 3: the engine process that asked, for full-hold items; null otherwise. */
+  enginePid: number | null
   /**
    * 6.60.0: settled with `{}` written to the hook (handed to the desk, expired, no client,
    * drained), so the Mac's own dialog is showing, and the session has not moved past the
@@ -948,6 +984,56 @@ export interface SessionQuestionView {
   awayHold: boolean
   /** 6.60.0: handed to the Mac's own dialog and still waiting there. Always false for a pending item. */
   waitingAtMac: boolean
+  /** X1: the engine's tool_use id, when the hook sent one: the key that matches a `waiting` entry. Absent when unknown. */
+  toolUseId?: string
+  /** X1: held for the whole hook wait. Present (true) only then. */
+  fullHold?: true
+}
+
+/**
+ * X1: a question a live session waits on, as the questions route lists it (`waiting`). In memory
+ * only, from the live PreToolUse event (the ledger keeps no question text); never logged.
+ *   - `held`: a pending broker item a COS surface can answer now (`heldId`);
+ *   - `at_mac`: only the Mac's own prompt can answer it;
+ *   - `answered`: the session moved past it (kept WAITING_ANSWERED_KEEP_MS, words dropped).
+ */
+export type WaitingQuestionState = 'held' | 'at_mac' | 'answered'
+export interface WaitingQuestionView {
+  key: string
+  sessionId: string
+  provider: 'claude' | 'codex'
+  toolUseId: string | null
+  state: WaitingQuestionState
+  answerable: boolean
+  heldId: string | null
+  questions: BrokerQuestion[]
+  askedAt: string
+  deadlineAt: string | null
+  answeredAt: string | null
+  answeredBy: 'mac' | 'cos' | null
+}
+
+/** X1: an answered `waiting` entry is listed this long, then dropped. */
+export const WAITING_ANSWERED_KEEP_MS = 120_000
+/** X1: a `waiting` entry older than this is dropped, answered or not (a lost PostToolUse). */
+export const WAITING_MAX_AGE_MS = 24 * 60 * 60_000
+/** X1: at most this many `waiting` entries; past it the oldest go first. */
+export const MAX_WAITING = 64
+/** X1: at most this many unexpired web confirm ids at once. */
+export const MAX_CONFIRMS = 64
+export const CONFIRM_ID_RE = /^pc_[0-9a-f]{24}$/
+
+interface WaitingEntry {
+  key: string
+  sessionId: string
+  provider: 'claude' | 'codex'
+  toolUseId: string | null
+  questionFingerprint: string
+  questions: BrokerQuestion[] | null
+  askedAt: number
+  state: 'waiting' | 'answered'
+  answeredAt: number | null
+  answeredBy: 'mac' | 'cos' | null
 }
 
 /**
@@ -1071,6 +1157,14 @@ function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolN
   return false
 }
 
+/**
+ * X1: a web answer's own touch: the whole number of ms since the page's last real touch or key while
+ * it was in front, at most WEB_ANSWER_TOUCH_MAX_MS. Anything else is no touch.
+ */
+export function validWebTouch(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= WEB_ANSWER_TOUCH_MAX_MS
+}
+
 /** A presence age from a dep: a finite number of ms at or above 0, else null (absent, throwing or nonsense). */
 function readAgeMs(read: () => number | null): number | null {
   let ageMs: number | null = null
@@ -1089,6 +1183,10 @@ export class PermissionBroker {
   private readonly fastPaths: Record<string, number> = {}
   private lastFastPath: BrokerFastPath | null = null
   private lastFastPathAt: number | null = null
+  /** X1: questions live sessions wait on (`waiting` on the questions route). In memory only. */
+  private readonly waiting = new Map<string, WaitingEntry>()
+  /** X1: unexpired web confirm ids for approvals: single use, bound to one item and one decision. */
+  private readonly confirms = new Map<string, { itemId: string; decision: 'allow' | 'deny'; expiresAt: number }>()
 
   /**
    * 6.60.0 (QA round 1, Ghost Hunter W1): the server cannot know about a waiting-at-the-Mac
@@ -1182,10 +1280,63 @@ export class PermissionBroker {
   }
 
   /** 6.60.0: the installed hook timeout, or null when absent or unreadable. */
-  private installedHookTimeoutS(): number | null {
+  private installedHookTimeoutS(kind?: BrokerItemKind): number | null {
     let value: number | null = null
-    try { value = this.deps.installedHookTimeoutS?.() ?? null } catch { value = null }
+    // X1: the full hold reads its own kind's block (`installedHookTimeoutForKindS`); everything else the one number, as before.
+    try { value = (kind !== undefined && this.deps.installedHookTimeoutForKindS ? this.deps.installedHookTimeoutForKindS(kind) : this.deps.installedHookTimeoutS?.()) ?? null } catch { value = null }
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+  }
+
+  /** X1: the two switches now; both off when absent or unreadable. */
+  private fullHoldSwitches(): FullHoldSwitches {
+    try {
+      const on = this.deps.fullHold?.()
+      return { questions: on?.questions === true, approvals: on?.approvals === true }
+    } catch {
+      return { questions: false, approvals: false }
+    }
+  }
+
+  /** X1: either switch is on (the web door then needs a touch, and an approval a confirm). */
+  private anyFullHoldOn(): boolean {
+    const on = this.fullHoldSwitches()
+    return on.questions || on.approvals
+  }
+
+  /**
+   * X1: whether THIS request is held for the whole hook wait: its kind's switch is on, it is a
+   * Claude request that is not a background or child one, a question carries the 6.71.7 stamp (so
+   * `hook-ask-hold` 0 still rolls questions back), the hook stamped its own wait (an earlier script
+   * or block keeps the old clamp), and the engine is proven to keep its dialog up while the hook
+   * waits (`engineProvenForFullHold`). The registry is read only when a switch is on.
+   */
+  private fullHoldEligible(isQuestion: boolean, askHold: boolean, background: boolean, facts: Omit<PermissionRequestFacts, 'fingerprint'>): boolean {
+    const on = this.fullHoldSwitches()
+    if (isQuestion ? !on.questions : !on.approvals) return false
+    if (background || facts.provider === 'codex') return false
+    if (isQuestion && !askHold) return false
+    if (facts.hookWaitS === null) return false
+    return true
+  }
+
+  /** The engine probe, for an eligible request only: the hook's own process, proven or not. */
+  private async fullHoldEngineProven(sessionId: string, body: unknown): Promise<number | null | false> {
+    const raw = isRecord(body) ? body.ppid : undefined
+    const ppid = typeof raw === 'number' && Number.isInteger(raw) && raw > 1 ? raw : null
+    let engine: EngineFacts | null = null
+    try { engine = (await this.deps.engineFor?.(sessionId, ppid)) ?? null } catch { engine = null }
+    // Proven: the engine's pid (for the registry tick check); not proven: false.
+    return engineProvenForFullHold(engine) ? ppid : false
+  }
+
+  /**
+   * X1: the full hold's deadline: the hook's own whole wait, `holdCeilingS` of this kind's installed
+   * timeout and this invocation's stamp (10 s inside it, so `{}` lands before the hook gives up).
+   */
+  private fullHoldMs(hookWaitS: number | null, kind: BrokerItemKind): { holdMs: number; awayHoldMs: number; installedHookTimeoutS: number | null; ceilingS: number } {
+    const installedHookTimeoutS = this.installedHookTimeoutS(kind)
+    const ceilingS = holdCeilingS(installedHookTimeoutS, hookWaitS)
+    return { holdMs: ceilingS * 1000, awayHoldMs: 0, installedHookTimeoutS, ceilingS }
   }
 
   /**
@@ -1255,6 +1406,10 @@ export class PermissionBroker {
     let background = false
     try { background = this.deps.isBackgroundRequest?.(body) === true } catch { background = true }
     const askHold = isQuestion && facts.askHold === true && !background
+    // Awaited only for an eligible request, so with the switches off nothing here yields or reads.
+    const probe = this.fullHoldEligible(isQuestion, askHold, background, facts) ? await this.fullHoldEngineProven(facts.sessionId, body) : false
+    const full = probe !== false
+    const enginePid = probe === false ? null : probe
     const now = this.deps.now()
     const presence = this.presence(now)
     let holdPollAt: number | null = null
@@ -1271,18 +1426,18 @@ export class PermissionBroker {
     const deviceAdmits = askHold ? clientLive || presence.recent : clientLive || deviceAway
     // 6.99.26 (QA round 1): a recent touch on COS Control Web admits only what nothing else would, for the away
     // hold alone. A request a glasses or phone client admits keeps its 6.99.25 deadline, flag and hand-back.
-    const webOnly = !deviceAdmits && switchOn && ceilingAllowsAway && presence.webRecent
+    const webOnly = !full && !deviceAdmits && switchOn && ceilingAllowsAway && presence.webRecent
     const away = deviceAway || webOnly
     const notAwayReason: NotAwayReason | null = away ? null
       : !switchOn ? 'hold_off'
       : !ceilingAllowsAway ? 'ceiling_at_base'
       : presence.ageMs === null ? 'no_hold_client'
       : 'stale_presence'
-    if (askHold && !deviceAdmits && !webOnly) return this.noteFastPath('no_client', { presence, clientLive })
-    const hold = this.holdMs(facts.hookWaitS, away)
+    if (!full && askHold && !deviceAdmits && !webOnly) return this.noteFastPath('no_client', { presence, clientLive })
+    const hold = full ? this.fullHoldMs(facts.hookWaitS, isQuestion ? 'question' : 'approval') : this.holdMs(facts.hookWaitS, away)
     // With it, a request is held whether or not a client is polling right now, so a lens or
     // phone that comes back can still answer it. Without it, no client is `{}`, as in 6.59.0.
-    if (!clientLive && !away) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })
+    if (!full && !clientLive && !away) return this.noteFastPath('no_client', { notAway: notAwayReason!, presence, clientLive })
     // The deadline counts from when the HOOK started, when its stamp is sane: a request the
     // server read late must still be answered before the hook's curl gives up.
     const requestedAt = facts.hookStartedAtMs !== null && facts.hookStartedAtMs <= now ? facts.hookStartedAtMs : now
@@ -1328,8 +1483,9 @@ export class PermissionBroker {
       recentWindowS: Math.round(presence.windowMs / 1000),
       notAwayReason,
       ...(webOnly ? { webOnly: true as const, webPresenceAgeMs: Math.round(presence.webAgeMs ?? 0) } : {}),
+      ...(full ? { fullHold: true as const } : {}),
     }
-    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), hold: holdFacts } }
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), ...(full ? { fullHold: true, enginePid } : {}), hold: holdFacts } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -1364,6 +1520,8 @@ export class PermissionBroker {
       lensVisible: request.lensVisible !== false,
       toolUseId: facts.toolUseId ?? null,
       questionFingerprint: toolFingerprint(ASK_USER_QUESTION_TOOL, { questions: facts.toolInput.questions }),
+      fullHold: request.fullHold === true,
+      enginePid: request.fullHold === true && typeof request.enginePid === 'number' ? request.enginePid : null,
       waitingAtMac: false,
     }
     this.items.set(id, item)
@@ -1376,7 +1534,7 @@ export class PermissionBroker {
     this.ensurePolling()
     // 6.60.0: the numbers the deadline came from, once per request (never text).
     const hold = request.hold ? ` hold=${JSON.stringify(request.hold)}` : ''
-    this.log(`parked ${id} kind=${item.kind} session=${item.sessionId.slice(0, 8)} deadline_s=${Math.round((request.deadlineAt - now) / 1000)} away_hold=${item.awayHold} pending=${this.pendingCount()}${hold}`)
+    this.log(`parked ${id} kind=${item.kind} session=${item.sessionId.slice(0, 8)} deadline_s=${Math.round((request.deadlineAt - now) / 1000)} away_hold=${item.awayHold}${item.fullHold ? ' full_hold=true' : ''} pending=${this.pendingCount()}${hold}`)
     return id
   }
 
@@ -1416,6 +1574,7 @@ export class PermissionBroker {
   /** The pending items, oldest first, for `GET /api/session-questions`. */
   list(): SessionQuestionView[] {
     const now = this.deps.now()
+    const extended = this.extendedQuestionsView()
     const views: SessionQuestionView[] = []
     for (const item of [...this.items.values()]) {
       if (item.state !== 'pending') continue
@@ -1435,6 +1594,10 @@ export class PermissionBroker {
         answerable: true,
         awayHold: item.awayHold,
         waitingAtMac: false,
+        // X1, additive: present only when known or true, so a view without them reads as before.
+        // Q1 F1: only while a full-hold switch is on, so with both off each item is 7.0.13's, key for key.
+        ...(item.toolUseId && extended ? { toolUseId: item.toolUseId } : {}),
+        ...(item.fullHold ? { fullHold: true as const } : {}),
       })
     }
     return views.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
@@ -1481,11 +1644,14 @@ export class PermissionBroker {
     let cleared = 0
     for (const item of this.items.values()) {
       if (item.sessionId !== wanted && !(wanted.length < 36 && item.sessionId.startsWith(wanted))) continue
-      if (item.askHold && item.state === 'pending') {
+      if ((item.askHold || item.fullHold) && item.state === 'pending') {
         if (this.settle(item, 'retracted')) cleared++
       } else if (item.waitingAtMac) { item.waitingAtMac = false; cleared++ }
     }
     if (cleared > 0) this.log(`session row ended: ${cleared} no longer waiting at the Mac session=${wanted.slice(0, 8)}`)
+    for (const entry of [...this.waiting.values()]) {
+      if (entry.sessionId === wanted || (wanted.length < 36 && entry.sessionId.startsWith(wanted))) this.waiting.delete(entry.key)
+    }
     return cleared
   }
 
@@ -1519,12 +1685,25 @@ export class PermissionBroker {
       return { status: 400, body: { error: 'invalid_answer', reason: 'client_answer_id' } }
     }
     const handBack = input.handBack === true
+    // X1: while a full-hold switch is on, the web door answers (or hands back) only with a touch it
+    // just had. The token door (the Even app, Control through its helper) is unchanged.
+    // Q1 C1: an item held under the full hold keeps both web steps even if the switch reads off before the next tick.
+    if (by === 'web' && (this.anyFullHoldOn() || item.fullHold) && !validWebTouch(input.presenceAgeMs)) {
+      this.log(`web_touch_required ${item.id} kind=${item.kind}`)
+      return { status: 403, body: { error: 'web_touch_required' } }
+    }
     if (item.state !== 'pending') return this.settledReply(item, clientAnswerId, handBack)
     if (this.deps.now() >= item.deadlineAt) {
       this.settle(item, 'expired')
       return this.settledReply(item, clientAnswerId, handBack)
     }
     if (handBack) return this.handBack(item, clientAnswerId)
+    // Q1 O1: while a switch is on, an item no device is shown yet (the desk-idle latch has not fired) is
+    // not answerable by its id, from any door. A hand-back stays allowed: it only shows the Mac's dialog.
+    if (!item.lensVisible && (this.anyFullHoldOn() || item.fullHold)) {
+      this.log(`not_shown ${item.id} kind=${item.kind}`)
+      return { status: 409, body: { error: 'not_shown' } }
+    }
     let chosen: Chosen
     let output: Record<string, unknown>
     if (item.kind === 'question') {
@@ -1539,6 +1718,15 @@ export class PermissionBroker {
       if (input.decision !== 'allow' && input.decision !== 'deny') {
         this.counters.invalidAnswer++
         return { status: 400, body: { error: 'invalid_answer', reason: 'decision' } }
+      }
+      // X1: while a full-hold switch is on, a web approval carries the confirm id this server gave the
+      // page for this item and this decision (`confirm`), once. Tap, then confirm, enforced here.
+      if (by === 'web' && (this.anyFullHoldOn() || item.fullHold)) {
+        const refused = this.consumeConfirm(input.confirmId, item.id, input.decision)
+        if (refused) {
+          this.log(`${refused} ${item.id}`)
+          return { status: 403, body: { error: refused } }
+        }
       }
       chosen = { decision: input.decision }
       output = approvalHookOutput(input.decision)
@@ -1567,6 +1755,217 @@ export class PermissionBroker {
     this.log(`answered ${item.id} kind=${item.kind} pending=${this.pendingCount()}`)
     this.prune()
     return { status: 200, body: { ok: true, id: item.id, kind: item.kind, ...chosen } }
+  }
+
+  /**
+   * X1: `POST /api/session-questions/:id/confirm`, the web door's confirm step for an approval: the
+   * page asks after the first tap and sends the id back with the answer. Single use, bound to this
+   * item and this decision, valid WEB_CONFIRM_TTL_MS. Only for an approval, only from the web door,
+   * only with a fresh touch. A settled or expired item answers as the answer route would.
+   */
+  confirm(id: string, body: unknown, by: AnswerSurface = 'app'): AnswerResult {
+    const item = BROKER_ID_RE.test(id) ? this.items.get(id) : undefined
+    // Q1 F2: with both switches off the route does not exist (404) and mints nothing, unless the item itself is
+    // held under the full hold (Q1 C1: it still needs its confirm, so it must still be able to get one).
+    if (!this.anyFullHoldOn() && !item?.fullHold) return { status: 404, body: { error: 'not_found' } }
+    if (!item) return { status: 404, body: { error: 'not_found' } }
+    const input = isRecord(body) ? body : {}
+    if (item.kind !== 'approval') return { status: 400, body: { error: 'invalid_confirm', reason: 'kind' } }
+    if (input.decision !== 'allow' && input.decision !== 'deny') return { status: 400, body: { error: 'invalid_confirm', reason: 'decision' } }
+    if (by !== 'web') return { status: 400, body: { error: 'invalid_confirm', reason: 'surface' } }
+    if (!validWebTouch(input.presenceAgeMs)) return { status: 403, body: { error: 'web_touch_required' } }
+    if (item.state !== 'pending') return this.settledReply(item, '')
+    const now = this.deps.now()
+    if (now >= item.deadlineAt) {
+      this.settle(item, 'expired')
+      return this.settledReply(item, '')
+    }
+    this.pruneConfirms(now)
+    while (this.confirms.size >= MAX_CONFIRMS) {
+      const oldest = this.confirms.keys().next().value
+      if (oldest === undefined) break
+      this.confirms.delete(oldest)
+    }
+    const confirmId = this.deps.newConfirmId ? this.deps.newConfirmId() : `pc_${randomBytes(12).toString('hex')}`
+    const expiresAt = now + WEB_CONFIRM_TTL_MS
+    this.confirms.set(confirmId, { itemId: item.id, decision: input.decision, expiresAt })
+    this.log(`confirm_issued ${item.id}`)
+    return { status: 200, body: { confirmId, decision: input.decision, expiresAt: new Date(expiresAt).toISOString() } }
+  }
+
+  /** X1: use a confirm id once. Null when it matches this item and decision; else why not. */
+  private consumeConfirm(raw: unknown, itemId: string, decision: 'allow' | 'deny'): 'confirm_required' | 'confirm_invalid' | null {
+    if (raw === undefined || raw === null || raw === '') return 'confirm_required'
+    if (typeof raw !== 'string' || !CONFIRM_ID_RE.test(raw)) return 'confirm_invalid'
+    const found = this.confirms.get(raw)
+    if (!found) return 'confirm_invalid'
+    if (this.deps.now() >= found.expiresAt) {
+      this.confirms.delete(raw)
+      return 'confirm_invalid'
+    }
+    if (found.itemId !== itemId || found.decision !== decision) return 'confirm_invalid'
+    this.confirms.delete(raw)
+    return null
+  }
+
+  private pruneConfirms(now: number): void {
+    for (const [key, value] of [...this.confirms.entries()]) {
+      const item = this.items.get(value.itemId)
+      if (now >= value.expiresAt || !item || item.state !== 'pending') this.confirms.delete(key)
+    }
+  }
+
+  /**
+   * X1: keep the `waiting` list from the live hook events. A PreToolUse of AskUserQuestion adds the
+   * question (its words parsed with `parseQuestions`; the ledger's projection has none, so a replay
+   * adds nothing). Its PostToolUse marks it answered and drops the words; a failure or a denial drops
+   * it; a turn boundary, an interrupt or a new session drops what the session still waited on.
+   */
+  private noteWaiting(env: HookEnvelope, toolName: string): void {
+    const p = env.payload
+    const toolUseId = typeof p.tool_use_id === 'string' && p.tool_use_id.length > 0 ? p.tool_use_id.slice(0, 128) : null
+    if (toolName === ASK_USER_QUESTION_TOOL && env.event === 'PreToolUse') {
+      if (!isRecord(p.tool_input)) return
+      const questionFingerprint = toolFingerprint(ASK_USER_QUESTION_TOOL, { questions: p.tool_input.questions })
+      const key = `${env.sessionId}:${toolUseId ?? `q${questionFingerprint.slice(0, 24)}`}`
+      if (this.waiting.has(key)) return
+      this.waiting.set(key, {
+        key,
+        sessionId: env.sessionId,
+        provider: env.provider === 'codex' ? 'codex' : 'claude',
+        toolUseId,
+        questionFingerprint,
+        questions: parseQuestions(p.tool_input),
+        askedAt: env.ts,
+        state: 'waiting',
+        answeredAt: null,
+        answeredBy: null,
+      })
+      this.pruneWaiting(this.deps.now())
+      return
+    }
+    if (toolName === ASK_USER_QUESTION_TOOL && (env.event === 'PostToolUse' || env.event === 'PostToolUseFailure' || env.event === 'PermissionDenied')) {
+      const entry = this.findWaiting(env.sessionId, toolUseId, p.tool_input)
+      if (!entry || entry.state !== 'waiting') return
+      if (env.event !== 'PostToolUse') { this.waiting.delete(entry.key); return }
+      entry.state = 'answered'
+      entry.answeredAt = env.ts
+      entry.questions = null
+      entry.answeredBy = this.answeredFromCos(entry) ? 'cos' : 'mac'
+      return
+    }
+    if (env.event === 'Interrupt' || TURN_BOUNDARIES.has(env.event) || (env.event === 'SessionStart' && p.source !== 'compact')) {
+      for (const entry of [...this.waiting.values()]) {
+        if (entry.sessionId === env.sessionId && entry.state === 'waiting' && env.ts >= entry.askedAt) this.waiting.delete(entry.key)
+      }
+    }
+  }
+
+  /** X1: the waiting entry an AskUserQuestion completion is for: by tool_use id, else by its questions. */
+  private findWaiting(sessionId: string, toolUseId: string | null, toolInput: unknown): WaitingEntry | null {
+    if (toolUseId) {
+      for (const entry of this.waiting.values()) if (entry.sessionId === sessionId && entry.toolUseId === toolUseId) return entry
+      return null
+    }
+    if (!isRecord(toolInput)) return null
+    const fingerprint = toolFingerprint(ASK_USER_QUESTION_TOOL, { questions: toolInput.questions })
+    let found: WaitingEntry | null = null
+    for (const entry of this.waiting.values()) {
+      if (entry.sessionId === sessionId && entry.state === 'waiting' && entry.questionFingerprint === fingerprint && (!found || entry.askedAt > found.askedAt)) found = entry
+    }
+    return found
+  }
+
+  /** X1: the pending question item a waiting entry is (same session, then the tool_use id, else the questions). */
+  private itemMatches(item: BrokerItem, entry: Pick<WaitingEntry, 'sessionId' | 'toolUseId' | 'questionFingerprint'>): boolean {
+    if (item.kind !== 'question' || item.sessionId !== entry.sessionId) return false
+    if (item.toolUseId && entry.toolUseId) return item.toolUseId === entry.toolUseId
+    return item.questionFingerprint === entry.questionFingerprint
+  }
+
+  private answeredFromCos(entry: WaitingEntry): boolean {
+    for (const item of this.items.values()) {
+      if (item.state === 'answered' && item.answer && item.answer.clientAnswerId !== 'cos-cancel' && this.itemMatches(item, entry)) return true
+    }
+    return false
+  }
+
+  private pruneWaiting(now: number): void {
+    for (const entry of [...this.waiting.values()]) {
+      if (now - entry.askedAt > WAITING_MAX_AGE_MS) this.waiting.delete(entry.key)
+      else if (entry.state === 'answered' && entry.answeredAt !== null && now - entry.answeredAt > WAITING_ANSWERED_KEEP_MS) this.waiting.delete(entry.key)
+    }
+    if (this.waiting.size > MAX_WAITING) {
+      const oldest = [...this.waiting.values()].sort((a, b) => a.askedAt - b.askedAt)
+      for (let i = 0; i < oldest.length - MAX_WAITING; i++) this.waiting.delete(oldest[i]!.key)
+    }
+  }
+
+  /**
+   * X1: `waiting` on the questions route: every question a live session waits on that this server
+   * saw asked, with its state, plus any held question whose PreToolUse the spool has not delivered
+   * yet. Empty unless `extendedQuestionsView`. Held means a COS surface can answer it now
+   * (the same items `list` shows); a stamped question still behind the desk latch reads `at_mac`.
+   */
+  /**
+   * X1: whether the questions route carries `waiting`, `webAnswer` and each item's `toolUseId`: only
+   * while a full-hold switch is on (lead 22:10; Q1 F1). With both off the route is 7.0.13's, key for key.
+   * (`COS_WAITING_QUESTION_WORDS` is the rows' 80 characters, not this.)
+   */
+  extendedQuestionsView(): boolean {
+    return this.anyFullHoldOn()
+  }
+
+  waitingList(): WaitingQuestionView[] {
+    if (!this.extendedQuestionsView()) return []
+    const now = this.deps.now()
+    this.pruneWaiting(now)
+    const answerable = (item: BrokerItem): boolean => item.state === 'pending' && item.lensVisible && now < item.deadlineAt
+    const used = new Set<string>()
+    const views: WaitingQuestionView[] = []
+    for (const entry of this.waiting.values()) {
+      const held = entry.state === 'waiting' ? [...this.items.values()].find(item => answerable(item) && this.itemMatches(item, entry)) ?? null : null
+      if (held) used.add(held.id)
+      views.push({
+        key: entry.key,
+        sessionId: entry.sessionId,
+        provider: entry.provider,
+        toolUseId: entry.toolUseId,
+        state: entry.state === 'answered' ? 'answered' : held ? 'held' : 'at_mac',
+        answerable: !!held,
+        heldId: held ? held.id : null,
+        // Settled words are already gone from memory (`noteWaiting` drops them), so an answered entry lists none.
+        questions: held?.questions ?? entry.questions ?? [],
+        askedAt: new Date(entry.askedAt).toISOString(),
+        deadlineAt: held ? new Date(held.deadlineAt).toISOString() : null,
+        answeredAt: entry.answeredAt !== null ? new Date(entry.answeredAt).toISOString() : null,
+        answeredBy: entry.answeredBy,
+      })
+    }
+    for (const item of this.items.values()) {
+      if (used.has(item.id) || item.kind !== 'question' || !answerable(item)) continue
+      views.push({
+        key: `${item.sessionId}:${item.toolUseId ?? item.id}`,
+        sessionId: item.sessionId,
+        provider: item.provider,
+        toolUseId: item.toolUseId,
+        state: 'held',
+        answerable: true,
+        heldId: item.id,
+        questions: item.questions ?? [],
+        askedAt: new Date(item.requestedAt).toISOString(),
+        deadlineAt: new Date(item.deadlineAt).toISOString(),
+        answeredAt: null,
+        answeredBy: null,
+      })
+    }
+    return views.sort((a, b) => a.askedAt.localeCompare(b.askedAt))
+  }
+
+  /** X1: what a web page must send with an answer right now (`webAnswer` on the questions route). */
+  webAnswerRules(): { touchRequired: boolean; touchMaxMs: number; confirmApprovals: boolean } {
+    const on = this.anyFullHoldOn()
+    return { touchRequired: on, touchMaxMs: WEB_ANSWER_TOUCH_MAX_MS, confirmApprovals: on }
   }
 
   /**
@@ -1652,6 +2051,7 @@ export class PermissionBroker {
     const p = env.payload
     const toolName = typeof p.tool_name === 'string' ? p.tool_name : ''
     const fingerprint = typeof p.tool_fingerprint === 'string' ? p.tool_fingerprint : toolFingerprint(toolName, p.tool_input ?? null)
+    try { this.noteWaiting(env, toolName) } catch { /* the list is advisory */ }
     for (const item of [...this.items.values()]) {
       if (item.sessionId !== env.sessionId) continue
       if (env.event === 'PermissionRequest' || env.event === 'PreToolUse') {
@@ -1698,6 +2098,20 @@ export class PermissionBroker {
   async tick(): Promise<void> {
     if (this.pendingCount() === 0) { this.stopPolling(); return }
     if (!this.deps.admissionsOpen()) { this.settleAll('drained'); return }
+    // X1 kill switch: a full-hold item whose switch now reads off goes back to the Mac at once.
+    // The switches are read only while one is held, so with both off nothing here runs.
+    if ([...this.items.values()].some(item => item.state === 'pending' && item.fullHold)) {
+      const on = this.fullHoldSwitches()
+      this.settleAll('handed_to_desk', item => item.fullHold && (item.kind === 'question' ? !on.questions : !on.approvals))
+      if (this.pendingCount() === 0) return
+      // X1 round 3: a held item whose settling hook event never arrived (a lost spool event) must not sit
+      // to its deadline. Its own engine's registry record says whether the session moved on: the record is
+      // gone (the process ended), or its status left `waiting` after this request began. The engine writes
+      // `waiting` just before the hook starts and leaves it within milliseconds of an answer (both engines,
+      // measured), so a status written after the request began that is not `waiting` means it was answered.
+      this.releaseMovedOn()
+      if (this.pendingCount() === 0) return
+    }
     const now = this.deps.now()
     const presence = this.presence(now)
     if (!(this.clientLive(now) || presence.holdLive)) {
@@ -1706,9 +2120,10 @@ export class PermissionBroker {
       // single glance must not hold a question 10 more minutes). The desk below still hands
       // it back. 6.99.26 (QA round 1): a recent web touch keeps only what it admitted; a glasses or
       // phone hold reads exactly as in 6.99.25.
-      this.settleAll('no_client', item => item.webOnly
+      // X1: a full-hold item never needs a client live: it is answerable for the whole hook wait.
+      this.settleAll('no_client', item => !item.fullHold && (item.webOnly
         ? !(presence.recent || presence.webRecent)
-        : !item.askHold && (!item.awayHold || !presence.recent))
+        : !item.askHold && (!item.awayHold || !presence.recent)))
       if (this.pendingCount() === 0) return
     }
     if (![...this.items.values()].some(item => item.state === 'pending' && (!item.askHold || !item.lensVisible || item.webOnly))) return
@@ -1734,6 +2149,23 @@ export class PermissionBroker {
     }
     // 6.99.26 (QA round 1): a web-only stamped question goes back to the Mac as any away-held request does.
     this.settleAll('handed_to_desk', item => !item.askHold || item.webOnly)
+  }
+
+  /** X1 round 3: settle (`retracted`, so `{}`) every held full-hold item its engine's record says the session moved past. */
+  private releaseMovedOn(): void {
+    const read = this.deps.engineStatus
+    if (!read) return
+    for (const item of [...this.items.values()]) {
+      // `enginePid` is set only on a full-hold item (`park`), so an item held under today's rules is never read.
+      if (item.state !== 'pending' || item.enginePid === null) continue
+      let record: { status: string | null; statusUpdatedAt: number | null } | null
+      try { record = read(item.sessionId, item.enginePid) } catch { continue }
+      const movedOn = record === null
+        || (record.status !== 'waiting' && record.statusUpdatedAt !== null && record.statusUpdatedAt > item.requestedAt)
+      if (!movedOn) continue
+      this.log(`registry_moved_on ${item.id} kind=${item.kind} record=${record === null ? 'gone' : 'not_waiting'}`)
+      this.settle(item, 'retracted')
+    }
   }
 
   private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client', only: (item: BrokerItem) => boolean = () => true): void {

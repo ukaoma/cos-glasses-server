@@ -24,6 +24,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { atomicWriteFileSync } from './atomic-fs.js'
+import { FULL_HOLD_HOOK_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER, fullHoldSwitches } from './full-hold.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -188,6 +189,93 @@ function priorWaitBlock(scriptPath: string, sub: HookSubscription, paths: HookPa
 }
 
 /**
+ * X1 (2026-11-09): how the PermissionRequest hook is written. With `COS_QUESTION_FULL_HOLD` and
+ * `COS_APPROVAL_FULL_HOLD` both off (the default) it is the ONE block every release since 6.60.0
+ * writes, byte for byte (`split: false`). With either on it is TWO blocks of ours, split by matcher
+ * (canary C9, both engines): `AskUserQuestion` waits `questionWaitS`, everything else `otherWaitS`;
+ * a kind whose switch is on waits FULL_HOLD_HOOK_WAIT_S, the other keeps 630. Each block passes its
+ * own wait to the script, so the stamp a request carries is its own block's. Reinstall hooks is what
+ * writes it: until then the file reads `drift` (`priorWaitOnly`, still halt-ready).
+ */
+export interface PermissionHookPlan { split: boolean; questionWaitS: number; otherWaitS: number }
+
+export function permissionHookPlan(env: NodeJS.ProcessEnv = process.env): PermissionHookPlan {
+  const on = fullHoldSwitches(env)
+  if (!on.questions && !on.approvals) return { split: false, questionWaitS: PERMISSION_HOOK_TIMEOUT_S, otherWaitS: PERMISSION_HOOK_TIMEOUT_S }
+  return {
+    split: true,
+    questionWaitS: on.questions ? FULL_HOLD_HOOK_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
+    otherWaitS: on.approvals ? FULL_HOLD_HOOK_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
+  }
+}
+
+const UNSPLIT_PLAN: PermissionHookPlan = { split: false, questionWaitS: PERMISSION_HOOK_TIMEOUT_S, otherWaitS: PERMISSION_HOOK_TIMEOUT_S }
+
+/** The two blocks of a split PermissionRequest, question block first. */
+function splitPermissionBlocks(scriptPath: string, sub: HookSubscription, paths: HookPaths, questionWaitS: number, otherWaitS: number): Record<string, unknown>[] {
+  return [
+    canonicalBlock(scriptPath, { ...sub, matcher: QUESTION_MATCHER, timeout: questionWaitS }, paths),
+    canonicalBlock(scriptPath, { ...sub, matcher: NON_QUESTION_MATCHER, timeout: otherWaitS }, paths),
+  ]
+}
+
+/** Our blocks for one event under a plan. Every event but a split PermissionRequest: exactly `[canonicalBlock]`. */
+export function canonicalBlocks(scriptPath: string, sub: HookSubscription, paths: HookPaths, plan: PermissionHookPlan = UNSPLIT_PLAN): Record<string, unknown>[] {
+  if (sub.event === 'PermissionRequest' && plan.split) return splitPermissionBlocks(scriptPath, sub, paths, plan.questionWaitS, plan.otherWaitS)
+  return [canonicalBlock(scriptPath, sub, paths)]
+}
+
+/**
+ * Earlier shapes of our PermissionRequest blocks that differ from the plan only by the wait: the
+ * pre-6.60.0 block (`priorWaitBlock`); with a split plan, the one unsplit block; with an unsplit
+ * plan, every split pair this file can write (a flag turned off after Reinstall hooks).
+ */
+function priorWaitVariants(scriptPath: string, sub: HookSubscription, paths: HookPaths, plan: PermissionHookPlan): Record<string, unknown>[][] {
+  const prior = priorWaitBlock(scriptPath, sub, paths)
+  if (!prior) return []
+  const out: Record<string, unknown>[][] = [[prior]]
+  if (plan.split) out.push([canonicalBlock(scriptPath, sub, paths)])
+  const waits = [PERMISSION_HOOK_TIMEOUT_S, FULL_HOLD_HOOK_WAIT_S]
+  for (const q of waits) for (const o of waits) {
+    if (plan.split && q === plan.questionWaitS && o === plan.otherWaitS) continue
+    if (q === PERMISSION_HOOK_TIMEOUT_S && o === PERMISSION_HOOK_TIMEOUT_S) continue
+    out.push(splitPermissionBlocks(scriptPath, sub, paths, q, o))
+  }
+  return out
+}
+
+/** Whether a hook block's `matcher` selects this tool, as Claude Code reads it: no matcher, `*` or an empty one is every tool, else a regex. */
+function matcherSelects(matcher: unknown, toolName: string): boolean {
+  if (matcher === undefined || matcher === null || matcher === '' || matcher === '*') return true
+  if (typeof matcher !== 'string') return false
+  if (matcher === toolName) return true
+  try { return new RegExp(`^(?:${matcher})$`).test(toolName) } catch { return false }
+}
+
+/**
+ * X1: how long Claude Code waits on our PermissionRequest hook FOR THIS TOOL: the smallest timeout
+ * among our blocks whose matcher selects it. With the one unsplit block, the same number as
+ * `permissionHookTimeoutS`. Null when none of ours selects it or one has no usable number.
+ */
+export function permissionHookTimeoutForToolS(settings: unknown, toolName: string): number | null {
+  const hooks = settings && typeof settings === 'object' ? (settings as Record<string, unknown>).hooks : null
+  const blocks = hooks && typeof hooks === 'object' ? (hooks as Record<string, unknown>).PermissionRequest : null
+  if (!Array.isArray(blocks)) return null
+  let least: number | null = null
+  for (const block of blocks) {
+    if (!blockIsOurs(block)) continue
+    if (!matcherSelects((block as HookBlock).matcher, toolName)) continue
+    for (const h of (block as HookBlock).hooks as unknown[]) {
+      if (!hookIsOurs(h)) continue
+      const timeout = (h as { timeout?: unknown }).timeout
+      if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) return null
+      least = least === null ? timeout : Math.min(least, timeout)
+    }
+  }
+  return least
+}
+
+/**
  * 6.60.0: how long Claude Code waits on OUR PermissionRequest hook, read from a settings
  * object: the smallest `timeout` among our entries (Claude runs each, so the first to give up
  * bounds the wait). Null when none of ours is there, or one of ours has no usable number:
@@ -220,7 +308,7 @@ export type MergeResult =
  * `hooks` key that is not an object, or an event whose value is not an array, is refused
  * rather than replaced: "preserving every existing hook block" is the contract.
  */
-export function mergeHookSettings(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): MergeResult {
+export function mergeHookSettings(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths(), plan: PermissionHookPlan = permissionHookPlan()): MergeResult {
   const settings: Record<string, unknown> = current && typeof current === 'object' && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {}
   const before = JSON.stringify(settings)
   if (settings.hooks !== undefined && (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks))) return { ok: false, reason: 'settings_hooks_invalid' }
@@ -231,7 +319,7 @@ export function mergeHookSettings(current: unknown, scriptPath: string, paths: H
     if (value !== undefined && !Array.isArray(value)) return { ok: false, reason: 'settings_hooks_invalid' }
     const existing = Array.isArray(value) ? value : []
     const foreign = existing.filter(b => !blockIsOurs(b))
-    hooks[sub.event] = [...foreign, canonicalBlock(scriptPath, sub, paths)]
+    hooks[sub.event] = [...foreign, ...canonicalBlocks(scriptPath, sub, paths, plan)]
   }
   settings.hooks = hooks
   return { ok: true, settings, changed: JSON.stringify(settings) !== before }
@@ -258,7 +346,7 @@ export function stripHookSettings(current: unknown): MergeResult {
  * (6.60.0) names the drifted events whose one block of ours is exactly the block an earlier
  * release wrote, differing only by the wait (`priorWaitBlock`).
  */
-export function subscribedEvents(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths()): { subscribed: string[]; missing: string[]; drifted: string[]; priorWait: string[] } {
+export function subscribedEvents(current: unknown, scriptPath: string, paths: HookPaths = currentHookPaths(), plan: PermissionHookPlan = permissionHookPlan()): { subscribed: string[]; missing: string[]; drifted: string[]; priorWait: string[] } {
   const hooks = current && typeof current === 'object' && (current as Record<string, unknown>).hooks
   const table = hooks && typeof hooks === 'object' ? hooks as Record<string, unknown> : {}
   const subscribed: string[] = []
@@ -269,11 +357,10 @@ export function subscribedEvents(current: unknown, scriptPath: string, paths: Ho
     const blocks = Array.isArray(table[sub.event]) ? table[sub.event] as unknown[] : []
     const ours = blocks.filter(blockIsOurs)
     if (ours.length === 0) { missing.push(sub.event); continue }
-    const canonical = JSON.stringify(canonicalBlock(scriptPath, sub, paths))
-    if (ours.length === 1 && JSON.stringify(ours[0]) === canonical) { subscribed.push(sub.event); continue }
+    const canonical = JSON.stringify(canonicalBlocks(scriptPath, sub, paths, plan))
+    if (JSON.stringify(ours) === canonical) { subscribed.push(sub.event); continue }
     drifted.push(sub.event)
-    const prior = priorWaitBlock(scriptPath, sub, paths)
-    if (prior && ours.length === 1 && JSON.stringify(ours[0]) === JSON.stringify(prior)) priorWait.push(sub.event)
+    if (priorWaitVariants(scriptPath, sub, paths, plan).some(variant => JSON.stringify(variant) === JSON.stringify(ours))) priorWait.push(sub.event)
   }
   return { subscribed, missing, drifted, priorWait }
 }
@@ -312,6 +399,11 @@ export interface HookStatus {
   observerOnlyDrift?: boolean
   /** 6.60.0: our PermissionRequest hook's `timeout` in the settings file, or null (`permissionHookTimeoutS`). */
   permissionHookTimeoutS: number | null
+  /**
+   * X1: the same, per kind (`permissionHookTimeoutForToolS` for AskUserQuestion and for any other
+   * tool). Equal to `permissionHookTimeoutS` while the block is not split.
+   */
+  permissionHookTimeouts?: { question: number | null; approval: number | null }
   tokenPresent: boolean
 }
 
@@ -343,7 +435,7 @@ function hooksDisabled(settings: unknown): boolean {
   return !!settings && typeof settings === 'object' && (settings as { disableAllHooks?: unknown }).disableAllHooks === true
 }
 
-export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; packageScriptPath?: string; hookPaths?: HookPaths } = {}): HookStatus {
+export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; packageScriptPath?: string; hookPaths?: HookPaths; plan?: PermissionHookPlan } = {}): HookStatus {
   const settingsPath = paths.settingsPath ?? claudeSettingsPath()
   const scriptPath = paths.scriptPath ?? stableHookScriptPath()
   const packageScriptPath = paths.packageScriptPath ?? packagedHookScriptPath()
@@ -355,8 +447,12 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   if (!read.ok) {
     return { state: read.reason, installed: false, settingsPath, scriptPath, scriptSha, packageScriptSha, subscribed: [], missing: HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [], priorWait: [], priorWaitOnly: false, permissionHookTimeoutS: null, tokenPresent }
   }
-  const events = subscribedEvents(read.settings, scriptPath, hookPaths)
+  const events = subscribedEvents(read.settings, scriptPath, hookPaths, paths.plan ?? permissionHookPlan())
   const permissionWaitS = permissionHookTimeoutS(read.settings)
+  const permissionHookTimeouts = {
+    question: permissionHookTimeoutForToolS(read.settings, 'AskUserQuestion'),
+    approval: permissionHookTimeoutForToolS(read.settings, 'Bash'),
+  }
   let state: HookInstallState
   if (hooksDisabled(read.settings)) state = 'disabled_by_settings'
   else if (events.subscribed.length === 0 && events.drifted.length === 0) state = 'missing'
@@ -366,7 +462,7 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   const priorWaitOnly = state === 'drift' && events.missing.length === 0 && events.drifted.length > 0
     && events.drifted.every(event => events.priorWait.includes(event))
   const observerOnlyDrift = state === 'drift' && events.missing.length > 0 && events.missing.every(event => event === 'PreCompact') && events.drifted.every(event => events.priorWait.includes(event))
-  return { observerOnlyDrift, state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, tokenPresent }
+  return { observerOnlyDrift, state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, ...(paths.plan?.split || permissionHookPlan().split || permissionHookTimeouts.question !== permissionHookTimeouts.approval ? { permissionHookTimeouts } : {}), tokenPresent }
 }
 
 /**
@@ -476,6 +572,8 @@ export interface InstallOptions {
   port?: number
   deskIdleSeconds?: number
   dryRun?: boolean
+  /** X1: how the PermissionRequest hook is written. Default: from the two full-hold switches (`permissionHookPlan`). */
+  plan?: PermissionHookPlan
 }
 
 export interface InstallResult {
@@ -548,10 +646,11 @@ export function installClaudeHooks(options: InstallOptions = {}): InstallResult 
   const packageScriptPath = options.packageScriptPath ?? packagedHookScriptPath()
   const hookPaths = options.hookPaths ?? currentHookPaths()
   const read = readSettings(settingsPath)
-  const statusNow = () => hookStatus({ settingsPath, scriptPath, packageScriptPath, hookPaths })
+  const plan = options.plan ?? permissionHookPlan()
+  const statusNow = () => hookStatus({ settingsPath, scriptPath, packageScriptPath, hookPaths, plan })
   const refuse = (reason: string, scriptCopied = false): InstallResult => ({ ok: false, reason, changed: false, scriptCopied, backupPath: null, status: statusNow() })
   if (!read.ok) return refuse(read.reason)
-  const merged = mergeHookSettings(read.settings, scriptPath, hookPaths)
+  const merged = mergeHookSettings(read.settings, scriptPath, hookPaths, plan)
   if (!merged.ok) return refuse(merged.reason)
   if (options.dryRun) {
     return { ok: true, changed: merged.changed, scriptCopied: false, backupPath: null, status: statusNow(), merged: merged.settings }

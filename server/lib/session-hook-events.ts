@@ -13,6 +13,7 @@
 // interactive-only events (Notification, StopFailure, sub-agents, compaction, model switch)
 // whose shapes are still the documented ones until a Desktop recording lands.
 
+import { questionRowText, waitingQuestionWordsEnabled } from './full-hold.js'
 import { createHash } from 'node:crypto'
 import { profileIdForCodexPath } from './codex-homes.js'
 import { isKeyProfileId } from '../../shared/key-preference.js'
@@ -208,7 +209,14 @@ function canonicalJson(value: unknown): string {
 export function toolTarget(toolInput: unknown, max = 80): string {
   if (!toolInput || typeof toolInput !== 'object') return ''
   const i = toolInput as Record<string, unknown>
-  const candidate = [i.command, i.file_path, i.path, i.url, i.pattern, i.query, i.prompt, i.description]
+  // X1: an AskUserQuestion carries only `questions`. With COS_WAITING_QUESTION_WORDS on (default ON, Miles
+  // 22:10) its target is its first question's text, control and format characters out, cut at `max` (80)
+  // below, so a row waiting on a question says what it asks. Never an option, a description or an answer.
+  // `0`: a question's target is '' exactly as in 7.0.13, and the words reach neither the ledger nor a row.
+  const firstQuestion = waitingQuestionWordsEnabled(process.env) && Array.isArray(i.questions) && i.questions.length > 0 && i.questions[0] && typeof i.questions[0] === 'object'
+    ? questionRowText((i.questions[0] as Record<string, unknown>).question)
+    : undefined
+  const candidate = [i.command, i.file_path, i.path, i.url, i.pattern, i.query, i.prompt, i.description, firstQuestion]
     .find(v => typeof v === 'string' && v.trim().length > 0)
   const text = typeof candidate === 'string' ? candidate.replace(/\s+/g, ' ').trim() : ''
   return text.length > max ? text.slice(0, max - 1) + '…' : text
