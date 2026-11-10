@@ -419,7 +419,8 @@ describe('refusals and failure states', () => {
 })
 
 describe('budget and resume', () => {
-  it('resumes from the cursor after the daily cap stops a backfill', async () => {
+  // S1 (2026-11-09): its own bound. Two runs paging through the free plan's 50-call cap (about 2,500 records). Alone 2.1 to 2.8 s; under a full parallel suite plus a Swift compile it passed 5 s (7.0.5 red run, 11/09 rerun 7.2 s in 7.0.5), and passed only on a serial rerun. A hang still fails at 30 s.
+  it('resumes from the cursor after the daily cap stops a backfill', { timeout: 30_000 }, async () => {
     // Every page is full, so the pass never ends on its own and the free cap is
     // what stops it.
     const h = harness({
@@ -472,7 +473,8 @@ describe('budget and resume', () => {
     expect(status.windowDays).toBe(30)
   })
 
-  it('starts a new pass when the window changes', async () => {
+  // S1 (2026-11-09): its own bound. Two runs paging through the free plan's 50-call cap (about 2,500 records). Alone 2.1 to 2.8 s; under a full parallel suite plus a Swift compile it passed 5 s (7.0.5 red run, 11/09 rerun 6.8 s in 7.0.5), and passed only on a serial rerun. A hang still fails at 30 s.
+  it('starts a new pass when the window changes', { timeout: 30_000 }, async () => {
     const h = harness({
       plan: 'free',
       // Full pages so the pass never ends on its own, of meetings the vendor is

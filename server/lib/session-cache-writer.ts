@@ -188,9 +188,16 @@ function loadArchivedSessions(): SessionCacheEntry[] {
   return entries
 }
 
+// S1 (2026-11-09): said once per process. COS Control's generated .env has no COS_SCRIPTS_DIR, so
+// on a new install this ran after every exchange (5 s debounce) and printed each time.
+let scriptsDirMissingNoted = false
+
 export function updateGlassesSessionCache(): void {
   if (!SCRIPTS_DIR) {
-    console.warn('[session-cache] COS_SCRIPTS_DIR not set — skipping cache write')
+    if (!scriptsDirMissingNoted) {
+      scriptsDirMissingNoted = true
+      console.warn('[session-cache] COS_SCRIPTS_DIR not set — skipping cache writes (said once)')
+    }
     return
   }
 

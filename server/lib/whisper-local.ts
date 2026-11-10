@@ -764,18 +764,66 @@ async function startWhisperServerAttempt(preflightCompleted = false): Promise<vo
 /**
  * Gracefully stop whisper-server (called on process exit).
  */
-export function stopWhisperServer(): void {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM')
+/** How whisper-server is stopped, and why it is never SIGTERM (S1, 2026-11-09).
+ * whisper-server's own SIGTERM/SIGINT handler calls exit(); exit runs static destructors,
+ * and ggml's Metal device teardown aborts in ggml_metal_rsets_free. Nine crash reports
+ * 11/03 to 11/08 show exactly that stack (signal_handler, exit, __cxa_finalize_ranges,
+ * ggml_metal_device_free, ggml_abort), each in the minute of a COS server restart, with the
+ * parent already launchd because node exited without waiting. The daemon holds no state
+ * worth flushing (the model is on disk, requests are retried by their callers), so SIGKILL
+ * stops it without running that teardown and leaves no crash report. The stop then waits
+ * for the close, so node never exits first and orphans the child. */
+export const WHISPER_STOP_SIGNAL: NodeJS.Signals = 'SIGKILL'
+export const WHISPER_STOP_WAIT_MS = 2_000
+
+/** Resolve true when `child` has closed, false after `timeoutMs`. */
+export function waitForChildClose(child: Pick<ChildProcess, 'exitCode' | 'signalCode' | 'once' | 'off'>, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  return new Promise(resolvePromise => {
+    let settled = false
+    const finish = (closed: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.off('close', onClose)
+      resolvePromise(closed)
+    }
+    const onClose = () => finish(true)
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    timer.unref?.()
+    child.once('close', onClose)
+  })
+}
+
+export interface WhisperStopResult { stopped: boolean; exited: boolean; waitedMs: number; hqChildren: number }
+
+export async function stopWhisperServer(options: { waitMs?: number } = {}): Promise<WhisperStopResult> {
+  const waitMs = options.waitMs ?? WHISPER_STOP_WAIT_MS
+  const started = Date.now()
+  const waits: Array<Promise<boolean>> = []
+  const child = serverProcess
+  if (child) {
     serverProcess = null
     serverAvailable = false
-    console.log('[whisper-local] whisper-server stopped')
+    try { child.kill(WHISPER_STOP_SIGNAL) } catch { /* already exited */ }
+    waits.push(waitForChildClose(child, waitMs))
   }
-  for (const proc of ownedHqChildren) {
+  const hq = [...ownedHqChildren]
+  for (const proc of hq) {
     try { proc.kill('SIGKILL') } catch { /* already exited */ }
+    waits.push(waitForChildClose(proc, waitMs))
   }
   ownedHqChildren.clear()
   serverStartupState = 'stopped'
+  const closed = await Promise.all(waits)
+  const exited = closed.every(Boolean)
+  const waitedMs = Date.now() - started
+  if (child || hq.length) {
+    // Q1 S4: name what was actually running.
+    const what = child ? `whisper-server stopped (${WHISPER_STOP_SIGNAL}, ${hq.length} HQ child(ren))` : `${hq.length} HQ child(ren) stopped (SIGKILL; whisper-server was not running)`
+    console.log(`[whisper-local] ${what}: ` + (exited ? `exited in ${waitedMs} ms` : `did not exit within ${waitMs} ms`))
+  }
+  return { stopped: Boolean(child), exited, waitedMs, hqChildren: hq.length }
 }
 
 export function isWhisperLocalAvailable(): boolean {
@@ -950,6 +998,36 @@ export function parseWhisperCliFullJson(raw: string): { text: string; words: Whi
     words,
     spokenWords,
   }
+}
+
+/** S1 (2026-11-09): an HQ decode that hit its wall-clock ceiling. The message keeps the
+ * historical prefix ("whisper-cli HQ timeout (240s, model=large-v3)") that log scans count,
+ * then names what settles why: the audio length, the device and why, the thread count and
+ * whether the child ran at background QoS (taskpolicy -b, which keeps it off the
+ * performance cores). Field evidence 10/26 to 11/09: 290 progressive-checkpoint timeouts
+ * against 190 successes, every one on CPU at background QoS. */
+export class WhisperHqTimeoutError extends Error {
+  readonly hqTimeout = true
+  constructor(
+    readonly timeoutMs: number,
+    readonly model: 'large-v3' | 'turbo',
+    readonly details: { audioSeconds: number; device: 'metal' | 'cpu'; reason: string; threads: number; backgroundQos: boolean; elapsedMs: number },
+  ) {
+    super(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${model}) `
+      + `audio=${details.audioSeconds.toFixed(1)}s device=${details.device} reason=${details.reason} `
+      + `threads=${details.threads} qos=${details.backgroundQos ? 'background' : 'default'} elapsed=${details.elapsedMs}ms`)
+    this.name = 'WhisperHqTimeoutError'
+  }
+}
+
+export function isWhisperHqTimeout(error: unknown): error is WhisperHqTimeoutError {
+  return error instanceof WhisperHqTimeoutError
+    || (typeof error === 'object' && error !== null && (error as { hqTimeout?: boolean }).hqTimeout === true)
+}
+
+/** Seconds of audio in a 16 kHz mono 16-bit WAV (the only shape the HQ path decodes). */
+export function wavAudioSeconds(buffer: Buffer): number {
+  return Math.max(0, buffer.length - 44) / 32_000
 }
 
 /**
@@ -1152,7 +1230,14 @@ export async function transcribeHighQuality(
           return
         }
         if (timedOut) {
-          reject(new Error(`whisper-cli HQ timeout (${timeoutMs / 1000}s, model=${useLargeV3 ? 'large-v3' : 'turbo'})`))
+          reject(new WhisperHqTimeoutError(timeoutMs, useLargeV3 ? 'large-v3' : 'turbo', {
+            audioSeconds: wavAudioSeconds(audioBuffer),
+            device: decision.device,
+            reason: decision.reason,
+            threads: (isBatch && !useMetal) ? requestedThreads : 16,
+            backgroundQos: useBackgroundTaskPolicy,
+            elapsedMs: Date.now() - start,
+          }))
           return
         }
         if (code !== 0) {
@@ -1215,7 +1300,8 @@ export async function transcribeHighQuality(
     const modelTag = useLargeV3 ? 'large-v3' : 'turbo'
     console.log(
       `[whisper-hq] Batch transcribed in ${elapsed}ms ` +
-      `(${modelTag}${useVad ? '+vad' : ''}${captureWords ? '+words' : ''}` +
+      // S1: the audio length makes the real-time factor readable from the log.
+      `(${modelTag}${useVad ? '+vad' : ''}${captureWords ? '+words' : ''}, audio=${wavAudioSeconds(audioBuffer).toFixed(1)}s` +
       `${words ? `, ${words.length} words` : ''}` +
       // Device forensics: without these, "why is polish slow today" is
       // unanswerable after the fact.

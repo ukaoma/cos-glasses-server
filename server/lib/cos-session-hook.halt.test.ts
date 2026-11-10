@@ -204,7 +204,8 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: the halt check (6.53.0)', (
     expect(existsSync(join(p.halt, SESSION))).toBe(false)
   })
 
-  it('a full spool or a stale drain stamp never stops a cancel: the check runs before the B8 guard', () => {
+  // S1 (2026-11-09): its own bound. 2,000 spool files plus two real shell spawns. Alone about 0.3 to 1 s; under a full parallel suite plus a Swift compile it passed 5 s (7.0.5 red run, 11/09 rerun 11.0 s), and passed only on a serial rerun. A hang still fails at 60 s.
+  it('a full spool or a stale drain stamp never stops a cancel: the check runs before the B8 guard', { timeout: 60_000 }, () => {
     const p = halted([SESSION])
     for (let i = 0; i < 2000; i++) writeFileSync(join(p.spool, `${1700000000000 + i}-1-Stop.json`), '{}\n')
     expect(runIn('PreToolUse', tool('Bash'), p).stdout.toString()).toBe(DENY)
@@ -381,7 +382,8 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook: one read, and a drained std
     }
   })
 
-  it('a failed spool (no folder) or the B8 guard still drains a spooled event\'s stdin', async () => {
+  // S1 (2026-11-09): its own bound. 2,000 spool files plus two real shell spawns, each streaming a 2.5 MB payload. Alone about 0.2 to 2 s; under a full parallel suite plus a Swift compile it passed 5 s (7.0.5 red run, 11/09 rerun 5.9 s), and passed only on a serial rerun. A hang still fails at 60 s.
+  it('a failed spool (no folder) or the B8 guard still drains a spooled event\'s stdin', { timeout: 60_000 }, async () => {
     const p = paths()
     for (let i = 0; i < 2000; i++) writeFileSync(join(p.spool, `${1700000000000 + i}-1-Stop.json`), '{}\n')
     const ask = big({ hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion' })

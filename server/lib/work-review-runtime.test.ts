@@ -217,3 +217,47 @@ it('6.57.1: peek reads one stored review without reconciling or resolving meetin
   expect(s.runtime.peek('wr_' + 'f'.repeat(32))).toBeNull()
   for (const bad of ['wr_x', '../' + review.id, review.id.toUpperCase()]) expect(s.runtime.peek(bad)).toBeNull()
 })
+
+// S1 (2026-11-09): the 5 s reconcile timer rewrote the whole journal (fsync'd) for every row whose
+// only change was a fresh updatedAt. Live evidence: three source_unavailable rows rewrote the
+// 114 KB reviews.json three times every 5 s.
+it('S1: reconciling unchanged rows writes nothing, and keeps their updatedAt', async () => {
+  const s = setup()
+  const running = await s.runtime.request({ meeting: descriptor, model: 'ollama' })
+  const put = vi.spyOn(s.deps.store, 'put')
+  const statPath = join(s.root, 'reviews.json')
+  const before = readFileSync(statPath, 'utf8')
+  // A running review reconciled again and again: same job state, no write.
+  for (let i = 0; i < 5; i++) await s.runtime.reconcile(true)
+  expect(put).not.toHaveBeenCalled()
+  expect(readFileSync(statPath, 'utf8')).toBe(before)
+
+  // The meeting becomes unavailable: ONE write marks it, then repeats write nothing.
+  s.deps.resolveMeeting.mockRejectedValue(new Error('source gone'))
+  await s.runtime.reconcile(true)
+  expect(put).toHaveBeenCalledTimes(1)
+  const marked = (await s.runtime.peek(running.review.id))!
+  expect(marked.status).toBe('source_unavailable')
+  for (let i = 0; i < 5; i++) await s.runtime.reconcile(true)
+  expect(put).toHaveBeenCalledTimes(1)
+  expect((await s.runtime.peek(running.review.id))!.updatedAt).toBe(marked.updatedAt)
+
+})
+
+it('S1: a real change after quiet reconciles is still written, with a fresh updatedAt', async () => {
+  const s = setup()
+  let clock = Date.parse('2026-11-09T20:00:00Z')
+  ;(s.deps as any).now = () => new Date(clock)
+  const first = await s.runtime.request({ meeting: descriptor, model: 'ollama' })
+  clock += 60_000
+  for (let i = 0; i < 3; i++) await s.runtime.reconcile(true)
+  const put = vi.spyOn(s.deps.store, 'put')
+  const job = s.jobs.get(first.review.clientJobId)!
+  s.jobs.set(job.clientJobId, { ...job, status: 'completed', response: 'Done review' })
+  await s.runtime.reconcile(true)
+  expect(put).toHaveBeenCalledTimes(1)
+  const ready = s.runtime.peek(first.review.id)!
+  expect(ready.status).toBe('ready')
+  expect(ready.markdown).toBe('Done review')
+  expect(ready.updatedAt).toBe('2026-11-09T20:01:00.000Z') // the change is stamped when it lands (Q1 S1: was >=)
+})

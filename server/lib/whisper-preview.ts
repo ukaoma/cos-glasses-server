@@ -446,10 +446,12 @@ export async function stopWhisperPreviewServer(options: { final?: boolean } = {}
   previewStarting = false
   previewWorkerModel = null
   if (child) {
-    try { child.kill('SIGTERM') } catch { /* already exited */ }
+    // S1 (2026-11-09): never SIGTERM. The sidecar is the same whisper-server binary, whose
+    // SIGTERM handler exits through ggml's Metal teardown and aborts (see whisper-local.ts
+    // WHISPER_STOP_SIGNAL). SIGKILL leaves no crash report; then wait so node never exits first.
+    try { child.kill('SIGKILL') } catch { /* already exited */ }
     if (!await waitForPreviewClose(child, 2_000)) {
-      try { child.kill('SIGKILL') } catch { /* already exited */ }
-      await waitForPreviewClose(child, 1_000)
+      console.warn('[whisper-preview] sidecar did not exit within 2000 ms of SIGKILL')
     }
   }
 }

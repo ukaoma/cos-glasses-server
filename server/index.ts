@@ -155,6 +155,7 @@ import {
   stopCodexModelCatalogRefresh,
 } from './lib/codex-model-catalog.js'
 import { startWhisperServer, stopWhisperServer } from './lib/whisper-local.js'
+import { noteCorsRejection } from './lib/cors-reject-log.js'
 import { startWhisperPreviewServer, stopWhisperPreviewServer } from './lib/whisper-preview.js'
 import { startLocalTtsServer, stopLocalTtsServer } from './lib/tts-local.js'
 import { initSileroVAD } from './lib/vad-silero.js'
@@ -320,9 +321,10 @@ app.use(cors({
     if (!origin || origin === 'null') return cb(null, true)
     // Async only for an unrecognised *.ts.net origin (see isAllowedCorsOrigin); every other
     // origin is decided from cached state, as before.
+    // S1 (2026-11-09): the rejected origin is logged (origin only, once per origin per hour).
     isAllowedCorsOrigin(origin, getTailnetSelfName()).then(
-      ok => ok ? cb(null, true) : cb(new Error('CORS blocked')),
-      () => cb(new Error('CORS blocked')),
+      ok => { if (ok) return cb(null, true); noteCorsRejection(origin, 'not_allowed'); cb(new Error('CORS blocked')) },
+      () => { noteCorsRejection(origin, 'check_failed'); cb(new Error('CORS blocked')) },
     )
   },
   // Without this, a cross-origin reader sees only the CORS-safelisted response
@@ -1616,8 +1618,13 @@ async function gracefulShutdown(): Promise<void> {
     if (parakeet.killed || parakeet.removed) console.log(`[stt] shutdown: killed ${parakeet.killed} Parakeet run(s), removed ${parakeet.removed} temp dir(s)`)
   } catch { /* best effort */ }
   stopCodexModelCatalogRefresh()
-  stopWhisperServer()
-  await stopWhisperPreviewServer({ final: true })
+  // S1 (2026-11-09): both whisper-server children are stopped with SIGKILL and waited for
+  // (about 2 s at most each, inside the 8 s force exit), so an update restart leaves no
+  // Metal-teardown crash report and no orphan reparented to launchd.
+  await Promise.all([
+    stopWhisperServer().catch(err => console.error('[shutdown] whisper-server stop:', err)),
+    stopWhisperPreviewServer({ final: true }),
+  ])
   stopLocalTtsServer()
   clearTimeout(forceExit)
   process.exit(0)

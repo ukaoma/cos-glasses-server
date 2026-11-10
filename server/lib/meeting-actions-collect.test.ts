@@ -19,7 +19,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, afterAll } from 'vitest'
+import { afterEach, describe, expect, it, afterAll, vi } from 'vitest'
 import { ImportedMeetingLibrary } from './imported-meeting-library.js'
 import {
   FIREFLIES_SIDECAR_VERSION,
@@ -31,6 +31,7 @@ import {
 } from './meeting-actions.js'
 import { MeetingActionsStore } from './meeting-actions-store.js'
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
+import { diskIoSnapshot, installDiskIoMeter, reportDiskIo, uninstallDiskIoMeter } from './disk-io-meter.js'
 import { runEngine } from './meeting-engine/worker.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
@@ -144,51 +145,61 @@ function cacheKeyFor(cache: Record<string, unknown>, basename: string): string {
   return key
 }
 
-/** Wall time of one pass, on the main thread. */
-async function timePass(runner: MeetingMergeRunner, label: string): Promise<number> {
-  const startedAt = performance.now()
-  await runner.run(label)
-  return performance.now() - startedAt
-}
-
 describe('input collection does not stall the event loop', () => {
-  it('reads every sidecar once, then never again until one moves', async () => {
+  it('reads every sidecar once, then never again until one moves', { timeout: 30_000 }, async () => {
+    // S1 (2026-11-09): counted, not timed. The old form asserted passes two and three under 100 ms
+    // of wall clock; 7.0.7 went public with that assertion failing at 151.7 ms under load, and on
+    // 11/09 it took 10 s on a busy Mac. What the QA pass wanted proven is that an unchanged pass
+    // reads no sidecar, so this counts the sidecar bytes each pass reads (disk-io-meter wraps
+    // readFileSync, which sha256OfFile uses). A pass that read anything fails, however fast.
+    // Its own bound: building 500 sidecars and four passes take 0.4 s alone and 9 s under a parallel
+    // suite on a busy Mac (11/09); a hang still fails at 30 s.
     const { root, monthDir } = operationsTree(500)
     const { runner, store } = runnerFor(root)
-
-    const first = await timePass(runner, 'first')
-    expect(store.read().status.lastInputScan).toMatchObject({ count: 500, mode: 'advise' })
-    expect(Object.keys(store.read().status.hashCache ?? {})).toHaveLength(500)
-
-    // PASS TWO AND THREE: nothing has changed, so nothing is read. The budget is the
-    // blocking figure the QA pass asked for.
-    const second = await timePass(runner, 'second')
-    const third = await timePass(runner, 'third')
-    expect(second).toBeLessThan(100)
-    expect(third).toBeLessThan(100)
-    expect(store.read().status.lastRun).toMatchObject({ skippedReason: 'inputs_unchanged' })
-    // And the saving is real, not an artefact of a fast first pass.
-    expect(second).toBeLessThan(first)
-
-    // ONE FILE MOVES: the pass collects again, and only that file is re-hashed.
-    const changed = join(monthDir, '2026-08-20_Capture0007.g2-chunks.json')
-    const before = store.read().status.hashCache!
-    const doc = JSON.parse(readFileSync(changed, 'utf8')) as Record<string, unknown>
-    doc.filler = `${String(doc.filler)}y`
-    writeFileSync(changed, JSON.stringify(doc))
-    const fourth = await timePass(runner, 'fourth')
-    expect(store.read().status.lastRun?.skippedReason).toBeUndefined()
-    const after = store.read().status.hashCache!
-    // The collector resolves the operations root through realpath, so the cache is keyed on
-    // the resolved path rather than the one this test built.
-    const changedKey = cacheKeyFor(after, '2026-08-20_Capture0007.g2-chunks.json')
-    expect(after[changedKey]).not.toEqual(before[changedKey])
-    let moved = 0
-    for (const [path, entry] of Object.entries(after)) {
-      if (JSON.stringify(entry) !== JSON.stringify(before[path])) moved += 1
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    installDiskIoMeter({ reportEveryMs: 0 })
+    log.mockRestore()
+    const sidecarReads = async (label: string) => {
+      reportDiskIo(() => undefined) // fresh window
+      await runner.run(label)
+      const rows = diskIoSnapshot(100_000)!.topReads.filter(r => r.path.endsWith('.g2-chunks.json'))
+      return { files: rows.length, bytes: rows.reduce((sum, r) => sum + r.bytes, 0), ops: rows.reduce((sum, r) => sum + r.ops, 0) }
     }
-    expect(moved).toBe(1)
-    expect(fourth).toBeGreaterThan(0)
+    try {
+      const first = await sidecarReads('first')
+      expect(first.files).toBe(500) // the counter sees reads, so the zeros below can fail
+      expect(first.ops).toBe(1000) // each sidecar parsed once and hashed once
+      expect(store.read().status.lastInputScan).toMatchObject({ count: 500, mode: 'advise' })
+      expect(Object.keys(store.read().status.hashCache ?? {})).toHaveLength(500)
+
+      // PASS TWO AND THREE: nothing has changed, so nothing is read.
+      expect(await sidecarReads('second')).toEqual({ files: 0, bytes: 0, ops: 0 })
+      expect(await sidecarReads('third')).toEqual({ files: 0, bytes: 0, ops: 0 })
+      expect(store.read().status.lastRun).toMatchObject({ skippedReason: 'inputs_unchanged' })
+
+      // ONE FILE MOVES: the pass collects again, and only that file is re-hashed.
+      const changed = join(monthDir, '2026-08-20_Capture0007.g2-chunks.json')
+      const before = store.read().status.hashCache!
+      const doc = JSON.parse(readFileSync(changed, 'utf8')) as Record<string, unknown>
+      doc.filler = `${String(doc.filler)}y`
+      writeFileSync(changed, JSON.stringify(doc))
+      const fourth = await sidecarReads('fourth')
+      expect(store.read().status.lastRun?.skippedReason).toBeUndefined()
+      expect(fourth.files).toBe(500) // a collected pass parses every sidecar; only the hash below is per-file
+      expect(fourth.ops).toBe(501) // 500 parses, and a hash read for the one file that moved only
+      const after = store.read().status.hashCache!
+      // The collector resolves the operations root through realpath, so the cache is keyed on
+      // the resolved path rather than the one this test built.
+      const changedKey = cacheKeyFor(after, '2026-08-20_Capture0007.g2-chunks.json')
+      expect(after[changedKey]).not.toEqual(before[changedKey])
+      let moved = 0
+      for (const [path, entry] of Object.entries(after)) {
+        if (JSON.stringify(entry) !== JSON.stringify(before[path])) moved += 1
+      }
+      expect(moved).toBe(1)
+    } finally {
+      uninstallDiskIoMeter()
+    }
   })
 
   it('notices a file that was DELETED, not only one that was touched', async () => {

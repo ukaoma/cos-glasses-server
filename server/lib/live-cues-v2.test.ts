@@ -883,7 +883,9 @@ describe('engine', () => {
       } finally { warn.mockRestore() }
     })
 
-    it('6.99.0: a saved cap of 50 is reachable: 50 cues are shown, the writer cap is 100, and the next evaluation stops at meeting_cap', async () => {
+    // S1 (2026-11-09): its own bound. 51 full engine evaluations (cue writer, ledgers). Alone 1.6 to 2.7 s; under a full
+    // parallel suite plus a Swift compile it passed 5 s (7.0.5 red run: 5.3 s) and passed only on a serial rerun. A hang still fails at 30 s.
+    it('6.99.0: a saved cap of 50 is reachable: 50 cues are shown, the writer cap is 100, and the next evaluation stops at meeting_cap', { timeout: 30_000 }, async () => {
       saved.maxCuesPerMeeting = 50
       const e = withLimits(); e.arm('meeting_a')
       for (let i = 0; i < 50; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }

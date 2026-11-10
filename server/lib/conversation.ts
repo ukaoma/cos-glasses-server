@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { notifySessionStart, notifySessionEnd } from './telegram-notify.js'
 import { appendToArchive, type SessionToArchive } from './archive.js'
 import { updateGlassesSessionCache, scheduleCacheUpdate, setSessionProvider } from './session-cache-writer.js'
-import { logSessionEnd, buildSessionLogEntry, writeSessionLog } from './session-log.js'
+import { logSessionEnd, buildSessionLogEntry, writeSessionLogIfChanged, flushSessionLogState } from './session-log.js'
 import { atomicWriteFileSync, durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { localDay } from './local-day.js'
 import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
@@ -966,11 +966,14 @@ export async function endSession(sessionId: string): Promise<{ logged: boolean; 
   return { logged: exchangeCount > 0, exchangeCount, durationMin }
 }
 
-/** Log all active sessions on server shutdown — prevents data loss on restart */
-export function logActiveSessionsOnShutdown(): void {
+/** Log active sessions on server shutdown — prevents data loss on restart.
+ * S1 (2026-11-09): a session whose content was already written (by a snapshot or an
+ * earlier shutdown, in this boot or a previous one) is not appended again. */
+export function logActiveSessionsOnShutdown(): { written: number; unchanged: number; unconfigured: number; failed: number } {
+  const counts = { written: 0, unchanged: 0, unconfigured: 0, failed: 0 }
   for (const session of sessions.values()) {
     if (session.exchanges.length === 0) continue
-    logSessionEnd({
+    const entry = buildSessionLogEntry({
       id: session.id,
       exchanges: session.exchanges,
       createdAt: session.createdAt,
@@ -978,38 +981,63 @@ export function logActiveSessionsOnShutdown(): void {
       modelPreference: session.modelPreference,
       endReason: 'server_shutdown',
     })
+    counts[writeSessionLogIfChanged(entry, 'shutdown')]++
   }
+  flushSessionLogState()
+  // No ledger configured (the new-install default): nothing to report.
+  if (counts.written || counts.unchanged || counts.failed) {
+    console.log(`[session-log] shutdown: ${counts.written} written, ${counts.unchanged} unchanged, ${counts.failed} failed`)
+  }
+  return counts
 }
 
-// ── Auto-snapshot: periodically write active sessions to .glasses_sessions.jsonl ──
-// Runs every 5 minutes. No LLM calls, no network — just JSON serialize + file append.
-// Cost: ~0 CPU, ~0 RAM, ~50KB disk per snapshot.
+// ── Auto-snapshot: periodically write changed active sessions to .glasses_sessions.jsonl ──
+// Runs every 5 minutes. No LLM calls, no network. A session is appended only when its
+// content changed since the last write for it, and that memory survives restarts
+// (session-log.ts). Before 2026-11-09 the memory was this module's own map, empty after
+// every boot, so the first tick after a restart re-appended every session (about 300 entries,
+// roughly 5 MB, per boot on Miles's Mac; not the "~50KB per snapshot" once written here).
 let snapshotTimer: ReturnType<typeof setInterval> | null = null
-let lastSnapshotCounts: Record<string, number> = {} // track exchange counts to skip unchanged sessions
+let lastSnapshotCounts: Record<string, number> = {} // cheap in-process pre-check before hashing
+
+/** One auto-snapshot pass. Exported for tests. */
+export function runAutoSnapshotOnce(): { written: number; unchanged: number; unconfigured: number; failed: number } {
+  const counts = { written: 0, unchanged: 0, unconfigured: 0, failed: 0 }
+  for (const session of sessions.values()) {
+    if (session.exchanges.length === 0) continue
+    // Skip if exchange count hasn't changed since this process last looked
+    const prevCount = lastSnapshotCounts[session.id]
+    if (prevCount !== undefined && session.exchanges.length === prevCount) continue
+
+    const entry = buildSessionLogEntry({
+      id: session.id,
+      exchanges: session.exchanges,
+      createdAt: session.createdAt,
+      lastActivity: Date.now(), // Use NOW, not lastActivity — ensures lookup covers up to this moment
+      modelPreference: session.modelPreference,
+      endReason: 'explicit_end',
+      slug: `[LIVE] ${(session.exchanges.find(e => e.role === 'user')?.content ?? '').slice(0, 50)}`,
+    })
+    counts[writeSessionLogIfChanged(entry, 'snapshot')]++
+    // Recorded whatever the result, as before S1: a failed or unconfigured write is not retried
+    // every 5 minutes (Q1 review M2), only after the session changes again.
+    lastSnapshotCounts[session.id] = session.exchanges.length
+  }
+  if (counts.written) flushSessionLogState()
+  return counts
+}
 
 export function startAutoSnapshot(intervalMs = 5 * 60_000): void {
   if (snapshotTimer) return
-  snapshotTimer = setInterval(() => {
-    for (const session of sessions.values()) {
-      if (session.exchanges.length === 0) continue
-      // Skip if exchange count hasn't changed since last snapshot
-      const prevCount = lastSnapshotCounts[session.id] ?? 0
-      if (session.exchanges.length === prevCount) continue
-
-      const entry = buildSessionLogEntry({
-        id: session.id,
-        exchanges: session.exchanges,
-        createdAt: session.createdAt,
-        lastActivity: Date.now(), // Use NOW, not lastActivity — ensures lookup covers up to this moment
-        modelPreference: session.modelPreference,
-        endReason: 'explicit_end',
-        slug: `[LIVE] ${(session.exchanges.find(e => e.role === 'user')?.content ?? '').slice(0, 50)}`,
-      })
-      writeSessionLog(entry)
-      lastSnapshotCounts[session.id] = session.exchanges.length
-    }
-  }, intervalMs)
+  snapshotTimer = setInterval(() => { runAutoSnapshotOnce() }, intervalMs)
   console.log(`[conversation] Auto-snapshot started (every ${intervalMs / 1000}s)`)
+}
+
+/** Tests only. */
+export function __resetAutoSnapshotForTests(): void {
+  if (snapshotTimer) clearInterval(snapshotTimer)
+  snapshotTimer = null
+  lastSnapshotCounts = {}
 }
 
 /** Return all active sessions with exchanges, shaped for archiving */

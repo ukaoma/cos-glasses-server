@@ -43,9 +43,12 @@ const SECRET_NAME: readonly RegExp[] = [
   /^hubspot\.config\.ya?ml$/, // the HubSpot CLI's portal keys
   /^\.mcp\.json$/, // MCP server definitions, which often carry tokens
   /^\.credentials\.json$/, // Claude Code's sign-in (~/.claude/.credentials.json)
+  // S1 (2026-11-09): COS's own key store. key-store.ts calls it "the only file on the Mac that holds a real key";
+  // neither its name (-keys.json, not -key.json) nor its folder (key-secrets, not secrets) matched before.
+  /^provider-keys\.json$/,
 ]
 /** Folders whose whole subtree is refused, matched exactly as a folder name. Lower-cased. */
-const SECRET_DIRECTORY = new Set(['.ssh', '.gnupg', 'secrets'])
+const SECRET_DIRECTORY = new Set(['.ssh', '.gnupg', 'secrets', 'key-secrets']) // key-secrets: COS's 0700 key folder (S1)
 /** A file refused only inside this folder (`config` alone is an ordinary name). Lower-cased `folder/file`. */
 const SECRET_PAIR = new Set(['.aws/credentials', '.aws/config', '.docker/config.json', '.kube/config', 'gh/hosts.yml', '.codex/auth.json'])
 
