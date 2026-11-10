@@ -344,3 +344,27 @@ describe('ledger state follows the file it describes (Q1 S5)', () => {
     expect(conversation.logActiveSessionsOnShutdown()).toMatchObject({ written: 1, unchanged: 0 })
   })
 })
+
+// W1 candidate suite (2026-11-09): hazard-invariants counted the reader's openSync as an 11th unguarded
+// open. openSync on a FIFO with no writer never returns and blocks the server's only JS thread.
+describe('the ledger reader cannot be blocked or broken by a non-file at the ledger path', () => {
+  it('a FIFO: the reader answers at once with no history (checked in a child, so a hang cannot hang this run)', async () => {
+    const { execFileSync, spawnSync } = await import('node:child_process')
+    execFileSync('/usr/bin/mkfifo', [ledger()])
+    const probe = join(scriptsDir, 'probe.mts')
+    writeFileSync(probe, `import { readSessionLogRanges } from ${JSON.stringify(join(process.cwd(), 'server/lib/session-log.ts'))}\n`
+      + `const r = await readSessionLogRanges(${JSON.stringify(ledger())}); console.log('size=' + r.size)\n`)
+    const run = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), [probe], {
+      env: { ...process.env, COS_DATA_DIR: dataDir, COS_SCRIPTS_DIR: scriptsDir }, timeout: 20_000, killSignal: 'SIGKILL', encoding: 'utf8',
+    })
+    expect(run.signal).toBeNull() // SIGKILL here means the open blocked
+    expect(run.stdout).toContain('size=0')
+  }, 30_000)
+
+  it('a folder: no history, and no throw', async () => {
+    const { sessionLog } = await boot()
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(ledger())
+    await expect(sessionLog.readSessionLogRanges()).resolves.toEqual(new Map())
+  })
+})
