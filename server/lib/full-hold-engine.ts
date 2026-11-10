@@ -13,8 +13,13 @@
 // full hold there would stall a headless job for up to an hour. What does tell them apart is where
 // the process runs (census of 25 live sessions, 22:06):
 //   - a Desktop tab's engine is a child of Claude.app's own `Contents/Helpers/disclaimer`;
-//   - an interactive CLI has a controlling terminal (`ttys000`);
+//   - an interactive CLI has a controlling terminal (`ttys000`) and none of the print or SDK flags;
 //   - a print run started from a shell or a tool has neither.
+// Q1 C3 (Codex second opinion), measured 22:42: a terminal alone is not enough. A `claude -p` run under
+// a terminal (typed there, or started by a CLI session's own Bash tool, whose children inherit its
+// terminal) has a tty too, and `-p` in its arguments. So a terminal engine must also carry none of
+// `-p`, `--print`, `--input-format`, `--output-format` (an SDK host passes the last two). Miles's two
+// interactive CLI sessions carried none of them.
 // Anything that cannot be read is `other`, and `other` is never proven.
 
 import { execFile } from 'node:child_process'
@@ -28,8 +33,8 @@ export function claudeSessionsRegistryDir(): string {
   return join(configDir, 'sessions')
 }
 
-/** `~/.claude/sessions/<pid>.json`, only when it names `sessionId`. Bounded, synchronous; null on anything else. */
-export function registryRecordForPid(pid: number, sessionId: string, dir = claudeSessionsRegistryDir()): { entrypoint: string | null; version: string | null } | null {
+/** `~/.claude/sessions/<pid>.json` parsed, only when it names `sessionId` (and, if it says, that pid). Bounded; null on anything else. */
+function readRecord(pid: number, sessionId: string, dir: string): Record<string, unknown> | null {
   if (!Number.isInteger(pid) || pid <= 1) return null
   try {
     const text = readFileSync(join(dir, `${pid}.json`), 'utf-8')
@@ -37,16 +42,26 @@ export function registryRecordForPid(pid: number, sessionId: string, dir = claud
     const raw = JSON.parse(text) as Record<string, unknown>
     if (typeof raw.sessionId !== 'string' || raw.sessionId.toLowerCase() !== sessionId.toLowerCase()) return null
     if (typeof raw.pid === 'number' && raw.pid !== pid) return null
-    return {
-      entrypoint: typeof raw.entrypoint === 'string' && raw.entrypoint ? raw.entrypoint : null,
-      version: typeof raw.version === 'string' && raw.version ? raw.version.slice(0, 32) : null,
-    }
+    return raw
   } catch {
     return null
   }
 }
 
+/** The engine's entrypoint and version from its own record. */
+export function registryRecordForPid(pid: number, sessionId: string, dir = claudeSessionsRegistryDir()): { entrypoint: string | null; version: string | null } | null {
+  const raw = readRecord(pid, sessionId, dir)
+  if (!raw) return null
+  return {
+    entrypoint: typeof raw.entrypoint === 'string' && raw.entrypoint ? raw.entrypoint : null,
+    version: typeof raw.version === 'string' && raw.version ? raw.version.slice(0, 32) : null,
+  }
+}
+
 type PsRun = (args: string[]) => Promise<string | null>
+
+/** A flag only a print run or an SDK host passes (Q1 C3). */
+const PRINT_OR_SDK_FLAG = /^(?:-p|--print|--input-format(?:=.*)?|--output-format(?:=.*)?)$/
 
 const runPs: PsRun = args => new Promise(resolve => {
   try {
@@ -63,11 +78,31 @@ export async function processHost(pid: number, ps: PsRun = runPs): Promise<Engin
   if (!own) return 'other'
   const [ppidRaw, tty] = own.trim().split(/\s+/)
   const ppid = Number(ppidRaw)
-  if (tty && tty !== '??' && tty !== '-' && /^tty/.test(tty)) return 'terminal'
+  if (tty && tty !== '??' && tty !== '-' && /^tty/.test(tty)) {
+    const args = await ps(['-o', 'args=', '-p', String(pid)])
+    if (args === null) return 'other'
+    return args.trim().split(/\s+/).some(token => PRINT_OR_SDK_FLAG.test(token)) ? 'other' : 'terminal'
+  }
   if (!Number.isInteger(ppid) || ppid <= 1) return 'other'
   const parent = await ps(['-o', 'comm=', '-p', String(ppid)])
   const path = parent ? parent.trim() : ''
   return /\/Claude\.app\/Contents\/Helpers\/disclaimer$/.test(path) ? 'desktop-app' : 'other'
+}
+
+/**
+ * X1 round 3: the engine's own status now (`waiting` while its dialog is up), from the same record, or
+ * null when the record is gone (the process ended) or names another session (the pid was reused).
+ * Measured 22:39 on both engines: `waiting` is written 0 to 5 ms before the PermissionRequest hook
+ * starts and leaves `waiting` within milliseconds of an answer at the desk (`busy`, or `idle` on Esc);
+ * the record is removed when the process exits.
+ */
+export function registryStatusForPid(pid: number, sessionId: string, dir = claudeSessionsRegistryDir()): { status: string | null; statusUpdatedAt: number | null } | null {
+  const raw = readRecord(pid, sessionId, dir)
+  if (!raw) return null
+  return {
+    status: typeof raw.status === 'string' ? raw.status : null,
+    statusUpdatedAt: typeof raw.statusUpdatedAt === 'number' && Number.isFinite(raw.statusUpdatedAt) ? raw.statusUpdatedAt : null,
+  }
 }
 
 /** The engine facts the full hold reads, for the process that ran the hook. Null when its record does not name the session. */

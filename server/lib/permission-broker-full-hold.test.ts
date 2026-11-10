@@ -375,6 +375,89 @@ describe('full hold: while held', () => {
   })
 })
 
+describe('round 3: a lost settling event (the registry tick check)', () => {
+  type Rec = { status: string | null; statusUpdatedAt: number | null } | null
+  function withRegistry(initial: Rec, opts: Parameters<typeof harness>[0] = {}) {
+    const reg = { rec: initial as Rec, reads: [] as Array<[string, number]> }
+    const h = harness(opts, { engineStatus: (sid: string, pid: number) => { reg.reads.push([sid, pid]); return reg.rec } })
+    return { h, reg }
+  }
+
+  it('the PostToolUse never arrives, the registry says the desk answered: released ({}) within one tick', async () => {
+    const { h, reg } = withRegistry({ status: 'waiting', statusUpdatedAt: 1_000_000 - 5 })
+    const { sent } = park(h, await h.b.admit(ask()))
+    await h.b.tick()
+    expect(sent).toEqual([])
+    expect(reg.reads.at(-1)).toEqual([SESSION, 4242])
+    // The desk answers. The spool drops the PostToolUse, so no hook event reaches the broker.
+    reg.rec = { status: 'busy', statusUpdatedAt: 1_000_000 + 8_000 }
+    h.s.now += 9_000
+    await h.b.tick()
+    expect(sent).toEqual([{}])
+    expect(h.b.settledList()[0]).toMatchObject({ resolution: 'retracted', waitingAtMac: false })
+  })
+
+  it('the engine process ended (its record is gone): released', async () => {
+    const { h, reg } = withRegistry({ status: 'waiting', statusUpdatedAt: 999_000 })
+    const { sent } = park(h, await h.b.admit(ask()))
+    reg.rec = null
+    await h.b.tick()
+    expect(sent).toEqual([{}])
+  })
+
+  it('kept while the record says waiting, and while a non-waiting status predates the request', async () => {
+    for (const rec of [{ status: 'waiting', statusUpdatedAt: 1_000_000 + 60_000 }, { status: 'busy', statusUpdatedAt: 1_000_000 - 1 }, { status: 'busy', statusUpdatedAt: null }]) {
+      const { h } = withRegistry(rec)
+      const { sent } = park(h, await h.b.admit(ask()))
+      h.s.now += 60_000
+      await h.b.tick()
+      expect([rec, sent, h.b.pendingCount()]).toEqual([rec, [], 1])
+    }
+  })
+
+  it('an approval too, and only full-hold items: a held item under today\'s rules is never read or released', async () => {
+    const { h, reg } = withRegistry({ status: 'idle', statusUpdatedAt: 1_000_000 + 1 })
+    h.s.idle = 200
+    const a = park(h, await h.b.admit(approval()))
+    await h.b.tick()
+    expect(a.sent).toEqual([{}])
+    const old = withRegistry({ status: 'idle', statusUpdatedAt: 1_000_000 + 1 }, { switches: { questions: false, approvals: false } })
+    const legacy = harness({ switches: { questions: false, approvals: false } }, { lastLegacyPollAt: () => 1_000_000, lastQuestionsPollAt: () => 1_000_000, engineStatus: old.h.deps.engineStatus })
+    legacy.s.idle = 200
+    const q = park(legacy, await legacy.b.admit(ask(1_000_000, { hookWaitS: 630 })))
+    await legacy.b.tick()
+    expect(q.sent).toEqual([])
+    expect(old.reg.reads).toEqual([])
+    void reg
+  })
+
+  it('beside a full-hold item, an item held under today\'s rules is never read and never released by it', async () => {
+    const reads: number[] = []
+    const h = harness({ switches: { questions: true, approvals: false } }, {
+      lastLegacyPollAt: () => 1_000_000, lastQuestionsPollAt: () => 1_000_000,
+      engineStatus: (_sid: string, pid: number) => { reads.push(pid); return { status: 'idle', statusUpdatedAt: 1_000_000 + 1 } },
+    })
+    h.s.idle = 200
+    const legacyApproval = park(h, await h.b.admit(approval(1_000_000, { hookWaitS: 630, ppid: 7777 })))
+    const full = park(h, await h.b.admit(ask()))
+    await h.b.tick()
+    expect(full.sent).toEqual([{}])
+    expect(legacyApproval.sent).toEqual([])
+    expect(reads).toEqual([4242])
+  })
+
+  it('a registry read that throws keeps the item (and the next good read can still release it)', async () => {
+    let throwIt = true
+    const h = harness({}, { engineStatus: () => { if (throwIt) throw new Error('EIO'); return { status: 'busy', statusUpdatedAt: 1_000_000 + 10 } } })
+    const { sent } = park(h, await h.b.admit(ask()))
+    await h.b.tick()
+    expect(sent).toEqual([])
+    throwIt = false
+    await h.b.tick()
+    expect(sent).toEqual([{}])
+  })
+})
+
 describe('full hold: the web door', () => {
   async function heldApproval(switches: FullHoldSwitches = { questions: true, approvals: true }) {
     const h = harness({ switches })
@@ -460,6 +543,26 @@ describe('full hold: the web door', () => {
     const a = park(h, await h.b.admit(approval(1_000_000, { hookWaitS: 630 })))
     expect(h.b.answer(a.id, { clientAnswerId: 'w', decision: 'allow' }, 'web').status).toBe(200)
     expect(h.b.webAnswerRules()).toEqual({ touchRequired: false, touchMaxMs: 60_000, confirmApprovals: false })
+  })
+})
+
+describe('Q1 C1: an item held under the full hold keeps its web steps if the switch reads off before the next tick', () => {
+  it('touch, confirm and the not-shown refusal still apply; the confirm route still serves it', async () => {
+    const h = harness()
+    h.s.idle = 200
+    const a = park(h, await h.b.admit(approval()))
+    const q = park(h, await h.b.admit(ask(1_000_000, {}, { tool_use_id: 'toolu_c1q' })))
+    h.s.switches = { questions: false, approvals: false }
+    expect(h.b.answer(a.id, { clientAnswerId: 'w', decision: 'allow' }, 'web')).toEqual({ status: 403, body: { error: 'web_touch_required' } })
+    expect(h.b.answer(a.id, { clientAnswerId: 'w', decision: 'allow', presenceAgeMs: 0 }, 'web')).toEqual({ status: 403, body: { error: 'confirm_required' } })
+    const c = h.b.confirm(a.id, { decision: 'allow', presenceAgeMs: 0 }, 'web')
+    expect(c.status).toBe(200)
+    expect(h.b.answer(a.id, { clientAnswerId: 'w', decision: 'allow', presenceAgeMs: 0, confirmId: c.body.confirmId }, 'web').status).toBe(200)
+    const hidden = harness()
+    const hq = park(hidden, await hidden.b.admit(ask()))
+    hidden.s.switches = { questions: false, approvals: false }
+    expect(hidden.b.answer(hq.id, { clientAnswerId: 'app', ...ANSWER }, 'app')).toEqual({ status: 409, body: { error: 'not_shown' } })
+    void q
   })
 })
 

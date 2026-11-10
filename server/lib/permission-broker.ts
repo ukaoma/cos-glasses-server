@@ -842,6 +842,13 @@ export interface PermissionBrokerDeps {
    * rest); the one number while it is not. Read only by the full hold. Absent: `installedHookTimeoutS`.
    */
   installedHookTimeoutForKindS?(kind: BrokerItemKind): number | null
+  /**
+   * X1 round 3: the status of the engine process that asked (`lib/full-hold-engine.ts`
+   * `registryStatusForPid`): null when its record is gone or names another session. Read each tick for
+   * full-hold items only, so a held item whose settling hook event was lost does not sit to its
+   * deadline. Absent: the tick check is off.
+   */
+  engineStatus?(sessionId: string, pid: number): { status: string | null; statusUpdatedAt: number | null } | null
   /** X1: a new confirm id (tests). Absent: `pc_` and 24 random hex. */
   newConfirmId?: () => string
 }
@@ -909,6 +916,8 @@ export interface ParkRequest {
   webOnly?: boolean
   /** X1: held for the whole hook wait under a full-hold switch (`lib/full-hold.ts`). */
   fullHold?: boolean
+  /** X1 round 3: the engine process that asked (the hook's ppid), for the registry tick check. */
+  enginePid?: number | null
   hold?: HoldFacts
 }
 
@@ -948,6 +957,8 @@ interface BrokerItem {
   questionFingerprint: string
   /** X1: held for the whole hook wait (`ParkRequest.fullHold`). */
   fullHold: boolean
+  /** X1 round 3: the engine process that asked, for full-hold items; null otherwise. */
+  enginePid: number | null
   /**
    * 6.60.0: settled with `{}` written to the hook (handed to the desk, expired, no client,
    * drained), so the Mac's own dialog is showing, and the session has not moved past the
@@ -1309,12 +1320,13 @@ export class PermissionBroker {
   }
 
   /** The engine probe, for an eligible request only: the hook's own process, proven or not. */
-  private async fullHoldEngineProven(sessionId: string, body: unknown): Promise<boolean> {
+  private async fullHoldEngineProven(sessionId: string, body: unknown): Promise<number | null | false> {
     const raw = isRecord(body) ? body.ppid : undefined
     const ppid = typeof raw === 'number' && Number.isInteger(raw) && raw > 1 ? raw : null
     let engine: EngineFacts | null = null
     try { engine = (await this.deps.engineFor?.(sessionId, ppid)) ?? null } catch { engine = null }
-    return engineProvenForFullHold(engine)
+    // Proven: the engine's pid (for the registry tick check); not proven: false.
+    return engineProvenForFullHold(engine) ? ppid : false
   }
 
   /**
@@ -1395,7 +1407,9 @@ export class PermissionBroker {
     try { background = this.deps.isBackgroundRequest?.(body) === true } catch { background = true }
     const askHold = isQuestion && facts.askHold === true && !background
     // Awaited only for an eligible request, so with the switches off nothing here yields or reads.
-    const full = this.fullHoldEligible(isQuestion, askHold, background, facts) ? await this.fullHoldEngineProven(facts.sessionId, body) : false
+    const probe = this.fullHoldEligible(isQuestion, askHold, background, facts) ? await this.fullHoldEngineProven(facts.sessionId, body) : false
+    const full = probe !== false
+    const enginePid = probe === false ? null : probe
     const now = this.deps.now()
     const presence = this.presence(now)
     let holdPollAt: number | null = null
@@ -1471,7 +1485,7 @@ export class PermissionBroker {
       ...(webOnly ? { webOnly: true as const, webPresenceAgeMs: Math.round(presence.webAgeMs ?? 0) } : {}),
       ...(full ? { fullHold: true as const } : {}),
     }
-    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), ...(full ? { fullHold: true } : {}), hold: holdFacts } }
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), ...(full ? { fullHold: true, enginePid } : {}), hold: holdFacts } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -1507,6 +1521,7 @@ export class PermissionBroker {
       toolUseId: facts.toolUseId ?? null,
       questionFingerprint: toolFingerprint(ASK_USER_QUESTION_TOOL, { questions: facts.toolInput.questions }),
       fullHold: request.fullHold === true,
+      enginePid: request.fullHold === true && typeof request.enginePid === 'number' ? request.enginePid : null,
       waitingAtMac: false,
     }
     this.items.set(id, item)
@@ -1672,7 +1687,8 @@ export class PermissionBroker {
     const handBack = input.handBack === true
     // X1: while a full-hold switch is on, the web door answers (or hands back) only with a touch it
     // just had. The token door (the Even app, Control through its helper) is unchanged.
-    if (by === 'web' && this.anyFullHoldOn() && !validWebTouch(input.presenceAgeMs)) {
+    // Q1 C1: an item held under the full hold keeps both web steps even if the switch reads off before the next tick.
+    if (by === 'web' && (this.anyFullHoldOn() || item.fullHold) && !validWebTouch(input.presenceAgeMs)) {
       this.log(`web_touch_required ${item.id} kind=${item.kind}`)
       return { status: 403, body: { error: 'web_touch_required' } }
     }
@@ -1684,7 +1700,7 @@ export class PermissionBroker {
     if (handBack) return this.handBack(item, clientAnswerId)
     // Q1 O1: while a switch is on, an item no device is shown yet (the desk-idle latch has not fired) is
     // not answerable by its id, from any door. A hand-back stays allowed: it only shows the Mac's dialog.
-    if (!item.lensVisible && this.anyFullHoldOn()) {
+    if (!item.lensVisible && (this.anyFullHoldOn() || item.fullHold)) {
       this.log(`not_shown ${item.id} kind=${item.kind}`)
       return { status: 409, body: { error: 'not_shown' } }
     }
@@ -1705,7 +1721,7 @@ export class PermissionBroker {
       }
       // X1: while a full-hold switch is on, a web approval carries the confirm id this server gave the
       // page for this item and this decision (`confirm`), once. Tap, then confirm, enforced here.
-      if (by === 'web' && this.anyFullHoldOn()) {
+      if (by === 'web' && (this.anyFullHoldOn() || item.fullHold)) {
         const refused = this.consumeConfirm(input.confirmId, item.id, input.decision)
         if (refused) {
           this.log(`${refused} ${item.id}`)
@@ -1748,9 +1764,10 @@ export class PermissionBroker {
    * only with a fresh touch. A settled or expired item answers as the answer route would.
    */
   confirm(id: string, body: unknown, by: AnswerSurface = 'app'): AnswerResult {
-    // Q1 F2: with both switches off the route does not exist (404) and mints nothing.
-    if (!this.anyFullHoldOn()) return { status: 404, body: { error: 'not_found' } }
     const item = BROKER_ID_RE.test(id) ? this.items.get(id) : undefined
+    // Q1 F2: with both switches off the route does not exist (404) and mints nothing, unless the item itself is
+    // held under the full hold (Q1 C1: it still needs its confirm, so it must still be able to get one).
+    if (!this.anyFullHoldOn() && !item?.fullHold) return { status: 404, body: { error: 'not_found' } }
     if (!item) return { status: 404, body: { error: 'not_found' } }
     const input = isRecord(body) ? body : {}
     if (item.kind !== 'approval') return { status: 400, body: { error: 'invalid_confirm', reason: 'kind' } }
@@ -2087,6 +2104,13 @@ export class PermissionBroker {
       const on = this.fullHoldSwitches()
       this.settleAll('handed_to_desk', item => item.fullHold && (item.kind === 'question' ? !on.questions : !on.approvals))
       if (this.pendingCount() === 0) return
+      // X1 round 3: a held item whose settling hook event never arrived (a lost spool event) must not sit
+      // to its deadline. Its own engine's registry record says whether the session moved on: the record is
+      // gone (the process ended), or its status left `waiting` after this request began. The engine writes
+      // `waiting` just before the hook starts and leaves it within milliseconds of an answer (both engines,
+      // measured), so a status written after the request began that is not `waiting` means it was answered.
+      this.releaseMovedOn()
+      if (this.pendingCount() === 0) return
     }
     const now = this.deps.now()
     const presence = this.presence(now)
@@ -2125,6 +2149,23 @@ export class PermissionBroker {
     }
     // 6.99.26 (QA round 1): a web-only stamped question goes back to the Mac as any away-held request does.
     this.settleAll('handed_to_desk', item => !item.askHold || item.webOnly)
+  }
+
+  /** X1 round 3: settle (`retracted`, so `{}`) every held full-hold item its engine's record says the session moved past. */
+  private releaseMovedOn(): void {
+    const read = this.deps.engineStatus
+    if (!read) return
+    for (const item of [...this.items.values()]) {
+      // `enginePid` is set only on a full-hold item (`park`), so an item held under today's rules is never read.
+      if (item.state !== 'pending' || item.enginePid === null) continue
+      let record: { status: string | null; statusUpdatedAt: number | null } | null
+      try { record = read(item.sessionId, item.enginePid) } catch { continue }
+      const movedOn = record === null
+        || (record.status !== 'waiting' && record.statusUpdatedAt !== null && record.statusUpdatedAt > item.requestedAt)
+      if (!movedOn) continue
+      this.log(`registry_moved_on ${item.id} kind=${item.kind} record=${record === null ? 'gone' : 'not_waiting'}`)
+      this.settle(item, 'retracted')
+    }
   }
 
   private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client', only: (item: BrokerItem) => boolean = () => true): void {

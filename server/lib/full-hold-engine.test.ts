@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { engineForHookProcess, processHost, registryRecordForPid } from './full-hold-engine.js'
+import { engineForHookProcess, processHost, registryRecordForPid, registryStatusForPid } from './full-hold-engine.js'
 
 const SID = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 function registry(records: Record<string, unknown>) {
@@ -31,9 +31,33 @@ describe('registryRecordForPid', () => {
   })
 })
 
+describe('registryStatusForPid (round 3)', () => {
+  it('the status for that pid only when it names the session; gone or reused is null', () => {
+    const dir = registry({
+      '100.json': { pid: 100, sessionId: SID, status: 'waiting', statusUpdatedAt: 1_794_285_453_035 },
+      '200.json': { pid: 200, sessionId: 'b1b2c3d4-0000-4000-8000-00000000abcd', status: 'busy', statusUpdatedAt: 5 },
+      '300.json': { pid: 300, sessionId: SID, status: 7, statusUpdatedAt: 'x' },
+      '400.json': { pid: 999, sessionId: SID, status: 'busy', statusUpdatedAt: 5 },
+    })
+    expect(registryStatusForPid(100, SID, dir)).toEqual({ status: 'waiting', statusUpdatedAt: 1_794_285_453_035 })
+    expect(registryStatusForPid(200, SID, dir)).toBeNull()
+    expect(registryStatusForPid(300, SID, dir)).toEqual({ status: null, statusUpdatedAt: null })
+    expect(registryStatusForPid(400, SID, dir)).toBeNull()
+    expect(registryStatusForPid(500, SID, dir)).toBeNull()
+    expect(registryStatusForPid(1, SID, dir)).toBeNull()
+  })
+})
+
 describe('processHost', () => {
-  it('a controlling terminal is a terminal', async () => {
-    expect(await processHost(100, fakePs({ '-o ppid=,tty= -p 100': '  55 ttys002\n' }))).toBe('terminal')
+  it('a controlling terminal with no print or SDK flag is a terminal', async () => {
+    expect(await processHost(100, fakePs({ '-o ppid=,tty= -p 100': '  55 ttys002\n', '-o args= -p 100': 'claude --model opus\n' }))).toBe('terminal')
+  })
+  it('Q1 C3: a print run or an SDK host in a terminal is not (and unreadable args are not)', async () => {
+    for (const args of ['claude -p fix it', 'claude --print', 'node claude --input-format stream-json', 'claude --output-format=json', null]) {
+      expect([args, await processHost(100, fakePs({ '-o ppid=,tty= -p 100': '  55 ttys002\n', '-o args= -p 100': args }))]).toEqual([args, 'other'])
+    }
+    // A word that only contains a flag is not the flag.
+    expect(await processHost(100, fakePs({ '-o ppid=,tty= -p 100': '  55 ttys002\n', '-o args= -p 100': 'claude --model x-print' }))).toBe('terminal')
   })
   it('a child of Claude.app\'s helper is the desktop app', async () => {
     const ps = fakePs({ '-o ppid=,tty= -p 100': '  55 ??\n', '-o comm= -p 55': '/Applications/Claude.app/Contents/Helpers/disclaimer\n' })

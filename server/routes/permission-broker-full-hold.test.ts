@@ -116,6 +116,7 @@ describe('the questions route under the full hold', () => {
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     expect(index).toContain('  fullHold: () => fullHoldSwitches(process.env),')
     expect(index).toContain('  engineFor: (sessionId, ppid) => engineForHookProcess(sessionId, ppid),')
+    expect(index).toContain('  engineStatus: (sessionId, pid) => registryStatusForPid(pid, sessionId),')
     expect(index).toContain('  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,')
   })
 
