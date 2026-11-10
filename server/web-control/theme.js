@@ -19,5 +19,8 @@
     apply: function () { return apply(read()); }
   };
   apply(read());
+  // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
+  // never shows a mark that nothing would take away. app.js removes the class when the sign-in card or the app shows.
+  document.documentElement.classList.add('fp-wait');
   if (media && media.addEventListener) media.addEventListener('change', function () { if (read() === 'system') apply('system'); });
 })();

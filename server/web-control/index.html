@@ -53,6 +53,12 @@
     <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
   </svg>
 
+  <!-- 7.0.19: the first paint. Shows at once, before any script or answer from the Mac: the mark on the page's own
+       background, true whichever comes next (the sign-in card or the app). Out of the layout (fixed), so nothing moves
+       when it goes. app.js removes it; a CSS failsafe hides it after 25 s if the scripts never run. -->
+  <div id="first-paint" class="first-paint" aria-hidden="true"><svg class="mark"><use href="#i-mark"/></svg></div>
+  <noscript><p class="noscript-note">COS Control Web needs JavaScript. Turn it on for this site, then reload.</p></noscript>
+
   <main id="auth-gate" class="auth-gate hidden" aria-labelledby="auth-title">
     <div class="auth-card">
       <svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg>
