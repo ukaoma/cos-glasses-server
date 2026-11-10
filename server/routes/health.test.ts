@@ -13,6 +13,8 @@ import { installCodexHooks } from '../lib/codex-hooks-installer.js'
 import { installCursorObserver } from '../lib/cursor-observer-installer.js'
 import { __resetProviderObserveForTests, refreshProviderHookFiles } from '../lib/provider-observe.js'
 import { healthRouter } from './health.js'
+import { API_AUTH_BY_LOCAL, requireApiToken } from '../lib/api-auth.js'
+import { mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -33,6 +35,9 @@ let base = ''
 
 beforeAll(async () => {
   const app = express()
+  // Final review S8: stands in for the /api gate's mark on a token request (lib/api-auth.ts sets it only after the
+  // X-COS-Token header matched). The real gate is exercised below in 'display-stream capability advertisement'.
+  app.use('/api', (req, res, next) => { if (req.headers['x-cos-token']) res.locals[API_AUTH_BY_LOCAL] = 'token'; next() })
   app.use('/api', healthRouter)
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => resolve())
@@ -346,7 +351,7 @@ describe('display-stream capability advertisement', () => {
   })
 
   it('hands /api/models callers a ticket the verifier accepts', async () => {
-    const response = await fetch(`${base}/api/models`)
+    const response = await fetch(`${base}/api/models`, { headers: { 'x-cos-token': TOKEN } })
     expect(response.status).toBe(200)
     const body = await response.json() as { displayStreamTicket?: unknown }
     expect(typeof body.displayStreamTicket).toBe('string')
@@ -359,7 +364,7 @@ describe('display-stream capability advertisement', () => {
 
   it('omits the ticket entirely when the server has no API token', async () => {
     delete process.env.COS_API_TOKEN
-    const body = await (await fetch(`${base}/api/models`)).json() as Record<string, unknown>
+    const body = await (await fetch(`${base}/api/models`, { headers: { 'x-cos-token': TOKEN } })).json() as Record<string, unknown>
     // A ticket keyed on '' can never verify, so publishing one would advertise a
     // dead capability. Absent is the honest answer.
     expect(body).not.toHaveProperty('displayStreamTicket')
@@ -387,6 +392,27 @@ describe('display-stream capability advertisement', () => {
     // The advertised TTL is the one the verifier actually enforces, not a literal
     // that can drift away from it.
     expect(body.capabilities.displayStream.ticketTtlSeconds).toBe(900)
+  }, 30_000)
+
+  it('final review S8: through the real gate, a token caller gets a ticket and a browser signed in by cookie gets none', async () => {
+    const gated = express()
+    gated.use('/api', requireApiToken(TOKEN))
+    gated.use('/api', healthRouter)
+    const srv = await new Promise<Server>(resolve => { const l = gated.listen(0, '127.0.0.1', () => resolve(l)) })
+    try {
+      const at = `http://127.0.0.1:${(srv.address() as { port: number }).port}/api/models`
+      const token = await (await fetch(at, { headers: { 'x-cos-token': TOKEN } })).json() as Record<string, unknown>
+      expect(verifyDisplayTicket(TOKEN, token.displayStreamTicket), 'the token door still gets a working ticket').toBe(true)
+      const r = await fetch(at, { headers: { Cookie: `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue(TOKEN).value}` } })
+      expect(r.status, 'the cookie is a valid sign-in').toBe(200)
+      const cookie = await r.json() as Record<string, unknown>
+      expect(cookie).not.toHaveProperty('displayStreamTicket')
+      expect(cookie.capabilities, 'the rest of the answer is unchanged').toEqual(token.capabilities)
+    } finally { await new Promise(resolve => srv.close(resolve)) }
+  }, 30_000)
+  it('final review S8: a request no gate marked as the token door gets no ticket (fails closed)', async () => {
+    const body = await (await fetch(`${base}/api/models`)).json() as Record<string, unknown>
+    expect(body).not.toHaveProperty('displayStreamTicket')
   }, 30_000)
 
   it('never puts a ticket on the public health route', async () => {

@@ -1,3 +1,4 @@
+import { API_AUTH_BY_LOCAL } from '../lib/api-auth.js'
 import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
 import { calendarStatus } from '../lib/calendar-source.js'
 import { TURN_FILE_MAX_BYTES } from '../lib/turn-file-store.js'
@@ -688,6 +689,11 @@ healthRouter.get('/models', async (req, res) => {
   // mintDisplayTicket refuses an empty key, because a ticket signed with '' can
   // never verify. Omit the field rather than publish a dead capability.
   const apiToken = process.env.COS_API_TOKEN ?? ''
+  // Final review S8 (Q1 and the lead, 2026-11-10 02:20): only a caller the API token let in (the glasses, the phone app,
+  // COS Control) gets a display-stream ticket. A browser signed in by cookie never does: Control Web never uses one, and
+  // a ticket's socket is authorized once at connect, so it would outlive "Sign out every browser". Fails closed: a
+  // request the gate did not mark as the token door gets none.
+  const ticketCaller = res.locals?.[API_AUTH_BY_LOCAL] === 'token'
   res.json({
     ...catalog,
     ...threadAttachHealthFields(threadAttach),
@@ -755,7 +761,7 @@ healthRouter.get('/models', async (req, res) => {
     // 6.8.441 lens fifteen minutes into a meeting. The TTL therefore bounds how
     // long a LEAKED URL can open a new socket, not how long an open socket lives.
     // Changing that is a breaking change that needs a client version gate first.
-    ...(apiToken ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
+    ...(apiToken && ticketCaller ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
     capabilities: {
       meetingAsk: { ...meetingAskCapabilities(), webRetrieval: meetingWebCapability().available },
       // 6.91.0: learnedStyle ("Your style", enabled = the server switch) and polishOptions ("Previous polish").
