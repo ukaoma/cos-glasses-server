@@ -125,7 +125,7 @@ describe('Ask about this under the Today summary (app.js)', () => {
     expect(story).toContain('askBox(brief);')
   })
 
-  it('shows under a summary with Ask on; hidden without the capability, without a summary, offline, unread or without the chat', () => {
+  it('shows under a summary with Ask on; hidden without the capability, without a summary, offline or without the chat; kept through an unread session list (T1 spec 0)', () => {
     const on = box(); on.fns.paintTodayAsk(SUMMARY); expect(on.form.hidden).toBe(false)
     const off = box({ askOn: false }); off.form.hidden = false; off.fns.paintTodayAsk(SUMMARY); expect(off.form.hidden).toBe(true)
     const none = box(); none.form.hidden = false; none.fns.paintTodayAsk(null); expect(none.form.hidden).toBe(true)
