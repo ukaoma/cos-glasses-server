@@ -694,7 +694,7 @@ describe('Sign-in failures say what went wrong (6.99.3)', () => {
     const asked: string[] = []
     const glasses = (code: string) => { asked.push(code); return code === 'K7P3QX9M' }
     expect(classifyWebLogin({ token: 'nope' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_token', length: 4 })
-    expect(classifyWebLogin({ handoff: 'A'.repeat(32) }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'handoff_expired', length: 32 })
+    expect(classifyWebLogin({ handoff: 'A'.repeat(32) }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'handoff_expired', length: 32, handoff: 'unknown' })
     expect(classifyWebLogin({ code: 'k7p3-qx9m' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'glasses_code', length: 8 })
     expect(classifyWebLogin({ code: 'AAAA-AAAA' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_code', length: 8 })
     expect(classifyWebLogin({ code: 'abc' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_code', length: 3 })
