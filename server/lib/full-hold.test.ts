@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest'
 import { approvalFullHoldEnabled, engineProvenForFullHold, fullHoldSwitches, parseEngineVersion, questionFullHoldEnabled, versionAtLeast, waitingQuestionWordsEnabled } from './full-hold.js'
 
 describe('the switches', () => {
-  it('both full-hold switches and the words switch default OFF', () => {
+  it('both full-hold switches default OFF', () => {
     expect(fullHoldSwitches({})).toEqual({ questions: false, approvals: false })
-    expect(waitingQuestionWordsEnabled({})).toBe(false)
+  })
+  it('the row-words switch defaults ON (Miles 22:10) and reads off only for an explicit off', () => {
+    expect(waitingQuestionWordsEnabled({})).toBe(true)
+    for (const off of ['0', 'false', 'off']) expect(waitingQuestionWordsEnabled({ COS_WAITING_QUESTION_WORDS: off })).toBe(false)
   })
   it('read the one switch grammar, each its own name', () => {
     for (const on of ['1', 'true', 'on', ' ON ']) {
@@ -25,15 +28,21 @@ describe('the switches', () => {
 describe('the engine gate', () => {
   it('admits the proven floors and anything newer', () => {
     for (const engine of [
-      { entrypoint: 'cli', version: '2.1.321' }, { entrypoint: 'cli', version: '2.1.400' }, { entrypoint: 'cli', version: '2.2' }, { entrypoint: 'cli', version: '3.0.0' },
-      { entrypoint: 'claude-desktop', version: '2.1.317' }, { entrypoint: 'claude-desktop', version: '2.1.318' },
-    ]) expect(engineProvenForFullHold(engine)).toBe(true)
+      { entrypoint: 'cli', version: '2.1.321', host: 'terminal' }, { entrypoint: 'cli', version: '2.1.400', host: 'terminal' }, { entrypoint: 'cli', version: '2.2', host: 'terminal' }, { entrypoint: 'cli', version: '3.0.0', host: 'terminal' },
+      { entrypoint: 'claude-desktop', version: '2.1.317', host: 'desktop-app' }, { entrypoint: 'claude-desktop', version: '2.1.318', host: 'desktop-app' },
+    ] as const) expect(engineProvenForFullHold(engine)).toBe(true)
+  })
+  it('refuses a proven version running where its dialog is not (a print run, a mislabelled host, no host read)', () => {
+    for (const engine of [
+      { entrypoint: 'cli', version: '2.1.322', host: 'other' }, { entrypoint: 'cli', version: '2.1.322', host: 'desktop-app' }, { entrypoint: 'cli', version: '2.1.322' },
+      { entrypoint: 'claude-desktop', version: '2.1.317', host: 'other' }, { entrypoint: 'claude-desktop', version: '2.1.317', host: 'terminal' }, { entrypoint: 'claude-desktop', version: '2.1.317' },
+    ]) expect(engineProvenForFullHold(engine as never)).toBe(false)
   })
   it('refuses older, unknown, unparseable and missing', () => {
     for (const engine of [
-      null, undefined, { entrypoint: null, version: '9.9.9' }, { entrypoint: 'cli', version: '2.1.320' }, { entrypoint: 'cli', version: '2.0.999' }, { entrypoint: 'cli', version: '1.9.400' },
-      { entrypoint: 'claude-desktop', version: '2.1.316' }, { entrypoint: 'sdk-cli', version: '2.1.400' }, { entrypoint: 'cli', version: null },
-      { entrypoint: 'cli', version: '2.1.321-beta' }, { entrypoint: 'cli', version: 'v2.1.321' }, { entrypoint: '__proto__', version: '9' }, { entrypoint: 'toString', version: '9' },
+      null, undefined, { entrypoint: null, version: '9.9.9', host: 'terminal' }, { entrypoint: 'cli', version: '2.1.320', host: 'terminal' }, { entrypoint: 'cli', version: '2.0.999', host: 'terminal' }, { entrypoint: 'cli', version: '1.9.400', host: 'terminal' },
+      { entrypoint: 'claude-desktop', version: '2.1.316', host: 'desktop-app' }, { entrypoint: 'sdk-cli', version: '2.1.400', host: 'terminal' }, { entrypoint: 'cli', version: null, host: 'terminal' },
+      { entrypoint: 'cli', version: '2.1.321-beta', host: 'terminal' }, { entrypoint: 'cli', version: 'v2.1.321', host: 'terminal' }, { entrypoint: '__proto__', version: '9', host: 'terminal' }, { entrypoint: 'toString', version: '9', host: 'terminal' },
     ]) expect(engineProvenForFullHold(engine as never)).toBe(false)
   })
   it('compares part by part', () => {

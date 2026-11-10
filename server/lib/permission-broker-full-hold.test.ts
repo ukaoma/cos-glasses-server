@@ -11,17 +11,17 @@ import type { HookEnvelope } from './session-hook-events.js'
 const live: PermissionBroker[] = []
 afterEach(() => { for (const b of live.splice(0)) b.stop(); vi.useRealTimers() })
 
-const CLI_OK: EngineFacts = { entrypoint: 'cli', version: '2.1.321' }
-const DESK_OK: EngineFacts = { entrypoint: 'claude-desktop', version: '2.1.317' }
+const CLI_OK: EngineFacts = { entrypoint: 'cli', version: '2.1.321', host: 'terminal' }
+const DESK_OK: EngineFacts = { entrypoint: 'claude-desktop', version: '2.1.317', host: 'desktop-app' }
 
-function harness(opts: { switches?: FullHoldSwitches; engine?: EngineFacts | null; words?: boolean; kindTimeout?: { question: number; approval: number } } = {}, extra: Partial<PermissionBrokerDeps> = {}) {
+function harness(opts: { switches?: FullHoldSwitches; engine?: EngineFacts | null; kindTimeout?: { question: number; approval: number } } = {}, extra: Partial<PermissionBrokerDeps> = {}) {
   const s = {
     now: 1_000_000, idle: 0 as number | null, open: true, reads: 0, engineReads: 0, switchReads: 0,
     switches: opts.switches ?? { questions: true, approvals: true },
     engine: opts.engine === undefined ? CLI_OK : opts.engine,
-    words: opts.words ?? false,
     kindTimeout: opts.kindTimeout ?? { question: 3600, approval: 3600 },
     lines: [] as string[],
+    lastPpid: undefined as number | null | undefined,
   }
   let seq = 0
   let cseq = 0
@@ -33,8 +33,7 @@ function harness(opts: { switches?: FullHoldSwitches; engine?: EngineFacts | nul
     timeoutMs: () => 110_000, awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630,
     installedHookTimeoutForKindS: kind => s.kindTimeout[kind],
     fullHold: () => { s.switchReads++; return s.switches },
-    engineFor: () => { s.engineReads++; return s.engine },
-    waitingWords: () => s.words,
+    engineFor: (_sid: string, ppid: number | null) => { s.engineReads++; s.lastPpid = ppid; return s.engine },
     pollMs: 60_000, newId: () => `pq_${String(++seq).padStart(24, '0')}`,
     newConfirmId: () => `pc_${String(++cseq).padStart(24, '0')}`,
     log: (line: string) => { s.lines.push(line) },
@@ -92,19 +91,22 @@ describe('full hold: admission', () => {
 
   it.each([
     ['no registry record', null],
-    ['a print run (sdk-cli)', { entrypoint: 'sdk-cli', version: '2.1.330' }],
-    ['a CLI below the proven version', { entrypoint: 'cli', version: '2.1.320' }],
-    ['a desktop engine below the proven version', { entrypoint: 'claude-desktop', version: '2.1.316' }],
-    ['no version', { entrypoint: 'cli', version: null }],
-    ['a version that is not one', { entrypoint: 'cli', version: '2.1.x' }],
-    ['an unknown entrypoint', { entrypoint: 'vscode', version: '9.9.9' }],
+    ['a print run (sdk-cli)', { entrypoint: 'sdk-cli', version: '2.1.330', host: 'other' }],
+    ['a print run labelled claude-desktop (started from a tab\'s shell)', { entrypoint: 'claude-desktop', version: '2.1.322', host: 'other' }],
+    ['a print run labelled cli (no terminal)', { entrypoint: 'cli', version: '2.1.322', host: 'other' }],
+    ['a desktop label in a terminal', { entrypoint: 'claude-desktop', version: '2.1.322', host: 'terminal' }],
+    ['a CLI below the proven version', { entrypoint: 'cli', version: '2.1.320', host: 'terminal' }],
+    ['a desktop engine below the proven version', { entrypoint: 'claude-desktop', version: '2.1.316', host: 'desktop-app' }],
+    ['no version', { entrypoint: 'cli', version: null, host: 'terminal' }],
+    ['a version that is not one', { entrypoint: 'cli', version: '2.1.x', host: 'terminal' }],
+    ['an unknown entrypoint', { entrypoint: 'vscode', version: '9.9.9', host: 'terminal' }],
   ])('keeps today\'s rule for %s', async (_name, engine) => {
     const h = harness({ engine: engine as EngineFacts | null })
     expect(await h.b.admit(ask())).toEqual({ ok: false, reason: 'no_client' })
   })
 
   it('admits the proven desktop engine and a newer CLI', async () => {
-    for (const engine of [DESK_OK, { entrypoint: 'cli', version: '2.2.0' }]) {
+    for (const engine of [DESK_OK, { entrypoint: 'cli', version: '2.2.0', host: 'terminal' as const }]) {
       const h = harness({ engine })
       expect((await h.b.admit(ask())).ok).toBe(true)
     }
@@ -172,6 +174,73 @@ describe('full hold: admission', () => {
   })
 })
 
+describe('Q1 review fixes', () => {
+  it('O2: the engine probe gets the hook\'s own ppid', async () => {
+    const h = harness()
+    await h.b.admit(ask())
+    expect(h.s.lastPpid).toBe(4242)
+    const none = harness()
+    await none.b.admit({ ...ask(), ppid: 'x' })
+    expect(none.s.lastPpid).toBeNull()
+  })
+
+  it('F1: with both hold switches off a listed item has no toolUseId; with one on it does', async () => {
+    for (const on of [false, true]) {
+      const h = harness({ switches: { questions: false, approvals: on } }, { lastLegacyPollAt: () => 1_000_000, lastQuestionsPollAt: () => 1_000_000 })
+      h.s.idle = 200
+      park(h, await h.b.admit(ask(1_000_000, { hookWaitS: 630 })))
+      const [view] = h.b.list()
+      expect('toolUseId' in view!).toBe(on)
+      expect('fullHold' in view!).toBe(false)
+    }
+  })
+
+  it('F2: with both switches off /confirm is 404 and mints nothing', async () => {
+    const h = harness({ switches: { questions: false, approvals: false } }, { lastLegacyPollAt: () => 1_000_000, lastQuestionsPollAt: () => 1_000_000 })
+    h.s.idle = 200
+    const { id } = park(h, await h.b.admit(approval(1_000_000, { hookWaitS: 630 })))
+    expect(h.b.confirm(id, { decision: 'allow', presenceAgeMs: 0 }, 'web')).toEqual({ status: 404, body: { error: 'not_found' } })
+    expect((h.b as unknown as { confirms: Map<string, unknown> }).confirms.size).toBe(0)
+  })
+
+  it('O1: an item no device is shown yet cannot be answered by id (any door); a hand-back can; after the latch it answers', async () => {
+    const h = harness()
+    const { id } = park(h, await h.b.admit(ask()))
+    expect(h.b.answer(id, { clientAnswerId: 'app', ...ANSWER }, 'app')).toEqual({ status: 409, body: { error: 'not_shown' } })
+    expect(h.b.answer(id, { clientAnswerId: 'web', ...ANSWER, presenceAgeMs: 1 }, 'web')).toEqual({ status: 409, body: { error: 'not_shown' } })
+    expect(h.b.pendingCount()).toBe(1)
+    h.s.idle = 95
+    await h.b.tick()
+    expect(h.b.answer(id, { clientAnswerId: 'app', ...ANSWER }, 'app').status).toBe(200)
+    const other = harness()
+    const second = park(other, await other.b.admit(ask()))
+    expect(other.b.answer(second.id, { clientAnswerId: 'leave', handBack: true }, 'app').status).toBe(200)
+    expect(second.sent).toEqual([{}])
+  })
+
+  it('G1: a confirm id is gone the moment it is used (single use, seen in the store itself)', async () => {
+    const h = harness()
+    h.s.idle = 200
+    const { id } = park(h, await h.b.admit(approval()))
+    const c = String(h.b.confirm(id, { decision: 'allow', presenceAgeMs: 0 }, 'web').body.confirmId)
+    const store = (h.b as unknown as { confirms: Map<string, unknown> }).confirms
+    expect(store.has(c)).toBe(true)
+    expect(h.b.answer(id, { clientAnswerId: 'w', decision: 'allow', confirmId: c, presenceAgeMs: 0 }, 'web').status).toBe(200)
+    expect(store.has(c)).toBe(false)
+  })
+
+  it('G3: a web approval with a valid confirm id still needs its own fresh touch at answer time, and the refusal does not spend the id', async () => {
+    const h = harness()
+    h.s.idle = 200
+    const { id } = park(h, await h.b.admit(approval()))
+    const c = h.b.confirm(id, { decision: 'deny', presenceAgeMs: 0 }, 'web').body.confirmId
+    for (const presenceAgeMs of [undefined, 60_001]) {
+      expect(h.b.answer(id, { clientAnswerId: 'w', decision: 'deny', confirmId: c, presenceAgeMs }, 'web')).toEqual({ status: 403, body: { error: 'web_touch_required' } })
+    }
+    expect(h.b.answer(id, { clientAnswerId: 'w', decision: 'deny', confirmId: c, presenceAgeMs: 3 }, 'web').status).toBe(200)
+  })
+})
+
 describe('full hold: while held', () => {
   it('a question stays answerable with no client and an active desk, and its card appears once the desk is idle', async () => {
     const h = harness()
@@ -236,11 +305,13 @@ describe('full hold: while held', () => {
 
   it('first answer wins: a COS answer writes the hook once; the desk answering first closes the card', async () => {
     const h = harness()
+    h.s.idle = 200
     const first = park(h, await h.b.admit(ask()))
     expect(h.b.answer(first.id, { clientAnswerId: 'lens', ...ANSWER }).status).toBe(200)
     expect(first.sent).toHaveLength(1)
     expect(h.b.answer(first.id, { clientAnswerId: 'other', ...ANSWER }).status).toBe(409)
     const desk = harness()
+    desk.s.idle = 200
     const second = park(desk, await desk.b.admit(ask()))
     desk.b.observeHookEvent(ev(desk.s.now + 5, 'PostToolUse'), false)
     expect(desk.b.pendingCount()).toBe(0)
@@ -268,6 +339,7 @@ describe('full hold: while held', () => {
 
   it('a hook that left is hook_gone, and an answer to it reads 410', async () => {
     const h = harness()
+    h.s.idle = 200
     const { id } = park(h, await h.b.admit(ask()), false)
     expect(h.b.answer(id, { clientAnswerId: 'lens', ...ANSWER }).status).toBe(410)
   })
@@ -283,6 +355,7 @@ describe('full hold: the web door', () => {
 
   it('needs a fresh touch on every web answer and hand-back while a switch is on', async () => {
     const h = harness()
+    h.s.idle = 200
     const { id } = park(h, await h.b.admit(ask()))
     for (const presenceAgeMs of [undefined, -1, 60_001, 1.5, '10']) {
       expect(h.b.answer(id, { clientAnswerId: 'w', ...ANSWER, presenceAgeMs }, 'web')).toEqual({ status: 403, body: { error: 'web_touch_required' } })
@@ -368,10 +441,12 @@ describe('the waiting list', () => {
     expect(h.b.waitingList()).toEqual([])
   })
 
-  it('COS_WAITING_QUESTION_WORDS alone turns it on', () => {
-    const h = harness({ switches: { questions: false, approvals: false }, words: true })
-    h.b.observeHookEvent(ev(h.s.now, 'PreToolUse'), false)
-    expect(h.b.waitingList().map(w => w.state)).toEqual(['at_mac'])
+  it('either hold switch alone turns it on', () => {
+    for (const switches of [{ questions: true, approvals: false }, { questions: false, approvals: true }]) {
+      const h = harness({ switches })
+      h.b.observeHookEvent(ev(h.s.now, 'PreToolUse'), false)
+      expect(h.b.waitingList().map(w => w.state)).toEqual(['at_mac'])
+    }
   })
 
   it('walks at_mac, held, answered (by COS), and is dropped after the keep window', async () => {

@@ -20,14 +20,14 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(r => { s.closeAllConnections?.(); s.close(() => r()) })))
 })
 
-async function start(switches: FullHoldSwitches, opts: { words?: boolean; desk?: number } = {}) {
+async function start(switches: FullHoldSwitches, opts: { desk?: number } = {}) {
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const broker = new PermissionBroker({
     now: () => Date.now(), mode: () => 'all', admissionsOpen: () => true,
     lastQuestionsPollAt: () => null, lastLegacyPollAt: () => null, lastHoldPollAt: () => null, presenceAgeMs: () => null,
     readDeskIdleSeconds: async () => opts.desk ?? 1_000, deskIdleSeconds: () => 90, timeoutMs: () => 110_000,
     awayHoldMs: () => 600_000, installedHookTimeoutS: () => 3600, installedHookTimeoutForKindS: () => 3600,
-    fullHold: () => switches, engineFor: () => ({ entrypoint: 'claude-desktop', version: '2.1.317' }), waitingWords: () => opts.words === true,
+    fullHold: () => switches, engineFor: () => ({ entrypoint: 'claude-desktop', version: '2.1.317', host: 'desktop-app' }),
     signals: brokerSignalSink(store), pollMs: 25, log: () => {},
   })
   brokers.push(broker)
@@ -102,21 +102,20 @@ describe('the questions route under the full hold', () => {
     expect(await held.reply).toEqual({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } })
   })
 
-  it('COS_WAITING_QUESTION_WORDS alone adds the list and says the web door needs nothing new', async () => {
-    const { base, store } = await start({ questions: false, approvals: false }, { words: true })
+  it('with both hold switches off a question at the Mac adds nothing to the route, and /confirm is 404', async () => {
+    const { base, store } = await start({ questions: false, approvals: false })
     store.apply({ ts: Date.now(), ppid: 1, sessionId: SESSION, event: 'PreToolUse', payload: { session_id: SESSION, tool_name: 'AskUserQuestion', tool_input: ASK_INPUT, tool_use_id: 'toolu_w' } }, false)
     const body = await list(base)
-    expect(body.webAnswer).toEqual({ touchRequired: false, touchMaxMs: 60_000, confirmApprovals: false })
-    expect((body.waiting as Record<string, unknown>[]).map(w => w.state)).toEqual(['at_mac'])
+    expect('waiting' in body || 'webAnswer' in body).toBe(false)
+    const confirm = await fetch(`${base}/api/session-questions/pq_000000000000000000000001/confirm`, { ...json({ decision: 'allow', presenceAgeMs: 0 }), headers: { 'content-type': 'application/json', ...web } })
+    expect([confirm.status, await confirm.json()]).toEqual([404, { error: 'not_found' }])
   })
 
   it('index.ts wires the switches from the environment, the engine from the registry, and leaves the 6.60.0 timeout line as it was', async () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     expect(index).toContain('  fullHold: () => fullHoldSwitches(process.env),')
-    expect(index).toContain('  waitingWords: () => waitingQuestionWordsEnabled(process.env),')
-    expect(index).toContain('    const record = registryRecordSync(sessionId)')
-    expect(index).toContain("    return record ? { entrypoint: record.entrypoint, version: record.version ?? null } : null")
+    expect(index).toContain('  engineFor: (sessionId, ppid) => engineForHookProcess(sessionId, ppid),')
     expect(index).toContain('  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,')
   })
 

@@ -831,10 +831,12 @@ export interface PermissionBrokerDeps {
    * request and per tick. Absent or throwing: both off, and nothing below reads the registry.
    */
   fullHold?(): FullHoldSwitches
-  /** X1: the registry facts of the engine that asked (`lib/full-hold.ts`). Read only while a switch is on. Absent: not proven. */
-  engineFor?(sessionId: string): EngineFacts | null
-  /** X1: `COS_WAITING_QUESTION_WORDS`: the `waiting` list on the questions route even with both full-hold switches off. Absent: off. */
-  waitingWords?(): boolean
+  /**
+   * X1 (Q1 O2): the facts of the engine that ran THIS hook: its own registry record (the hook's
+   * `ppid`), only when that record names the session, and where it runs (`lib/full-hold-engine.ts`).
+   * Read only while a switch is on and the request is otherwise eligible. Absent: not proven.
+   */
+  engineFor?(sessionId: string, ppid: number | null): EngineFacts | null | Promise<EngineFacts | null>
   /**
    * X1: our PermissionRequest `timeout` for this kind once the hook is split (question block vs the
    * rest); the one number while it is not. Read only by the full hold. Absent: `installedHookTimeoutS`.
@@ -1297,14 +1299,21 @@ export class PermissionBroker {
    * or block keeps the old clamp), and the engine is proven to keep its dialog up while the hook
    * waits (`engineProvenForFullHold`). The registry is read only when a switch is on.
    */
-  private fullHoldAdmits(isQuestion: boolean, askHold: boolean, background: boolean, facts: Omit<PermissionRequestFacts, 'fingerprint'>): boolean {
+  private fullHoldEligible(isQuestion: boolean, askHold: boolean, background: boolean, facts: Omit<PermissionRequestFacts, 'fingerprint'>): boolean {
     const on = this.fullHoldSwitches()
     if (isQuestion ? !on.questions : !on.approvals) return false
     if (background || facts.provider === 'codex') return false
     if (isQuestion && !askHold) return false
     if (facts.hookWaitS === null) return false
+    return true
+  }
+
+  /** The engine probe, for an eligible request only: the hook's own process, proven or not. */
+  private async fullHoldEngineProven(sessionId: string, body: unknown): Promise<boolean> {
+    const raw = isRecord(body) ? body.ppid : undefined
+    const ppid = typeof raw === 'number' && Number.isInteger(raw) && raw > 1 ? raw : null
     let engine: EngineFacts | null = null
-    try { engine = this.deps.engineFor?.(facts.sessionId) ?? null } catch { engine = null }
+    try { engine = (await this.deps.engineFor?.(sessionId, ppid)) ?? null } catch { engine = null }
     return engineProvenForFullHold(engine)
   }
 
@@ -1385,7 +1394,8 @@ export class PermissionBroker {
     let background = false
     try { background = this.deps.isBackgroundRequest?.(body) === true } catch { background = true }
     const askHold = isQuestion && facts.askHold === true && !background
-    const full = this.fullHoldAdmits(isQuestion, askHold, background, facts)
+    // Awaited only for an eligible request, so with the switches off nothing here yields or reads.
+    const full = this.fullHoldEligible(isQuestion, askHold, background, facts) ? await this.fullHoldEngineProven(facts.sessionId, body) : false
     const now = this.deps.now()
     const presence = this.presence(now)
     let holdPollAt: number | null = null
@@ -1549,6 +1559,7 @@ export class PermissionBroker {
   /** The pending items, oldest first, for `GET /api/session-questions`. */
   list(): SessionQuestionView[] {
     const now = this.deps.now()
+    const extended = this.extendedQuestionsView()
     const views: SessionQuestionView[] = []
     for (const item of [...this.items.values()]) {
       if (item.state !== 'pending') continue
@@ -1569,7 +1580,8 @@ export class PermissionBroker {
         awayHold: item.awayHold,
         waitingAtMac: false,
         // X1, additive: present only when known or true, so a view without them reads as before.
-        ...(item.toolUseId ? { toolUseId: item.toolUseId } : {}),
+        // Q1 F1: only while a full-hold switch is on, so with both off each item is 7.0.13's, key for key.
+        ...(item.toolUseId && extended ? { toolUseId: item.toolUseId } : {}),
         ...(item.fullHold ? { fullHold: true as const } : {}),
       })
     }
@@ -1670,6 +1682,12 @@ export class PermissionBroker {
       return this.settledReply(item, clientAnswerId, handBack)
     }
     if (handBack) return this.handBack(item, clientAnswerId)
+    // Q1 O1: while a switch is on, an item no device is shown yet (the desk-idle latch has not fired) is
+    // not answerable by its id, from any door. A hand-back stays allowed: it only shows the Mac's dialog.
+    if (!item.lensVisible && this.anyFullHoldOn()) {
+      this.log(`not_shown ${item.id} kind=${item.kind}`)
+      return { status: 409, body: { error: 'not_shown' } }
+    }
     let chosen: Chosen
     let output: Record<string, unknown>
     if (item.kind === 'question') {
@@ -1730,6 +1748,8 @@ export class PermissionBroker {
    * only with a fresh touch. A settled or expired item answers as the answer route would.
    */
   confirm(id: string, body: unknown, by: AnswerSurface = 'app'): AnswerResult {
+    // Q1 F2: with both switches off the route does not exist (404) and mints nothing.
+    if (!this.anyFullHoldOn()) return { status: 404, body: { error: 'not_found' } }
     const item = BROKER_ID_RE.test(id) ? this.items.get(id) : undefined
     if (!item) return { status: 404, body: { error: 'not_found' } }
     const input = isRecord(body) ? body : {}
@@ -1871,13 +1891,12 @@ export class PermissionBroker {
    * (the same items `list` shows); a stamped question still behind the desk latch reads `at_mac`.
    */
   /**
-   * X1: whether the questions route carries `waiting` and `webAnswer`: either full-hold switch is on,
-   * or `COS_WAITING_QUESTION_WORDS` is. With all three off the route answers exactly as 7.0.13 did.
+   * X1: whether the questions route carries `waiting`, `webAnswer` and each item's `toolUseId`: only
+   * while a full-hold switch is on (lead 22:10; Q1 F1). With both off the route is 7.0.13's, key for key.
+   * (`COS_WAITING_QUESTION_WORDS` is the rows' 80 characters, not this.)
    */
   extendedQuestionsView(): boolean {
-    let words = false
-    try { words = this.deps.waitingWords?.() === true } catch { words = false }
-    return words || this.anyFullHoldOn()
+    return this.anyFullHoldOn()
   }
 
   waitingList(): WaitingQuestionView[] {

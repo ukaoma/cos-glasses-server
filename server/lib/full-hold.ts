@@ -27,12 +27,22 @@ export function approvalFullHoldEnabled(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * `COS_WAITING_QUESTION_WORDS`: list every question a live session waits on, with its words, on the
- * questions route (`waiting`), even with both full-hold switches off. Default OFF, so with every X1
- * switch off the route answers exactly as 7.0.13 did. Either full-hold switch turns the list on.
+ * `COS_WAITING_QUESTION_WORDS`: a session waiting on a question carries the first 80 characters of its
+ * first question (`waiting_detail`, through `toolTarget`), so Today and the Sessions rows say what it
+ * asks. Default ON: Miles, 2026-11-09 22:10 CST, "Yes, show by default", told that the text is written
+ * to the on-disk session-hook ledger and sent to any signed-in browser, including for questions
+ * answered at the desk. `0` restores 7.0.13's empty detail exactly. Question text only: never an
+ * option, a description or an answer. The `waiting` list with full words and options is NOT this
+ * switch: it is on only while a full-hold switch is.
  */
 export function waitingQuestionWordsEnabled(env: NodeJS.ProcessEnv): boolean {
-  return readSwitch(env.COS_WAITING_QUESTION_WORDS, false)
+  return readSwitch(env.COS_WAITING_QUESTION_WORDS, true)
+}
+
+/** Control and format characters (bidi overrides, zero-width) taken out of a question before it becomes row text. */
+export function questionRowText(question: unknown): string {
+  if (typeof question !== 'string') return ''
+  return question.replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
 }
 
 export interface FullHoldSwitches { questions: boolean; approvals: boolean }
@@ -54,7 +64,19 @@ export const FULL_HOLD_ENGINE_FLOORS: Readonly<Record<string, readonly number[]>
   'claude-desktop': Object.freeze([2, 1, 317]),
 })
 
-export interface EngineFacts { entrypoint: string | null; version: string | null }
+/** Where the engine runs (`lib/full-hold-engine.ts` `processHost`): Claude.app's helper, a terminal, or neither. */
+export type EngineHost = 'desktop-app' | 'terminal' | 'other'
+
+export interface EngineFacts { entrypoint: string | null; version: string | null; host?: EngineHost }
+
+/**
+ * Q1 O2: the host each entrypoint must run in. A `claude -p` print run takes its entrypoint from
+ * whatever launched it, has no dialog, and runs under neither (`lib/full-hold-engine.ts`).
+ */
+export const FULL_HOLD_ENGINE_HOSTS: Readonly<Record<string, EngineHost>> = Object.freeze({
+  cli: 'terminal',
+  'claude-desktop': 'desktop-app',
+})
 
 /** `2.1.321` as numbers; null for anything that is not one to four dot-separated whole numbers. */
 export function parseEngineVersion(version: unknown): number[] | null {
@@ -75,10 +97,11 @@ export function versionAtLeast(version: readonly number[], floor: readonly numbe
   return true
 }
 
-/** Whether this engine is proven to keep its dialog on screen while the hook waits. */
+/** Whether this engine is proven to keep its dialog on screen while the hook waits, and runs where that dialog is. */
 export function engineProvenForFullHold(engine: EngineFacts | null | undefined): boolean {
   if (!engine || typeof engine.entrypoint !== 'string') return false
   if (!Object.prototype.hasOwnProperty.call(FULL_HOLD_ENGINE_FLOORS, engine.entrypoint)) return false
+  if (engine.host !== FULL_HOLD_ENGINE_HOSTS[engine.entrypoint]) return false
   const floor = FULL_HOLD_ENGINE_FLOORS[engine.entrypoint]!
   const version = parseEngineVersion(engine.version)
   return version !== null && versionAtLeast(version, floor)

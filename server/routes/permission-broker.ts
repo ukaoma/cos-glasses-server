@@ -325,9 +325,9 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       // forgotten (the server started then, or dropped it while it still waited). Missing from
       // `settled` and settled after it: the session moved past it.
       waitingAtMacForgottenBefore: new Date(deps.broker.waitingAtMacForgottenBeforeMs()).toISOString(),
-      // X1, additive and only while a full-hold switch or COS_WAITING_QUESTION_WORDS is on: every question a live
-      // session waits on (held, at the Mac, or just answered), with its words while it waits, and what a web page must
-      // send with an answer right now. With all of them off the response is 7.0.13's, key for key.
+      // X1, additive and only while a full-hold switch is on: every question a live session waits on (held, at the
+      // Mac, or just answered), with its words while it waits, and what a web page must send with an answer right now.
+      // With both off the response is 7.0.13's, key for key.
       ...(deps.broker.extendedQuestionsView() ? { waiting: deps.broker.waitingList(), webAnswer: deps.broker.webAnswerRules() } : {}),
     })
   })
