@@ -358,7 +358,8 @@ describe('the plan failing: nothing is sent, and the words come back', () => {
       expect(r.state, String(words)).toBe('planFailed')
       expect(r.error).toContain(words)
       expect(h.sent('/api/work/chat/lens-rounds')).toHaveLength(0)
-      expect(h.html()).toContain('Use this request again')
+      // W1 (0.5.386 parity): a round that failed before the planner answered offers Plan again in place.
+      expect(h.html()).toContain('data-wk="chat-plan-again"')
       h.tap('chat-again', { 'data-key': r.key })
       expect(h.card().draft).toBe('Fix the rounding on the pricing page and add a test')
       expect(h.box()!.value).toBe('Fix the rounding on the pricing page and add a test')
@@ -434,7 +435,7 @@ describe('Send: once, through COS Control, and truthful about where it is', () =
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('send_requested', 'pending', 'pending')
     await h.send(h.card().rounds[0].key); await h.tick(1)
     let page = h.html()
-    expect(page).toContain('Waiting for COS Control on your Mac to send this. Nothing has been sent yet.')
+    expect(page).toContain('Waiting for COS Control on your Mac to send this. COS Control has to be open on the Mac. Nothing has been sent yet.')
     expect(page).toContain('Waiting for COS Control · planned with')
     expect(page).not.toContain('sent from this browser')
     expect(page).not.toContain('Dispatched')
@@ -671,7 +672,7 @@ describe('the draft and the keyboard: nothing typed is lost', () => {
     const again = await opened({ storage: h.storage })
     const r = again.card().rounds[0]
     expect(r.state).toBe('planFailed')
-    expect(r.error).toBe('Planning stopped when this page closed. Nothing was sent. Use this request again to plan it.')
+    expect(r.error).toBe('Planning stopped when this page closed. Nothing was sent. Plan again to plan it.')
     again.tap('chat-again', { 'data-key': r.key })
     expect(again.box()!.value).toBe('Plan this please')
     expect(again.calls.some(c => c.path.includes('lens-rounds'))).toBe(false)
@@ -934,5 +935,140 @@ describe('QA follow-ups: limits, truthful states, two tabs, Open session', () =>
     const h = await opened({ answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: two } })
     const html = h.dom.ids.get('wk-part-side')!.html || h.dom.pane.html
     expect(html).toMatch(/Agent workspace<\/h2>[\s\S]*data-wk="session" data-provider="claude" data-sid="11111111-1111-4111-8111-111111111111">Open session</)
+  })
+})
+
+// ── W1 (Control 0.5.386 parity, PLAN_work_chat_no_session T9): an empty card, Plan again, Start work's default ──
+const EMPTY_INPUT = { ...INPUT, rows: [] as unknown[], leftOut: [] as unknown[], discovered: 0 }
+const NO_ASSIGN = { protocolVersion: 1, answer: 'Nothing on this card can pick this up yet.', assignments: [] as unknown[], model: 'claude:claude-opus-5-5', effort: 'high' }
+const chatPlanBody = (h: Awaited<ReturnType<typeof opened>>) => h.calls.filter(c => c.path === '/api/work/chat' && c.method === 'POST').map(c => c.body)
+
+describe('W1: an empty card plans one New session, as Control 0.5.386 does', () => {
+  it('offers the planner exactly one provider (Claude) and says so while it plans', async () => {
+    const h = await planned({ answers: { '/api/work/orchestrator/input': EMPTY_INPUT, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : NO_ASSIGN) } })
+    const body = chatPlanBody(h)[0]
+    expect(body.newSessionProviders).toEqual(['claude'])
+  })
+  it('Codex when Claude is low, and never a used-up provider', async () => {
+    const low = { ...EMPTY_INPUT, usage: [{ ...INPUT.usage[0], state: 'low' }, INPUT.usage[1]] }
+    const h = await planned({ answers: { '/api/work/orchestrator/input': low, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : NO_ASSIGN) } })
+    expect(chatPlanBody(h)[0].newSessionProviders).toEqual(['codex'])
+    const out = { ...EMPTY_INPUT, usage: [INPUT.usage[0], { ...INPUT.usage[1], state: 'exhausted' }] }
+    const h2 = await planned({ answers: { '/api/work/orchestrator/input': out, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : NO_ASSIGN) } })
+    expect(chatPlanBody(h2)[0].newSessionProviders).toEqual(['claude'])
+  })
+  it('a card with a session it can continue is not an empty card', async () => {
+    const h = await planned()
+    expect(chatPlanBody(h)[0].newSessionProviders).toEqual(['claude', 'codex'])
+  })
+  it('keeps one New session at most, stops at Ready to send, and says what Send will do', async () => {
+    const two = { ...NO_ASSIGN, answer: 'Start one.', assignments: [{ mode: 'newSession', provider: 'claude', prompt: 'One.' }, { mode: 'newSession', provider: 'claude', prompt: 'Two.' }] }
+    const h = await planned({ answers: { '/api/work/orchestrator/input': EMPTY_INPUT, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : two) } })
+    const r = h.card().rounds[0]
+    expect(r.state).toBe('ready')
+    expect(r.assignments.map((a: any) => a.prompt)).toEqual(['One.'])
+    expect(h.html()).toContain('No session on this task yet. COS will start a new Claude session when you press Send.')
+    expect(h.sent('/api/work/chat/lens-rounds')).toHaveLength(0)
+  })
+  it('a plan with no assignment offers one tap that sends one New session with the request, once', async () => {
+    const h = await planned({ answers: { '/api/work/orchestrator/input': EMPTY_INPUT, '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : NO_ASSIGN) } })
+    const r = h.card().rounds[0]
+    expect(r.state).toBe('answered')
+    expect(h.html()).toContain('Start a new Claude session with this request')
+    expect(h.html()).toContain('Nothing is sent until you press this.')
+    h.tap('chat-start-new', { 'data-key': r.key }); await flush(30)
+    h.tap('chat-start-new', { 'data-key': r.key }); await flush(30)
+    const saved = h.sent('/api/work/chat/lens-rounds')
+    expect(saved).toHaveLength(1)
+    expect(saved[0]!.body.assignments).toEqual([{ id: 'a1', mode: 'newSession', provider: 'claude', prompt: 'Fix the rounding on the pricing page and add a test' }])
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(1)
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)[0]!.body.assignmentIds).toEqual(['a1'])
+    expect(h.html()).not.toContain('Start a new Claude session with this request')
+  })
+})
+
+describe('W1: Plan again reruns a round that failed before planning, in place', () => {
+  it('one request is one round: Plan again reuses it, and the composer draft is left alone', async () => {
+    let n = 0
+    const h = await planned({ answers: { '/api/work/orchestrator/input': () => (++n === 1 ? fail(503, 'orchestrator_input_unavailable') : INPUT) } })
+    const r = h.card().rounds[0]
+    expect(r.state).toBe('planFailed')
+    expect(h.html()).toContain('data-wk="chat-plan-again"')
+    expect(h.html()).not.toContain('Use this request again')
+    h.type('a new draft')
+    h.tap('chat-plan-again', { 'data-key': r.key }); await flush(30)
+    expect(h.card().rounds).toHaveLength(1)
+    expect(h.card().rounds[0].key).toBe(r.key)
+    expect(h.card().rounds[0].state).toBe('ready')
+    expect(h.card().draft).toBe('a new draft')
+    expect(chatPlanBody(h).map(b => b.question)).toEqual(['Fix the rounding on the pricing page and add a test'])
+  })
+  it('a round the planner answered is never planned again in place', async () => {
+    const h = await planned()
+    const r = h.card().rounds[0]
+    expect(r.state).toBe('ready')
+    h.tap('chat-plan-again', { 'data-key': r.key }); await flush(30)
+    expect(chatPlanBody(h)).toHaveLength(1)
+    expect(h.card().rounds).toHaveLength(1)
+  })
+})
+
+describe('W1: Start work on a card with no session of its own preselects Start a new session', () => {
+  it('even over a saved Continue', async () => {
+    const saved = { ...ACTIVITY, savedDestination: { mode: 'continueSession', sessionId: S1 } }
+    const h = await opened({ route: [ID, 'start'], answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: saved } })
+    h.chat.renderStart(ID); await flush()
+    expect(h.dom.pane.html).toContain('Start work on this card?')
+    expect(h.dom.pane.html).toContain('value="newSession" checked')
+    expect(h.dom.pane.html).not.toContain('value="continueSession" checked')
+  })
+  it('a card with its own session still opens on the saved Continue', async () => {
+    const own = { ...ACTIVITY, savedDestination: { mode: 'continueSession', sessionId: S1 },
+      activities: [{ id: 'r-1', sessionId: S1, provider: 'claude', sessionTitle: 'Pricing page', status: 'idle', acknowledged: true, createdAt: '2026-11-06T22:00:00.000Z' }] }
+    const h = await opened({ route: [ID, 'start'], answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: own } })
+    h.chat.renderStart(ID); await flush()
+    expect(h.dom.pane.html).toContain('value="continueSession" checked')
+  })
+})
+
+describe('W1 (audit 02 F6): Sort offers only what this server serves', () => {
+  const sortWith = async (caps: Record<string, unknown>, loop: boolean | null) => {
+    const h = await opened()
+    h.chat.S.tasks = [{ ...JSON.parse(JSON.stringify(TASK)), workStage: 'mentioned' }]
+    h.chat.S.intake = []; h.chat.S.loadedAt = Date.now() + 1
+    h.chat.S.caps = caps; h.chat.S.undoBatch = 'wi_x:1'; h.chat.S.loopAvailable = loop
+    return h.chat.sortView() as string
+  }
+  it('no undo or batch routes (7.0.13): no Undo, no Keep or Drop, and no promise of a newer server', async () => {
+    const html = await sortWith({ writable: true }, false)
+    expect(html).toContain('Ship the pricing page fix')
+    expect(html).toContain('data-wk="open"')
+    expect(html).not.toContain('data-wk="card-keep"')
+    expect(html).not.toContain('data-wk="card-drop"')
+    expect(html).not.toContain('data-wk="undo"')
+    expect(html).not.toMatch(/newer COS server|Work batch changes/)
+  })
+  it('a server that serves them gets them back', async () => {
+    const html = await sortWith({ writable: true, workBatch: 1 }, true)
+    expect(html).toContain('data-wk="card-keep"')
+    expect(html).toContain('data-wk="card-drop"')
+    expect(html).toContain('data-wk="undo"')
+  })
+})
+
+describe('W1 (audit 02 F8): a request from the phone says it needs COS Control open, and how long it waits', () => {
+  const startWith = async (request: Record<string, unknown>) => {
+    const h = await opened({ route: [ID, 'start'] })
+    h.chat.S.start[WID] = { mode: 'newSession', sessionId: '', model: '', note: '', sending: false, request, error: '', fromSaved: false, madeAt: new Date(), fails: 0, pollStopped: '' }
+    h.chat.renderStart(ID); await flush()
+    return h.dom.pane.html as string
+  }
+  it('pending: COS Control has to be open on the Mac, and the minutes left', async () => {
+    const html = await startWith({ clientRequestId: 'r1', state: 'pending', expiresAt: new Date(Date.parse('2026-11-06T23:00:00.000Z') + 7 * 60000 - 1000).toISOString() })
+    expect(html).toContain('Waiting for COS Control on your Mac to pick this up. COS Control has to be open on the Mac. Nothing has been sent yet. It waits 7 more minutes.')
+  })
+  it('expired: nothing was sent, open COS Control and send again', async () => {
+    const html = await startWith({ clientRequestId: 'r1', state: 'expired' })
+    expect(html).toContain('COS Control on your Mac did not pick this up within 10 minutes, so nothing was sent. Open COS Control on the Mac, then send it again.')
   })
 })

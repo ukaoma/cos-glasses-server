@@ -35,7 +35,9 @@
     ['codex-frontier', 'Codex frontier'], ['codex-balanced', 'Codex balanced']];
   var MODEL_PROVIDER = { opus: 'claude', fable: 'claude', sonnet: 'claude', haiku: 'claude', 'codex-frontier': 'codex', 'codex-balanced': 'codex' };
   var HELPER = "'/Applications/COS Control.app/Contents/Resources/cos-control-helper'";
-  var UNDO_MISSING = 'Undo needs a newer COS server. To change a card, open it in Work.';
+  // W1 (7.0.x): no COS server serves the undo or batch routes yet (audit 02 F6), so Undo, Keep and Drop are offered only
+  // where the server answers for them, and nothing on the page promises a newer server.
+  var UNDO_FAILED = 'Undo did not go through. To change a card, open it in Work.';
   var INTAKE_REFUSALS = {
     meeting_identity_changed: 'That meeting was renamed or merged after it was scored. Dismiss this item; the renamed meeting is checked again.',
     meeting_unavailable: 'That meeting can’t be found; it may have been renamed or removed. Dismiss this item.',
@@ -51,13 +53,21 @@
     intake_store_closed: 'Intake is unavailable while the server restarts. Try again shortly.',
     work_intake_unavailable: 'Intake is unavailable right now. Try again shortly.' };
   var REQUEST_LINE = {
-    pending: 'Waiting for COS Control on your Mac to pick this up. Nothing has been sent yet.',
+    pending: 'Waiting for COS Control on your Mac to pick this up. COS Control has to be open on the Mac. Nothing has been sent yet.',
     claimed: 'COS Control picked it up and is sending it.',
     sent: 'Sent. The session has the card’s context.',
     refused: 'COS Control did not send it.',
     unresolved: 'COS Control sent it but could not confirm it arrived. Check the session before sending again.',
     unconfirmed: 'COS Control took it and has not said whether it was sent. Check the session before sending again.',
-    expired: 'COS Control did not pick it up in time. Nothing was sent.' };
+    expired: 'COS Control on your Mac did not pick this up within 10 minutes, so nothing was sent. Open COS Control on the Mac, then send it again.' };
+  // W1 (audit 02 F8): a request from this page only goes through when COS Control on the Mac picks it up, within 10 minutes
+  // of when it was made (lib/work-handoff-requests.ts pendingMs). While it waits, the line says how long is left.
+  function requestLine(req) {
+    var line = REQUEST_LINE[req.state] || req.state;
+    if (req.state !== 'pending') return line;
+    var until = W.toDate(req.expiresAt), left = until ? Math.ceil((until.getTime() - Date.now()) / 60000) : 0;
+    return left > 0 ? line + ' It waits ' + (left === 1 ? '1 more minute.' : left + ' more minutes.') : line;
+  }
   var STOP = {};
   ('a an and are as at be by for from in into is me my of on or our so that the their this to up was we with you your').split(' ').forEach(function (w) { STOP[w] = 1; });
 
@@ -831,8 +841,7 @@
     if (S.sortIndex > n - 1) S.sortIndex = Math.max(0, n - 1);
     var g = n ? groups[S.sortIndex] : null, batch = S.caps.workBatch === 1 && S.caps.writable === true;
     S.sortGroupId = g ? g.id : '';
-    var undo = S.undoBatch ? (S.loopAvailable === true ? '<button type="button" class="wk-text-btn" data-wk="undo">Undo last decision</button>'
-      : S.loopAvailable === false ? '<span class="wk-muted">' + esc(UNDO_MISSING) + '</span>' : '') : '';
+    var undo = S.undoBatch && S.loopAvailable === true ? '<button type="button" class="wk-text-btn" data-wk="undo">Undo last decision</button>' : '';
     var body;
     if (S.intakeError && !(S.intake && S.intake.length)) body = '<p class="wk-muted">' + esc(S.intakeError) + '</p>';
     else if (!S.intake) body = '<p class="wk-muted">Loading Intake…</p>';
@@ -844,10 +853,10 @@
         g.cards.map(function (t) {
           var meta = [str(t.createdAt), str(t.owner), str(t.dueDate) ? 'Due ' + t.dueDate : ''].filter(Boolean).join(' · ');
           return '<div class="wk-sort-card"><p class="wk-intake-text">' + inline(titleOf(t)) + '</p>' + (meta ? '<p class="wk-muted">' + esc(meta) + '</p>' : '') +
-            '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="card-keep" data-id="' + esc(identity(t)) + '"' + (batch && !S.batchBusy ? '' : ' disabled') + '>Keep</button>' +
-            '<button type="button" class="cx-btn quiet" data-wk="card-drop" data-id="' + esc(identity(t)) + '"' + (batch && !S.batchBusy ? '' : ' disabled') + '>Drop</button>' +
+            '<div class="wk-row">' + (batch ? '<button type="button" class="cx-btn quiet" data-wk="card-keep" data-id="' + esc(identity(t)) + '"' + (S.batchBusy ? ' disabled' : '') + '>Keep</button>' +
+            '<button type="button" class="cx-btn quiet" data-wk="card-drop" data-id="' + esc(identity(t)) + '"' + (S.batchBusy ? ' disabled' : '') + '>Drop</button>' : '') +
             '<button type="button" class="wk-text-btn" data-wk="open" data-id="' + esc(identity(t)) + '">Open card</button></div></div>';
-        }).join('') + (g.cards.length && !batch ? '<p class="wk-fine">Keep and Drop need a COS server with Work batch changes.</p>' : '') +
+        }).join('') +
         (g.items.length ? '<div class="wk-items"><div class="wk-row"><h4>Items to decide</h4><span class="wk-muted">' + g.items.length + '</span></div>' +
           '<p class="wk-muted">Keep what you own. Other people’s asks can become cards when you take them on.</p>' +
           '<div class="wk-items-list">' + g.items.map(intakeRow).join('') + '</div></div>' : '') +
@@ -1016,7 +1025,7 @@
     if (r.request) {
       var req = r.request, done = ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(req.state) >= 0;
       return '<div class="wk-handoff" data-tone="' + (req.state === 'sent' ? 'green' : req.state === 'refused' || req.state === 'expired' ? 'danger' : 'accent') + '"><p class="wk-state">' +
-        esc(REQUEST_LINE[req.state] || req.state) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') +
+        esc(requestLine(req)) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') +
         (r.pollStopped ? '<p class="wk-small wk-muted">' + esc(r.pollStopped) + '</p>' : done ? '' : '<p class="wk-fine">This page checks every few seconds.</p>') +
         (done || r.pollStopped ? '<div class="wk-row"><button type="button" class="wk-text-btn" data-wk="reply-reset" data-id="' + esc(it.id) + '">Dismiss</button></div>' : '') + '</div>';
     }
@@ -1266,9 +1275,10 @@
       state: CHAT_ROUND_WORD[r.state] ? r.state : 'planFailed', roundState: chatClean(r.roundState, 40), inHistory: r.inHistory === true,
       states: r.states && typeof r.states === 'object' ? r.states : {}, error: chatClean(r.error, 400), at: Number(r.at) || 0, sentAt: Number(r.sentAt) || 0,
       sendUnknown: r.sendUnknown === true, context: chatClean(r.context, 4000), skipped: r.skipped && typeof r.skipped === 'object' ? r.skipped : {},
-      pollSince: Number(r.pollSince) || 0, pollStopped: r.pollStopped === true, up: Number(r.up) || 0 };
+      pollSince: Number(r.pollSince) || 0, pollStopped: r.pollStopped === true, up: Number(r.up) || 0,
+      offerNewSession: CHAT_NEW_PROVIDERS.indexOf(r.offerNewSession) >= 0 ? r.offerNewSession : '' };
     // A plan in flight lives only in this page. After a reload it is gone, and nothing was saved or sent for it.
-    if (out.state === 'planning') { out.state = 'planFailed'; out.error = 'Planning stopped when this page closed. Nothing was sent. Use this request again to plan it.'; }
+    if (out.state === 'planning') { out.state = 'planFailed'; out.error = 'Planning stopped when this page closed. Nothing was sent. Plan again to plan it.'; }
     return out;
   }
   function chatOf(wid) {
@@ -1336,7 +1346,8 @@
   function chatStored(r) {
     return { key: r.key, roundId: r.roundId, question: r.question, answer: r.answer, assignments: r.assignments, planner: r.planner, model: r.model,
       effort: r.effort, note: r.note, meter: r.meter, state: r.state, roundState: r.roundState, inHistory: r.inHistory, states: r.states, error: r.error,
-      at: r.at, sentAt: r.sentAt, sendUnknown: r.sendUnknown, context: r.context, skipped: r.skipped, pollSince: r.pollSince || 0, pollStopped: !!r.pollStopped };
+      at: r.at, sentAt: r.sentAt, sendUnknown: r.sendUnknown, context: r.context, skipped: r.skipped, pollSince: r.pollSince || 0, pollStopped: !!r.pollStopped,
+      offerNewSession: r.offerNewSession || '' };
   }
   function chatTrim(rounds) {
     var newest = rounds.slice(-CHAT_KEEP.rounds);
@@ -1459,6 +1470,29 @@
     return 'COS found ' + total + ' session' + (total === 1 ? '' : 's') + ' for this task, none can take a Continue now' +
       (named.length ? ': ' + named.join('; ') + (more > 0 ? '; and ' + more + ' more' : '') : '') + '. The planner can fork one or start a new session.';
   }
+  // ── An empty card (Control 0.5.386, Miles 2026-11-09; WorkOrchestrator.swift "An empty card") ──
+  // A card with no session that can take a Continue or a Fork plans exactly one New session: Claude, or Codex when Claude's
+  // plan usage is low (a used-up provider is never offered). COS Control on the Mac picks the model when it sends: Opus when
+  // available on 0.5.386. Nothing starts until a Send.
+  var CHAT_NEW_PROVIDERS = ['claude', 'codex'];
+  function chatNothingToContinue(rows) {
+    return !rows.some(function (r) { return chatAutomatic(r) || (r.forkable && FORKABLE[r.id.slice(0, r.id.indexOf(':'))]); });
+  }
+  function chatEmptyCardProvider(offered, usage) {
+    var claudeLow = usage.some(function (u) { return u.provider === 'claude' && u.state === 'low'; });
+    if (offered.indexOf('claude') >= 0 && !(claudeLow && offered.indexOf('codex') >= 0)) return 'claude';
+    return offered.indexOf('codex') >= 0 ? 'codex' : '';
+  }
+  function chatOneNewSession(list) {
+    var seen = false;
+    return list.filter(function (a) { if (a.mode !== 'newSession') return true; var keep = !seen; seen = true; return keep; });
+  }
+  function chatEmptyPhase(p) { return 'No session on this task yet. Planning a new ' + providerName(p) + ' session\u2026'; }
+  function chatEmptyNote(p) { return 'No session on this task yet. COS will start a new ' + providerName(p) + ' session when you press Send.'; }
+  function chatStartNewTitle(p) { return 'Start a new ' + providerName(p) + ' session with this request'; }
+  // Plan again (WorkChatPolicy.canPlanAgain): a round that failed before the planner answered, so nothing was planned or sent.
+  function chatCanPlanAgain(r) { return !!(r && r.state === 'planFailed' && !r.answer && !r.assignments.length && !r.roundId && !r.sentAt); }
+
   // The planner input, exactly as the server's parseWorkChatInput reads an orchestrator client's (Control 0.5.333).
   function chatPlanBody(it, question, input, c, wid) {
     var t = it.task, ids = {};
@@ -1544,8 +1578,10 @@
     if (c.rounds.some(function (r) { return r.state === 'planning'; })) return 'A plan is still being made for this card.';
     return '';
   }
-  function chatPlan(it) {
-    var c = chatOf(it.wid), question = c.draft.trim();
+  function chatPlan(it, replanKey) {
+    var c = chatOf(it.wid), again = replanKey ? chatFindRound(it.wid, replanKey) : null;
+    if (replanKey && !chatCanPlanAgain(again)) return Promise.resolve(false);
+    var question = again ? again.question : c.draft.trim();
     if (c.busy || !question || chatProblem(it, c)) return Promise.resolve(false);
     var wid = chatWorkId(it.task);
     c.busy = true; c.error = ''; c.phase = 'Reading the task and its connections…';
@@ -1559,10 +1595,13 @@
         throw chatOwn('This task changed since the page loaded. Check it, then plan again. Your request is still here.');
       }
       // From here the request belongs to a round, as on the Mac: the composer is cleared and the round keeps the words.
-      var r = { key: 'web-' + uuid(), roundId: '', question: question, answer: '', assignments: [], planner: chatPlanner(), model: '', effort: '', note: '', meter: null,
-        state: 'planning', roundState: '', inHistory: false, states: {}, error: '', at: Date.now(), sentAt: 0, sendUnknown: false, context: '', skipped: {} };
-      c.rounds.push(r); c.draft = ''; c.draftAt = Date.now(); chatTouch(c);
-      chatResetComposer(it.wid);
+      // Plan again reuses the failed round in its place (same key, same words), so one request never shows twice, and the
+      // composer's draft is left alone.
+      var base = { key: again ? again.key : 'web-' + uuid(), roundId: '', question: question, answer: '', assignments: [], planner: chatPlanner(), model: '', effort: '', note: '', meter: null,
+        state: 'planning', roundState: '', inHistory: false, states: {}, error: '', at: Date.now(), sentAt: 0, sendUnknown: false, context: '', skipped: {}, offerNewSession: '' };
+      var r = again ? Object.assign(again, base) : base;
+      if (!again) { c.rounds.push(r); c.draft = ''; c.draftAt = Date.now(); chatTouch(c); chatResetComposer(it.wid); }
+      else chatTouch(c);
       c.phase = 'Finding this task’s sessions…'; chatRepaint(it.wid);
       var meetings = (Array.isArray(it.task.meetingRefs) ? it.task.meetingRefs : []).map(function (m) { return m && typeof m.recordId === 'string' ? 'meeting:' + m.recordId : ''; })
         .filter(function (m) { return m && m.length <= 250 && /^meeting:[^\u0000-\u001f]+$/.test(m); }).slice(0, 20);
@@ -1570,17 +1609,27 @@
         var input = chatReadInput(raw);
         if (!input || raw.workID !== wid) throw chatOwn('The server’s list of this task’s sessions could not be read. Nothing was sent.');
         var body = chatPlanBody(it, question, input, c, wid);
+        // Empty card: the planner is offered exactly one provider for its one New session.
+        var empty = chatNothingToContinue(input.rows) ? chatEmptyCardProvider(body.newSessionProviders, input.usage) : '';
+        if (empty) body.newSessionProviders = [empty];
         r.note = chatSessionsNote(input);
         r.meter = chatMeter(question, body.context, wid);
         r.context = body.context.slice(0, 4000);
-        c.phase = 'Thinking through the request with ' + plannerName(body.planner || 'sonnet') + '…'; chatRepaint(it.wid);
+        c.phase = empty ? chatEmptyPhase(empty) : 'Thinking through the request with ' + plannerName(body.planner || 'sonnet') + '…'; chatRepaint(it.wid);
         return api('/api/work/chat', { method: 'POST', body: body, timeoutMs: CHAT_TIMEOUT.plan }).then(function (answer) {
           var plan = chatReadPlan(answer, input, body);
           if (plan && plan.tooMany) throw chatOwn('The plan has more than 3 assignments, more than COS sends from one plan. Nothing was sent. Plan again.');
           if (!plan) throw chatOwn('The plan named a session it may not send to here, or broke a limit. Nothing was sent. Plan again.');
-          r.answer = plan.answer; r.assignments = plan.assignments;
+          var planned = plan.assignments;
+          if (empty) {
+            // One New session at most. With it the round stops at Ready to send; without one, the round offers it as one tap.
+            planned = chatOneNewSession(planned);
+            if (planned.some(function (a) { return a.mode === 'newSession'; })) r.note = chatEmptyNote(empty);
+            else if (!planned.length) r.offerNewSession = empty;
+          }
+          r.answer = plan.answer; r.assignments = planned;
           r.model = chatClean(answer.model, 100); r.effort = CHAT_EFFORTS.indexOf(answer.effort) >= 0 ? answer.effort : '';
-          r.state = plan.assignments.length ? 'ready' : 'answered';
+          r.state = planned.length ? 'ready' : 'answered';
           chatTouch(c);
           // The plan is saved to the Mac only on Send. Today's COS Control files every saved round as a plan "from your
           // glasses" and posts a notice, so saving on Plan would announce a plan nobody chose to send. Send saves it
@@ -1779,6 +1828,20 @@
     chatTouch(c); chatRepaint(it.wid);
     return true;
   }
+  // "Start a new Claude session with this request" (WorkTaskChat.startNewSession): the tap is the Send. It makes the one New
+  // session assignment (the request as its prompt) and sends it through chatSend, so the server's one-send-per-round rule,
+  // the saved round and COS Control's fences all apply. Once only: the offer is gone as soon as it is tapped.
+  function chatStartNewSession(it, r) {
+    var p = r && r.offerNewSession;
+    if (!p || CHAT_NEW_PROVIDERS.indexOf(p) < 0 || r.state !== 'answered' || r.assignments.length || r.sending || chatOf(it.wid).busy) return Promise.resolve(false);
+    if (!r.question.trim() || r.question.length > 2000 || /COS-WORK/i.test(r.question.replace(/[*_`‌‍]/g, ''))) {
+      r.error = 'This request cannot be sent as it is. Edit it and plan again. Nothing was sent.'; chatRepaint(it.wid); return Promise.resolve(false);
+    }
+    r.assignments = [{ id: 'a1', mode: 'newSession', provider: p, prompt: r.question, title: 'New ' + providerName(p) + ' session' }];
+    r.offerNewSession = ''; r.state = 'ready'; r.note = chatEmptyNote(p);
+    chatTouch(chatOf(it.wid));
+    return chatSend(it, r, ['a1']);
+  }
   function chatAgain(it, r) {
     var c = chatOf(it.wid);
     if (!r || c.draft.trim() || c.busy) return;
@@ -1895,6 +1958,13 @@
         (r.pollStopped ? '<p class="wk-fine">This page stopped checking it. Check again to see whether the Mac sent it.</p><div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-check" data-key="' + esc(r.key) + '">Check again</button></div>' : '');
     } else if (r.state === 'quiet') {
       actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-check" data-key="' + esc(r.key) + '">Check again</button></div>';
+    } else if (r.state === 'answered' && !r.assignments.length && r.offerNewSession) {
+      actions = '<div class="wk-row wk-wrap wk-round-actions"><button type="button" class="cx-btn primary" data-wk="chat-start-new" data-key="' + esc(r.key) + '"' + (r.sending || c.busy ? ' disabled' : '') + '>' +
+        esc(chatStartNewTitle(r.offerNewSession)) + '</button></div>' +
+        '<p class="wk-fine">No session on this task yet, and the plan did not start one. Nothing is sent until you press this.</p>';
+    } else if (chatCanPlanAgain(r)) {
+      actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-plan-again" data-key="' + esc(r.key) + '"' + (c.busy ? ' disabled' : '') + '>Plan again</button>' +
+        '<span class="wk-small wk-muted">Plans this request again here. Nothing is sent until you press Send.</span></div>';
     } else if (r.state === 'planFailed' || (r.state === 'notDelivered' && !r.roundId)) {
       actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-again" data-key="' + esc(r.key) + '"' + (c.draft.trim() || c.busy ? ' disabled title="Clear the message box first"' : '') + '>Use this request again</button></div>';
     }
@@ -1907,7 +1977,7 @@
     var waited = Date.now() - (r.sentAt || Date.now());
     var sendingLine = r.state !== 'sending' ? '' : '<p class="wk-small wk-muted">' + esc(r.roundState === 'sending' ? 'COS Control on your Mac is sending it. This page checks every few seconds.'
       : r.roundState === 'checking' ? 'COS Control already has a send for this plan. Checking where it is…'
-      : waited < 60000 ? 'Waiting for COS Control on your Mac to send this. Nothing has been sent yet.'
+      : waited < 60000 ? 'Waiting for COS Control on your Mac to send this. COS Control has to be open on the Mac. Nothing has been sent yet.'
       : 'Waiting for COS Control on your Mac to send this. It has not picked it up yet: the Mac may be asleep or COS Control closed. The request waits 10 minutes, and nothing is sent until COS Control takes it.') + '</p>';
     return '<article class="wk-round" data-key="' + esc(r.key) + '">' +
       '<p class="wk-round-q">' + esc(r.question) + '</p>' +
@@ -2087,9 +2157,11 @@
     if (st) return st;
     var saved = (S.activity[it.wid] || {}).savedDestination, rows = sessionChoices(it);
     st = { mode: 'newSession', sessionId: '', model: '', note: '', sending: false, request: null, error: '', fromSaved: false };
-    if (saved && saved.mode) {
+    // Control 0.5.386: a card with no session of its own preselects Start a new session, even over a saved Continue or Fork.
+    var own = rows.filter(function (c) { return !c.saved; });
+    if (saved && saved.mode && (saved.mode === 'newSession' || own.length)) {
       st.mode = saved.mode; st.sessionId = str(saved.sessionId); st.model = str(saved.model); st.fromSaved = true;
-    } else if (rows.length) { st.mode = 'continueSession'; st.sessionId = rows[0].sessionId; }
+    } else if (own.length) { st.mode = 'continueSession'; st.sessionId = own[0].sessionId; }
     S.start[it.wid] = st;
     return st;
   }
@@ -2133,7 +2205,7 @@
     if (req) {
       var terminal = ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(req.state) >= 0;
       reqHtml = '<div class="wk-handoff" data-tone="' + (req.state === 'sent' ? 'green' : req.state === 'refused' || req.state === 'expired' ? 'danger' : 'accent') + '">' +
-        '<p class="wk-state">' + esc(REQUEST_LINE[req.state] || req.state) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') +
+        '<p class="wk-state">' + esc(requestLine(req)) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') +
         (st.pollStopped ? '<p class="wk-small wk-muted">' + esc(st.pollStopped) + '</p>' : '') +
         (terminal || st.pollStopped ? '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="back">Back to the card</button></div>' : '<p class="wk-fine">This page checks every few seconds.</p>') + '</div>';
     }
@@ -2321,7 +2393,7 @@
     if (!S.undoBatch) return;
     api('/api/work-intake/undo', { method: 'POST', body: { batchId: S.undoBatch } }).then(function () {
       S.undoBatch = null; loadIntake(true); loadBoard(true);
-    }, function (err) { if (err.status === 404) S.loopAvailable = false; S.sortError = err.status === 404 ? UNDO_MISSING : errText(err); render(); });
+    }, function (err) { if (err.status === 404) S.loopAvailable = false; S.sortError = err.status === 404 ? UNDO_FAILED : errText(err); render(); });
   }
   function batchOp(t, action, fields) {
     if (S.batchBusy || !(S.caps.workBatch === 1 && S.caps.writable === true)) return;
@@ -2330,7 +2402,7 @@
     S.batchBusy = true; S.loopError = ''; render();
     api('/api/work-board/batch', { method: 'POST', body: { domain: t.domain, ops: [op] } }).then(function () {
       S.batchBusy = false; loadBoard(true); if (S.tab === 'waiting') loadWaiting();
-    }, function (err) { S.batchBusy = false; S.loopError = err.status === 404 ? 'Waiting on needs a newer COS server.' : errText(err); render(); });
+    }, function (err) { S.batchBusy = false; S.loopError = err.status === 404 ? 'Waiting on is not on this COS server.' : errText(err); render(); });
   }
   function loadWaiting() {
     var mode = S.waitingDropped ? 'dropped' : 'waiting';
@@ -2338,7 +2410,7 @@
       var rows = (d && (d.tasks || d.items || d.cards)) || [];
       if (mode === 'dropped') S.dropped = rows; else S.waiting = rows;
       S.loopError = ''; render();
-    }, function (err) { S.loopError = err.status === 404 ? (mode === 'dropped' ? 'Dropped cards need a newer COS server.' : 'Waiting on needs a newer COS server.') : errText(err);
+    }, function (err) { S.loopError = err.status === 404 ? (mode === 'dropped' ? 'Dropped cards are not on this COS server.' : 'Waiting on is not on this COS server.') : errText(err);
       if (mode === 'dropped') S.dropped = []; else S.waiting = []; render(); });
   }
   // Meaning search: asked only when Return is pressed in the search box (never while typing).
@@ -2472,6 +2544,10 @@
         it = current(); if (!it) return;
         var draftBox = $('wk-chat-text'); if (draftBox) { chatOf(it.wid).draft = draftBox.value; draftBox.blur(); }
         chatPlan(it); return;
+      case 'chat-plan-again': case 'chat-start-new':
+        it = current(); var again = it && chatFindRound(it.wid, t.getAttribute('data-key')); if (!again) return;
+        if (act === 'chat-plan-again') chatPlan(it, again.key); else chatStartNewSession(it, again);
+        return;
       case 'chat-send': case 'chat-confirm': case 'chat-cancel': case 'chat-skip': case 'chat-stop': case 'chat-again': case 'chat-check': case 'chat-remove':
         it = current(); var round = it && chatFindRound(it.wid, t.getAttribute('data-key')); if (!round) return;
         var ids = String(t.getAttribute('data-ids') || '').split(',').filter(Boolean);
@@ -2681,7 +2757,7 @@
     // For web-control/work-composer-web.test.ts: Work chat's steps, run against a fake server.
     _chat: { S: S, of: chatOf, plan: chatPlan, send: chatSend, stop: chatStop, again: chatAgain, poll: chatPoll, caps: loadChatCaps, readCaps: chatReadCaps,
       find: chatFindRound, planBody: chatPlanBody, context: chatContext, meter: chatMeter, readPlan: chatReadPlan, readInput: chatReadInput,
-      store: function () { return chatStore; }, save: chatSave, timers: CHAT_TIMERS, render: renderDetail, restore: chatRestored, item: itemFor,
+      store: function () { return chatStore; }, save: chatSave, timers: CHAT_TIMERS, render: renderDetail, renderStart: renderStart, sortView: sortView, restore: chatRestored, item: itemFor,
       mergeIn: function () { chatMergeIn(chatReadDisk()); }, limits: { questionChars: CHAT_MAX, pollMaxMs: CHAT_POLL.max } },
     // The Ask sheet's "Find a task about this": open the board on this query and ask by meaning.
     search: function (q) { S.q = String(q || ''); S.tab = 'board'; render(); searchMeaning(); },

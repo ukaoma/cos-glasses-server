@@ -773,7 +773,7 @@
     }, function (err) {
       row.undoing = false;
       if (err && err.status === 404) O.loop = false;
-      row.undoNote = err && err.status === 404 ? 'Undo needs a newer COS server. Change it in Work.' : (err && err.message) || 'Undo did not go through.';
+      row.undoNote = err && err.status === 404 ? 'Undo did not go through. Change it in Work.' : (err && err.message) || 'Undo did not go through.';
       if (row.state === 'dismissed') { row.until = Date.now() + UNDO_SECONDS * 1000; expireLater(); }
     }).then(paintIntake);
   }

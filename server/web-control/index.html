@@ -58,6 +58,10 @@
       <svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg>
       <h1 id="auth-title">Connect this browser</h1>
       <p>COS runs on your Mac. Sign in once and this browser stays connected for 7 days.</p>
+      <div id="auth-offline" class="auth-offline hidden" role="status">
+        <p id="auth-offline-text">Your Mac is not answering. COS runs on your Mac, so this page waits for it. Check that the Mac is awake and on Tailscale.</p>
+        <button type="button" class="btn primary block" id="auth-retry">Try again</button>
+      </div>
       <form id="auth-form">
         <div id="auth-code-block">
           <label for="auth-code">Sign-in code</label>
@@ -116,6 +120,8 @@
       </header>
 
       <main class="workspace" id="workspace">
+        <!-- W1: the Mac not answering, and the sign-in ending soon (app.js "Mac reachability and sign-in lifetime") -->
+        <div id="conn-notice" class="conn-notice" hidden></div>
         <!-- SESSION QUESTIONS (panes/questions.js, 6.99.12): over every pane while one waits -->
         <div id="sq-host" class="sq-host" aria-live="polite" hidden></div>
         <!-- TODAY -->

@@ -611,3 +611,13 @@ select.field {
 /* 6.99.30 (QA): an element with the hidden attribute is hidden, whatever display its classes give it ("Retry image"
    showed under loaded images: .link-btn's inline-flex beat [hidden]). */
 [hidden] { display: none !important; }
+
+/* W1: the Mac not answering, and the sign-in ending soon (app.js "Mac reachability and sign-in lifetime"). */
+.conn-notice { display: grid; gap: 8px; margin: 0 0 12px; }
+.conn-notice[hidden] { display: none; }
+.conn-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--panel-border); background: var(--panel); color: var(--ink); font-size: 15px; line-height: 1.4; }
+.conn-line strong { font-weight: 600; }
+.conn-line .conn-sub { color: var(--sub); flex: 1 1 220px; min-width: 0; }
+.conn-line .btn { margin: 0; }
+.auth-offline p { color: var(--sub); }
+.meaning-consent .row-actions { padding: 0 16px 14px; }

@@ -236,6 +236,7 @@ import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlEnabled } from './routes/web-control.js'
+import { webControlOffnetResponse } from './lib/web-control-offnet-page.js'
 import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
@@ -1652,7 +1653,12 @@ if (webControlEnabled()) {
   app.use('/control', (req, res, next) => {
     // Loopback and Tailscale only, unless COS_WEB_CONTROL_LAN=1 (review W2).
     if (!isWebControlSocketAllowed(req.socket?.remoteAddress, process.env, req.headers)) {
-      res.status(403).type('text').send('COS Control Web is available on this Mac and over Tailscale.')
+      // W1 (audit 02 F1): still 403, but a browser gets a short page that says to use Tailscale (lib/web-control-offnet-page.ts).
+      const offnet = webControlOffnetResponse(/\btext\/html\b/i.test(String(req.headers.accept ?? '')))
+      res.setHeader('Cache-Control', 'no-store')
+      if (offnet.csp) res.setHeader('Content-Security-Policy', offnet.csp)
+      res.setHeader('X-Content-Type-Options', 'nosniff')
+      res.status(403).type(offnet.type).send(offnet.body)
       return
     }
     res.setHeader('Content-Security-Policy', webControlCsp(req.path))

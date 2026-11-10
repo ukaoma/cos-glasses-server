@@ -24,6 +24,7 @@ import {
   type WebLoginFailure,
   WebGlassesCodeProbeBudget,
   WEB_SESSION_TTL_MS,
+  WEB_SESSION_COOKIE_NAME,
   WebHandoffStore,
   WebLoginLimiter,
   WebDeviceCodeStore,
@@ -199,6 +200,19 @@ export function webControlCsp(_requestPath: string): string {
   ].join('; ')
 }
 
+/** The expiry (ISO) carried in the first part of a cos_web_session cookie, `<exp unix s>.<epoch>.<sig>`. Read only after verification. */
+export function webSessionCookieExpiry(cookieHeader: unknown): string | null {
+  if (typeof cookieHeader !== 'string') return null
+  for (const part of cookieHeader.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq < 0 || part.slice(0, eq).trim() !== WEB_SESSION_COOKIE_NAME) continue
+    const exp = /^(\d{1,15})\./.exec(part.slice(eq + 1).trim())
+    const ms = exp ? Number(exp[1]) * 1000 : NaN
+    return Number.isSafeInteger(ms) && ms > 0 ? new Date(ms).toISOString() : null
+  }
+  return null
+}
+
 export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   const router = Router()
   const handoffStore = deps.handoffStore ?? new WebHandoffStore()
@@ -287,11 +301,16 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
         ? { authenticated: false, mode: 'none' }
         : { authenticated: false, mode: 'none', network: 'tailscale_only' })
     }
+    // W1 (audit 02 F2): a signed-in browser learns when ITS OWN cookie ends, so the page can say so before it does.
+    // Only after the cookie verified (its signature covers the expiry), only for cookie mode, and nothing a caller without
+    // that cookie can read. The 7-day lifetime itself is unchanged.
+    const expiresAt = cookieOk && !headerOk ? webSessionCookieExpiry(req.headers.cookie) : null
     res.json({
       authenticated: true,
       mode: headerOk ? 'header' : 'cookie',
       serverName: hostname().replace(/\.local$/i, ''),
       ownerName: getOwnerName(),
+      ...(expiresAt ? { expiresAt } : {}),
     })
   })
 
