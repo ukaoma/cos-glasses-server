@@ -28,6 +28,11 @@ describe('index.html: the six scripts are a list, in the order they always ran',
     expect(m, 'the list').not.toBeNull()
     expect(JSON.parse(m![1]!)).toEqual(LIST)
   })
+  it('each of them is preloaded in the head, in the same order, so a first open downloads them while the page parses', () => {
+    const head = HTML.slice(0, HTML.indexOf('</head>'))
+    const pre = [...head.matchAll(/<link rel="preload" href="([^"]+)" as="script">/g)].map(m => m[1])
+    expect(pre).toEqual(LIST)
+  })
   it('no script tag but theme.js, so nothing runs before the first paint; the list comes before the lazy panes', () => {
     expect(HTML.match(/<script src=/g)?.length).toBe(1)
     expect(HTML).toContain('<script src="/control/theme.js"></script>')
