@@ -14,6 +14,7 @@
 // whose shapes are still the documented ones until a Desktop recording lands.
 
 import { questionRowText, waitingQuestionWordsEnabled } from './full-hold.js'
+import { captureTurnAsk, turnEndAsksEnabled, WRAP_UP_TOOL } from './turn-end-ask.js'
 import { createHash } from 'node:crypto'
 import { profileIdForCodexPath } from './codex-homes.js'
 import { isKeyProfileId } from '../../shared/key-preference.js'
@@ -222,6 +223,18 @@ export function toolTarget(toolInput: unknown, max = 80): string {
   return text.length > max ? text.slice(0, max - 1) + '…' : text
 }
 
+/**
+ * 7.0.18 (X1): a turn-end ask (lib/turn-end-ask.ts) kept in the ledger so a restart replays it. Only on a
+ * PostToolUse of `mcp__ccd_turn__wrap_up`, only with COS_TURN_END_ASKS on, and only the bounded capture:
+ * the ask (80), at most 2 reply labels (40) and `blocked`. Never `recap`, never `tool_response`. An
+ * additive key, so 7.0.17 replays the row and ignores it. `tool_target` stays as 7.0.17 computes it.
+ */
+function turnAskProjection(event: HookEventName, toolName: string, toolInput: unknown): Record<string, unknown> {
+  if (event !== 'PostToolUse' || toolName !== WRAP_UP_TOOL || !turnEndAsksEnabled()) return {}
+  const capture = captureTurnAsk(toolInput, waitingQuestionWordsEnabled(process.env))
+  return capture ? { turn_ask: capture } : {}
+}
+
 /** Text fields kept from a payload. Everything else is dropped before the ledger sees it. */
 export const HOOK_TEXT_MAX = 400
 
@@ -280,6 +293,7 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
         ...(event === 'PermissionRequest' && Array.isArray(payload.permission_suggestions)
           ? { permission_suggestions: payload.permission_suggestions.slice(0, 4) }
           : {}),
+        ...turnAskProjection(event, toolName, payload.tool_input),
       }
     }
     case 'Notification':
