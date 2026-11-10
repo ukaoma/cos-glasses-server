@@ -119,6 +119,18 @@ describe('the questions route under the full hold', () => {
     expect(index).toContain('  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,')
   })
 
+  it('answered at the desk: the PostToolUse answers the held hook request {} at once, over the real socket', async () => {
+    const { base, broker, store } = await start({ questions: true, approvals: false })
+    const payload = { tool_use_id: 'toolu_desk' }
+    const held = await hook(base, { ...permissionEnvelope('AskUserQuestion', ASK_INPUT, payload, Date.now()), hookWaitS: 3600, askHold: 1 })
+    await until(async () => (broker.pendingCount() ? true : undefined))
+    const t0 = Date.now()
+    store.apply({ ts: Date.now(), ppid: 1, sessionId: SESSION, event: 'PostToolUse', payload: { session_id: SESSION, tool_name: 'AskUserQuestion', tool_input: ASK_INPUT, ...payload } }, false)
+    expect(await held.reply).toEqual({})
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    expect(broker.settledList()[0]).toMatchObject({ resolution: 'retracted' })
+  })
+
   it('the hook leaving settles the held item (hook_gone), as before', async () => {
     const { base, broker } = await start({ questions: true, approvals: false })
     const held = await hook(base, { ...permissionEnvelope('AskUserQuestion', ASK_INPUT, { tool_use_id: 'toolu_gone' }, Date.now()), hookWaitS: 3600, askHold: 1 })

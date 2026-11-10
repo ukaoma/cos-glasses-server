@@ -319,6 +319,35 @@ describe('full hold: while held', () => {
     expect(desk.b.answer(second.id, { clientAnswerId: 'lens', ...ANSWER }).status).toBe(409)
   })
 
+  it('the session moving past a held question answers the held hook response at once ({}), so no hook process outlives it', async () => {
+    for (const [name, payload] of [
+      ['PostToolUse', {}], ['PostToolUseFailure', {}], ['PermissionDenied', {}], ['Stop', {}], ['StopFailure', {}],
+      ['SessionEnd', {}], ['UserPromptSubmit', {}], ['Interrupt', {}], ['SessionStart', { source: 'startup' }],
+    ] as const) {
+      const h = harness()
+      const { sent } = park(h, await h.b.admit(ask()))
+      h.b.observeHookEvent(ev(h.s.now + 1, name as HookEnvelope['event'], payload), false)
+      expect([name, sent]).toEqual([name, [{}]])
+      expect(h.b.pendingCount()).toBe(0)
+    }
+  })
+
+  it('a held approval answered at the desk: the desk activity hands it back ({}) within one tick, before any PostToolUse', async () => {
+    const h = harness()
+    h.s.idle = 200
+    const { sent } = park(h, await h.b.admit(approval()))
+    h.s.idle = 1
+    await h.b.tick()
+    expect(sent).toEqual([{}])
+  })
+
+  it('at most MAX_PENDING (32) held at once; past it the Mac at once (capacity)', async () => {
+    const h = harness()
+    h.s.idle = 200
+    for (let i = 0; i < 32; i++) park(h, await h.b.admit(approval(1_000_000, { payload: { ...approval().payload, tool_use_id: `toolu_${i}`, tool_input: { command: `echo ${i}` } } })))
+    expect(await h.b.admit(approval(1_000_000, { payload: { ...approval().payload, tool_use_id: 'toolu_33', tool_input: { command: 'echo 33' } } }))).toEqual({ ok: false, reason: 'capacity' })
+  })
+
   it('a session row that ends retracts a held approval too', async () => {
     const h = harness()
     h.s.idle = 200
@@ -469,11 +498,17 @@ describe('the waiting list', () => {
     expect(h.b.waitingList()).toEqual([])
   })
 
-  it('answered at the Mac reads answeredBy mac', () => {
+  it('answered at the Mac reads answeredBy mac, also when COS was holding it', async () => {
     const h = harness()
     h.b.observeHookEvent(ev(h.s.now, 'PreToolUse'), false)
     h.b.observeHookEvent(ev(h.s.now + 1, 'PostToolUse'), false)
     expect(h.b.waitingList()[0]).toMatchObject({ state: 'answered', answeredBy: 'mac' })
+    const held = harness()
+    held.s.idle = 200
+    held.b.observeHookEvent(ev(held.s.now, 'PreToolUse'), false)
+    park(held, await held.b.admit(ask()))
+    held.b.observeHookEvent(ev(held.s.now + 1, 'PostToolUse'), false)
+    expect(held.b.waitingList()[0]).toMatchObject({ state: 'answered', answeredBy: 'mac' })
   })
 
   it('two questions in one session: only the one with the held tool_use id reads held', async () => {
