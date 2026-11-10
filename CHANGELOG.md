@@ -1,3 +1,22 @@
+## 7.0.19 - Control Web shows the COS mark at once on open, instead of a blank page
+
+2026-11-10. 7.0.18 (a7e0317) plus one change to Control Web, on Miles's go (12:07, "Let's build that for the next publish for today. Ensure no regressions."). Private on Miles's Mac first.
+
+- **The problem (Miles, 11:56):** opening the web app for the first time was a little slow. Measured: the page was blank until the Mac had answered twice, once to re-check the page and once to say whether this browser is signed in. Caching and compression were already right.
+- **Now the COS mark shows at once,** on the page's own background in your theme, before any script runs or the Mac answers. It goes the moment the sign-in card or the app shows. It shows neither one's content, so it is true whichever comes next.
+- **Nothing else moves:** the mark sits above the page, so the app and the sign-in card appear exactly where they did. It takes no taps, asks the Mac for nothing and loads no new file.
+- **If the page's scripts never run,** the mark hides itself after 25 seconds, longer than the 20 second sign-in check. A Mac that does not answer still shows "COS on your Mac is not answering" as before.
+- **With JavaScript off,** the page now says "COS Control Web needs JavaScript. Turn it on for this site, then reload." It was blank.
+- **A timing report on open:** one layout report gives the milliseconds from opening to the first paint and to the app or sign-in card showing, inside the existing report limits, with no text. So the next slow open is measured on the phone itself.
+- **Measured in WebKit on this Mac** with 150 ms added to every request: on a reopen the first paint came at 189 ms instead of 358 ms, and the app at the same time as before. Only the phone shows its own numbers, and the Home Screen app.
+- **Notes:** the 7.0.18 entry below now also says what the glasses show for a turn-end question and how to answer by voice. That line was left out of the 7.0.18 package.
+
+**Default-on for every install:** yes: the first paint, the JavaScript-off line and the open timing report. There is no switch.
+
+### If you roll back
+
+- To 7.0.18: the page is blank again until the Mac answers. Nothing is stored by this change.
+
 ## 7.0.18 - A question a session ends its turn with reaches the glasses, Control Web and the desktop
 
 2026-11-10. 7.0.17 (7313e50) plus X1's server half (claude/server-7018-turn-end-ask) and W1's Control Web card (claude/server-7018-web-turn-end), on Miles's go (07:14, "fold this in to the latest update so I can respond from glasses, web app and desktop"). Pairs with COS Control 0.5.389. Private on Miles's Mac first.
