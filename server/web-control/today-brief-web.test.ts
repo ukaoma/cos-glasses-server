@@ -125,13 +125,19 @@ describe('the Today summary on the web', () => {
       expect(f.els['today-story']!.textContent).toBe('Nothing is waiting on you. One agent is working.')
     }
   })
-  it('never over a session list that was not read: the counts line keeps "Couldn’t read your sessions"', async () => {
-    const s = story({ sessionsState: 'failed', answer: () => FRESH })
+  it('T1 spec 0 (was: never over an unread list): a failed session read keeps today’s summary, and its age line says what could not be read', async () => {
+    const s = story({ sessionsState: 'failed', failed: ['sessions'], answer: () => FRESH })
     s.fns.BRIEF.view = FRESH
     s.render(); await s.flush()
-    expect(s.els['today-story']!.textContent).toContain('Couldn’t read your sessions')
-    expect(s.els['today-story']!.textContent).not.toContain('shipping')
-    expect(s.posts[0].body.sessionsRead).toBe(false)
+    expect(s.text()).toContain('shipping')
+    expect(s.text()).not.toContain('Couldn’t read your sessions.')
+    expect(s.text()).toContain('Couldn’t read sessions, so this may not be everything')
+    expect(s.posts[0].body.sessionsRead, 'the server is still told the list was not read').toBe(false)
+  })
+  it('with no summary yet, an unread list still shows the counts line with "Couldn’t read your sessions"', async () => {
+    const s = story({ sessionsState: 'failed', answer: () => ({ state: 'off', text: '' }) })
+    s.render(); await s.flush()
+    expect(s.text()).toContain('Couldn’t read your sessions')
   })
   it('offline shows the offline line and asks nothing', () => {
     const s = story({ offline: true, answer: () => FRESH })
@@ -359,5 +365,78 @@ describe('7.0.5 QA: Summaries per day ignores an empty or invalid value', () => 
     expect((await h.change('250')).value).toBe('100')
     expect(h.puts).toEqual([{ dailyCap: 25 }, { dailyCap: 250 }])
     expect(h.toasts).toEqual(['Saved', 'Saved'])
+  })
+})
+
+// ── T1 spec (lead 23:04, lanes/T1_today_stable.md "Spec for W1"): Today's summary holds still while Miles reads ──
+// A #today-story stand-in that counts writes and reports a height from what it holds: "L<n>" in the text is n lines of
+// 30 px, plus 20 px for the age line under a summary; anything else is one line.
+class Story {
+  _text = ''; _html = ''; writes = 0; className = ''; style = { minHeight: '' }; clientWidth = 600
+  set textContent(v: string) { this._text = v; this._html = ''; this.writes++ }
+  get textContent() { return this._text || this._html.replace(/<[^>]+>/g, '') }
+  set innerHTML(v: string) { this._html = v; this._text = ''; this.writes++ }
+  get innerHTML() { return this._html }
+  content() { const t = this._html || this._text; const n = Number((/L(\d+)/.exec(t) || [])[1] || 1); return n * 30 + (this._html.includes('story-when') ? 20 : 0) }
+  getBoundingClientRect() { return { height: Math.max(this.content(), parseFloat(this.style.minHeight) || 0) } }
+}
+const V = (lines: number, extra: Record<string, unknown> = {}) => ({ ...FRESH, text: `L${lines} summary of the sessions.`, ...extra })
+function held(opts: Parameters<typeof story>[0] = {}) {
+  const s = story({ answer: () => null, ...opts })
+  const el = new Story(); s.els['today-story'] = el as any
+  const show = (v: unknown) => { s.fns.BRIEF.view = v; s.render(); return el.style.minHeight }
+  return { ...s, el, show }
+}
+
+describe('T1 spec: the Today summary holds still', () => {
+  it('0. pending and failed session reads never swap today’s summary for the counts line', () => {
+    const h = held()
+    h.fns.BRIEF.view = V(3)
+    for (const st of ['answered', 'pending', 'answered', 'failed', 'pending', 'answered']) {
+      h.TODAY.sessionsState = st
+      h.render()
+      expect(h.el.textContent, st).toContain('L3 summary')
+      expect(h.el.textContent, st).not.toMatch(/agents? (is|are) working|No agents are running|Couldn’t read your sessions\./)
+    }
+  })
+  it('0. a summary written yesterday is not today’s: the counts line shows', () => {
+    const h = held()
+    h.show(V(3, { at: '2026-11-03T15:00:00Z' }))
+    expect(h.el.textContent).not.toContain('L3 summary')
+  })
+  it('3. the same words are written once; only the age line moves', () => {
+    const h = held()
+    h.show(V(2))
+    expect(h.el.writes).toBe(1)
+    h.clock.t += 3 * 60000
+    h.render(); h.render()
+    expect(h.el.writes, 'no rewrite of unchanged text').toBe(1)
+    expect(h.els['story-when']!.textContent).toBe('Updated 9 min ago.')
+    h.show(V(4))
+    expect(h.el.writes, 'new words are written').toBe(2)
+  })
+  it('1. the block keeps its tallest height through shorter rewrites and the fall back to the counts line', () => {
+    const h = held()
+    expect(h.show(V(5))).toBe('170px')
+    expect(h.show(V(4)), 'shorter: held').toBe('170px')
+    expect(h.show(V(6)), 'longer: grows').toBe('200px')
+    expect(h.show(V(1)), 'one line: held').toBe('200px')
+    expect(h.show(null), 'counts line: held').toBe('200px')
+  })
+  it('2. it may shrink on a width change, a new day and resetBrief, never on a rewrite', () => {
+    const h = held()
+    h.show(V(6)); expect(h.el.style.minHeight).toBe('200px')
+    h.el.clientWidth = 380
+    expect(h.show(V(2)), 'width changed: re-fit').toBe('80px')
+    h.show(V(6)); h.clock.t += 24 * 3600000
+    expect(h.show(V(2, { at: new Date(h.clock.t).toISOString() })), 'a new day: re-fit').toBe('80px')
+    h.show(V(6, { at: new Date(h.clock.t).toISOString() }))
+    h.fns.resetBrief()
+    expect(h.fns.BRIEF.heldPx).toBe(0)
+    expect(h.show(null), 'after resetBrief the counts line fits itself').toBe('30px')
+  })
+  it('2. Refresh re-fits the block when its answer lands (todayRefresh, outside this block)', () => {
+    const at = APP.indexOf('        // T1 spec 2: Refresh re-fits the block to what it now holds.\n        BRIEF.heldPx = 0;\n        if (TODAY.model && state.pane === \'today\') renderStory(TODAY.model);')
+    expect(at).toBeGreaterThan(APP.indexOf('  function todayRefresh() {'))
   })
 })

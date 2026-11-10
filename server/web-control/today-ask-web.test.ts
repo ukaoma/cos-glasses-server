@@ -130,7 +130,8 @@ describe('Ask about this under the Today summary (app.js)', () => {
     const off = box({ askOn: false }); off.form.hidden = false; off.fns.paintTodayAsk(SUMMARY); expect(off.form.hidden).toBe(true)
     const none = box(); none.form.hidden = false; none.fns.paintTodayAsk(null); expect(none.form.hidden).toBe(true)
     const offline = box({ offline: true }); offline.form.hidden = false; offline.fns.paintTodayAsk(SUMMARY); expect(offline.form.hidden).toBe(true)
-    const unread = box({ sessionsState: 'failed' }); unread.form.hidden = false; unread.fns.paintTodayAsk(SUMMARY); expect(unread.form.hidden).toBe(true)
+    // T1 spec 0: a pending or failed session read keeps the summary, and the box under it with it.
+    for (const st of ['failed', 'pending']) { const unread = box({ sessionsState: st }); unread.form.hidden = true; unread.fns.paintTodayAsk(SUMMARY); expect(unread.form.hidden, st).toBe(false) }
     const nochat = box({ noChat: true }); nochat.form.hidden = false; nochat.fns.paintTodayAsk(SUMMARY); expect(nochat.form.hidden).toBe(true)
   })
 
