@@ -7040,9 +7040,9 @@
   // scale 1; scw, the document's scroll width. A browser or phone setting widens the layout viewport itself (cw = scw,
   // both above dw): nothing on the page is wider than its container, so nothing is named and nothing is scanned. Our
   // page overflowing leaves the layout at the device width and the document wider (scw above cw): then `wide` names the
-  // element that sticks out, the first in page order whose right edge passes cw while its parent's does not. Stretched
-  // containers end at cw and are never named (Q1 15:20). One scan per layout (cached by cw and scw), at most 4000
-  // elements.
+  // element that sticks out, the first in page order whose right edge passes cw. Page order puts a parent before its
+  // children, so that element's parent ends within cw: it is the one that sticks out of its container, never a
+  // stretched container (those end at cw; Q1 15:20). One scan per layout (cached by cw and scw), at most 4000 elements.
   var LR_WIDE = { key: '', out: null };
   function lrWide() {
     var num = function (v) { return typeof v === 'number' && isFinite(v) ? Math.round(v) : null; };
@@ -7058,8 +7058,6 @@
       for (var i = 0; i < all.length && i < 4000; i++) {
         var el = all[i], r = el.getBoundingClientRect();
         if (!(r.width > 0 && r.right + sx > edge)) continue;
-        var par = el.parentElement, pr = par && par.getBoundingClientRect ? par.getBoundingClientRect() : null;
-        if (pr && pr.right + sx > edge) continue;
         out.wide = (el.tagName.toLowerCase() + (el.id ? '#' + el.id : (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/)[0] : ''))).slice(0, 24);
         break;
       }
