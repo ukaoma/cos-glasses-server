@@ -3,7 +3,7 @@
 // source copy, green baseline over every named suite, each target matched exactly once, each mutant
 // killed by the test named for it, and byte-for-byte restoration. Never mutates the worktree.
 // `--check` stops after the exact-once check (no tests run).
-import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { mkdtempSync, cpSync, existsSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,15 +13,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
 // [name, file, exact target, replacement, a substring of the test that must fail, tests]
 const mutations = [
-  ["question-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_QUESTION_FULL_HOLD, false)", "readSwitch(env.COS_QUESTION_FULL_HOLD, true)", "default OFF", ["server/lib/full-hold.test.ts"]],
-  ["approval-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_APPROVAL_FULL_HOLD, false)", "readSwitch(env.COS_APPROVAL_FULL_HOLD, true)", "default OFF", ["server/lib/full-hold.test.ts"]],
-  ["words-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_WAITING_QUESTION_WORDS, false)", "readSwitch(env.COS_WAITING_QUESTION_WORDS, true)", "default OFF", ["server/lib/full-hold.test.ts"]],
+  ["question-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_QUESTION_FULL_HOLD, false)", "readSwitch(env.COS_QUESTION_FULL_HOLD, true)", "both full-hold switches default OFF", ["server/lib/full-hold.test.ts"]],
+  ["approval-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_APPROVAL_FULL_HOLD, false)", "readSwitch(env.COS_APPROVAL_FULL_HOLD, true)", "both full-hold switches default OFF", ["server/lib/full-hold.test.ts"]],
   ["engine-gate-open", "server/lib/full-hold.ts", "return version !== null && versionAtLeast(version, floor)", "return true", "refuses older", ["server/lib/full-hold.test.ts"]],
   ["cli-floor-lowered", "server/lib/full-hold.ts", "cli: Object.freeze([2, 1, 321])", "cli: Object.freeze([2, 1, 320])", "refuses older", ["server/lib/full-hold.test.ts"]],
   ["desktop-floor-lowered", "server/lib/full-hold.ts", "'claude-desktop': Object.freeze([2, 1, 317])", "'claude-desktop': Object.freeze([2, 1, 316])", "refuses older", ["server/lib/full-hold.test.ts"]],
   ["engine-own-property", "server/lib/full-hold.ts", "if (!Object.prototype.hasOwnProperty.call(FULL_HOLD_ENGINE_FLOORS, engine.entrypoint)) return false", "", "refuses older", ["server/lib/full-hold.test.ts"]],
   ["non-question-matcher-all", "server/lib/full-hold.ts", "export const NON_QUESTION_MATCHER = '^(?!AskUserQuestion$).*'", "export const NON_QUESTION_MATCHER = '.*'", "selects every tool but AskUserQuestion", ["server/lib/claude-hooks-installer-full-hold.test.ts"]],
-  ["switch-ignored-differential", "server/lib/permission-broker.ts", "if (isQuestion ? !on.questions : !on.approvals) return false", "", "admission and tick cases", ["server/lib/permission-broker-full-hold-off.test.ts"]],
+  ["switch-ignored-differential", "server/lib/permission-broker.ts", "if (isQuestion ? !on.questions : !on.approvals) return false", "", "admission, tick and answer cases against 7.0.13", ["server/lib/permission-broker-full-hold-off.test.ts"]],
   ["switch-ignored", "server/lib/permission-broker.ts", "if (isQuestion ? !on.questions : !on.approvals) return false", "", "with the question switch off it is exactly today", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["background-or-codex-held", "server/lib/permission-broker.ts", "if (background || facts.provider === 'codex') return false", "", "unstamped question (hook-ask-hold 0)", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["unstamped-question-held", "server/lib/permission-broker.ts", "if (isQuestion && !askHold) return false", "", "unstamped question (hook-ask-hold 0)", ["server/lib/permission-broker-full-hold.test.ts"]],
@@ -44,13 +43,11 @@ const mutations = [
   ["confirm-skipped", "server/lib/permission-broker.ts", "if (by === 'web' && this.anyFullHoldOn()) {\n        const refused", "if (false) {\n        const refused", "needs a confirm id this server issued", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["confirm-decision-unbound", "server/lib/permission-broker.ts", "if (found.itemId !== itemId || found.decision !== decision) return 'confirm_invalid'", "if (found.itemId !== itemId) return 'confirm_invalid'", "needs a confirm id this server issued", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["confirm-item-unbound", "server/lib/permission-broker.ts", "if (found.itemId !== itemId || found.decision !== decision) return 'confirm_invalid'", "if (found.decision !== decision) return 'confirm_invalid'", "belongs to one item", ["server/lib/permission-broker-full-hold.test.ts"]],
-  ["confirm-reusable", "server/lib/permission-broker.ts", "    this.confirms.delete(raw)\n    return null", "    return null", "single use", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["confirm-reusable", "server/lib/permission-broker.ts", "    this.confirms.delete(raw)\n    return null", "    return null", "G1: a confirm id is gone the moment it is used", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["confirm-never-expires", "server/lib/permission-broker.ts", "if (this.deps.now() >= found.expiresAt) {", "if (false) {", "expires", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["confirm-any-surface", "server/lib/permission-broker.ts", "if (by !== 'web') return { status: 400, body: { error: 'invalid_confirm', reason: 'surface' } }", "", "the confirm route", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["confirm-no-touch", "server/lib/permission-broker.ts", "    if (!validWebTouch(input.presenceAgeMs)) return { status: 403, body: { error: 'web_touch_required' } }", "", "the confirm route", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["confirm-for-questions", "server/lib/permission-broker.ts", "if (item.kind !== 'approval') return { status: 400, body: { error: 'invalid_confirm', reason: 'kind' } }", "", "the confirm route", ["server/lib/permission-broker-full-hold.test.ts"]],
-  ["waiting-always-on", "server/lib/permission-broker.ts", "return words || this.anyFullHoldOn()", "return true", "is empty with every switch off", ["server/lib/permission-broker-full-hold.test.ts"]],
-  ["waiting-words-ignored", "server/lib/permission-broker.ts", "return words || this.anyFullHoldOn()", "return this.anyFullHoldOn()", "COS_WAITING_QUESTION_WORDS alone", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["waiting-words-kept", "server/lib/permission-broker.ts", "      entry.questions = null\n", "", "walks at_mac, held, answered", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["waiting-failure-kept", "server/lib/permission-broker.ts", "if (env.event !== 'PostToolUse') { this.waiting.delete(entry.key); return }", "", "a failure, a denial", ["server/lib/permission-broker-full-hold.test.ts"]],
   ["waiting-turn-kept", "server/lib/permission-broker.ts", "if (entry.sessionId === env.sessionId && entry.state === 'waiting' && env.ts >= entry.askedAt) this.waiting.delete(entry.key)", "", "a failure, a denial", ["server/lib/permission-broker-full-hold.test.ts"]],
@@ -75,6 +72,30 @@ const mutations = [
   ["route-keys-when-off", "server/routes/permission-broker.ts", "...(deps.broker.extendedQuestionsView() ?", "...(true ?", "7.0.13's keys exactly", ["server/routes/permission-broker-full-hold.test.ts"]],
   ["route-confirm-door-forced-web", "server/routes/permission-broker.ts", "const result = deps.broker.confirm(String(req.params.id ?? ''), req.body, by)", "const result = deps.broker.confirm(String(req.params.id ?? ''), req.body, 'web')", "confirm (web door only)", ["server/routes/permission-broker-full-hold.test.ts"]],
   ["index-switches-hardwired", "server/index.ts", "  fullHold: () => fullHoldSwitches(process.env),", "  fullHold: () => ({ questions: true, approvals: true }),", "index.ts wires the switches", ["server/routes/permission-broker-full-hold.test.ts"]],
+  ["words-default-off", "server/lib/full-hold.ts", "readSwitch(env.COS_WAITING_QUESTION_WORDS, true)", "readSwitch(env.COS_WAITING_QUESTION_WORDS, false)", "the row-words switch defaults ON", ["server/lib/full-hold.test.ts"]],
+  ["waiting-always-on", "server/lib/permission-broker.ts", "  extendedQuestionsView(): boolean {\n    return this.anyFullHoldOn()", "  extendedQuestionsView(): boolean {\n    return true", "is empty with every switch off", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["engine-host-ignored", "server/lib/full-hold.ts", "  if (engine.host !== FULL_HOLD_ENGINE_HOSTS[engine.entrypoint]) return false\n", "", "refuses a proven version running where its dialog is not", ["server/lib/full-hold.test.ts"]],
+  ["engine-host-ignored-broker", "server/lib/full-hold.ts", "  if (engine.host !== FULL_HOLD_ENGINE_HOSTS[engine.entrypoint]) return false\n", "", "a print run labelled claude-desktop", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["host-any-tty-terminal", "server/lib/full-hold-engine.ts", "if (tty && tty !== '??' && tty !== '-' && /^tty/.test(tty)) return 'terminal'", "if (tty) return 'terminal'", "a child of Claude.app", ["server/lib/full-hold-engine.test.ts"]],
+  ["host-disclaimer-loose", "server/lib/full-hold-engine.ts", "/\\/Claude\\.app\\/Contents\\/Helpers\\/disclaimer$/", "/disclaimer/", "anything unreadable, is other", ["server/lib/full-hold-engine.test.ts"]],
+  ["registry-session-unchecked", "server/lib/full-hold-engine.ts", "if (typeof raw.sessionId !== 'string' || raw.sessionId.toLowerCase() !== sessionId.toLowerCase()) return null", "", "only when it names the session", ["server/lib/full-hold-engine.test.ts"]],
+  ["registry-pid-unchecked", "server/lib/full-hold-engine.ts", "if (typeof raw.pid === 'number' && raw.pid !== pid) return null", "", "only when it names the session", ["server/lib/full-hold-engine.test.ts"]],
+  ["ppid-ignored", "server/lib/permission-broker.ts", "const ppid = typeof raw === 'number' && Number.isInteger(raw) && raw > 1 ? raw : null", "const ppid = null", "O2: the engine probe gets the hook", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["f1-tool-use-id-always", "server/lib/permission-broker.ts", "...(item.toolUseId && extended ? { toolUseId: item.toolUseId } : {}),", "...(item.toolUseId ? { toolUseId: item.toolUseId } : {}),", "admission, tick and answer cases against 7.0.13", ["server/lib/permission-broker-full-hold-off.test.ts"]],
+  ["f1-tool-use-id-always-unit", "server/lib/permission-broker.ts", "...(item.toolUseId && extended ? { toolUseId: item.toolUseId } : {}),", "...(item.toolUseId ? { toolUseId: item.toolUseId } : {}),", "F1: with both hold switches off", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["f2-confirm-live-when-off", "server/lib/permission-broker.ts", "    if (!this.anyFullHoldOn()) return { status: 404, body: { error: 'not_found' } }\n", "", "F2: with both switches off /confirm is 404", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["o1-unshown-answerable", "server/lib/permission-broker.ts", "if (!item.lensVisible && this.anyFullHoldOn()) {", "if (false) {", "O1: an item no device is shown yet", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["o1-blocks-when-off", "server/lib/permission-broker.ts", "if (!item.lensVisible && this.anyFullHoldOn()) {", "if (!item.lensVisible) {", "admission, tick and answer cases against 7.0.13", ["server/lib/permission-broker-full-hold-off.test.ts"]],
+  ["row-words-control-chars-kept", "server/lib/full-hold.ts", "return question.replace(/[\\p{Cc}\\p{Cf}]+/gu, ' ')", "return question", "control and format characters out", ["server/lib/session-hook-events-question.test.ts"]],
+  ["row-words-switch-ignored", "server/lib/session-hook-events.ts", "const firstQuestion = waitingQuestionWordsEnabled(process.env) && Array.isArray(i.questions)", "const firstQuestion = Array.isArray(i.questions)", "a question's target is empty", ["server/lib/session-hook-events-question.test.ts"]],
+  ["row-words-options-leak", "server/lib/session-hook-events.ts", "? questionRowText((i.questions[0] as Record<string, unknown>).question)", "? questionRowText(JSON.stringify(i.questions))", "only its text, never an option", ["server/lib/session-hook-events-question.test.ts"]],
+  ["g2-exitplanmode-brokered", "server/lib/permission-broker.ts", "if (UNBROKERED_TOOLS.has(facts.toolName)) return this.noteFastPath('unsupported_tool')", "", "never brokers ExitPlanMode", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["g2-approval-at-active-desk", "server/lib/permission-broker.ts", "if (!askHold && idle! < this.deskIdleThreshold()) return", "if (false) return", "an approval keeps the desk rules", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["g2-approval-kept-at-desk", "server/lib/permission-broker.ts", "    // 6.99.26 (QA round 1): a web-only stamped question goes back to the Mac as any away-held request does.\n    this.settleAll('handed_to_desk', item => !item.askHold || item.webOnly)", "    // removed", "goes back to the Mac when the desk is used", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["g2-version-compare-inverted", "server/lib/full-hold.ts", "if (v !== f) return v > f", "if (v !== f) return v < f", "admits the proven floors", ["server/lib/full-hold.test.ts"]],
+  ["g2-settle-writes-allow", "server/lib/permission-broker.ts", "try { written = item.channel?.reply({}) === true }", "try { written = item.channel?.reply({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }) === true }", "kill switch", ["server/lib/permission-broker-full-hold.test.ts"]],
+  ["g2-answer-door-forced-app", "server/routes/permission-broker.ts", "const result = deps.broker.answer(String(req.params.id ?? ''), req.body, by)", "const result = deps.broker.answer(String(req.params.id ?? ''), req.body, 'app')", "a web answer with a touch reaches the hook", ["server/routes/permission-broker-full-hold.test.ts"]],
+  ["g2-touch-negative", "server/lib/permission-broker.ts", "value >= 0 && value <= WEB_ANSWER_TOUCH_MAX_MS", "value <= WEB_ANSWER_TOUCH_MAX_MS", "needs a fresh touch", ["server/lib/permission-broker-full-hold.test.ts"]],
 ]
 
 const args = process.argv.slice(2)
@@ -89,6 +110,8 @@ try {
   cpSync(join(root, 'server'), join(scratch, 'server'), { recursive: true, filter: src => !(skip.has(basename(src)) && dirname(src) === join(root, 'server')) })
   cpSync(join(root, 'shared'), join(scratch, 'shared'), { recursive: true })
   cpSync(join(root, 'bin'), join(scratch, 'bin'), { recursive: true })
+  // vitest.config.ts names setup files here (the 6.71.7 gate predates them).
+  if (existsSync(join(root, 'test-support'))) cpSync(join(root, 'test-support'), join(scratch, 'test-support'), { recursive: true })
   cpSync(join(root, 'vitest.config.ts'), join(scratch, 'vitest.config.ts'))
   cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
   cpSync(join(root, 'managed-runtime-contract.json'), join(scratch, 'managed-runtime-contract.json'))
