@@ -139,6 +139,8 @@ try {
     if (n !== 1) throw new Error(`Mutation ${name} matches ${n} times in ${file}; it must match exactly once`)
   }
   let killed = 0
+  // Every mutant runs; survivors are collected and reported together (Q1: stopping at the first hid the rest).
+  const survivors = []
   for (const [name, file, find, replacement, killerName, tests] of chosen) {
     const target = join(scratch, file), original = readFileSync(target, 'utf8')
     const mutated = original.replace(find, () => replacement)
@@ -150,11 +152,12 @@ try {
     const output = result.stdout + '\n' + result.stderr
     // The intended test must be among the named failures: a kill by some unrelated test proves nothing about the rule.
     const killers = [...output.matchAll(/FAIL\s+(server\/\S+\.test\.ts > [^\n]+)/g)].map(match => match[1].trim())
-    if (result.status === 0 || result.error || !killers.length) throw new Error(`Mutation survived or harness failed: ${name}\n${output.slice(-4000)}`)
+    if (result.status === 0 || result.error || !killers.length) { survivors.push(`${name}: SURVIVED or harness failed`); console.log(`${name} SURVIVED\n${output.slice(-1500)}`); continue }
     const killer = killers.find(line => line.includes(killerName))
-    if (!killer) throw new Error(`Mutation ${name} was killed, but not by the test named for it ("${killerName}"): ${killers.join(' | ')}`)
+    if (!killer) { survivors.push(`${name}: killed, but not by "${killerName}" (${killers.join(' | ')})`); console.log(`${name} KILLED BY THE WRONG TEST: ${killers.join(' | ')}`); continue }
     killed++
     console.log(`${name} KILLED by ${killer}`)
   }
   console.log(`${killed} of ${chosen.length} full-hold mutations killed`)
+  if (survivors.length) { console.log('NOT KILLED:\n  ' + survivors.join('\n  ')); process.exitCode = 1 }
 } finally { rmSync(scratch, { recursive: true, force: true }) }

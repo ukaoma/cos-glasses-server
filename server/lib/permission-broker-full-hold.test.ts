@@ -130,7 +130,8 @@ describe('full hold: admission', () => {
     const h = harness({ kindTimeout: { question: 3600, approval: 630 } })
     h.s.idle = 200
     const q = await h.b.admit(ask())
-    const a = await h.b.admit(approval(1_000_000, { hookWaitS: 630 }))
+    // The approval's own stamp says 3600 (a session still running an older hook block): its installed block, 630, bounds it.
+    const a = await h.b.admit(approval(1_000_000, { hookWaitS: 3600 }))
     expect(q.ok && q.request.deadlineAt).toBe(1_000_000 + 3_590_000)
     expect(a.ok && a.request.deadlineAt).toBe(1_000_000 + 620_000)
   })
