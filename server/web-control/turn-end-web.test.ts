@@ -185,3 +185,11 @@ describe('the reader’s card and its send', () => {
     expect(APP).toContain("      if (act === 'turnend' && rd) return sendTurnEndChoice(rd, Number(t.getAttribute('data-i')));")
   })
 })
+
+describe('the choice buttons: a thumb-sized target that wraps instead of squeezing (Duo 382 and 951)', () => {
+  const CSS = readFileSync(join(HERE, 'app.css'), 'utf8')
+  it('both cards share one rule: wrap the row, each button at least 44 px tall, long labels wrap inside the button', () => {
+    expect(CSS).toContain('.sx-te-choices, .ta-te-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 6px; }')
+    expect(CSS).toContain('.sx-te-choices .cx-btn, .ta-te-choices .cx-btn { flex: 1 1 12rem; min-height: 44px; white-space: normal; text-align: center; line-height: 1.25; }')
+  })
+})
