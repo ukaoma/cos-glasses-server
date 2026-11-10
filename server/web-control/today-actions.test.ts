@@ -4837,3 +4837,69 @@ describe('X1 contract: the web question block (held, at the Mac, answered)', () 
     expect(el.innerHTML).toContain('data-sq="send"')
   })
 })
+
+// ── 7.0.18 (Miles 2026-11-10 07:14; X1 contract v1): a turn that ended asking you, in Today's overlay ──
+describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
+  const PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: '
+  const LINE = 'A choice or a reply here reaches the session as a message from COS, not typed in the session, and the session may ask you to confirm.'
+  const TROW = { session_id: SID, provider: 'claude', display_label: 'Mail intel', alive: true, running: true, running_active: false, agent_state: 'waiting',
+    state_source: 'hook', waiting_kind: 'question', waiting_source: 'turn_end', waiting_detail: 'Where should the overnight mail intel show up first?',
+    waiting_choices: ['Good Morning + Today', 'COS Control pane'] }
+  const tmodel = () => ({ rows: [{ kind: 'session', key: 'claude|' + SID, title: 'Mail intel asked: Where should the overnight mail intel show up first?',
+    why: 'Tap a choice or reply here', where: 'turnend', ask: TROW.waiting_detail, choices: TROW.waiting_choices }], now: [], later: [], failed: [], settled: true })
+  const turns = (h: { calls: Array<{ method?: string; path: string; body?: any }> }) => h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
+
+  it('the question, a button per choice and the honest line; the reply box shows; never the Mac line', async () => {
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: tmodel(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('<blockquote class="ta-quote ta-te-ask">Where should the overnight mail intel show up first?</blockquote>')
+    expect(meta).toContain('data-ta="turnend" data-id="0">Good Morning + Today</button>')
+    expect(meta).toContain('data-ta="turnend" data-id="1">COS Control pane</button>')
+    expect(meta).toContain(esc(LINE))
+    expect(meta).not.toContain('ta-mac-line')
+    expect(h.els['ta-foot']!.hidden, 'a reply is the other answer').toBe(false)
+  })
+  it('a tap sends the contract’s exact text through the reader’s Continue, once, and says it was sent', async () => {
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: tmodel(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '1'); h.tap('turnend', '1')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
+    expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'COS Control pane')
+    expect(h.els['ta-status']!.textContent).toBe('Sent “COS Control pane”. It reaches the session as a message from COS; it may ask you to confirm.')
+  })
+  it('answered on another screen first: nothing is sent, and it says so', async () => {
+    const m = tmodel()
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    m.rows = []
+    h.tap('turnend', '0')
+    await flush()
+    expect(turns(h)).toHaveLength(0)
+    expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen, or the session moved on. Nothing was sent.')
+  })
+  it('his own words in the box go with the same attribution, and leave the box', async () => {
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: tmodel(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.els['ta-input']!.value = 'Both, but the pane first'
+    h.tap('send')
+    await flush()
+    expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'Both, but the pane first')
+    expect(h.els['ta-input']!.value).toBe('')
+  })
+  it('a session waiting at the Mac’s prompt (no turn-end source) reads exactly as before', async () => {
+    const { waiting_source: _s, waiting_choices: _c, ...mac } = TROW
+    const m = { rows: [{ kind: 'session', key: 'claude|' + SID, title: 'Mail intel asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'mac', ask: '' }], now: [], later: [], failed: [], settled: true }
+    const h = load({ data: { sessions: [mac] }, routes: OK_ROUTES, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('data-ta="turnend"')
+    expect(h.els['ta-meta']!.innerHTML).toContain('ta-mac-line')
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+})

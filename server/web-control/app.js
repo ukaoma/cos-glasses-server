@@ -1873,8 +1873,29 @@
   // Control's askedTitle and askedWhy for a session waiting on you.
   // Control's TodayHome: guarded(title) ?? "A session". Never the workspace path or the session id: this line is shown
   // on Today and goes into the Today summary sent to the model, which carries no ids.
+  // ── A turn that ended asking you (7.0.18, X1 contract v1; Miles 2026-11-10 07:14) ──
+  // A Claude session ended its turn with the app's next-step box: a question and reply buttons. The server marks the row
+  // (waiting_source 'turn_end', waiting_choices: 0 to 2 labels) only while COS_TURN_END_ASKS is on. Unlike a question at
+  // the Mac's prompt, a reply IS the answer here, so Today and the reader offer the choices and the reply box. What is
+  // sent is the contract's exact text: it never reads as typed at the desk, and the session may ask him to confirm.
+  var TURN_END_PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: ';
+  var TURN_END_LINE = 'A choice or a reply here reaches the session as a message from COS, not typed in the session, and the session may ask you to confirm.';
+  /** The turn-end ask on a session row, or null: any other row, an older server, or the switch off. */
+  function turnEndOf(s) {
+    if (!s || s.waiting_source !== 'turn_end' || s.agent_state !== 'waiting') return null;
+    var clean = function (v, n) { return String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n); };
+    var choices = Array.isArray(s.waiting_choices) ? s.waiting_choices.filter(function (c) { return typeof c === 'string' && clean(c, 40); }).map(function (c) { return clean(c, 40); }).slice(0, 2) : [];
+    return { ask: clean(s.waiting_detail, 160), choices: choices };
+  }
+  /** The exact words a choice or a reply sends (contract v1): attributed to COS Control Web, never to the desk. */
+  function turnEndPrompt(text) { return TURN_END_PREFIX + turnEndBare(text); }
+  /** The words as he wrote them: a message that came back to the box already carries the prefix, never twice. */
+  function turnEndBare(text) { var t = String(text || '').trim(); return t.indexOf(TURN_END_PREFIX) === 0 ? t.slice(TURN_END_PREFIX.length).trim() : t; }
   function askedTitle(s) {
     var t = plain(s.display_label || s.custom_title || '').replace(/\s+/g, ' ').trim() || 'A session';
+    // The harnesses that run this block alone have no turnEndOf: looked up, never assumed.
+    var te = typeof turnEndOf === 'function' ? turnEndOf(s) : null;
+    if (te) return te.ask ? t + ' asked: ' + te.ask : t + ' asked you something';
     if (sxProvider(s.provider) !== 'claude') return t + ' is waiting for your reply';
     if (s.waiting_kind === 'plan') return t + ' has a plan for you to approve';
     if (s.waiting_kind === 'permission') return t + ' wants your permission';
@@ -1885,6 +1906,8 @@
   var TOOL_NAMES = ['AskUserQuestion', 'ExitPlanMode', 'Bash', 'BashOutput', 'KillShell', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'LS', 'Task', 'Agent',
     'WebFetch', 'WebSearch', 'TodoWrite', 'NotebookEdit', 'MultiEdit', 'SlashCommand', 'Skill', 'ToolSearch'];
   function askedWhy(s) {
+    var te = typeof turnEndOf === 'function' ? turnEndOf(s) : null;
+    if (te) return te.choices.length ? 'Tap a choice or reply here' : 'Reply here';
     if (s.waiting_kind === 'plan') return 'Has a plan for you to approve';
     var d = String(s.waiting_detail || '').trim();
     if (TOOL_NAMES.indexOf(d) >= 0) d = '';
@@ -1915,6 +1938,9 @@
     var q = sessionQs();
     var held = q ? q.itemsFor(id) : [], mac = q && q.atMacFor ? q.atMacFor(id) : [];
     if (held.length) return { where: 'here', ask: askedHere(held) };
+    // 7.0.18: a turn that ended asking him is answered by a reply, here or anywhere: never "at the Mac".
+    var te = row && typeof turnEndOf === 'function' ? turnEndOf(row) : null;
+    if (te) return { where: 'turnend', ask: te.ask, choices: te.choices };
     if (q && q.answeredFor && q.answeredFor(id)) return { where: 'answered', ask: '' };
     // X1 contract: a card built from the server's `waiting` list carries its own words; a held one gone back to the Mac
     // has the words this page saw while it was held.
@@ -1934,6 +1960,19 @@
   // answer a question that waits on the Mac's own prompt either, so it says so at the top, with the words when this page
   // has them (a held question it saw, or the server's waiting line) and plainly when it does not. Nothing here sends.
   var MAC_Q = { line: "Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac.", none: "COS cannot read this question's words from here. They show at the Mac's prompt." };
+  /** 7.0.18: the reader's card for a turn that ended asking him: the question, a button per choice, the honest line. */
+  function readerTurnEndHtml(r, row) {
+    var te = turnEndOf(row);
+    if (!te) return '';
+    var title = plain((row && (row.display_label || row.custom_title)) || '').replace(/\s+/g, ' ').trim() || 'This session';
+    var busy = !!(r && r.teSending);
+    return '<p class="sx-mac-q-title"><strong>' + esc(te.ask ? title + ' asked:' : title + ' asked you something') + '</strong></p>' +
+      (te.ask ? '<blockquote class="ta-quote sx-te-ask">' + esc(te.ask) + '</blockquote>' : '') +
+      (te.choices.length ? '<div class="sx-te-choices">' + te.choices.map(function (c, i) {
+        return '<button type="button" class="cx-btn' + (i === 0 ? ' primary' : '') + '" data-sx="turnend" data-i="' + i + '"' + (busy ? ' disabled' : '') + '>' + esc(c) + '</button>';
+      }).join('') + '</div>' : '') +
+      '<p class="sx-note sx-te-line">' + esc(TURN_END_LINE) + '</p>';
+  }
   function readerMacHtml(provider, id, row) {
     var w = whereFor(provider, id, row);
     if (w.where !== 'mac') return '';
@@ -1948,19 +1987,55 @@
       (words ? '<blockquote class="ta-quote sx-mac-q-words">' + esc(words) + '</blockquote>' : '<p class="sx-note sx-mac-q-none">' + esc((q && q.macNoWords) || MAC_Q.none) + '</p>') +
       '<p class="sx-note sx-mac-q-line">' + esc((q && q.macLine) || MAC_Q.line) + '</p>';
   }
+  function readerRowOf(r) {
+    return (state.sessions || []).filter(function (s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider === r.provider && String(k.id).toLowerCase() === String(r.id).toLowerCase(); })[0] || null;
+  }
+  // 7.0.18: a tap on a choice sends the contract's exact text through the reader's own Continue (continueSession), so the
+  // queue, the held reply and the turn watch behave as for any message. The outcome is said in the status line.
+  var TURN_END_SENT = function (label) { return 'Sent \u201c' + label + '\u201d. It reaches the session as a message from COS; it may ask you to confirm.'; };
+  var TURN_END_GONE = 'Already answered on another screen, or the session moved on. Nothing was sent.';
+  function sendTurnEndChoice(r, i) {
+    if (!r || r.sending) return;
+    var te = turnEndOf(readerRowOf(r));
+    if (!te) { sessionStatus(TURN_END_GONE); readerMacPaint(r, r.waitingNow); return; }
+    var label = te.choices[i];
+    if (!label) return;
+    r.sending = true; r.teSending = true; readerMacPaint(r, r.waitingNow);
+    var done = function () { r.sending = false; r.teSending = false; if (state.reading === r) readerMacPaint(r, r.waitingNow); };
+    return continueSession(r, turnEndPrompt(label), {}).then(function (how) {
+      done();
+      if (state.reading !== r) return how;
+      if (how === 'sent') sessionStatus(TURN_END_SENT(label));
+      else if (how === 'changed') {
+        // The box under it would offer Continue anyway for the composer's words, not this choice: a choice says it plainly.
+        r.refusal = null; r.sendAnyway = null; renderVerdict(r);
+        sessionStatus('The session moved on before this reached it. \u201c' + label + '\u201d was not sent.', 'error');
+      } else if (how === 'refused') sessionStatus('The session did not take \u201c' + label + '\u201d. Try again, or answer it on your Mac.', 'error');
+      return how;
+    }, function (err) {
+      done();
+      if (state.reading !== r) return;
+      var why = err && err.name === 'AbortError' ? 'No answer from your Mac yet. It may still land; tapping again is safe, it will not post twice.' : (err && err.message) || 'Could not reach your Mac.';
+      sessionStatus('Not sent: ' + why, 'error');
+    });
+  }
   function readerMacPaint(r, waiting) {
     var el = $('session-mac-q');
     if (!el || !r) return;
     r.waitingNow = !!waiting;
-    var row = (state.sessions || []).filter(function (s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider === r.provider && String(k.id).toLowerCase() === String(r.id).toLowerCase(); })[0] || null;
-    var html = waiting ? readerMacHtml(r.provider, r.id, row) : '';
+    var row = readerRowOf(r);
+    // 7.0.18: a turn that ended asking him gets its card whether or not the reader thinks it waits (the row is the truth).
+    var te = typeof turnEndOf === 'function' ? turnEndOf(row) : null;
+    r.turnEnd = te;
+    var html = te ? readerTurnEndHtml(r, row) : waiting ? readerMacHtml(r.provider, r.id, row) : '';
     if (el.innerHTML !== html) el.innerHTML = html;
     el.hidden = !html;
     // Q1 M3: the Send box under it says plainly that a message is not the answer, whichever block shows the question
     // (this one, a Mac card or a held card above).
-    var qs1 = sessionQs(), open = !!html || !!(qs1 && ((qs1.itemsFor && qs1.itemsFor(r.id).length) || (qs1.atMacFor && qs1.atMacFor(r.id).length)));
+    var qs1 = sessionQs(), open = (!!html && !te) || !!(qs1 && ((qs1.itemsFor && qs1.itemsFor(r.id).length) || (qs1.atMacFor && qs1.atMacFor(r.id).length)));
     var box = $('session-input');
-    if (box && box.setAttribute) box.setAttribute('placeholder', open ? 'Message this session (not an answer)' : 'Continue this session…');
+    // 7.0.18: here a reply IS the answer (sent with the contract's attribution), so the box says so.
+    if (box && box.setAttribute) box.setAttribute('placeholder', te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…');
   }
   // ── end at the Mac's prompt
 
@@ -1972,7 +2047,7 @@
       var k = splitSessionId(s.provider, s.session_id || s.id);
       seen[k.provider + '|' + String(k.id).toLowerCase()] = 1;
       var w = whereFor(k.provider, k.id, s);
-      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id, where: w.where, ask: w.ask });
+      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id, where: w.where, ask: w.ask, choices: w.choices || [] });
     });
     // A question this page holds for a session the list has not shown waiting yet: its own row, so every held
     // question is in front of you (two at once each get one).
@@ -2048,7 +2123,8 @@
       // The session's question shows in the overlay's peek, with its cards to answer. Under it, where it can be answered.
       var q = sessionQs(), whereLine = r.where === 'here' ? 'Answer it here.' : r.where === 'mac' ? (q && q.macLine) || '' : r.where === 'answered' ? (q && q.answeredLine) || '' : '';
       return '<div class="need-row">' +
-        '<button type="button" class="need-open" data-today="wait" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.ask || r.why) + '</span>' +
+        // 7.0.18: a turn-end row's title already says the question, so its foot says how to answer.
+        '<button type="button" class="need-open" data-today="wait" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.where === 'turnend' ? r.why : (r.ask || r.why)) + '</span>' +
         (whereLine ? '<span class="need-foot need-where" data-where="' + esc(r.where) + '">' + esc(whereLine) + '</span>' : '') + '</button>' +
         '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(r.key) + '">Open session</button></div></div>';
     }
@@ -2901,6 +2977,7 @@
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
       if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
       if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; renderVerdict(rd); return; }
+      if (act === 'turnend' && rd) return sendTurnEndChoice(rd, Number(t.getAttribute('data-i')));
       if (act === 'usage-clear') { SX.uTool = 'All tools'; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
       if (act === 'usage-range') return uOpenRange(t, true);
     });
@@ -3720,7 +3797,8 @@
   // The box is cleared only of the very words that were sent; anything typed since stays.
   function clearBoxOf(text) {
     var input = $('session-input');
-    if (input && input.value.trim() === String(text).trim()) { input.value = ''; autoGrow(input); }
+    // 7.0.18: an answer to a turn-end ask was sent with the attribution in front; the box holds his words without it.
+    if (input && (input.value.trim() === String(text).trim() || input.value.trim() === turnEndBare(text))) { input.value = ''; autoGrow(input); }
     if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null;
   }
   // Words go back in the box only if the box is empty; otherwise the status line keeps them. `files` says what became
@@ -3867,6 +3945,9 @@
     // during the first attach could park the same text in the queue while the first lands.
     if (r.sending) return;
     if (r.refusal || r.cautionAsk) { r.refusal = null; r.cautionAsk = false; renderVerdict(r); }
+    // 7.0.18: while a turn-end ask is open, the box's words are his own answer ('Other' in the contract): sent with the
+    // same attribution as a choice. A fork goes to a copy and is not an answer, so it is sent as written.
+    if (!fork && r.turnEnd && turnEndOf(readerRowOf(r))) text = turnEndPrompt(text);
     r.sending = true;
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
     var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); paintReaderFiles(); };

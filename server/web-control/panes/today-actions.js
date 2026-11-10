@@ -537,6 +537,7 @@
       return open(pk === 'wait' ? 'wait' : 'run', id, O.opener, { from: { scroll: lb ? lb.scrollTop || 0 : 0 } });
     }
     if (what === 'send') return sendReply();
+    if (what === 'turnend') return sendChoice(Number(id));
     if (what === 'approve-phone' && K.approvePhone && O.r) return K.approvePhone(phoneApprovalOptions(O.r));
     if (what === 'att-remove' || what === 'att-retry') {
       var fb = filesBox(); if (!fb) return;
@@ -1045,6 +1046,7 @@
         ' <button type="button" class="link-btn" data-ta="q-retry">Retry</button></p>';
       if (where === 'answered') html += '<p class="ta-sub ta-mac-line">' + esc((W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.') + '</p>';
       if (where === 'reply') html += '<p class="ta-sub">' + esc('Answer it in a reply below, or open the session.') + '</p>';
+      if (where === 'turnend') html += turnEndHtml();
     } else if (O.row || O.r) {
       // Once the live feed speaks, the line says what it says, so the header and the peek never disagree (qa2-user N3).
       html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : O.row.provider) + ' <span id="ta-run-state">' + esc(runWords()) + '</span></p>';
@@ -1059,7 +1061,7 @@
     box.innerHTML = html;
     // The reply box shows only where a reply can be the answer; what was typed stays in it, hidden.
     var foot = $('ta-foot');
-    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply'; }
+    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply' && w !== 'turnend'; }
   }
   // Where a waiting session's question is answered: 'here' (its cards in this sheet), 'answered' (on some screen just
   // now), 'mac' (a Claude session's own prompt, or a held question that went back to the Mac), or 'reply' (a Codex or
@@ -1068,6 +1070,8 @@
   // reply box stays a Codex or Cursor one.
   function waitWhere() {
     if (O.qCount) return 'here';
+    // 7.0.18: a turn that ended asking him is answered by a reply (a choice or his own words), so the reply box shows.
+    if (O.wait && O.wait.where === 'turnend') return 'turnend';
     if (O.r && W.sessionQuestions && W.sessionQuestions.answeredFor && W.sessionQuestions.answeredFor(O.r.id)) return 'answered';
     if (!O.macCount && W.sessionQuestions && W.sessionQuestions.loadState && W.sessionQuestions.loadState() === 'failed') return 'failed';
     if (O.macCount || (O.r && O.r.provider === 'claude') || (O.wait && O.wait.where === 'mac')) return 'mac';
@@ -1077,6 +1081,46 @@
   function waitAsk() {
     var a = O.wait && O.wait.ask ? String(O.wait.ask).trim() : '';
     return a && !(O.wait.why && String(O.wait.why).trim() === a) ? a : '';
+  }
+  // 7.0.18: a turn that ended asking him (X1 contract v1). The question as the row has it, a button per choice, and the
+  // required honest line. A tap sends the contract's exact text through the reader's Continue (K.send); his own words
+  // in the box below are sent the same way.
+  var TURN_END_LINE = 'A choice or a reply here reaches the session as a message from COS, not typed in the session, and the session may ask you to confirm.';
+  var TURN_END_PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: ';
+  function turnEndAnswer(text) { var t = String(text || '').trim(); return TURN_END_PREFIX + (t.indexOf(TURN_END_PREFIX) === 0 ? t.slice(TURN_END_PREFIX.length).trim() : t); }
+  function turnEndHtml() {
+    var w = O.wait || {}, choices = Array.isArray(w.choices) ? w.choices : [], busy = !!(O.r && O.r.sending);
+    return (w.ask ? '<blockquote class="ta-quote ta-te-ask">' + esc(w.ask) + '</blockquote>' : '') +
+      (choices.length ? '<div class="ta-te-choices">' + choices.map(function (c, i) {
+        return '<button type="button" class="cx-btn' + (i === 0 ? ' primary' : '') + '" data-ta="turnend" data-id="' + i + '"' + (busy ? ' disabled' : '') + '>' + esc(c) + '</button>';
+      }).join('') + '</div>' : '') +
+      '<p class="ta-sub ta-te-line">' + esc(TURN_END_LINE) + '</p>';
+  }
+  /** Still waiting on this answer? The latest session list decides; a reply from anywhere clears it on the server. */
+  function turnEndStill() {
+    var nm = T.needs ? T.needs() : null, key = O.wait && O.wait.key;
+    return !!(nm && key && nm.rows.some(function (x) { return x.kind === 'session' && x.key === key && x.where === 'turnend'; }));
+  }
+  function sendChoice(i) {
+    var r = O.r, w = O.wait; if (!r || !w || r.sending) return;
+    var label = (Array.isArray(w.choices) ? w.choices : [])[i];
+    if (!label) return;
+    if (!turnEndStill()) { O.note = { text: 'Already answered on another screen, or the session moved on. Nothing was sent.', kind: '' }; paintNote(); return; }
+    r.sending = true; setSending(true); paintMeta();
+    var done = function () { r.sending = false; if (O.r === r) { setSending(false); paintMeta(); } };
+    return K.send(r, turnEndAnswer(label), {}).then(function (how) {
+      done();
+      if (O.r !== r) return;
+      if (how === 'sent') O.note = { text: 'Sent \u201c' + label + '\u201d. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' };
+      else if (how === 'changed') { r.refusal = null; r.sendAnyway = null; paintVerdict(); O.note = { text: 'The session moved on before this reached it. \u201c' + label + '\u201d was not sent.', kind: 'error' }; }
+      else if (how === 'refused') O.note = { text: 'The session did not take \u201c' + label + '\u201d. Try again, or answer it on your Mac.', kind: 'error' };
+      paintNote();
+    }, function (err) {
+      done();
+      if (O.r !== r) return;
+      O.note = { text: 'Not sent: ' + (err && err.name === 'AbortError' ? 'no answer from your Mac yet. It may still land; tapping again is safe, it will not post twice.' : (err && err.message) || 'could not reach your Mac.'), kind: 'error' };
+      paintNote();
+    });
   }
   function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Answer this at your Mac's prompt. A message sent from here does not answer it; it waits until the question is answered at the Mac."; }
   function macNoWords() { return (W.sessionQuestions && W.sessionQuestions.macNoWords) || "COS cannot read this question's words from here. They show at the Mac's prompt."; }
@@ -1288,7 +1332,8 @@
       var fb = sent.length ? filesBox(r) : null, kit = KIT();
       if (fb && kit) fb.atts.filter(function (t) { return sent.indexOf(t.mediaId) >= 0; }).forEach(function (t) { kit.remove(fb, t.id); });
       var box = r === O.r ? $('ta-input') : null;
-      var left = box ? (box.value.trim() === String(text).trim() ? '' : box.value) : '';
+      // 7.0.18: his answer to a turn-end ask went with the attribution in front; the box holds his words without it.
+      var left = box ? (box.value.trim() === String(text).trim() || (box.value.trim() && turnEndAnswer(box.value) === String(text).trim()) ? '' : box.value) : '';
       if (box && !left) { box.value = ''; W.autoGrow(box); }
       keepDraft(r, left, null);
     },
@@ -1364,6 +1409,8 @@
     if (r.refusal || O.cautionAsk) { r.refusal = null; O.cautionAsk = false; paintVerdict(); }
     r.sending = true; setSending(true);
     var done = function () { r.sending = false; if (O.r === r) setSending(false); };
+    // 7.0.18: his own words in answer to a turn-end ask carry the same attribution as a choice ('Other' in the contract).
+    if (O.open && O.open.kind === 'wait' && waitWhere() === 'turnend' && turnEndStill()) text = turnEndAnswer(text);
     var sending = K.send(r, text, opts || {});
     // continueSession picks the key at once (draftFor): keep it until the Mac takes the words.
     if (r.draft) keepDraft(r, text, r.draft);
