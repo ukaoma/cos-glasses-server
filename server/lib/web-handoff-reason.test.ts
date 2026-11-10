@@ -96,3 +96,43 @@ describe('the login route logs the reason and tells the person the same thing as
     })
   })
 })
+
+// ── Miles 2026-11-09 20:00, "Yes, stop counting stale links" ──
+describe('a failed sign-in link no longer counts toward the per-device lockout; a wrong code still does', () => {
+  async function withLoginL(store: WebHandoffStore, limiter: WebLoginLimiter, fn: (port: number) => Promise<void>) {
+    const app = express()
+    let port = 0
+    app.use('/api', requireApiToken(TOKEN, { selfDnsName: () => null, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({ apiToken: () => TOKEN, port: () => port, selfDnsName: () => null, handoffStore: store, loginLimiter: limiter, log: () => {} }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    try { await fn(port) } finally { await new Promise(resolve => server.close(resolve)) }
+  }
+  const login = (port: number, body: Record<string, string>) => fetch(`http://127.0.0.1:${port}/api/web-session/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+  it('ten each of used, expired, evicted and unknown links: never locked out, and the token still signs in', async () => {
+    const c = clock(Date.now()), store = new WebHandoffStore(c.now), limiter = new WebLoginLimiter()
+    await withLoginL(store, limiter, async port => {
+      for (let i = 0; i < 10; i++) {
+        const used = store.mint().ticket; await login(port, { handoff: used })
+        expect((await login(port, { handoff: used })).status, 'used').toBe(401)
+        const old = store.mint().ticket; c.add(WEB_HANDOFF_TTL_MS + 1)
+        expect((await login(port, { handoff: old })).status, 'expired').toBe(401)
+        const evicted = store.mint().ticket
+        for (let k = 0; k < WEB_HANDOFF_MAX_ACTIVE; k++) store.mint()
+        expect((await login(port, { handoff: evicted })).status, 'evicted').toBe(401)
+        expect((await login(port, { handoff: 'B'.repeat(32) })).status, 'unknown').toBe(401)
+      }
+      expect(limiter.blockedFor('127.0.0.1')).toBe(0)
+      expect((await login(port, { token: TOKEN })).status).toBe(200)
+    })
+  })
+  it('wrong typed codes still count: the 9th try is refused 429, even with a good link', async () => {
+    const store = new WebHandoffStore(), limiter = new WebLoginLimiter()
+    await withLoginL(store, limiter, async port => {
+      for (let i = 0; i < 8; i++) expect((await login(port, { code: 'K7P3-QX9M' })).status).toBe(401)
+      expect((await login(port, { code: 'K7P3-QX9M' })).status).toBe(429)
+      expect((await login(port, { handoff: store.mint().ticket })).status, 'the lockout check itself is unchanged').toBe(429)
+    })
+  })
+})

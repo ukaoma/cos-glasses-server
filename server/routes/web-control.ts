@@ -347,9 +347,11 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     const token = deps.apiToken()
     const result = classifyWebLogin(body, token, handoffStore, deviceCodes, glassesCheck)
     if (!result.ok) {
-      // Every failure counts, the glasses-code one included, so that check cannot be used to
-      // probe codes faster than the limiter allows.
-      loginLimiter.fail(ip, result.reason)
+      // Every failure counts toward the per-IP limit, the glasses-code one included, so that check cannot be used to
+      // probe codes faster than the limiter allows. Except a failed sign-in LINK (Miles 2026-11-09 20:00, "Yes, stop
+      // counting stale links"): a ticket is 192 random bits, so guessing one is not a risk, and a person reopening an old
+      // QR or link should not lock themselves out of typing a code. It still fails with the same message.
+      if (result.reason !== 'handoff_expired') loginLimiter.fail(ip, result.reason)
       // S1 item 7: why a handoff link failed (expired, used, evicted, unknown). The log only; the message is unchanged.
       log(`[web-login] fail kind=${result.reason}${result.handoff ? ` sub=${result.handoff}` : ''} len=${result.length} ip=${ip}`)
       return res.status(401).json({
