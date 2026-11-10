@@ -42,7 +42,7 @@ strong { color: var(--ink); }
 <ol>
 <li>Install <strong>Tailscale</strong> on this phone or computer, and sign in with the same account your Mac uses.</li>
 <li>Turn Tailscale on.</li>
-<li>Open the COS link again. To get a new one, open COS Control on your Mac, then Settings, Glasses and iPhone, <strong>Open COS on your phone</strong>.</li>
+<li>Open the COS link again. To get a new one, open COS Control Settings on your Mac and choose <strong>Open COS on your phone</strong>.</li>
 </ol>
 <p>Nothing was sent and you are not signed in.</p>
 </main>

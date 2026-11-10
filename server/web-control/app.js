@@ -365,7 +365,8 @@
   // login answer carry this browser's own expiresAt; within a day of it the page says when it ends and how to sign in again.
   var CONN = { timer: null, retrying: false, signinEnds: 0, hideFor: 0, lapsed: false };
   var CONN_RETRY_MS = 30000, SIGNIN_WARN_MS = 24 * 3600000, SIGNIN_STORE = 'cos.web.signinEnds';
-  var SIGNIN_HOW = 'On your Mac, open COS Control, then Settings, Glasses and iPhone, Open COS on your phone. Or get a code from another signed-in browser, or from the COS Glasses app.';
+  // Names the row, never the Settings page: that page was renamed in COS Control 0.5.387, and a phone may pair with either build.
+  var SIGNIN_HOW = 'On your Mac, open COS Control Settings and choose Open COS on your phone. Or get a code from another signed-in browser, or from the COS Glasses app.';
   function connWhen(ms) {
     if (!ms) return '';
     var d = new Date(ms), same = new Date().toDateString() === d.toDateString();

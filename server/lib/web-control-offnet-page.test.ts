@@ -22,6 +22,9 @@ describe('the off-Tailscale page', () => {
     expect(WEB_CONTROL_OFFNET_HTML).toContain('It only opens over Tailscale')
     expect(WEB_CONTROL_OFFNET_HTML).toContain('Install <strong>Tailscale</strong>')
     expect(WEB_CONTROL_OFFNET_HTML).toContain('<meta name="viewport"')
+    // The row's name only: the Settings page is renamed in newer COS Control, and a phone may pair with either.
+    expect(WEB_CONTROL_OFFNET_HTML).toContain('open COS Control Settings on your Mac and choose <strong>Open COS on your phone</strong>')
+    expect(WEB_CONTROL_OFFNET_HTML).not.toMatch(/Glasses and iPhone|Glasses, phone and web/)
   })
   it('carries no script, link, address, version or LAN way in', () => {
     expect(WEB_CONTROL_OFFNET_HTML).not.toMatch(/<script|<a\s|href=|src=|https?:\/\//i)
