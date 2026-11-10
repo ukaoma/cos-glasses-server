@@ -3,7 +3,7 @@
 2026-11-10. 7.0.18 (a7e0317) plus one change to Control Web, on Miles's go (12:07, "Let's build that for the next publish for today. Ensure no regressions."). Private on Miles's Mac first.
 
 - **The problem (Miles, 11:56):** opening the web app for the first time was a little slow. Measured: the page was blank until the Mac had answered twice, once to re-check the page and once to say whether this browser is signed in. Caching and compression were already right.
-- **Now the COS mark shows at once,** on the page's own background in your theme, before any script runs or the Mac answers. It goes the moment the sign-in card or the app shows. It shows neither one's content, so it is true whichever comes next.
+- **Now the COS mark shows at once,** on the page's own background in your theme, right after the small theme script and before the app's scripts run or the Mac answers. It goes the moment the sign-in card or the app shows. It shows neither one's content, so it is true whichever comes next.
 - **Nothing else moves:** the mark sits above the page, so the app and the sign-in card appear exactly where they did. It takes no taps, asks the Mac for nothing and loads no new file.
 - **If the page's scripts never run,** the mark hides itself after 25 seconds, longer than the 20 second sign-in check. A Mac that does not answer still shows "COS on your Mac is not answering" as before.
 - **With JavaScript off,** the page now says "COS Control Web needs JavaScript. Turn it on for this site, then reload." It was blank.
