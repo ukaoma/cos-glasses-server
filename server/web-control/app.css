@@ -638,4 +638,9 @@ html { touch-action: manipulation; }
 .sx-mac-q { margin: 8px 0 12px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid var(--panel-border); background: var(--panel); }
 .sx-mac-q[hidden] { display: none; }
 .sx-mac-q .sx-mac-q-title { margin: 0 0 6px; }
+/* 7.0.18: a turn that ended asking him: the choices as buttons in a row that wraps under its own width (at most two,
+   each label at most 40 characters), so the closed Duo stacks them and the open Duo keeps them side by side. Labels wrap
+   inside a button rather than cut. */
+.sx-te-choices, .ta-te-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 6px; }
+.sx-te-choices .cx-btn, .ta-te-choices .cx-btn { flex: 1 1 12rem; min-height: 44px; white-space: normal; text-align: center; line-height: 1.25; }
 .sx-mac-q .sx-note { margin: 6px 0 0; }
