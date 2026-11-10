@@ -969,8 +969,8 @@ export async function endSession(sessionId: string): Promise<{ logged: boolean; 
 /** Log active sessions on server shutdown — prevents data loss on restart.
  * S1 (2026-11-09): a session whose content was already written (by a snapshot or an
  * earlier shutdown, in this boot or a previous one) is not appended again. */
-export function logActiveSessionsOnShutdown(): { written: number; unchanged: number; failed: number } {
-  const counts = { written: 0, unchanged: 0, failed: 0 }
+export function logActiveSessionsOnShutdown(): { written: number; unchanged: number; unconfigured: number; failed: number } {
+  const counts = { written: 0, unchanged: 0, unconfigured: 0, failed: 0 }
   for (const session of sessions.values()) {
     if (session.exchanges.length === 0) continue
     const entry = buildSessionLogEntry({
@@ -984,7 +984,10 @@ export function logActiveSessionsOnShutdown(): { written: number; unchanged: num
     counts[writeSessionLogIfChanged(entry, 'shutdown')]++
   }
   flushSessionLogState()
-  console.log(`[session-log] shutdown: ${counts.written} written, ${counts.unchanged} unchanged, ${counts.failed} failed`)
+  // No ledger configured (the new-install default): nothing to report.
+  if (counts.written || counts.unchanged || counts.failed) {
+    console.log(`[session-log] shutdown: ${counts.written} written, ${counts.unchanged} unchanged, ${counts.failed} failed`)
+  }
   return counts
 }
 
@@ -998,8 +1001,8 @@ let snapshotTimer: ReturnType<typeof setInterval> | null = null
 let lastSnapshotCounts: Record<string, number> = {} // cheap in-process pre-check before hashing
 
 /** One auto-snapshot pass. Exported for tests. */
-export function runAutoSnapshotOnce(): { written: number; unchanged: number; failed: number } {
-  const counts = { written: 0, unchanged: 0, failed: 0 }
+export function runAutoSnapshotOnce(): { written: number; unchanged: number; unconfigured: number; failed: number } {
+  const counts = { written: 0, unchanged: 0, unconfigured: 0, failed: 0 }
   for (const session of sessions.values()) {
     if (session.exchanges.length === 0) continue
     // Skip if exchange count hasn't changed since this process last looked
@@ -1015,9 +1018,10 @@ export function runAutoSnapshotOnce(): { written: number; unchanged: number; fai
       endReason: 'explicit_end',
       slug: `[LIVE] ${(session.exchanges.find(e => e.role === 'user')?.content ?? '').slice(0, 50)}`,
     })
-    const result = writeSessionLogIfChanged(entry, 'snapshot')
-    counts[result]++
-    if (result !== 'failed') lastSnapshotCounts[session.id] = session.exchanges.length
+    counts[writeSessionLogIfChanged(entry, 'snapshot')]++
+    // Recorded whatever the result, as before S1: a failed or unconfigured write is not retried
+    // every 5 minutes (Q1 review M2), only after the session changes again.
+    lastSnapshotCounts[session.id] = session.exchanges.length
   }
   if (counts.written) flushSessionLogState()
   return counts
