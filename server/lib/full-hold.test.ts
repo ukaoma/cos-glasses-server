@@ -43,6 +43,8 @@ describe('the engine gate', () => {
       null, undefined, { entrypoint: null, version: '9.9.9', host: 'terminal' }, { entrypoint: 'cli', version: '2.1.320', host: 'terminal' }, { entrypoint: 'cli', version: '2.0.999', host: 'terminal' }, { entrypoint: 'cli', version: '1.9.400', host: 'terminal' },
       { entrypoint: 'claude-desktop', version: '2.1.316', host: 'desktop-app' }, { entrypoint: 'sdk-cli', version: '2.1.400', host: 'terminal' }, { entrypoint: 'cli', version: null, host: 'terminal' },
       { entrypoint: 'cli', version: '2.1.321-beta', host: 'terminal' }, { entrypoint: 'cli', version: 'v2.1.321', host: 'terminal' }, { entrypoint: '__proto__', version: '9', host: 'terminal' }, { entrypoint: 'toString', version: '9', host: 'terminal' },
+      // An entrypoint with no floor and no host entry: only the own-property guard stands between it and a missing floor.
+      { entrypoint: 'vscode', version: '9.9.9' }, { entrypoint: 'vscode', version: '9.9.9', host: undefined },
     ]) expect(engineProvenForFullHold(engine as never)).toBe(false)
   })
   it('compares part by part', () => {
