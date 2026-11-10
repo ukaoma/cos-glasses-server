@@ -1898,7 +1898,8 @@ export class PermissionBroker {
         state: entry.state === 'answered' ? 'answered' : held ? 'held' : 'at_mac',
         answerable: !!held,
         heldId: held ? held.id : null,
-        questions: entry.state === 'answered' ? [] : (held?.questions ?? entry.questions ?? []),
+        // Settled words are already gone from memory (`noteWaiting` drops them), so an answered entry lists none.
+        questions: held?.questions ?? entry.questions ?? [],
         askedAt: new Date(entry.askedAt).toISOString(),
         deadlineAt: held ? new Date(held.deadlineAt).toISOString() : null,
         answeredAt: entry.answeredAt !== null ? new Date(entry.answeredAt).toISOString() : null,
