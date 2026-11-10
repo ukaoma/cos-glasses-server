@@ -152,6 +152,8 @@
     "docs/test-plan-6.71.11.md",
     "!server/scripts/web-key-mutation-gate.mjs",
     "!server/scripts/web-key-signer-mutation-gate.mjs",
+    "!server/scripts/compact-session-log.ts",
+    "!server/scripts/full-hold-mutation-gate.mjs",
     "docs/web-key-verifier-contract.md"
   ],
   "author": "COS Contributors",
