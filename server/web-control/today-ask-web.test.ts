@@ -117,7 +117,7 @@ function box(opts: { askOn?: boolean; known?: boolean; brief?: unknown; offline?
 describe('Ask about this under the Today summary (app.js)', () => {
   it('the markup mirrors the COS chat composer: one field, the placeholder, a Send button, hidden until shown', () => {
     expect(HTML).toContain('<form id="today-ask" class="cc-composer today-ask hidden"')
-    expect(HTML).toContain('<textarea class="field cc-input" id="today-ask-input" rows="1" maxlength="2000" placeholder="Ask about this or tell a session what to do"')
+    expect(HTML).toContain('<textarea class="field cc-input" id="today-ask-input" rows="1" maxlength="2000" placeholder="Ask about this or steer a session"')
     expect(HTML).toContain('<button type="submit" class="cx-btn primary cc-ask">Send</button>')
     expect(APP).toContain("else if (f.id === 'today-ask') sendTodayAsk();")
     // renderStory shows it with the model summary only.

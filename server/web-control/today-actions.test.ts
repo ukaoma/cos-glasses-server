@@ -4663,3 +4663,120 @@ describe('6.99.30: question cards keep one answer across copies and across a rel
     expect(readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')).toContain('.sq-host.sq-kb-up .sq-foot { position: static; }')
   })
 })
+
+// ═════════════ X1 contract v1 (COORD 2026-11-09 21:35): the question block's three states ═════════════
+// GET /api/session-questions adds `waiting[]` (held, at_mac, answered); items gain toolUseId and fullHold; the web door
+// sends presenceAgeMs and, for an approval with a full-hold flag on, confirms first. Nothing reaches a server.
+describe('X1 contract: the web question block (held, at the Mac, answered)', () => {
+  const SID = 'aaaaaaaa-2222-4222-8222-222222222222', TU = 'toolu_01ABC'
+  const WAIT = (state: string, extra: Record<string, unknown> = {}) => ({ key: SID + ':' + TU, sessionId: SID, provider: 'claude', toolUseId: TU, state,
+    answerable: state === 'held', heldId: null, askedAt: isoIn(-30_000), deadlineAt: null, answeredAt: state === 'answered' ? isoIn(-5_000) : null, answeredBy: state === 'answered' ? 'mac' : null,
+    questions: state === 'answered' ? [] : [{ question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: '' }] }], ...extra })
+  const ID = 'pq_' + 'x'.repeat(24)
+  const tap = (el: any, what: string, id = ID) => el.listeners.click!({ target: { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? id : null) }) } })
+  const pickFirst = (el: any) => el.listeners.change!({ target: { hasAttribute: (a: string) => a === 'data-sq-pick', getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': '0', 'data-o': '0' }) as Record<string, string>)[a], checked: true } })
+
+  it('at the Mac: the server’s words and options show read-only, with the Mac line and no buttons', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [], settled: [], waiting: [WAIT('at_mac')] }))
+    await h.start()
+    const el = h.mk(); h.Qs.mount(el, SID)
+    expect(el.innerHTML).toContain('Which color?')
+    expect(el.innerHTML).toContain('<li>Red<span class="sq-mac-desc"> warm</span></li>')
+    expect(el.innerHTML).toContain('<li>Blue</li>')
+    expect(el.innerHTML).toContain(MAC_WORDS)
+    expect(el.innerHTML, 'no way to answer from here').not.toContain('data-sq=')
+    expect(h.host.innerHTML, 'the top of every pane stays for what can be answered').toBe('')
+  })
+  it('words switch off (COS_WAITING_QUESTION_WORDS, default off): an entry without words keeps the honest no-words line, one card, no options', async () => {
+    const NO_WORDS = 'COS cannot read this question&#39;s words from here. They show at the Mac&#39;s prompt.'
+    for (const questions of [[], [{ question: '', header: '', multiSelect: false, options: [{ label: 'Red', description: '' }] }]]) {
+      const h = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC(ID, SID, { toolUseId: TU })], waiting: [WAIT('at_mac', { questions })] }))
+      await h.start()
+      const el = h.mk(); h.Qs.mount(el, SID)
+      expect(el.innerHTML.match(/data-sq-mac=/g), JSON.stringify(questions)).toHaveLength(1)
+      expect(el.innerHTML).toContain(NO_WORDS)
+      expect(el.innerHTML).toContain(MAC_WORDS)
+      expect(el.innerHTML, 'no options without the words').not.toContain('<ul')
+      expect(el.innerHTML).not.toContain('data-sq=')
+    }
+  })
+  it('one card per question: a held item gone back to the Mac and its waiting entry share a tool_use_id', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC(ID, SID, { toolUseId: TU })], waiting: [WAIT('at_mac')] }))
+    await h.start()
+    const el = h.mk(); h.Qs.mount(el, SID)
+    expect(el.innerHTML.match(/data-sq-mac=/g)).toHaveLength(1)
+    expect(el.innerHTML).toContain('<li>Red')
+  })
+  it('a different question on the same session is its own card; an older server (no waiting) draws as before', async () => {
+    const other = { ...WAIT('at_mac'), key: SID + ':toolu_02', toolUseId: 'toolu_02' }
+    const h = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC(ID, SID, { toolUseId: TU })], waiting: [other] }))
+    await h.start()
+    const el = h.mk(); h.Qs.mount(el, SID)
+    expect(el.innerHTML.match(/data-sq-mac=/g)).toHaveLength(2)
+    const old = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC(ID, SID)] }))
+    await old.start()
+    const el2 = old.mk(); old.Qs.mount(el2, SID)
+    expect(el2.innerHTML.match(/data-sq-mac=/g)).toHaveLength(1)
+    expect(old.Qs.waitingFor(SID)).toEqual([])
+  })
+  it('held for the whole wait: the card says both answers count; a held card without fullHold reads as today', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [{ ...HELD(ID, SID, 'Ship it?'), toolUseId: TU, fullHold: true }], settled: [], waiting: [WAIT('held', { heldId: ID })] }))
+    await h.start()
+    const el = h.mk(); h.Qs.mount(el, SID)
+    expect(el.innerHTML).toContain('Answer here or at your Mac. The first answer counts.')
+    expect(el.innerHTML).toContain('data-sq="send"')
+    const t = loadQ(() => ({ enabled: true, items: [HELD(ID, SID, 'Ship it?')], settled: [] }))
+    await t.start()
+    const el2 = t.mk(); t.Qs.mount(el2, SID)
+    expect(el2.innerHTML).not.toContain('The first answer counts.')
+  })
+  it('answered at the Mac: Answered for 2 minutes; a newer open question wins', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [], settled: [], waiting: [WAIT('answered')] }))
+    await h.start()
+    expect(h.Qs.answeredFor(SID)).toBe(true)
+    const newer = { ...WAIT('at_mac'), key: SID + ':toolu_03', toolUseId: 'toolu_03', askedAt: isoIn(-1_000) }
+    const h2 = loadQ(() => ({ enabled: true, items: [], settled: [], waiting: [WAIT('answered'), newer] }))
+    await h2.start()
+    expect(h2.Qs.answeredFor(SID)).toBe(false)
+  })
+  it('the web door sends how long ago the page was touched with every answer', async () => {
+    const q = loadQ(() => ({ enabled: true, items: [{ ...HELD(ID, SID, 'Ship it?'), toolUseId: TU, fullHold: true }], settled: [] }), { post: () => Promise.resolve({ ok: true }) })
+    await q.start()
+    const el = q.mk(); q.Qs.mount(el, SID)
+    pickFirst(el); q.touch(); tap(el, 'send'); q.later(450); tap(el, 'send')
+    await flush()
+    const ans = q.posts.filter(p => p.path.endsWith('/answer'))
+    expect(ans).toHaveLength(1)
+    expect(typeof ans[0]!.body.presenceAgeMs).toBe('number')
+    expect(ans[0]!.body.presenceAgeMs).toBeLessThanOrEqual(60_000)
+  })
+  it('an approval the server wants confirmed: confirm (bound to the decision), then the answer with its confirmId, once', async () => {
+    const approval = { ...HELD(ID, SID, ''), kind: 'approval', tool: 'Bash', questions: undefined, approval: { tool: 'Bash', summary: 'npm test', detail: 'npm test' }, fullHold: true }
+    let answers = 0
+    const post = (path: string, body: any) => {
+      if (path.endsWith('/confirm')) return Promise.resolve({ confirmId: 'pc_' + 'c'.repeat(24), decision: body.decision, expiresAt: isoIn(60_000) })
+      answers++
+      return body.confirmId ? Promise.resolve({ ok: true }) : Promise.reject(Object.assign(new Error('confirm'), { status: 403, code: 'confirm_required' }))
+    }
+    const q = loadQ(() => ({ enabled: true, items: [approval], settled: [] }), { post })
+    await q.start()
+    const el = q.mk(); q.Qs.mount(el, SID)
+    q.touch(); tap(el, 'allow'); q.later(450); tap(el, 'allow')
+    await flush(); await flush()
+    expect(q.posts.map(p => p.path.split('/').pop())).toEqual(['answer', 'confirm', 'answer'])
+    expect(q.posts[1]!.body).toMatchObject({ decision: 'allow' })
+    expect(q.posts[2]!.body).toMatchObject({ decision: 'allow', confirmId: 'pc_' + 'c'.repeat(24) })
+    expect(q.posts[2]!.body.clientAnswerId).toBe(q.posts[0]!.body.clientAnswerId)
+    expect(answers).toBe(2)
+  })
+  it('a stale touch is refused: the card stays, and says to tap the page and answer again', async () => {
+    const stale = () => Promise.reject(Object.assign(new Error('touch'), { status: 403, code: 'web_touch_required' }))
+    const q = loadQ(() => ({ enabled: true, items: [{ ...HELD(ID, SID, 'Ship it?'), toolUseId: TU, fullHold: true }], settled: [] }), { post: stale })
+    await q.start()
+    const el = q.mk(); q.Qs.mount(el, SID)
+    pickFirst(el); tap(el, 'send'); q.later(450); tap(el, 'send')
+    await flush()
+    expect(el.innerHTML).toContain('Not sent: tap anywhere on this page, then answer again.')
+    expect(el.innerHTML).toContain('data-sq="send"')
+  })
+})

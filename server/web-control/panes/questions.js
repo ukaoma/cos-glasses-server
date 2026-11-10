@@ -32,6 +32,7 @@
     cap: null,            // capabilities.sessionQuestions, once read
     capAt: 0,
     items: [],            // pending items, oldest first
+    waiting: [],          // X1 contract: the questions live sessions wait on (held, at_mac, answered)
     picks: {},            // id -> [{ labels: [], other: '' }] per question
     armed: {},            // id -> 'send' | 'allow' | 'deny'
     armedAt: {},          // id -> when it was armed (COSWeb.confirmReady)
@@ -181,7 +182,7 @@
           // the sheets still hear that the failure is over.
           var was = Q.load;
           Q.load = 'ok';
-          take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : []);
+          take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : [], Array.isArray(d.waiting) ? d.waiting : null);
           if (was !== 'ok') tellMounts();
           var every = Number(d.pollIntervalMs) > 0 ? Number(d.pollIntervalMs) : DEFAULT_POLL_MS;
           schedule(nextWait(every));
@@ -212,7 +213,23 @@
   function stop() { clearTimeout(Q.timer); }
 
   // ── state from a poll ─────────────────────────────────
-  function take(items, settled) {
+  // ── X1 contract v1 (COORD 2026-11-09 21:35): `waiting[]`, every AskUserQuestion a live Claude session waits on that the
+  // server saw asked: state held (a COS surface can answer it now), at_mac (only the Mac's own prompt can) or answered
+  // (kept 120 s). Words only in memory, as on the server. Keyed by `<sessionId>:<toolUseId>`, never by session alone.
+  var WAITING_STATES = { held: 1, at_mac: 1, answered: 1 };
+  function waitingEntry(w) {
+    if (!w || typeof w.key !== 'string' || !WAITING_STATES[w.state] || typeof w.sessionId !== 'string') return null;
+    var qs = (Array.isArray(w.questions) ? w.questions : []).slice(0, 4).map(function (q) {
+      return { question: String((q && q.question) || ''), header: String((q && q.header) || ''), multiSelect: !!(q && q.multiSelect),
+        options: (q && Array.isArray(q.options) ? q.options : []).slice(0, 8).map(function (o) { return { label: String((o && o.label) || ''), description: String((o && o.description) || '') }; }) };
+    }).filter(function (q) { return q.question; });
+    return { key: w.key, sessionId: w.sessionId.toLowerCase(), provider: 'claude', toolUseId: typeof w.toolUseId === 'string' ? w.toolUseId : null, state: w.state,
+      answerable: w.answerable === true && w.state === 'held', heldId: typeof w.heldId === 'string' && /^pq_[a-f0-9]{24}$/.test(w.heldId) ? w.heldId : null,
+      questions: qs, askedAt: Date.parse(w.askedAt) || 0, answeredAt: Date.parse(w.answeredAt) || 0 };
+  }
+  function take(items, settled, waiting) {
+    // An older server sends no `waiting`: keep the last list only for a moment's read, never invent one.
+    Q.waiting = Array.isArray(waiting) ? waiting.map(waitingEntry).filter(Boolean) : [];
     var pending = items.filter(function (i) { return i && i.answerable !== false && (i.kind === 'question' || i.kind === 'approval'); });
     var atMac = (settled || []).filter(function (i) { return i && i.waitingAtMac === true && (i.kind === 'question' || i.kind === 'approval'); });
     var before = Q.items.map(function (i) { return i.id; }).join('|') + '/' + Q.atMac.map(function (i) { return i.id; }).join('|');
@@ -254,9 +271,11 @@
       return n > 0 && (q.multiSelect || n === 1);
     });
   }
+  // X1 contract: a question held for the whole wait (fullHold) is on the Mac's screen too. Both answers count; the first wins.
+  var FULL_HOLD_LINE = 'Answer here or at your Mac. The first answer counts.';
   function noteHtml(item) {
     var text = Q.notes[item.id] || '';
-    return '<p class="sq-note' + (text ? '' : ' hidden') + '" data-sq-note="' + esc(item.id) + '" role="status">' + esc(text) + '</p>';
+    return (item.fullHold === true ? '<p class="sq-fullhold">' + esc(FULL_HOLD_LINE) + '</p>' : '') + '<p class="sq-note' + (text ? '' : ' hidden') + '" data-sq-note="' + esc(item.id) + '" role="status">' + esc(text) + '</p>';
   }
   // The card reads like Claude Code's own question in the terminal (Miles 11/07): a strip naming each question, ☒ once
   // it has an answer, then ✓ Submit; each question in bold, numbered options with their descriptions under them, Other
@@ -362,6 +381,16 @@
   // A question or an approval the Mac's own prompt waits on: what it asks when this page saw it held, and where to answer.
   // No buttons: nothing here can deliver an answer to that prompt.
   function macCard(item) {
+    if (item.fromWaiting) {
+      var body0 = (item.questions || []).map(function (q) {
+        return '<p class="sq-q-text sq-mac-q">' + esc(q.question) + '</p>' + (q.options.length ? '<ul class="sq-mac-opts">' + q.options.map(function (o) {
+          return '<li>' + esc(o.label) + (o.description ? '<span class="sq-mac-desc"> ' + esc(o.description) + '</span>' : '') + '</li>';
+        }).join('') + '</ul>' : '');
+      }).join('') || '<p class="sq-mac-nowords">' + esc(MAC_NO_WORDS) + '</p>';
+      return '<article class="sq-card sq-mac" data-sq-mac="' + esc(item.id) + '" data-kind="question">' +
+        '<header class="sq-head"><h2 class="sq-title">' + esc(engine(item)) + ' has a question</h2></header>' + body0 +
+        '<p class="sq-mac-line">' + esc(MAC_LINE) + '</p></article>';
+    }
     var words = Q.seen[item.id] || { questions: [], summary: '' };
     var title = item.kind === 'approval' ? engine(item) + ' wants to use ' + (item.tool || 'a tool') : engine(item) + ' has a question';
     var body = item.kind === 'approval'
@@ -376,7 +405,24 @@
     // Every item names its session (the broker validates it), so no session asked for matches none: the top of every
     // pane never draws a Mac card.
     var want = String(sessionId || '').toLowerCase();
-    return Q.atMac.filter(function (i) { return String(i.sessionId || '').toLowerCase() === want; });
+    // X1 contract: a question at the Mac's own prompt that this server saw asked has its words in `waiting`. One card per
+    // question, matched by tool_use_id: a held item that went back to the Mac and the waiting entry are the same question.
+    var waits = Q.waiting.filter(function (w) { return w.sessionId === want && w.state === 'at_mac'; });
+    var cards = waits.map(function (w) {
+      return { id: 'w:' + w.key, kind: 'question', sessionId: w.sessionId, provider: 'claude', toolUseId: w.toolUseId, fromWaiting: true, questions: w.questions };
+    });
+    var ids = {}; waits.forEach(function (w) { if (w.toolUseId) ids[w.toolUseId] = 1; });
+    var settled = Q.atMac.filter(function (i) {
+      if (String(i.sessionId || '').toLowerCase() !== want) return false;
+      if (i.toolUseId) return !ids[i.toolUseId];
+      // An older server gives a settled item no tool_use_id: show it only when no waiting entry speaks for the session.
+      return !waits.length;
+    });
+    return settled.concat(cards);
+  }
+  function waitingFor(sessionId) {
+    var want = String(sessionId || '').toLowerCase();
+    return Q.waiting.filter(function (w) { return w.sessionId === want; });
   }
   // True when this session's newest event here is an answer (from this page or any other screen) of the last two
   // minutes, with nothing held for it now and nothing at the Mac since.
@@ -386,6 +432,12 @@
     var at = 0, macAt = 0;
     Object.keys(Q.answered).forEach(function (id) { var a = Q.answered[id]; if (a.sessionId === want && Date.now() - a.at <= ANSWERED_MS) at = Math.max(at, a.at); });
     atMacFor(want).forEach(function (i) { macAt = Math.max(macAt, Date.parse(i.settledAt) || Date.parse(i.createdAt) || 0); });
+    // X1 contract: answered anywhere (the Mac's prompt or a COS surface) in the last 120 s, newer than any question still open.
+    Q.waiting.forEach(function (w) {
+      if (w.sessionId !== want) return;
+      if (w.state === 'answered' && Date.now() - w.answeredAt <= ANSWERED_MS) at = Math.max(at, w.answeredAt);
+      else if (w.state !== 'answered') macAt = Math.max(macAt, w.askedAt || Date.now());
+    });
     return at > 0 && at >= macAt;
   }
   function wordsOf(id) { var w = Q.seen[id]; return w ? { questions: w.questions.slice(), summary: w.summary } : null; }
@@ -466,8 +518,12 @@
   var REFUSED = {
     already_answered: 'Already answered, on the glasses or the Mac.', expired: 'Too late: the Mac took this back.',
     handed_to_desk: 'The Mac has this one now. Answer it there.', hook_gone: 'The session stopped waiting for this answer.',
-    not_found: 'This question is gone.', invalid_answer: 'That answer was not accepted. Check each question has a choice.'
+    not_found: 'This question is gone.', invalid_answer: 'That answer was not accepted. Check each question has a choice.',
+    // X1 contract, web door with a full-hold flag on: none of these settle the card; the person taps again.
+    web_touch_required: 'Not sent: tap anywhere on this page, then answer again.',
+    confirm_required: 'Not sent: tap again to confirm.', confirm_invalid: 'Not sent: that confirmation ran out. Tap again to confirm.'
   };
+  var KEEPS_CARD = { invalid_answer: 1, web_touch_required: 1, confirm_required: 1, confirm_invalid: 1 };
   // QA round 1: an answer that never reached the server (no HTTP status: offline, a dropped link, a timeout) says so in
   // plain words, with the button to tap; the retry goes under the same clientAnswerId, so the server replays it.
   function unreachable(item, what) {
@@ -483,10 +539,33 @@
     changed();
     if (W.today && W.today.refresh) { try { W.today.refresh(); } catch (_e) {} }
   }
+  // X1 contract: the web door sends how long ago this page was last touched (the tap that sent it counts). An older server
+  // or a flags-off server ignores the field.
+  function withTouch(body) {
+    var age = presenceAge();
+    if (age !== null) body.presenceAgeMs = age;
+    return body;
+  }
+  function confirmThen(id, body, doneLine) {
+    Q.sending[id] = 1; render();
+    var c = withTouch({ decision: body.decision });
+    api('/api/session-questions/' + encodeURIComponent(id) + '/confirm', { method: 'POST', body: c, timeoutMs: 20000 }).then(function (d) {
+      if (!d || typeof d.confirmId !== 'string' || !/^pc_[a-f0-9]{24}$/.test(d.confirmId)) throw Object.assign(new Error('confirm'), { status: 403, code: 'confirm_invalid' });
+      body.confirmId = d.confirmId;
+      post(id, body, doneLine);
+    }, function (err) {
+      delete Q.sending[id];
+      var settles = err && REFUSED[err.code] && !KEEPS_CARD[err.code];
+      if (settles) { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(REFUSED[err.code]); schedule(500); return; }
+      Q.notes[id] = REFUSED[err && err.code] || (err && err.status == null ? unreachable(itemOf(id), body.decision) : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer') + ' Tap again to retry.');
+      render();
+    });
+  }
   function post(id, body, doneLine) {
     Q.sending[id] = 1; Q.armed[id] = ''; Q.notes[id] = '';
     if (!Q.answerIds[id]) Q.answerIds[id] = answerId();
     body.clientAnswerId = Q.answerIds[id];
+    withTouch(body);
     render();
     var asked = itemOf(id);
     api('/api/session-questions/' + encodeURIComponent(id) + '/answer', { method: 'POST', body: body, timeoutMs: 20000 }).then(function () {
@@ -498,7 +577,12 @@
       schedule(500);
     }, function (err) {
       delete Q.sending[id];
-      var settled = err && REFUSED[err.code] && err.code !== 'invalid_answer';
+      // X1 contract: an approval the server wants confirmed gets its confirm (bound to this item and decision, 60 s, single
+      // use) and goes once more. The person already tapped twice; nothing is sent without a second tap.
+      if (err && err.status === 403 && err.code === 'confirm_required' && body.decision && !body.confirmId) {
+        return confirmThen(id, body, doneLine);
+      }
+      var settled = err && REFUSED[err.code] && !KEEPS_CARD[err.code];
       if (settled) {
         if (err.code === 'already_answered') noteAnswered(asked, id);
         Q.items = Q.items.filter(function (i) { return i.id !== id; });
@@ -572,11 +656,12 @@
       Q.armed[id] = '';
       if (!Q.answerIds[id]) Q.answerIds[id] = answerId();
       Q.sending[id] = 1; render();
-      api('/api/session-questions/' + encodeURIComponent(id) + '/answer', { method: 'POST', body: { clientAnswerId: Q.answerIds[id], handBack: true }, timeoutMs: 20000 }).then(function () {
+      api('/api/session-questions/' + encodeURIComponent(id) + '/answer', { method: 'POST', body: withTouch({ clientAnswerId: Q.answerIds[id], handBack: true }), timeoutMs: 20000 }).then(function () {
         delete Q.sending[id]; Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); W.toast('Left for the Mac.'); schedule(500);
       }, function (err) {
         delete Q.sending[id];
-        if (err && REFUSED[err.code] && err.code !== 'invalid_answer') { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(REFUSED[err.code]); return; }
+        if (err && REFUSED[err.code] && !KEEPS_CARD[err.code]) { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(REFUSED[err.code]); return; }
+        if (err && KEEPS_CARD[err.code]) { Q.notes[id] = REFUSED[err.code]; render(); return; }
         Q.notes[id] = err && err.status == null ? unreachable(item, 'leave') : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer'); render();
       });
       return;
@@ -732,6 +817,6 @@
   if (W.onRoute) W.onRoute(function (r) { if (r && r.pane === 'today') nudge(); });
 
   W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, _fitKeyboard: fitKeyboard, poll: poll, nudge: nudge, mount: mount,
-    itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, macNoWords: MAC_NO_WORDS, answeredLine: ANSWERED_LINE,
+    itemsFor: itemsFor, atMacFor: atMacFor, waitingFor: waitingFor, answeredFor: answeredFor, wordsOf: wordsOf, fullHoldLine: FULL_HOLD_LINE, macLine: MAC_LINE, macNoWords: MAC_NO_WORDS, answeredLine: ANSWERED_LINE,
     loadState: function () { return Q.load; }, retry: function () { nudge(); } };
 })();

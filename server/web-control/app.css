@@ -418,6 +418,11 @@ select.field {
 .menu-host { display: flex; align-items: center; gap: 8px; color: var(--sub); font-size: 14px; margin: 6px 4px 12px; }
 .sheet-head { display: flex; gap: 10px; align-items: center; }
 .sheet-head .field { flex: 1; }
+/* W1 (Miles 2026-11-09 21:24, closed Duo): the Ask field sat beside the camera, the clip and Cancel and its placeholder
+   was cut off. It needs at least 15rem; when the buttons do not fit beside that, they go to the row below, at its right. */
+#ask-form { flex-wrap: wrap; }
+#ask-form > .field { flex: 1 1 15rem; min-width: 0; }
+#ask-form > .ask-clip { margin-left: auto; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes drop { from { transform: translateY(-24px); opacity: 0.5; } }
 
