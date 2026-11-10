@@ -57,8 +57,11 @@ describe('theme.js: load the list one frame after the page is drawn, in order, t
   it('while the page is still arriving, nothing loads; after DOMContentLoaded it waits for one frame, then adds all six in order', () => {
     const h = run()
     expect(h.added).toHaveLength(0)
+    expect(h.frames.length + h.timers.length, 'nothing is even scheduled while the page is arriving').toBe(0)
     h.fire('DOMContentLoaded')
     expect(h.added, 'not before a frame').toHaveLength(0)
+    expect(h.frames, 'one frame is asked for').toHaveLength(1)
+    expect(h.timers.map(t => t.ms), 'and only the 50 ms fallback, no immediate load').toEqual([50])
     h.frame(); h.runTimers(0)
     expect(h.added.map(s => s.src)).toEqual(LIST)
     expect(h.added.every(s => s.async === false), 'async=false keeps the order').toBe(true)
