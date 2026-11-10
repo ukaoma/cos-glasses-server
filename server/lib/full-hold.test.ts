@@ -1,4 +1,5 @@
 // X1: the full hold's switches and its engine gate (lib/full-hold.ts).
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { approvalFullHoldEnabled, engineProvenForFullHold, fullHoldSwitches, parseEngineVersion, questionFullHoldEnabled, versionAtLeast, waitingQuestionWordsEnabled } from './full-hold.js'
 
@@ -54,5 +55,20 @@ describe('the engine gate', () => {
     expect(versionAtLeast([2, 1, 321], [2, 1, 321])).toBe(true)
     expect(versionAtLeast([2, 1], [2, 1, 1])).toBe(false)
     expect(versionAtLeast([2, 10, 0], [2, 9, 999])).toBe(true)
+  })
+})
+
+describe('the documented route (final review S6)', () => {
+  // A Control-managed server reads ~/.cos-glasses/.env itself (server/env.ts, loaded first by bootstrap.ts),
+  // so these work there; listing them is what documents them and what the managed contract promises.
+  it('all three switches are in the managed runtime contract and in .env.example, commented out at their non-default values', () => {
+    const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
+    const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8')
+    for (const [key, shown] of [['COS_QUESTION_FULL_HOLD', '1'], ['COS_APPROVAL_FULL_HOLD', '1'], ['COS_WAITING_QUESTION_WORDS', '0']] as const) {
+      expect(contract.optionalEnvironment, key).toContain(key)
+      expect(example, key).toContain(`\n# ${key}=${shown}\n`)
+      // Never set live by the example: an uncommented line would turn it on for anyone who copies the file.
+      expect(example, key).not.toMatch(new RegExp(`^${key}=`, 'm'))
+    }
   })
 })
