@@ -1,7 +1,7 @@
 // Session endpoints — recent list, full history, existence check, client-format messages, context breaks, end
 import { Router } from 'express'
 import { getRecentSessions, getHistory, sessionExists, addContextBreak, endSession, getSessionRaw, getActiveSessions, resolveExchangePairModel, ensureArchiveMirrorForDay } from '../lib/conversation.js'
-import { buildSessionLogEntry, readSessionLogRanges, writeSessionLogIfChanged } from '../lib/session-log.js'
+import { buildSessionLogEntry, lookupRangesFromHistory, readSessionLogRanges, writeSessionLogIfChanged } from '../lib/session-log.js'
 import { getArchiveDayMessages, listArchiveDateStrings } from '../lib/archive.js'
 import { recentMessagesLimit, selectRecentMessages } from '../lib/recent-messages.js'
 import { localDay } from '../lib/local-day.js'
@@ -152,16 +152,14 @@ sessionsRouter.post('/sessions/lookup', async (req, res) => {
     }
   }
 
-  // 2. JSONL history (ended sessions + snapshots), one widest range per session.
-  // S1 (2026-11-09): streamed and incremental (session-log.ts readSessionLogRanges). The old
-  // readFileSync().toString() threw on the 1.94 GB ledger and the catch read that as "no file".
+  // 2. JSONL history (ended sessions + snapshots). S1 (2026-11-09): streamed and incremental
+  // (session-log.ts readSessionLogRanges); the old readFileSync().toString() threw on the 1.94 GB
+  // ledger and the catch read that as "no file". The range rule is the old one, unchanged: a
+  // session's end is widened by later lines only when it is NOT in memory (lookupRangesFromHistory).
   try {
     const live = new Set(sessionRanges.map(s => s.sid))
     const history = await readSessionLogRanges()
-    for (const [sid, range] of history) {
-      if (live.has(sid)) continue // live sessions take priority (they extend to NOW)
-      sessionRanges.push({ sid, start: range.start, end: range.end })
-    }
+    sessionRanges.push(...lookupRangesFromHistory(history, sid => Boolean(getSessionRaw(sid)), live))
   } catch (err) {
     console.warn('[sessions] lookup could not read the session ledger:', err instanceof Error ? err.message : err)
   }
@@ -233,7 +231,9 @@ sessionsRouter.post('/sessions/:id/snapshot', (req, res) => {
     slug: `[LIVE] ${(session.exchanges.find(e => e.role === 'user')?.content ?? '').slice(0, 50)}`,
   })
 
-  const logged = writeSessionLogIfChanged(entry, 'snapshot') !== 'failed'
+  // Logged means the ledger holds this content: written now, or already there.
+  const result = writeSessionLogIfChanged(entry, 'snapshot')
+  const logged = result === 'written' || result === 'unchanged'
   res.json({
     ok: true,
     logged,

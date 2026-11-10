@@ -176,7 +176,13 @@ export function writeSessionLog(entry: SessionLogEntry): boolean {
 export type SessionLogKind = 'snapshot' | 'shutdown' | 'end'
 
 interface LedgerStateRow { sig: string; kind: SessionLogKind; at: number }
-interface LedgerState { version: 1; logPath: string; sessions: Record<string, LedgerStateRow> }
+/** `ino`: the ledger file the rows describe. A different or missing file (compaction, a restore, a
+ * deletion) means the rows no longer describe what is on disk, so they are dropped (Q1 review S5). */
+interface LedgerState { version: 1; logPath: string; ino?: number; sessions: Record<string, LedgerStateRow> }
+
+function ledgerInode(logPath: string): number | null {
+  try { return statSync(logPath).ino } catch { return null }
+}
 
 /** Most sessions the state remembers; the oldest by last write are dropped past this. */
 export const SESSION_LOG_STATE_CAP = 5_000
@@ -243,7 +249,18 @@ function scheduleStateFlush(): void {
   ledgerStateFlushTimer.unref?.()
 }
 
-export type SessionLogWriteResult = 'written' | 'unchanged' | 'failed'
+/** 'unconfigured': COS_SCRIPTS_DIR is not set, so there is no ledger. That is the default for
+ * every new install (COS Control's generated .env does not set it), not a failure. */
+export type SessionLogWriteResult = 'written' | 'unchanged' | 'unconfigured' | 'failed'
+
+let unconfiguredNoted = false
+/** Say once per process that there is no ledger (Q1 review M2: the auto-snapshot printed it per
+ * session every 5 minutes on a new install). */
+function noteUnconfigured(): void {
+  if (unconfiguredNoted) return
+  unconfiguredNoted = true
+  console.log('[session-log] COS_SCRIPTS_DIR not set: no .glasses_sessions.jsonl ledger on this install (said once)')
+}
 
 /** Append the entry unless this session's content was already written.
  *  - snapshot / shutdown: skipped when the last write for the session (any kind) had the same content.
@@ -251,12 +268,19 @@ export type SessionLogWriteResult = 'written' | 'unchanged' | 'failed'
  *    always lands once even after a snapshot of the same content (its slug and end_reason differ). */
 export function writeSessionLogIfChanged(entry: SessionLogEntry, kind: SessionLogKind): SessionLogWriteResult {
   const logPath = sessionLogPath()
-  if (!logPath) return writeSessionLog(entry) ? 'written' : 'failed'
+  if (!logPath) { noteUnconfigured(); return 'unconfigured' }
   const state = loadLedgerState(logPath)
+  const ino = ledgerInode(logPath)
+  if (state.ino !== undefined && state.ino !== ino) {
+    state.sessions = {}
+    state.ino = undefined
+    ledgerStateDirty = true
+  }
   const sig = sessionLogSignature(entry)
   const prev = state.sessions[entry.session_id]
   if (prev && prev.sig === sig && (kind !== 'end' || prev.kind === 'end')) return 'unchanged'
   if (!writeSessionLog(entry)) return 'failed'
+  state.ino = ledgerInode(logPath) ?? undefined
   state.sessions[entry.session_id] = { sig, kind, at: Date.now() }
   ledgerStateDirty = true
   scheduleStateFlush()
@@ -280,11 +304,19 @@ export function logSessionEnd(input: EndSessionInput): SessionLogEntry | null {
 // /api/sessions/lookup read the whole ledger with readFileSync(...).toString(). At 1.94 GB
 // that throws (the string is longer than V8 allows), the catch treated it as "no log
 // file", and every lookup silently answered from live sessions only, after blocking the
-// event loop for the read. This reader streams, reads only the bytes appended since the
-// last call, and keeps one range per session, so duplicates already in the file collapse
-// to the widest range (what the route always meant to keep).
+// event loop for the read. This reader streams and reads only the bytes appended since the
+// last call. It keeps, per session, what the old loop kept: the FIRST line's range, plus the
+// latest end any line reported. Which of the two a lookup uses is the route's old rule
+// (lookupRangesFromHistory below), unchanged.
 
-export interface SessionLogRange { start: number; end: number }
+export interface SessionLogRange {
+  /** created_at of the session's first line in the file. Never widened (the old loop never moved it). */
+  start: number
+  /** ended_at of that first line. */
+  firstEnd: number
+  /** The latest ended_at of any line for the session. */
+  end: number
+}
 
 interface RangeIndex { logPath: string; ino: number; offset: number; ranges: Map<string, SessionLogRange> }
 let rangeIndex: RangeIndex | null = null
@@ -323,9 +355,30 @@ export function parseSessionLogLine(line: string): { sessionId: string; start: n
 
 function mergeRange(ranges: Map<string, SessionLogRange>, id: string, start: number, end: number): void {
   const existing = ranges.get(id)
-  if (!existing) { ranges.set(id, { start, end }); return }
-  if (start < existing.start) existing.start = start
+  if (!existing) { ranges.set(id, { start, firstEnd: end, end }); return }
   if (end > existing.end) existing.end = end
+}
+
+/**
+ * The ranges /api/sessions/lookup matches against, in first-seen order: the route's rule from
+ * before S1, unchanged (Q1 review M1, 2026-11-09). A session's range starts at its first line.
+ * Its end may be widened by later lines ONLY when the session is not in memory. A session still
+ * in memory (restored from sessions.json, however old) keeps its first line's end, because every
+ * boot snapshot of it is stamped ended_at = now: widening would let an October session claim
+ * November timestamps, and the glasses companion stores the answer for good.
+ * Sessions in `live` are skipped (the route lists them first, extended to now).
+ */
+export function lookupRangesFromHistory(
+  history: ReadonlyMap<string, SessionLogRange>,
+  inMemory: (sessionId: string) => boolean,
+  live: ReadonlySet<string> = new Set(),
+): Array<{ sid: string; start: number; end: number }> {
+  const out: Array<{ sid: string; start: number; end: number }> = []
+  for (const [sid, range] of history) {
+    if (live.has(sid)) continue
+    out.push({ sid, start: range.start, end: inMemory(sid) ? range.firstEnd : Math.max(range.firstEnd, range.end) })
+  }
+  return out
 }
 
 /** Index lines in [from, to) of the file into `ranges`. Returns the offset just past the
@@ -401,6 +454,7 @@ export function __resetSessionLogForTests(): void {
   ledgerStateFlushTimer = null
   ledgerState = null
   ledgerStateDirty = false
+  unconfiguredNoted = false
   rangeIndex = null
   rangeIndexBuild = null
 }
