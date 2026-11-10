@@ -522,8 +522,10 @@
 
   // ── answering ─────────────────────────────────────────
   var REFUSED = {
-    already_answered: 'Already answered, on the glasses or the Mac.', expired: 'Too late: the Mac took this back.',
-    handed_to_desk: 'The Mac has this one now. Answer it there.', hook_gone: 'The session stopped waiting for this answer.',
+    // Q1 (D4 card review M2, same server): already_answered is another COS device (a lens, the phone, Control or a browser);
+    // an answer at the Mac comes back as handed_to_desk with reason retracted (RETRACTED_LINE).
+    already_answered: 'Already answered on another device.', expired: 'This question timed out here. Answer it at the Mac.',
+    handed_to_desk: 'Left for the Mac. Answer it there.', hook_gone: 'This question is no longer waiting.',
     not_found: 'This question is gone.', invalid_answer: 'That answer was not accepted. Check each question has a choice.',
     // X1 contract, web door with a full-hold flag on: none of these settle the card; the person taps again.
     web_touch_required: 'Not sent: tap anywhere on this page, then answer again.',
@@ -531,6 +533,20 @@
     not_shown: 'Not sent: this question is not on your devices yet. Answer it at the Mac, or try again in a minute.',
     confirm_required: 'Not sent: tap again to confirm.', confirm_invalid: 'Not sent: that confirmation ran out. Tap again to confirm.'
   };
+  var RETRACTED_LINE = 'Already answered at the Mac, or the session moved on.';
+  // The page's api() reads a body's `reason` before its `error` (other panes rely on that), so a refusal such as
+  // {error: 'handed_to_desk', reason: 'retracted'} or {error: 'invalid_answer', reason: 'client_answer_id'} arrives with the
+  // reason as its code and the error word as its message. Put the server's error word back as the code, the reason beside it.
+  function refusal(err) {
+    if (!err || err.status == null) return err;
+    var word = typeof err.message === 'string' ? err.message : '';
+    if (!REFUSED[err.code] && REFUSED[word]) { err.reason = err.code; err.code = word; }
+    return err;
+  }
+  function refusedLine(err) {
+    if (err && err.code === 'handed_to_desk' && err.reason === 'retracted') return RETRACTED_LINE;
+    return err ? REFUSED[err.code] : '';
+  }
   var KEEPS_CARD = { invalid_answer: 1, web_touch_required: 1, confirm_required: 1, confirm_invalid: 1, not_shown: 1 };
   // QA round 1: an answer that never reached the server (no HTTP status: offline, a dropped link, a timeout) says so in
   // plain words, with the button to tap; the retry goes under the same clientAnswerId, so the server replays it.
@@ -563,9 +579,10 @@
       post(id, body, doneLine);
     }, function (err) {
       delete Q.sending[id];
+      err = refusal(err);
       var settles = err && REFUSED[err.code] && !KEEPS_CARD[err.code];
-      if (settles) { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(REFUSED[err.code]); schedule(500); return; }
-      Q.notes[id] = REFUSED[err && err.code] || (err && err.status == null ? unreachable(itemOf(id), body.decision) : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer') + ' Tap again to retry.');
+      if (settles) { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(refusedLine(err)); schedule(500); return; }
+      Q.notes[id] = refusedLine(err) || (err && err.status == null ? unreachable(itemOf(id), body.decision) : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer') + ' Tap again to retry.');
       render();
     });
   }
@@ -588,6 +605,7 @@
       schedule(500);
     }, function (err) {
       delete Q.sending[id];
+      err = refusal(err);
       // X1 contract: an approval the server wants confirmed gets its confirm (bound to this item and decision, 60 s, single
       // use) and goes once more. The person already tapped twice; nothing is sent without a second tap.
       if (err && err.status === 403 && err.code === 'confirm_required' && body.decision && !body.confirmId) {
@@ -599,10 +617,10 @@
         Q.items = Q.items.filter(function (i) { return i.id !== id; });
         render();
         if (err.code === 'already_answered') answeredTold(); else changed();
-        W.toast(REFUSED[err.code]); schedule(500); return;
+        W.toast(refusedLine(err)); schedule(500); return;
       }
       // A timeout or a lost answer: the same clientAnswerId goes again on the next tap and the server replays it.
-      Q.notes[id] = REFUSED[err && err.code] || (err && err.status == null ? unreachable(asked, body.decision || 'send')
+      Q.notes[id] = refusedLine(err) || (err && err.status == null ? unreachable(asked, body.decision || 'send')
         : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer') + ' Tap again to retry.');
       render();
     });
@@ -671,8 +689,9 @@
         delete Q.sending[id]; Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); W.toast('Left for the Mac.'); schedule(500);
       }, function (err) {
         delete Q.sending[id];
-        if (err && REFUSED[err.code] && !KEEPS_CARD[err.code]) { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(REFUSED[err.code]); return; }
-        if (err && KEEPS_CARD[err.code]) { Q.notes[id] = REFUSED[err.code]; render(); return; }
+        err = refusal(err);
+        if (err && REFUSED[err.code] && !KEEPS_CARD[err.code]) { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(refusedLine(err)); return; }
+        if (err && KEEPS_CARD[err.code]) { Q.notes[id] = refusedLine(err); render(); return; }
         Q.notes[id] = err && err.status == null ? unreachable(item, 'leave') : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer'); render();
       });
       return;
