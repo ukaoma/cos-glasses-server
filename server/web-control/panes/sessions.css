@@ -741,21 +741,16 @@ button.sx-gh[aria-expanded='false'] .chev { transform: rotate(-45deg); }
 
 /* ── the list fits its column at every width (7.0.27; Miles 13:01 on 7.0.26, the open Duo) ──────────────────────────
    THE RULE: at every list width from the divider's minimum (240 px) to its maximum the list's content fits the column, so
-   the column never scrolls sideways and nothing in it is cut. A grid's or a flex row's default track grows to its
-   content's min-content width, so one long unbroken title, a long folder name or the reach line beside two buttons made
-   the head and the rows wider than the column and the column panned on x. Every track here is minmax(0, 1fr), every
-   item may shrink to 0, and what cannot shrink wraps: the reach line has its own full-width row, New folder and the
-   sort menu share the next row and wrap under each other if they must, the search field is the column's width, and
-   titles and folder names end in an ellipsis. Nothing is hidden to make it fit (width_sweep.cjs checks the fit). */
-.sx-lhead { grid-template-columns: minmax(0, 1fr); }
-.sx-lhead > *, .sx-lh-top > *, .sx-tools, .sx-search, .sx-search .field { min-width: 0; }
-.sx-search .field { text-overflow: ellipsis; }
+   the column never scrolls sideways and nothing in it is cut. The head is one grid column that grows to its widest
+   item's min-content width; the reach line, New folder and the sort menu on one unwrapped row measured 272 px at the
+   minimum, so the head, the search field with it, and the column were 32 px too wide and the column panned on x. Now
+   the reach line has its own full-width row and New folder and the sort menu share the next one, wrapping under each
+   other if they must. A folder heading may shrink below its name, so a long folder name never widens the list, and
+   it ends in an ellipsis like a title (rows already could). Nothing is hidden to make it fit: width_sweep.cjs
+   drags the real divider from its minimum to its maximum and checks the fit (each rule here is killed there). */
 .sx-tools-line { flex-wrap: wrap; row-gap: 6px; }
 .sx-tools-line .sx-quiet { flex: 1 0 100%; }
-.sx-tools-line .sx-select { min-width: 0; max-width: 100%; }
-.sx-tools-line .sx-new-folder { max-width: 100%; }
-.sx-rows { grid-template-columns: minmax(0, 1fr); }
-.sx-r, .sx-r-open, .sx-gh-row, .sx-gh-row .sx-gh, .sx-gh .fold { min-width: 0; }
+.sx-gh-row .sx-gh, .sx-gh .fold { min-width: 0; }
 .sx-gh .fold .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sx-org-note.hidden { display: none; }
 .sx-inline { display: grid; gap: 8px; padding: 10px 12px 12px; margin: 6px 0; border-radius: 10px; background: var(--qopen); }
