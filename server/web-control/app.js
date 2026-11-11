@@ -4251,6 +4251,22 @@
     if (p === 2) return '3rd in line';
     return (p + 1) + 'th in line';
   }
+  // Why a waiting follow-up is held (server 7.0.25, S1: waiting_reason on the row, a short code the drain decided).
+  // Plain words for the codes we know; any other well-formed code reads as a plain wait; a malformed value is not shown.
+  var SX_HOLD_WORDS = {
+    files_wait_for_turn_end: 'It has files, so it waits for the current turn to end.',
+    turn_open: 'Waiting for the current turn to end.', turn_not_ended: 'Waiting for the current turn to end.',
+    native_thread_working: 'Waiting for the current turn to end.',
+    live_desktop_process: 'Waiting while another app has this session open.',
+    native_target_busy: 'Waiting: another COS turn holds this session.',
+    native_target_fenced: 'Waiting for this session to be released.',
+    cancel_hold: 'Held for 2 minutes after a stop.'
+  };
+  function sxQueueWhy(t) {
+    var c = t && t.waiting_reason;
+    if (typeof c !== 'string' || !/^[a-z0-9_]{1,48}$/.test(c)) return '';
+    return Object.prototype.hasOwnProperty.call(SX_HOLD_WORDS, c) ? SX_HOLD_WORDS[c] : 'Waiting for this session to be free.';
+  }
   function loadQueue(provider, id) {
     apiAnswer(sessionPath(provider, id, '/queued-turns')).then(function (q) {
       var r = state.reading;
@@ -4266,7 +4282,9 @@
       box.innerHTML = '<div class="sx-queue">' + (waiting.length ? '<p class="sx-queue-head">' + (waiting.length === 1 ? '1 follow-up queued. It sends when this session is available.' : waiting.length + ' follow-ups queued. They send in order when this session is available.') + '</p>' : '') +
         waiting.map(function (t) {
           var mine = t.owner !== 'codex' && parkedByMe(r, t.clientTurnId);
-          return '<div class="sx-queue-row"><span class="sx-queue-state">' + esc(sxQueueLine(t)) + '</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') + '</span>' +
+          var why = sxQueueWhy(t);
+          return '<div class="sx-queue-row"><span class="sx-queue-state">' + esc(sxQueueLine(t)) + '</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
+            (why ? '<span class="sx-queue-reason">' + esc(why) + '</span>' : '') + '</span>' +
             (mine ? '<button type="button" class="cx-btn quiet" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '" title="Cancel this queued message. It will not be sent.">Cancel</button>' : '') + '</div>';
         }).join('') +
         notSent.map(function (t) {
