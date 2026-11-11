@@ -2098,7 +2098,9 @@
     chatGrow(box);
   }
   function chatGrow(box) {
-    var vv = window.visualViewport, h = vv ? vv.height : window.innerHeight || 600;
+    // The visible height the one way Control Web reads it (COSWeb.viewportFit): a visible height of 0 (the unfolded Duo
+    // after a keyboard closed, 11/10) reads as innerHeight, never as a 96 px box.
+    var fit = W.viewportFit ? W.viewportFit() : null, h = fit ? fit.height : window.innerHeight || 600;
     var max = Math.max(96, Math.min(320, Math.round(h * 0.42)));
     box.style.height = 'auto';
     box.style.height = Math.min(box.scrollHeight + 2, max) + 'px';
@@ -2111,9 +2113,11 @@
   // With the on-screen keyboard up, keep the text box and the Plan row inside what is visible: scroll only as much as
   // needed, never past the top of the box. On a folded or unfolded Duo the visual viewport tells us what is visible.
   function chatKeepInView() {
-    var box = $('wk-chat-text'), row = $('wk-cmp-actions'), vv = window.visualViewport;
+    var box = $('wk-chat-text'), row = $('wk-cmp-actions'), fit = W.viewportFit ? W.viewportFit() : null;
     if (!box || !row || document.activeElement !== box) return;
-    var top = vv ? vv.offsetTop : 0, height = vv ? vv.height : window.innerHeight;
+    // Through viewportFit, so a visible height of 0 (11/10) never puts the visible bottom above its top and scrolls the
+    // page away; it reads as innerHeight from offset 0.
+    var top = fit ? fit.top : 0, height = fit ? fit.height : window.innerHeight;
     var bar = document.querySelector('.topbar'), barBottom = bar ? bar.getBoundingClientRect().bottom : 0;
     var visTop = Math.max(top, barBottom > top ? barBottom : top) + 6, visBottom = top + height - 8;
     var boxTop = box.getBoundingClientRect().top, rowBottom = row.getBoundingClientRect().bottom, delta = 0;

@@ -243,7 +243,7 @@ describe('7.0.2 A1: layout reports from every pane, numbers and fixed labels onl
     const posts: any[] = []
     let now = 1_000_000
     const ctx: any = vm.createContext({ window: { innerWidth: 382, innerHeight: 557, visualViewport: { height: 557, width: 382, offsetTop: 0, scale: 1 }, matchMedia: () => ({ matches: true }) },
-      document: { documentElement: { clientHeight: 557 } }, navigator: { userAgent: 'x', maxTouchPoints: 5 }, screen: {}, api: (_p: string, o: any) => { posts.push(o.body.data); return Promise.resolve({}) },
+      document: { documentElement: { clientHeight: 557 } }, navigator: { userAgent: 'x', maxTouchPoints: 5 }, screen: {}, api: (_p: string, o: any) => { posts.push(o.body.data); return Promise.resolve({}) }, VP: { badN: 0, badReads: 0 },
       Date: { now: () => now }, JSON, Math, isFinite, Object, String })
     vm.runInContext(slice(APP, '  // ── layout breadcrumbs', '  // ── the shared kit') + '\n;this.crumb = layoutCrumb;', ctx)
     for (let i = 0; i < 40; i++) { now += 10_001; ctx.crumb('focus', { n: i }) }

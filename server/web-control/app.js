@@ -6832,6 +6832,15 @@
   //            fixed composer clears to sit above the keyboard. 0 when the web view itself shrank.
   var VP = { layoutH: 0 };
   VP.maxH = 0; VP.w = -1; VP.free = 0; VP.typing = false; VP.blurAt = 0;
+  // 7.0.23 (lead 23:02, from Miles's phone rows 11/10): on the unfolded Duo, after a keyboard closed, visualViewport
+  // reported a height of 0 (with an offset anywhere from 0 to 787) for minutes at a time, while innerHeight was back at
+  // 787 within 0.3 s. A visible height under VV_MIN_PX is never a real reading, whatever causes it: it is treated as no
+  // reading, the box is innerHeight from offset 0, and it is counted (VP.badN runs of it, VP.badReads reads), which every
+  // layout report carries as vz and vzr. Why 80: the smallest real visible height in his 99 rows that day is 359.98
+  // (folded, keyboard up), a phone on its side with the keyboard up still shows more than 80, and under 80 nothing fits
+  // a reply box and a header anyway. Without a keyboard innerHeight is the visible height, so the fallback costs nothing.
+  var VV_MIN_PX = 80;
+  VP.bad = false; VP.badN = 0; VP.badReads = 0;
   var VP_SLACK_PX = 20, VP_SETTLE_MS = 1000;
   function vpTyping() {
     var a = document.activeElement;
@@ -6867,7 +6876,13 @@
     }
     else if (!VP.layoutH) VP.layoutH = Math.max(inner, (de && de.clientHeight) || 0);
     var H = VP.layoutH;
-    if (!vv || !(vv.height > 0)) return { layoutH: H, top: 0, height: H, inset: 0, below: 0, dock: 0, scale: 1, zoomed: false, vv: false };
+    if (!vv) return { layoutH: H, top: 0, height: H, inset: 0, below: 0, dock: 0, scale: 1, zoomed: false, vv: false };
+    if (!(vv.height >= VV_MIN_PX)) {
+      VP.badReads++;
+      if (!VP.bad) { VP.bad = true; VP.badN++; }
+      return { layoutH: H, top: 0, height: Math.round(inner) || H, inset: 0, below: 0, dock: 0, scale: 1, zoomed: false, vv: false, bad: true };
+    }
+    VP.bad = false;
     var inset = Math.max(0, Math.round(H - vv.height * scale));
     var top, height;
     if (!zoomed) { top = Math.max(0, Math.round(vv.offsetTop || 0)); height = Math.min(Math.round(vv.height), H); }
@@ -6910,7 +6925,8 @@
       var o = (screen && screen.orientation && screen.orientation.type) || (typeof window.orientation === 'number' ? 'deg' + window.orientation : '');
       var data = { what: String(event || ''), ua: ua.brand, os: ua.os, iw: r(window.innerWidth), ih: r(window.innerHeight), ch: r(de && de.clientHeight),
         vvh: vv ? r(vv.height) : null, vvw: vv ? r(vv.width) : null, vvt: vv ? r(vv.offsetTop) : null, vvs: vv ? r(vv.scale) : null,
-        orient: String(o).slice(0, 24), coarse: !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) };
+        orient: String(o).slice(0, 24), coarse: !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches),
+        vz: VP.badN, vzr: VP.badReads };
       var x = extra || {};
       Object.keys(x).forEach(function (k) { var v = x[k]; if (/^[a-z][a-zA-Z0-9]{0,15}$/.test(k) && (typeof v === 'number' || typeof v === 'boolean' || (typeof v === 'string' && v.length <= 24))) data[k] = typeof v === 'number' ? r(v) : v; });
       var key = JSON.stringify(data), now = Date.now();

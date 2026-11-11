@@ -247,6 +247,8 @@ function crumbKit(ua: string, extra: Record<string, unknown> = {}) {
     window: { innerWidth: 1430, innerHeight: 1000, visualViewport: { height: 894, width: 1430, offsetTop: 0, scale: 1 }, matchMedia: (q: string) => ({ matches: q.includes('coarse') }) },
     document: { documentElement: { clientHeight: 1000 } }, navigator: { userAgent: ua, maxTouchPoints: 0, ...extra }, screen: { orientation: { type: 'landscape-primary' } },
     api: (path: string, o: any) => { posts.push({ path, body: o.body }); return Promise.resolve({}) }, Date: { now: () => now }, JSON, Math, isFinite, Object, String,
+    // 7.0.23: viewportFit's counts of visible heights under 80 px, which every report carries (vz, vzr).
+    VP: { badN: 0, badReads: 0 },
   })
   vm.runInContext(slice('  // ── layout breadcrumbs', '  // ── the shared kit') + '\n;this.crumb = layoutCrumb; this.ua = uaClass;', ctx)
   return { ctx, posts, later: (ms: number) => { now += ms } }
@@ -276,7 +278,7 @@ describe('6.99.30: a layout breadcrumb on open and on each keyboard change reach
     const p = k.posts[0]!
     expect(p.path).toBe('/api/diag/client')
     expect(p.body).toMatchObject({ level: 'info', event: 'web.layout' })
-    expect(p.body.data).toMatchObject({ what: 'open', ua: 'comet', os: 'ios', iw: 1430, ih: 1000, ch: 1000, vvh: 894, vvt: 0, vvs: 1, orient: 'landscape-primary', coarse: true, kind: 'run', kb: false, inset: 106, below: 106, lh: 1000 })
+    expect(p.body.data).toMatchObject({ what: 'open', ua: 'comet', os: 'ios', iw: 1430, ih: 1000, ch: 1000, vvh: 894, vvt: 0, vvs: 1, orient: 'landscape-primary', coarse: true, vz: 0, vzr: 0, kind: 'run', kb: false, inset: 106, below: 106, lh: 1000 })
     const json = JSON.stringify(p.body)
     expect(json, 'never the UA string').not.toContain('Mozilla')
     expect(p.body.data.text, 'a string over 24 characters is dropped').toBeUndefined()
