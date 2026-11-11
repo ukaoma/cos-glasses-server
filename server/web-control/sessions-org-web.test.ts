@@ -85,6 +85,12 @@ describe('the menus', () => {
     expect(nat).toContain('<p class="sx-pop-note">Pinned in Codex</p>')
     expect(nat).not.toContain('data-sx="org-pin"')
   })
+  it('an agent pin with a COS pin under it: the note, and Unpin in COS for the COS pin (Q1 07:22 a)', () => {
+    const both = kit().k.rowMenu({ provider: 'codex', session_id: 'a', pinned: true, cos_pinned: true }, 'codex|a', false)
+    expect(both).toContain('<p class="sx-pop-note">Pinned in Codex</p>')
+    expect(both).toContain('data-sx="org-pin" data-key="codex|a">Unpin in COS</button>')
+    expect(both).not.toContain('>Pin<')
+  })
   it('Move to folder: each folder (names as text), the current one checked, and No folder', () => {
     const h = kit()
     h.k.SXF.folders = [{ id: 'f_1', name: '<b>Release</b>' }, { id: 'f_2', name: 'Ops' }]

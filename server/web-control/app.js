@@ -3171,7 +3171,9 @@
       }).join('') : '<p class="sx-pop-note">No folders yet. Make one with New folder at the top of the list.</p>') +
         '<button type="button" role="menuitemradio" aria-checked="' + (!cur) + '" data-sx="org-move" data-key="' + esc(key) + '" data-folder="">No folder</button>';
     }
-    return (s.pinned ? '<p class="sx-pop-note">Pinned in ' + sxProviderLabel(k.provider) + '</p>'
+    // An agent's own pin is not COS's to undo; a COS pin under it still is (Q1 07:22 a).
+    return (s.pinned ? '<p class="sx-pop-note">Pinned in ' + sxProviderLabel(k.provider) + '</p>' +
+        (s.cos_pinned ? '<button type="button" role="menuitem" data-sx="org-pin" data-key="' + esc(key) + '">Unpin in COS</button>' : '')
         : '<button type="button" role="menuitem" data-sx="org-pin" data-key="' + esc(key) + '">' + (s.cos_pinned ? 'Unpin' : 'Pin') + '</button>') +
       '<button type="button" role="menuitem" data-sx="org-move-menu" data-key="' + esc(key) + '">Move to folder</button>' +
       '<button type="button" role="menuitem" data-sx="org-rename" data-key="' + esc(key) + '">Rename</button>';
