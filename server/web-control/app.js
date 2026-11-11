@@ -7507,6 +7507,36 @@
     } catch (_e) { return false; }
   }
 
+  // Page errors (lead 08:31, 11/11): Control Web reported none, so "no errors in his rows" proved nothing. A script error
+  // or an unhandled rejection becomes one bounded row, event web.error: what kind it was, the error's class (TypeError),
+  // its code and HTTP status when it has them, the script file's own name, line and column, and the pane. Never the
+  // message, a stack or any text: those can carry what a person typed. At most WEB_ERR_MAX rows a page load, one per
+  // kind, class, code and place.
+  var WEB_ERR_MAX = 10, WEB_ERR = { n: 0, seen: {} };
+  function webErrorRow(kind, err, file, line, col) {
+    try {
+      var name = err && typeof err.name === 'string' ? err.name : '';
+      var cls = /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(name) ? name : (err === null || err === undefined ? 'none' : typeof err === 'object' ? 'object' : typeof err);
+      var code = err && (typeof err.code === 'string' || typeof err.code === 'number') && /^[A-Za-z0-9_.-]{1,40}$/.test(String(err.code)) ? String(err.code) : '';
+      var status = err && typeof err.status === 'number' && isFinite(err.status) ? err.status : null;
+      var src = String(file || '').split(/[?#]/)[0].split('/').pop();
+      src = /^[A-Za-z0-9_.-]{1,40}$/.test(src) ? src : '';
+      var ln = Number(line) > 0 ? Math.floor(Number(line)) : 0, cn = Number(col) > 0 ? Math.floor(Number(col)) : 0;
+      var key = [kind, cls, code, status, src, ln].join('|');
+      if (WEB_ERR.seen[key] || WEB_ERR.n >= WEB_ERR_MAX) return false;
+      WEB_ERR.seen[key] = 1; WEB_ERR.n++;
+      var pane = typeof state === 'object' && state && typeof state.pane === 'string' && /^[a-z-]{1,24}$/.test(state.pane) ? state.pane : '';
+      api('/api/diag/client', { method: 'POST', body: { ts: Date.now(), level: 'error', event: 'web.error',
+        data: { kind: kind, cls: cls, code: code, status: status, src: src, line: ln, col: cn, pane: pane, n: WEB_ERR.n } }, timeoutMs: 5000 }).catch(function () {});
+      return true;
+    } catch (_e) { return false; }
+  }
+  if (window.addEventListener) {
+    // Only script errors: a failed image or file load fires 'error' on its element, which does not reach the window.
+    window.addEventListener('error', function (e) { if (e && (e.error || e.filename)) webErrorRow('error', e.error || null, e.filename, e.lineno, e.colno); });
+    window.addEventListener('unhandledrejection', function (e) { webErrorRow('rejection', e ? e.reason : null, '', 0, 0); });
+  }
+
   // 7.0.28: when theme.js had to bring back a stylesheet or a script (the page opened before it could reach the Mac), one
   // numbers-only row says so: how ('sheets', 'reload' or 'gave-up'), how many sheets and scripts had failed, how many
   // checks it took and how long. A reload's report comes back from sessionStorage once.
