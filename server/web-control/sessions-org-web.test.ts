@@ -35,7 +35,8 @@ function kit(o: { rows?: Row[]; api?: (p: string, opts?: any) => Promise<unknown
     api: (path: string, opts: any = {}) => { calls.push({ path, method: opts.method || 'GET', body: opts.body }); order.push('api ' + (opts.method || 'GET') + ' ' + path); return o.api ? o.api(path, opts) : Promise.resolve({}) },
     sxQueryActive: () => false,
     renderSessionGroups: () => { renders++; order.push('render') },
-    loadSessions: () => { order.push('loadSessions'); return Promise.resolve() },
+    // A redraw while the new list lands uses up a placement reset made before it (what happened on the page).
+    loadSessions: () => { order.push('loadSessions'); SXL.place = { x: 'held by a redraw in between' }; return Promise.resolve() },
     sxPaintListHead: () => { heads++ },
     splitSessionId: (p: string, id: string) => ({ provider: p || 'claude', id: String(id || '') }),
     sxAllRows: () => o.rows ?? [],
