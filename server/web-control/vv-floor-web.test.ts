@@ -24,7 +24,8 @@ function slice(text: string, start: string, end: string): string {
 
 // app.js's viewportFit and its VP, against a test window (no keyboard focus: the layout height is innerHeight).
 function fitKit(win: any) {
-  const doc = { documentElement: { clientHeight: win.innerHeight }, activeElement: null }
+  const doc: any = { documentElement: { clientHeight: win.innerHeight }, activeElement: null }
+  win.__doc = doc
   const src = slice(APP, '  var VP = { layoutH: 0 };', '  // ── layout breadcrumbs')
   // eslint-disable-next-line no-new-func
   return new Function('window', 'document', 'Date', src + '\nreturn { fit: viewportFit, VP: VP, MIN: VV_MIN_PX };')(win, doc, Date) as {
@@ -51,6 +52,17 @@ describe('viewportFit: a visible height under 80 px is no reading', () => {
     expect(v.vv).toBe(true)
     expect(v.bad).toBeUndefined()
     expect([v.top, v.height]).toEqual([407, 380])
+  })
+  it('the fallback is innerHeight, not the layout height kept while typing (a keyboard up, the web view 380 tall)', () => {
+    const win = duo({ height: 787, offsetTop: 0 })
+    const k = fitKit(win)
+    k.fit()                                    // not typing: the layout height is 787
+    win.__doc.activeElement = { tagName: 'TEXTAREA' }
+    win.innerHeight = 380                      // the keyboard shrank the web view
+    win.visualViewport!.height = 0             // and the reading is the bad one
+    const v = k.fit()
+    expect(v.layoutH, 'the layout height is kept while typing').toBe(787)
+    expect([v.top, v.height, v.vv]).toEqual([0, 380, false])
   })
   it('the floor is 80 and 80 itself is a reading', () => {
     const k = fitKit(duo({ height: 80, offsetTop: 0 }))
