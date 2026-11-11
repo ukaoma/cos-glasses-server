@@ -616,3 +616,9 @@ html.sx-frame.kb-up .sx-reader-head { padding: 2px 0 6px; margin-bottom: 4px; }
 html.sx-frame.kb-up .sx-reader-title { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 html.sx-frame.kb-up .sx-dock { max-height: 75%; }
 html.sx-frame.kb-up #session-input { max-height: 4.5em; }
+
+/* Q1 (23:40): a question waits at the end of the conversation, out of view. */
+.sx-goq { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 8px; padding: 6px 6px 6px 12px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--panel-border)); background: var(--panel); font-size: 14px; color: var(--ink); }
+.sx-goq[hidden] { display: none; }
+@media (any-pointer: coarse) { .sx-goq .cx-btn { min-height: 44px; } }

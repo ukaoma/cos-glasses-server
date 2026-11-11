@@ -58,7 +58,7 @@ function kit(o: { pane?: string; view?: string; ro?: boolean; fit?: any; rects?:
     Date,
   }
   // eslint-disable-next-line no-new-func
-  const k = new Function('deps', `with (deps) {\n${FRAME_SRC}\nreturn { sync: sxFrameSync, newest: sxToNewest, crumb: sxFrameCrumb, PIN: SX_PIN, FRAME: SX_FRAME, MAX: SX_FRAME_MAX, USER_MS: SX_PIN_USER_MS };\n}`)(deps)
+  const k = new Function('deps', `with (deps) {\n${FRAME_SRC}\nreturn { sync: sxFrameSync, newest: sxToNewest, crumb: sxFrameCrumb, goq: sxGoQuestionPaint, PIN: SX_PIN, FRAME: SX_FRAME, MAX: SX_FRAME_MAX, USER_MS: SX_PIN_USER_MS };\n}`)(deps)
   return { k, de, body, fire, observed, ros, timers, crumbs, hooks, scrolls, deps }
 }
 
@@ -287,5 +287,35 @@ describe('panes/sessions.css: the frame', () => {
   it('short screens: the sign-in line keeps its Hide button (the line is not wider than the screen)', () => {
     expect(css).toContain('html.sx-frame .conn-notice { margin-bottom: 8px; gap: 6px; grid-template-columns: minmax(0, 1fr); }')
     expect(css).toContain('html.sx-frame .conn-line > .btn { flex: none; }')
+  })
+})
+
+describe('Go to the question (Q1 23:40): the dock says a question waits when its card is out of view', () => {
+  function goq(o: { cards: boolean; qTop: number; frame?: boolean }) {
+    const h = kit()
+    if (o.frame !== false) h.de.classList.add('sx-frame')
+    const line: any = { hidden: true }
+    const q: any = { children: o.cards ? [{}] : [], textContent: o.cards ? 'Which branch?' : '', getBoundingClientRect: () => ({ top: o.qTop }) }
+    const body: any = { getBoundingClientRect: () => ({ bottom: 700 }) }
+    h.deps.$ = (id: string) => (id === 'session-goq' ? line : id === 'session-body' ? body : id === 'session-questions' ? q : null)
+    return { show: h.k.goq(), line }
+  }
+  it('a card at the end, below what shows: the line shows', () => {
+    const g = goq({ cards: true, qTop: 1400 })
+    expect(g.show).toBe(true)
+    expect(g.line.hidden).toBe(false)
+  })
+  it('the card in view, no card, or the frame off: no line', () => {
+    expect(goq({ cards: true, qTop: 500 }).line.hidden).toBe(true)
+    expect(goq({ cards: false, qTop: 1400 }).line.hidden).toBe(true)
+    expect(goq({ cards: true, qTop: 1400, frame: false }).line.hidden).toBe(true)
+  })
+  it('the line is in the dock; it repaints on the body\u2019s scroll, its size changes and the cards\u2019 redraws; its button goes to the end', () => {
+    const html = slice(APP, "      reader.innerHTML =\n        '<div class=\"sx-reader-head\">", '      readerImagesMount($')
+    expect(html.indexOf('id="session-goq"')).toBeGreaterThan(html.indexOf('id="session-dock"'))
+    expect(APP).toContain("body.addEventListener('scroll', sxGoQuestionPaint, { passive: true });")
+    expect(APP).toContain("if (SX_PIN.body === body && body.isConnected) bottom(); sxGoQuestionPaint(); });")
+    expect(APP).toContain("if (typeof sxGoQuestionPaint === 'function') sxGoQuestionPaint(); });")
+    expect(APP).toContain("if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint();")
   })
 })

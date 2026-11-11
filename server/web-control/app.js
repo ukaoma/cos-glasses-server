@@ -2701,6 +2701,19 @@
     SX_FRAME.hooked = true;
     window.COSWeb.onKeyboard(function (what) { if (what === 'after') sxFrameCrumb('kb-after'); });
   }
+  // "Go to the question" (Q1 23:40): shown in the dock while the session's question cards have something and the end of
+  // the conversation, where they are, is out of view (the person scrolled up). Read on the body's scroll, its size
+  // changes and the cards' redraws.
+  function sxGoQuestionPaint() {
+    var line = $('session-goq'), body = $('session-body'), q = $('session-questions');
+    if (!line) return false;
+    var has = !!(q && q.children && q.children.length && String(q.textContent || '').trim());
+    var hidden = false;
+    if (has && body && body.getBoundingClientRect && q.getBoundingClientRect) hidden = q.getBoundingClientRect().top >= body.getBoundingClientRect().bottom - 8;
+    var show = has && hidden && document.documentElement.classList.contains('sx-frame');
+    line.hidden = !show;
+    return show;
+  }
   // The reader's own scroll (#session-body); the window's only where the frame is off.
   // What mounts after the first paint (the session's question cards, the queue, the activity, image previews) changes
   // the body's height and would leave it short of the end. So the body stays at the newest turn while its size or its
@@ -2721,13 +2734,14 @@
       SX_PIN.body = body;
       var touched = function () { SX_PIN.userAt = Date.now(); };
       ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(function (t) { body.addEventListener(t, touched, { passive: true }); });
+      body.addEventListener('scroll', sxGoQuestionPaint, { passive: true });
       body.addEventListener('scroll', function () {
         if (SX_PIN.body !== body || Date.now() - SX_PIN.userAt > SX_PIN_USER_MS) return;
         if (Math.abs(body.scrollTop - SX_PIN.put) > 4 && body.scrollTop < body.scrollHeight - body.clientHeight - 4) sxUnpin();
       }, { passive: true });
       if (typeof ResizeObserver === 'function') {
         // The body and everything in it (the note, the turns, Copy session, its note): any of them can grow.
-        SX_PIN.ro = new ResizeObserver(function () { if (SX_PIN.body === body && body.isConnected) bottom(); });
+        SX_PIN.ro = new ResizeObserver(function () { if (SX_PIN.body === body && body.isConnected) bottom(); sxGoQuestionPaint(); });
         SX_PIN.ro.observe(body);
         [].forEach.call(body.children, function (c) { SX_PIN.ro.observe(c); });
       }
@@ -3068,6 +3082,7 @@
       if (!t || !sxPane.contains(t)) return;
       var act = t.getAttribute('data-sx'), rd = state.reading;
       if (act === 'view') return setSessionsView(t.getAttribute('data-view'));
+      if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint(); var gq = $('session-questions'), first = gq && gq.querySelector('button, input, [tabindex]'); if (first && first.focus) first.focus({ preventScroll: true }); return; }
       if (act === 'clock') { SX.clock = t.getAttribute('data-clock'); sxSave(); return renderSessionGroups(); }
       if (act === 'refresh') {
         if (SX.view !== 'sessions') return renderUsageView(true);
@@ -3466,6 +3481,8 @@
         // The dock, fixed at the bottom of the reader: what it is doing now (with Stop), the Mac's question, then the
         // verdict, the reply box, its status and the queue, all as before.
         '<div class="sx-dock" id="session-dock">' +
+        // Q1 (23:40): the question cards end the conversation; scrolled up away from them, the dock says one waits.
+        '<p class="sx-goq" id="session-goq" hidden><span>A question is waiting at the end.</span><button type="button" class="cx-btn quiet" data-sx="goto-question">Go to the question</button></p>' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
         '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
         '<div class="sx-chat">' +
@@ -3484,7 +3501,7 @@
       setLive({});
       if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
       var qk = window.COSWeb.sessionQuestions, qhost = $('session-questions');
-      if (qk && qk.mount && qhost) r.qMount = qk.mount(qhost, id, function () { if (state.reading === r && typeof readerMacPaint === 'function') readerMacPaint(r, r.waitingNow); });
+      if (qk && qk.mount && qhost) r.qMount = qk.mount(qhost, id, function () { if (state.reading === r && typeof readerMacPaint === 'function') readerMacPaint(r, r.waitingNow); if (typeof sxGoQuestionPaint === 'function') sxGoQuestionPaint(); });
       paintReaderFiles();
       paintWebKeyOffer(r);
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
