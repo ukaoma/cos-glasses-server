@@ -529,13 +529,19 @@ describe('whereFor: the Mac line only for a question or approval, words from the
 })
 
 describe('the session reader mounts its question cards above the verdict and the Send box (DESIGN.md step 4 #3)', () => {
-  it('one #session-questions, inside the chat block, before #session-verdict, mounted with the shared component', () => {
+  // 7.0.23 (the Sessions frame): the cards end the conversation (#session-body), right above the dock that holds the
+  // verdict and the Send box; in the dock a card hid its choices or the reply box on the Duo. Still one host, still above
+  // the verdict and the Send box, still the shared component.
+  it('one #session-questions, at the end of the conversation, before the dock and #session-verdict, mounted with the shared component', () => {
     const host = `'<div class="sx-questions" id="session-questions"></div>' +`
     expect(APP.split(host).length - 1, 'exactly one host').toBe(1)
-    const chat = APP.indexOf(`'<div class="sx-chat">' +`), at = APP.indexOf(host), verdict = APP.indexOf(`'<div id="session-verdict"></div>' +`)
-    expect(chat).toBeGreaterThan(-1)
-    expect(at, 'inside the chat block').toBeGreaterThan(chat)
+    const body = APP.indexOf(`'<div class="sx-body" id="session-body">' +`), at = APP.indexOf(host), dock = APP.indexOf(`'<div class="sx-dock" id="session-dock">' +`)
+    const verdict = APP.indexOf(`'<div id="session-verdict"></div>' +`), send = APP.indexOf(`id="session-send"`)
+    expect(body).toBeGreaterThan(-1)
+    expect(at, 'inside the conversation').toBeGreaterThan(body)
+    expect(at, 'its last part, before the dock').toBeLessThan(dock)
     expect(at, 'above the verdict and the Send box').toBeLessThan(verdict)
+    expect(verdict).toBeLessThan(send)
     expect(APP).toContain("r.qMount = qk.mount(qhost, id, function () {")
   })
 })
