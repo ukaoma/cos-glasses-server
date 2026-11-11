@@ -35,6 +35,16 @@ export interface AgentSessionListDropped {
   age: number
   limit: number
   oversized: number
+  /** Step 2a (Q1 FIX 1): kept rows (COS pins, folder members, COS-started sessions) past KEPT_LIST_MAX. Present only
+   *  when something was dropped, so an older reader of `dropped` sees the shape it knows. */
+  kept?: number
+}
+
+/** Step 2a (Q1 FIX 1): the most kept rows one list answer carries, on top of `limit`. Native pins are not counted
+ *  here; they stay inside `limit` as before. */
+export const KEPT_LIST_MAX = 40
+function countKeptOverflow(dropped: AgentSessionListDropped, n: number): void {
+  if (n > 0) dropped.kept = (dropped.kept ?? 0) + n
 }
 
 export function emptySessionListDropped(): AgentSessionListDropped {
@@ -1058,6 +1068,11 @@ export async function listClaudeSessions(
   desktopSessionsRoot = '',
   dropped: AgentSessionListDropped = emptySessionListDropped(),
   preloadedAliases?: ClaudeAliasMap,
+  /** Step 2a: canonical ids the COS organizer keeps (COS pins, folder members). Listed at any age and outside `cap`,
+   *  like a native pin, but `pinned` stays the native star only. */
+  keep: ReadonlySet<string> = new Set(),
+  /** Which kept ids win when KEPT_LIST_MAX must choose: lower first (0 COS pins and folders, 1 COS-started). */
+  keepRank: (id: string) => number = () => 0,
 ): Promise<AgentSessionRow[]> {
   const aliases = preloadedAliases ?? await loadClaudeDesktopAliases(desktopSessionsRoot)
   const canonical = (id: string) => { const cli = aliases.get(id)?.cliSessionId; return cli && CLAUDE_UUID_JSONL.test(cli + '.jsonl') ? cli : id }
@@ -1072,6 +1087,7 @@ export async function listClaudeSessions(
   const seen = new Set<string>()
   const pinnedCandidates: Array<{ file: string; native: string; project: string; mtimeMs: number; birthtimeMs: number; desktop?: string }> = []
   const recentCandidates: Array<{ file: string; native: string; project: string; mtimeMs: number; birthtimeMs: number; desktop?: string }> = []
+  const keptCandidates: typeof recentCandidates = []
   for (const folder of await dirents(projectsRoot)) {
     const dir = join(projectsRoot, folder)
     const dirSt = await fileStat(dir)
@@ -1084,7 +1100,9 @@ export async function listClaudeSessions(
       const file = join(dir, name)
       const st = await fileStat(file)
       if (!st?.isFile) continue
-      const pinned = canonicalStars.has(native.toLowerCase())
+      const starred = canonicalStars.has(native.toLowerCase())
+      const kept = !starred && keep.has(native.toLowerCase())
+      const pinned = starred || kept
       const fresh = now.getTime() - st.mtimeMs <= AGENT_SESSION_MAX_AGE_MS
       if (!pinned && !fresh) {
         dropped.age += 1
@@ -1099,17 +1117,18 @@ export async function listClaudeSessions(
         desktop: desktopByCli.get(native)?.file,
       }
       seen.add(native.toLowerCase())
-      if (pinned) pinnedCandidates.push(candidate)
+      if (starred) pinnedCandidates.push(candidate)
+      else if (kept) keptCandidates.push(candidate)
       else recentCandidates.push(candidate)
     }
   }
-  for (const starred of canonicalStars) {
+  for (const starred of new Set([...canonicalStars, ...keep])) {
     if (seen.has(starred) || canonicalLive.has(starred) || canonicalLive.has(starred.slice(0, 8))) continue
     const desktop = desktopByCli.get(starred)?.file
     if (!desktop) continue
     const st = await fileStat(desktop)
     if (!st?.isFile) continue
-    pinnedCandidates.push({
+    ;(canonicalStars.has(starred) ? pinnedCandidates : keptCandidates).push({
       file: '',
       native: starred,
       project: '',
@@ -1120,6 +1139,7 @@ export async function listClaudeSessions(
     seen.add(starred)
   }
   pinnedCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  keptCandidates.sort((a, b) => (keepRank(a.native.toLowerCase()) - keepRank(b.native.toLowerCase())) || b.mtimeMs - a.mtimeMs)
   recentCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
 
   const toRows = async (candidates: typeof recentCandidates, limit: number): Promise<AgentSessionRow[]> => {
@@ -1166,8 +1186,13 @@ export async function listClaudeSessions(
     return rows
   }
 
+  const keptLimitBefore = dropped.limit
+  const keptRows = await toRows(keptCandidates, KEPT_LIST_MAX)
+  countKeptOverflow(dropped, dropped.limit - keptLimitBefore)
+  dropped.limit = keptLimitBefore
   return [
     ...await toRows(pinnedCandidates, Math.max(pinnedCandidates.length, 0)),
+    ...keptRows,
     ...await toRows(recentCandidates, Math.max(0, cap)),
   ]
 }
@@ -1177,27 +1202,36 @@ export async function listCodexSessions(
   now: Date,
   cap = AGENT_SESSION_PER_PROVIDER_LIMIT,
   dropped: AgentSessionListDropped = emptySessionListDropped(),
+  /** Step 2a: thread ids the COS organizer keeps; see listClaudeSessions. */
+  keep: ReadonlySet<string> = new Set(),
+  keepRank: (id: string) => number = () => 0,
 ): Promise<AgentSessionRow[]> {
   const names = await loadCodexThreadNames(sessionsRoot)
   const pinnedIds = await loadCodexPinnedIds(sessionsRoot)
   const pinnedCandidates: Array<{ file: string; name: string; mtimeMs: number; birthtimeMs: number }> = []
   const recentCandidates: Array<{ file: string; name: string; mtimeMs: number; birthtimeMs: number }> = []
+  const keptCandidates: typeof recentCandidates = []
   for (const file of await listCodexJsonlFiles(sessionsRoot)) {
     const st = await fileStat(file)
     if (!st?.isFile) continue
     const name = file.split('/').pop() || file
     const fileId = idFromCodexFilename(name)
-    const pinned = fileId ? pinnedIds.has(fileId) : false
+    const nativePin = fileId ? pinnedIds.has(fileId) : false
+    const kept = !nativePin && (fileId ? keep.has(fileId) : false)
+    const pinned = nativePin || kept
     const fresh = now.getTime() - st.mtimeMs <= AGENT_SESSION_MAX_AGE_MS
     if (!pinned && !fresh) {
       dropped.age += 1
       continue
     }
     const candidate = { file, name, mtimeMs: st.mtimeMs, birthtimeMs: st.birthtimeMs }
-    if (pinned) pinnedCandidates.push(candidate)
+    if (nativePin) pinnedCandidates.push(candidate)
+    else if (kept) keptCandidates.push(candidate)
     else recentCandidates.push(candidate)
   }
   pinnedCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const codexRank = (c: { name: string }) => keepRank(idFromCodexFilename(c.name) ?? '')
+  keptCandidates.sort((a, b) => (codexRank(a) - codexRank(b)) || b.mtimeMs - a.mtimeMs)
   recentCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
 
   const toRows = async (candidates: typeof recentCandidates, limit: number): Promise<AgentSessionRow[]> => {
@@ -1251,8 +1285,12 @@ export async function listCodexSessions(
   }
 
   const pinnedRows = await toRows(pinnedCandidates, Math.max(pinnedCandidates.length, 0))
+  const keptLimitBefore = dropped.limit
+  const keptRows = await toRows(keptCandidates, KEPT_LIST_MAX)
+  countKeptOverflow(dropped, dropped.limit - keptLimitBefore)
+  dropped.limit = keptLimitBefore
   const recentRows = await toRows(recentCandidates, Math.max(0, cap))
-  return [...pinnedRows, ...recentRows]
+  return [...pinnedRows, ...keptRows, ...recentRows]
 }
 
 export async function listCursorSessions(
@@ -1262,15 +1300,19 @@ export async function listCursorSessions(
   composerDb = '',
   pinnedIds: ReadonlySet<string> = new Set(),
   dropped: AgentSessionListDropped = emptySessionListDropped(),
+  /** Step 2a: composer ids the COS organizer keeps; see listClaudeSessions. */
+  keep: ReadonlySet<string> = new Set(),
+  keepRank: (id: string) => number = () => 0,
 ): Promise<AgentSessionRow[]> {
   const composerNames = composerDb ? await loadCursorComposerNames(composerDb) : new Map<string, string>()
+  const retained = (id: string) => pinnedIds.has(id.toLowerCase()) || keep.has(id.toLowerCase())
   const byId = new Map<string, { file: string; sessionDir: string; project: string; mtimeMs: number; birthtimeMs: number }>()
   for (const folder of await dirents(projectsRoot)) {
     if (folder.includes('var-folders') || folder.includes('private-var')) continue
     const transcripts = join(projectsRoot, folder, 'agent-transcripts')
     for (const sessionDir of await dirents(transcripts)) {
       if (sessionDir === 'subagents') continue
-      const pinned = pinnedIds.has(sessionDir.toLowerCase())
+      const pinned = retained(sessionDir)
       if (folder === 'empty-window' && !pinned) continue
       const file = join(transcripts, sessionDir, `${sessionDir}.jsonl`)
       const st = await fileStat(file)
@@ -1295,9 +1337,12 @@ export async function listCursorSessions(
       byId.set(sessionDir, existing ? preferCursorCopy(next, existing) : next)
     }
   }
-  const pinnedCandidates = [...byId.values()].filter(c => pinnedIds.has(c.sessionDir.toLowerCase()))
-  const recentCandidates = [...byId.values()].filter(c => !pinnedIds.has(c.sessionDir.toLowerCase()))
+  const nativePin = (id: string) => pinnedIds.has(id.toLowerCase())
+  const pinnedCandidates = [...byId.values()].filter(c => nativePin(c.sessionDir))
+  const keptCandidates = [...byId.values()].filter(c => !nativePin(c.sessionDir) && retained(c.sessionDir))
+  const recentCandidates = [...byId.values()].filter(c => !retained(c.sessionDir))
   pinnedCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  keptCandidates.sort((a, b) => (keepRank(a.sessionDir.toLowerCase()) - keepRank(b.sessionDir.toLowerCase())) || b.mtimeMs - a.mtimeMs)
   recentCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
 
   const toRows = async (candidates: typeof recentCandidates, limit: number): Promise<AgentSessionRow[]> => {
@@ -1334,8 +1379,13 @@ export async function listCursorSessions(
     return rows
   }
 
+  const keptLimitBefore = dropped.limit
+  const keptRows = await toRows(keptCandidates, KEPT_LIST_MAX)
+  countKeptOverflow(dropped, dropped.limit - keptLimitBefore)
+  dropped.limit = keptLimitBefore
   return [
     ...await toRows(pinnedCandidates, Math.max(pinnedCandidates.length, 0)),
+    ...keptRows,
     ...await toRows(recentCandidates, Math.max(0, cap)),
   ]
 }
@@ -1407,6 +1457,12 @@ export async function listAgentSessions(
   sort: AgentSessionSort = 'updated',
   dropped: AgentSessionListDropped = emptySessionListDropped(),
   preloadedAliases?: ClaudeAliasMap,
+  /** Step 2a: canonical ids per provider the COS organizer keeps (COS pins, folder members). Kept rows are listed at
+   *  any age, outside the per-provider cap AND outside `limit`. Absent: exactly today's list. */
+  keep: Partial<Record<AgentProvider, ReadonlySet<string>>> = {},
+  /** Step 2a (Miles, 2026-11-10): sessions a COS job started in the last 7 days. Kept like `keep`, ranked after it when
+   *  the KEPT_LIST_MAX ceiling has to choose. */
+  started: Partial<Record<AgentProvider, ReadonlySet<string>>> = {},
 ): Promise<AgentSessionRow[]> {
   const originalStars = await loadClaudeStarredIds(roots.claudeDesktopConfig)
   // ONE alias load for the whole walk. Before this the walk loaded it here AND
@@ -1429,15 +1485,26 @@ export async function listAgentSessions(
     })
   const liveIds = new Set(enrichedLive.flatMap(row => [row.session_id, row.session_id.slice(0, 8)]))
   const cap = AGENT_SESSION_PER_PROVIDER_LIMIT
+  // Kept Claude ids are canonical already (the organizer route canonicalizes on write); map again in case a Desktop
+  // id reached the store from an older path.
+  const keptClaude = new Set([...(keep.claude ?? [])].map(id => canonical(id).toLowerCase()))
+  const startedClaude = new Set([...(started.claude ?? [])].map(id => canonical(id).toLowerCase()))
+  const inSet = (row: AgentSessionRow, claude: Set<string>, other: Partial<Record<AgentProvider, ReadonlySet<string>>>) =>
+    row.provider === 'claude' ? claude.has(row.session_id.toLowerCase()) : (other[row.provider]?.has(row.session_id.toLowerCase()) ?? false)
+  /** 0: a COS pin or folder member; 1: COS-started; null: not kept. */
+  const keptTier = (row: AgentSessionRow): 0 | 1 | null => inSet(row, keptClaude, keep) ? 0 : inSet(row, startedClaude, started) ? 1 : null
+  const isKept = (row: AgentSessionRow) => keptTier(row) !== null
+  const union = (provider: Exclude<AgentProvider, 'claude'>) => new Set([...(keep[provider] ?? []), ...(started[provider] ?? [])])
+  const keptForWalk = { claude: new Set([...keptClaude, ...startedClaude]), codex: union('codex'), cursor: union('cursor') }
   let rows = dedupeSessions([
     ...enrichedLive,
-    ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions, dropped, aliases),
-    ...(await Promise.all(codexSessionRootsOf(roots).map(root => listCodexSessions(root, now, cap, dropped)))).flat(),
-    ...await listCursorSessions(roots.cursorProjects, now, cap, roots.cursorComposerDb, cursorPinned, dropped),
+    ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions, dropped, aliases, keptForWalk.claude, id => keptClaude.has(id) ? 0 : 1),
+    ...(await Promise.all(codexSessionRootsOf(roots).map(root => listCodexSessions(root, now, cap, dropped, keptForWalk.codex, id => keep.codex?.has(id) ? 0 : 1)))).flat(),
+    ...await listCursorSessions(roots.cursorProjects, now, cap, roots.cursorComposerDb, cursorPinned, dropped, keptForWalk.cursor, id => keep.cursor?.has(id) ? 0 : 1),
   ])
   if (sort === 'opened') {
     rows = rows.filter(entry => {
-      if (entry.alive) return true
+      if (entry.alive || isKept(entry)) return true
       const created = Date.parse(entry.created)
       return Number.isFinite(created) && now.getTime() - created <= AGENT_SESSION_MAX_AGE_MS
     })
@@ -1450,9 +1517,24 @@ export async function listAgentSessions(
     // pin-boosting here made the lens show July stars instead of today.
     rows.sort((a, b) => (b.modified || '').localeCompare(a.modified || ''))
   }
-  const extras = Math.max(0, rows.length - Math.max(0, limit))
-  if (extras) dropped.limit += extras
-  return rows.slice(0, limit)
+  // Step 2a: kept rows are not cut by `limit` but by their own ceiling, KEPT_LIST_MAX (Q1 FIX 1): COS pins and folder
+  // members first, then COS-started sessions, newest first in each. They keep their place in the sort order.
+  const max = Math.max(0, limit)
+  const keptRanked = rows.filter(isKept)
+    .sort((a, b) => (keptTier(a)! - keptTier(b)!) || (b.modified || '').localeCompare(a.modified || ''))
+  const keptAllowed = new Set(keptRanked.slice(0, KEPT_LIST_MAX))
+  countKeptOverflow(dropped, keptRanked.length - keptAllowed.size)
+  let taken = 0
+  let cut = 0
+  const out = rows.filter(entry => {
+    if (isKept(entry)) return keptAllowed.has(entry)
+    taken += 1
+    if (taken <= max) return true
+    cut += 1
+    return false
+  })
+  if (cut) dropped.limit += cut
+  return out
 }
 
 /**

@@ -31,6 +31,7 @@ import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
 import { agentSessionsRouter } from './routes/agent-sessions.js'
+import { createSessionOrganizerRouter } from './routes/session-organizer.js'
 import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createLiveEventsRouter, liveEventsEnabled, realLiveSources } from './routes/live-events.js'
 import { LiveEventsHub } from './lib/live-events.js'
@@ -1154,6 +1155,8 @@ app.use('/api', transcribeRouter)
 app.use('/api', sessionIndexRouter)
 // Claude + Codex + Cursor transcripts from this Mac. Same 7-day window as Control.
 app.use('/api', agentSessionsRouter)
+// Step 2a (Sessions chat-style layout): COS folders, COS pins and renamed titles. Additive; an older server 404s these.
+app.use('/api', createSessionOrganizerRouter())
 // The live view of one of those sessions. Four segments ending in a literal `stream`,
 // so it cannot shadow the three-segment transcript route above or the bindings
 // router's `/attachability` below. READ-ONLY, and deliberately NOT behind

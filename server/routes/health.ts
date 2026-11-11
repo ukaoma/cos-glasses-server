@@ -10,6 +10,7 @@ import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
 import { customInstructionsCapability, learnedStyleCapability, polishOptionsCapability } from './dictation-polish-settings.js'
 import { PAIRING_PROTOCOL_VERSION } from '../lib/glasses-pairing.js'
 import { taskBridgeAvailable } from '../lib/task-bridge.js'
+import { modelEfforts } from '../lib/model-efforts.js'
 import { Router } from 'express'
 import { webKeyAuthorityEnabled } from '../lib/web-key-authority.js'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
@@ -712,6 +713,8 @@ healthRouter.get('/models', async (req, res) => {
       ...cursorOptions,
       ...ollamaOptions,
     ],
+    // Step 2a (Sessions chat-style layout): each agent's efforts, the values POST /api/query-jobs accepts. Additive.
+    efforts: modelEfforts(),
     cursor: cursorCatalog,
     cursorReady: isCursorProviderReady(),
     ollama: {

@@ -91,6 +91,34 @@ import { resetPreviewLogThrottle, warnPreviewThrottled } from '../lib/preview-lo
 import { sessionFilesSetting, withoutPreviews } from '../lib/session-files-setting.js'
 import { withoutLinkMarkers } from '../lib/session-links.js'
 import { createSessionPreviewRouter } from './session-preview.js'
+import { organizerKey, sessionOrganizer, type OrganizerRowFields } from '../lib/session-organizer.js'
+import { listOlderSessions, shortRowFor, OLDER_DEFAULT_DAYS, OLDER_DEFAULT_LIMIT, OLDER_MAX_DAYS, OLDER_MAX_LIMIT, OLDER_MIN_DAYS } from '../lib/agent-session-older.js'
+import { cachedListModel, warmListModels } from '../lib/list-model-memo.js'
+
+/** Step 2a: the organizer, or null when it is unavailable or empty (the list is then exactly today's). */
+function organizerForList(): ReturnType<typeof sessionOrganizer> | null {
+  try {
+    const o = sessionOrganizer()
+    return o.isAvailable() && !o.isEmpty() ? o : null
+  } catch {
+    return null
+  }
+}
+/** Claude Desktop ids per CLI id, from the request's alias table (an entry written under a Desktop id still matches). */
+function desktopIdsByCli(aliases: ClaudeAliasMap | undefined): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  for (const [desktopId, head] of aliases ?? new Map()) {
+    const cli = head?.cliSessionId
+    if (!cli || cli.startsWith('!')) continue
+    out.set(cli, [...(out.get(cli) ?? []), desktopId])
+  }
+  return out
+}
+function organizerFieldsOf(o: ReturnType<typeof sessionOrganizer> | null, provider: string, sessionId: string, desktopIds?: Map<string, string[]>): OrganizerRowFields {
+  if (!o) return {}
+  const id = sessionId.toLowerCase()
+  return o.fieldsForAny([organizerKey(provider, id)], provider === 'claude' ? desktopIds?.get(id) ?? [] : [])
+}
 
 export const agentSessionsRouter = Router()
 // Preview engine phase 1: GET /api/preview/agent-sessions/... and /api/preview-folders/settings (routes/session-preview.ts).
@@ -511,7 +539,10 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     const peers = await liveClaudePeerRecords()
     const live = liveClaudeRows(peers)
     const dropped = emptySessionListDropped()
-    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases)
+    // Step 2a: COS pins and folder members are listed at any age, outside the cap and `limit`.
+    const organizer = organizerForList()
+    const desktopIds = organizer ? desktopIdsByCli(aliases) : undefined
+    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases, organizer ? organizer.keptIds() : {})
     // 6.45.5: each row's last real activity, read from its transcript records. Memoized on
     // mtime and size, so a steady poll re-reads nothing; bounded so a cold list of 80 rows
     // never holds 80 descriptors at once.
@@ -583,8 +614,12 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
         const signal = signalFor(row.session_id)
         const facts = rolloutById.get(row.session_id) ?? null
         const hint = runningHintFor(row.provider, derived, hintClock(signal, derived, facts), now, clocks.get(row.session_id) ?? null)
+        // Step 2a: the model only from the memo (never a read on the list path, 6.62.0 W11).
+        const model = cachedListModel(row.provider, row.file, Number.isFinite(Date.parse(row.modified)) ? Date.parse(row.modified) : null)
         return {
           ...withRunning(toEntry(row, activity[index], derived, queuedOf(row.provider, row.session_id)), running, hint),
+          ...organizerFieldsOf(organizer, row.provider, row.session_id, desktopIds),
+          ...(model ? { reported_model: model } : {}),
           ...cursorActivityFields(row.provider, signal),
           ...(row.provider === 'codex'
             ? { ...(subagents.has(row.session_id) ? { subagent_activity: subagents.get(row.session_id) } : {}), ...codexCompactionFields(workObservationFor(row.session_id), facts, now) }
@@ -602,10 +637,52 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       // client ignores this key. Zero means the walk found nothing to hide, not
       // that the caps are off.
       dropped,
+      ...(organizer ? { organizer: { rev: organizer.rev() } } : {}),
     }))
+    // Step 2a: read the models this answer lacked, in the background, for a later poll. Never awaited.
+    warmListModels(sessions)
   } catch (error) {
     console.error(`[agent-sessions] list failed: ${error instanceof Error ? error.message : error}`)
     res.status(500).json({ error: 'Failed to read agent sessions', reason: 'agent_sessions_read_failed' })
+  }
+})
+
+// Step 2a (S1_CONTRACT_step2a.md B2): the last `days` days in a short form, paged, for the compact groups. Not on the
+// list poll: fetched when the list opens and as a group unfolds. Live rows, COS-kept rows and each agent's own pins are
+// left out (the main list has them in full); a row may still also be in the main list, and the client keeps that one.
+agentSessionsRouter.get('/agent-sessions/older', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  try {
+    const days = boundedInteger(req.query.days, OLDER_DEFAULT_DAYS, OLDER_MIN_DAYS, OLDER_MAX_DAYS)
+    const limit = boundedInteger(req.query.limit, OLDER_DEFAULT_LIMIT, 1, OLDER_MAX_LIMIT)
+    const beforeRaw = typeof req.query.before === 'string' ? Date.parse(req.query.before) : NaN
+    if (typeof req.query.before === 'string' && !Number.isFinite(beforeRaw)) {
+      res.status(400).json({ error: 'before must be an ISO time', reason: 'invalid_before' })
+      return
+    }
+    const roots = agentSessionRoots()
+    const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
+    const organizer = organizerForList()
+    const kept = organizer ? organizer.keptIds() : { claude: new Set<string>(), codex: new Set<string>(), cursor: new Set<string>() }
+    // Kept Claude ids may be Desktop ids; the walk names transcripts by CLI id.
+    for (const id of [...kept.claude]) { const cli = aliases.get(id)?.cliSessionId; if (cli && !cli.startsWith('!')) kept.claude.add(cli) }
+    const liveIds = new Set(liveClaudeRows(await liveClaudePeerRecords()).map(row => row.session_id.toLowerCase()))
+    const result = await listOlderSessions(roots, new Date(), {
+      days, limit, aliases,
+      ...(Number.isFinite(beforeRaw) ? { before: beforeRaw } : {}),
+      // Kept rows come back here at any age: the main list holds at most KEPT_LIST_MAX of them (Q1 FIX 1).
+      exclude: { claude: liveIds },
+      keep: kept,
+    })
+    res.json(redactLocalPathsDeep({
+      sessions: result.rows.map(row => ({ ...row, ...organizerFieldsOf(organizer, row.provider, row.session_id, desktopIdsByCli(aliases)) })),
+      windowDays: days,
+      next_before: result.nextBefore,
+      ...(Number.isFinite(beforeRaw) ? {} : { older_than_window: result.olderThanWindow }),
+    }))
+  } catch (error) {
+    console.error(`[agent-sessions] older list failed: ${error instanceof Error ? error.message : error}`)
+    res.status(500).json({ error: 'Failed to read older agent sessions', reason: 'agent_sessions_read_failed' })
   }
 })
 
@@ -619,6 +696,23 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
   try {
     const limit = boundedInteger(req.query.limit, 20, 1, 50)
     const result = await searchAgentSessions({ query, limit })
+    // Step 2a: a session renamed in COS is found by its new title too (the agent's own title still matches as before).
+    const organizer = organizerForList()
+    if (organizer) {
+      const seen = new Set(result.hits.map(hit => organizerKey(hit.provider, hit.session_id)))
+      const roots = agentSessionRoots()
+      const extra: AgentSessionSearchHit[] = []
+      for (const match of organizer.titleMatches(query)) {
+        if (seen.has(organizerKey(match.provider, match.session_id)) || extra.length + result.hits.length >= limit) continue
+        const file = await findAgentSessionFile(match.provider, match.session_id, roots).catch(() => null)
+        const short = file ? await shortRowFor(match.provider, file, undefined, roots) : null
+        if (!short) continue
+        extra.push({ session_id: short.session_id, provider: short.provider, display_label: short.display_label, project: short.project,
+          modified: short.modified, created: short.created, alive: false, state: 'recent', pinned: false,
+          snippet: '', keywordScore: 1, semanticScore: 0, match: 'keyword' })
+      }
+      result.hits = [...extra, ...result.hits]
+    }
     const queuedOf = await allQueuedWaitingLookup(Date.now())
     // 6.48.1: search hits carry the same derived state as list rows (no list/search shape
     // drift), from the registry and the hook signal; a hit has no transcript walk.
@@ -644,7 +738,7 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
     // 7.0.4 S1: search hits carry snippets of the same words.
     res.json(redactLocalPathsDeep({
       ...result,
-      hits: result.hits.map(hit => toSearchHit(hit, queuedOf(hit.provider, hit.session_id), derivedFor(hit))),
+      hits: result.hits.map(hit => ({ ...toSearchHit(hit, queuedOf(hit.provider, hit.session_id), derivedFor(hit)), ...organizerFieldsOf(organizer, hit.provider, hit.session_id) })),
     }))
   } catch (error) {
     console.error(`[agent-sessions] search failed: ${error instanceof Error ? error.message : error}`)
