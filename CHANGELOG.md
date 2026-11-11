@@ -1,3 +1,20 @@
+## 7.0.21 - Control Web shows the COS mark first on every reopen, and the phone reports where its open time goes
+
+2026-11-10. 7.0.19 (1a7c322) plus one change to Control Web, on the lead's go (14:55) after Miles's first 7.0.19 open on his phone: the mark showed only 72 ms before the app (first paint 520 ms, the app 592 ms). Not 7.0.20: that number stays with the phone approvals work, which is on hold. Private on Miles's Mac first.
+
+- **Why the mark came late:** the page's six scripts (about 735 KB) sat at the end of the page, and the browser often drew nothing until all of them had run. On the phone that is most of the wait.
+- **Now the scripts run one frame after the page is drawn,** in the same order as before, and the app starts only once every one of them has run, as before. They still start downloading while the page arrives, so a first open does not wait longer for them.
+- **Measured in WebKit on this Mac,** with each script slowed to stand in for the phone and 150 ms added to every request: on a reopen the mark showed at about 185 ms every time (before: 194 ms on one run, 476 ms on another), and the app showed at the same time as before. A first-ever open still varies from run to run, before and after; the app is no slower.
+- **The open timing report gains three numbers:** when the page finished arriving, when the scripts had run, and how long the sign-in check took. So the next slow open says where its time went.
+- **The phone's layout reports gain the page width:** the layout width, the width the screen shows at 100%, the scroll width, and the element that sticks out past the edge (none when nothing does). This is to settle why the Duo shows Control Web at 85%: our page, or a phone or browser setting. Numbers and a short element name only, no text.
+- **Not proven off the device:** only the phone shows its own first paint, a first-ever open, and the Duo's widths.
+
+**Default-on for every install:** yes: the script loading, and the extra numbers in the layout reports. There is no switch.
+
+### If you roll back
+
+- To 7.0.19: the scripts run as part of the page again, so the mark can come late; the reports lose the new numbers. Nothing is stored by this change.
+
 ## 7.0.19 - Control Web shows the COS mark at once on open, instead of a blank page
 
 2026-11-10. 7.0.18 (a7e0317) plus one change to Control Web, on Miles's go (12:07, "Let's build that for the next publish for today. Ensure no regressions."). Private on Miles's Mac first.
