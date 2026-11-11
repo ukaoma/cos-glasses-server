@@ -217,7 +217,7 @@ function load(o: Opts = {}) {
     removeEventListener: (t: string, fn: () => void) => { vvListeners[t] = (vvListeners[t] || []).filter(f => f !== fn) } } : undefined
   const frames: Array<() => void> = []
   const intervals: Array<{ fn: () => void; ms: number; cleared?: boolean }> = []
-  const win: any = { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport,
+  const win: any = { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, removeEventListener: (t: string, fn: () => void) => { if (winListeners[t] === fn) delete winListeners[t] }, visualViewport,
     ...(o.vv ? { innerHeight: o.innerHeight ?? 1000, requestAnimationFrame: (fn: () => void) => { frames.push(fn); return frames.length }, cancelAnimationFrame: (n: number) => { frames[n - 1] = () => {} } } : {}) }
   // app.js's own viewport reading and a breadcrumb recorder (6.99.30).
   const vf = realViewportFit(win, document)
@@ -4038,6 +4038,69 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     expect(count(), 'not twice').toBe(2)
     h.ta.close('user')
     expect(count()).toBe(0)
+  })
+
+  // Miles 11/10 20:16 (lead 20:26): the panel and the page under it moved together on the Duo. One report per open
+  // tells "the page scrolled behind it" (sy moves) from "the visible area panned" (pt or ot moves). Diagnostic only.
+  describe('ta-pan: one report per open when the page or the visible area moves under the panel', () => {
+    function openPanel(sy = 0) {
+      const h = load({ vv: { height: 1000, pageTop: 0 } as any, innerHeight: 1000 })
+      const w = (h.ctx as any).window
+      w.scrollY = sy
+      h.ta.open('meeting', 'Surcharging Push', h.opener())
+      h.document.appended.getBoundingClientRect = () => ({ top: -64.4, bottom: 935.6 })
+      const pans = () => h.crumbs.filter(c => c.what === 'ta-pan')
+      return { h, w, pans }
+    }
+    it('the page scrolled behind the panel: one report with scrollY before and after and where the panel sits', () => {
+      const { h, w, pans } = openPanel(0)
+      expect(h.winListeners.scroll, 'listens to the page scroll while open').toBeTypeOf('function')
+      w.scrollY = 120.4; h.winListeners.scroll!()
+      expect(pans()).toEqual([{ what: 'ta-pan', data: { kind: 'meeting', kb: false, sy0: 0, pt0: 0, ot0: 0, sy: 120, pt: 0, ot: 0, pTop: -64, pBot: 936 } }])
+      w.scrollY = 300; h.winListeners.scroll!()
+      expect(pans(), 'once per open, however far it goes').toHaveLength(1)
+    })
+    it('the visible area panned (pageTop) with the page still: reported through the visualViewport scroll', () => {
+      const { h, pans } = openPanel(0)
+      h.viewport({ pageTop: 85 } as any, 'scroll')
+      expect(pans()).toHaveLength(1)
+      expect(pans()[0]!.data).toMatchObject({ sy0: 0, sy: 0, pt0: 0, pt: 85, ot: 0 })
+    })
+    it('the visible area moved inside the layout (offsetTop) on a resize: reported', () => {
+      const { h, pans } = openPanel(0)
+      h.viewport({ offsetTop: 40 }, 'resize')
+      expect(pans()).toHaveLength(1)
+      expect(pans()[0]!.data).toMatchObject({ ot0: 0, ot: 40, pt: 0, sy: 0 })
+    })
+    it('a resize that moves nothing (the keyboard changing the height) sends nothing', () => {
+      const { h, w, pans } = openPanel(0)
+      h.viewport({ height: 700 }, 'resize'); h.runFrames(); h.winListeners.scroll?.()
+      w.scrollY = 0.3; h.winListeners.scroll!()
+      expect(pans(), 'a sub-pixel change rounds to the same number').toHaveLength(0)
+    })
+    it('close stops it; the next open gets its own report, measured from its own start', () => {
+      const { h, w, pans } = openPanel(0)
+      w.scrollY = 50; h.winListeners.scroll!()
+      h.ta.close('user')
+      expect(h.winListeners.scroll, 'the page scroll listener is gone').toBeUndefined()
+      h.ta.open('pet', '', h.opener())
+      h.document.appended.getBoundingClientRect = () => ({ top: 0, bottom: 1000 })
+      h.winListeners.scroll!()
+      expect(pans(), 'reopened where it was: nothing moved yet').toHaveLength(1)
+      w.scrollY = 90; h.winListeners.scroll!()
+      expect(pans()).toHaveLength(2)
+      expect(pans()[1]!.data).toMatchObject({ kind: 'pet', sy0: 50, sy: 90, pTop: 0, pBot: 1000 })
+    })
+    it('the report fits layoutCrumb: short keys, numbers or booleans, and a short kind', () => {
+      const { h, w, pans } = openPanel(0)
+      w.scrollY = 10; h.winListeners.scroll!()
+      const d = pans()[0]!.data
+      for (const [k, v] of Object.entries(d)) {
+        expect(k).toMatch(/^[a-z][a-zA-Z0-9]{0,15}$/)
+        expect(['number', 'boolean', 'string'].includes(typeof v) || v === null, k).toBe(true)
+        if (typeof v === 'string') expect(v.length).toBeLessThanOrEqual(24)
+      }
+    })
   })
 
   it('the stylesheet: the layer is the visible viewport with a dvh fallback; the dim and the sheet colour reach on below it; the page card waits while the sheet is open', () => {

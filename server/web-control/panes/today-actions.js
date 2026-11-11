@@ -267,6 +267,7 @@
     if (window.requestAnimationFrame) window.requestAnimationFrame(go); else go();
   }
   function fit() {
+    if (O.open) panCheck();
     if (KB.frame || !O.open) return;
     if (!window.requestAnimationFrame) return applyFit();   // every browser with visualViewport has frames
     KB.frame = window.requestAnimationFrame(applyFit);
@@ -321,6 +322,43 @@
   // opt.from: a session opened from the pet's list ({ scroll }), which gets Back to sessions and its own history entry,
   // so the phone's Back returns to the list too (Miles's iPhone, 11/07). opt.again: the list shown again from there,
   // its entry already current.
+  // Miles 11/10 20:16 (IMG_0570): with the panel open on his Duo, the panel and the page under it moved together. Two
+  // stories fit: the page scrolled behind the panel, or the visible area panned past the layout viewport (the page
+  // drawn at 0.85). These numbers tell them apart, so nothing is fixed on a guess (lead 20:26): while the panel is open,
+  // ONE layout report per open when window.scrollY, visualViewport.pageTop or visualViewport.offsetTop first changes,
+  // with the values at open and now, the panel's top and bottom, and whether a keyboard was up. layoutCrumb adds
+  // innerHeight (ih), the visible height (vvh) and scale (vvs) itself. Numbers only, inside layoutCrumb's caps.
+  var PAN = { at: null, sent: false, fn: null };
+  function panNum(v) { return typeof v === 'number' && isFinite(v) ? Math.round(v) : null; }
+  function panOffsets() {
+    var vv = window.visualViewport;
+    return { sy: panNum(window.scrollY), pt: vv ? panNum(vv.pageTop) : null, ot: vv ? panNum(vv.offsetTop) : null };
+  }
+  function panState() {
+    var r = layer && typeof layer.getBoundingClientRect === 'function' ? layer.getBoundingClientRect() : null, o = panOffsets();
+    return { sy: o.sy, pt: o.pt, ot: o.ot, pTop: r ? panNum(r.top) : null, pBot: r ? panNum(r.bottom) : null };
+  }
+  // Runs on the window's scroll and, through fit, on every visualViewport resize and scroll while the panel is open.
+  // The panel's box is read only once something has moved, and only once per open.
+  function panCheck() {
+    // PAN.at is set only between open and close (close stops the watch before it clears O.open).
+    if (PAN.sent || !PAN.at) return;
+    var moved = panOffsets(), was = PAN.at;
+    if (moved.sy === was.sy && moved.pt === was.pt && moved.ot === was.ot) return;
+    PAN.sent = true;
+    var now = panState();
+    if (W.layoutCrumb) W.layoutCrumb('ta-pan', { kind: O.open.kind, kb: !!KB.on, sy0: was.sy, pt0: was.pt, ot0: was.ot, sy: now.sy, pt: now.pt, ot: now.ot,
+      pTop: now.pTop, pBot: now.pBot });
+  }
+  function panWatch(on) {
+    if (on) {
+      PAN.at = panOffsets(); PAN.sent = false; PAN.fn = panCheck;
+      window.addEventListener('scroll', panCheck, { passive: true });
+    } else if (PAN.fn) {
+      if (window.removeEventListener) window.removeEventListener('scroll', panCheck, { passive: true });
+      PAN.fn = null; PAN.at = null;
+    }
+  }
   function open(kind, key, opener, opt) {
     opt = opt || {};
     build();
@@ -334,6 +372,7 @@
     document.documentElement.classList.add('ta-open');
     var shell = $('app-shell'); if (shell) shell.setAttribute('inert', '');
     listenViewport(true); applyFit();
+    panWatch(true);
     // The entry names what is open, so a reload can open it again and Back still closes it (restore below).
     var entry = { cosTodayOverlay: 1, kind: kind, key: O.open.key };
     if (O.back) entry.from = 'pet';
@@ -390,6 +429,7 @@
   function close(how) {
     if (!O.open) return;
     stopSession();
+    panWatch(false);
     O.open = null;
     if (layer) layer.hidden = true;
     unfit();
