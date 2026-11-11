@@ -3001,7 +3001,7 @@
         var fid = g[0].slice(2), frows = (by[g[0]] || []).sort(function (a, b) { return sxSortTime(b) - sxSortTime(a); }), fopen = SXL.open[g[0]] !== false;
         if (SXF.folderRenaming === fid) { html += '<section class="sx-g" data-g="' + esc(g[0]) + '">' + sxInlineHtml('folder-rename', fid, 'Rename folder', g[1], '') + '</section>'; return; }
         html += '<section class="sx-g sx-folder" data-g="' + esc(g[0]) + '"><div class="sx-gh-row"><button type="button" class="sx-gh" data-sx="fold" data-g="' + esc(g[0]) + '" aria-expanded="' + fopen + '">' +
-          '<span class="fold"><span class="chev" aria-hidden="true"></span>' + esc(g[1]) + '</span><span class="n">' + frows.length + '</span></button>' +
+          '<span class="fold"><span class="chev" aria-hidden="true"></span><span class="nm">' + esc(g[1]) + '</span></span><span class="n">' + frows.length + '</span></button>' +
           '<button type="button" class="sx-r-more" data-sx="folder-menu" data-id="' + esc(fid) + '" aria-haspopup="menu" aria-expanded="false" aria-label="' + esc('Folder menu for ' + g[1]) + '"><span aria-hidden="true">\u2026</span></button></div>' +
           (fopen ? (frows.length ? '<div class="sx-rows">' + frows.map(function (s) { return sxRow(s, null, amb, s.form === 'short'); }).join('') + '</div>'
             : '<p class="sx-empty-folder">Nothing here yet. Move a session in from its menu.</p>') : '') + '</section>';

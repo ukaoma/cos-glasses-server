@@ -397,3 +397,32 @@ describe('the list asks the server for kept rows (lead 10:29: kept rows only to 
     expect(APP.match(/api\('\/api\/agent-sessions\?[^']*'/g)).toEqual(["api('/api/agent-sessions?limit=80&sort=updated&kept=1'"])
   })
 })
+
+// 7.0.27 (lead 13:06, Miles 13:01 on 7.0.26, the open Duo): at the divider's minimum (240 px) the list head was 272 px
+// wide, so the column panned sideways and its left edge was cut, and the reach line was squeezed to one word a line
+// beside New folder and the sort menu. W1_evidence/two_column/width_sweep.cjs drags the real divider from its minimum
+// to its maximum in WebKit and fails on 6f6f4de (24 FAIL of 134); these pin the CSS that makes the content fit.
+describe('THE LIST FITS ITS COLUMN (7.0.27)', () => {
+  const CSS = readFileSync(join(HERE, 'panes/sessions.css'), 'utf8')
+  const RULE = slice(CSS, '/* ── the list fits its column at every width (7.0.27', '.sx-org-note.hidden')
+  const decl = (sel: string) => { const m = RULE.match(new RegExp('(^|\\n)' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' \\{([^}]*)\\}')); return m ? m[2] : '' }
+  it('the head is one column that may shrink to 0, and its items may shrink', () => {
+    expect(decl('.sx-lhead')).toContain('grid-template-columns: minmax(0, 1fr)')
+    expect(decl('.sx-lhead > *, .sx-lh-top > *, .sx-tools, .sx-search, .sx-search .field')).toContain('min-width: 0')
+  })
+  it('the reach line has its own full-width row; New folder and the sort menu wrap rather than overflow', () => {
+    expect(decl('.sx-tools-line')).toContain('flex-wrap: wrap')
+    expect(decl('.sx-tools-line .sx-quiet')).toContain('flex: 1 0 100%')
+    expect(decl('.sx-tools-line .sx-select')).toMatch(/min-width: 0;.*max-width: 100%/)
+  })
+  it('rows and folder headings may shrink, and a folder name ends in an ellipsis', () => {
+    expect(decl('.sx-rows')).toContain('grid-template-columns: minmax(0, 1fr)')
+    expect(decl('.sx-r, .sx-r-open, .sx-gh-row, .sx-gh-row .sx-gh, .sx-gh .fold')).toContain('min-width: 0')
+    expect(decl('.sx-gh .fold .nm')).toMatch(/overflow: hidden;.*text-overflow: ellipsis;.*white-space: nowrap/)
+    expect(APP).toContain('<span class="chev" aria-hidden="true"></span><span class="nm">\' + esc(g[1]) + \'</span></span><span class="n">\' + frows.length')
+  })
+  it('nothing is fixed by hiding: the rule sets no overflow on the list column', () => {
+    expect(RULE).not.toMatch(/#sessions-list-col|\.split-list/)
+    expect(RULE).not.toMatch(/overflow-x/)
+  })
+})
