@@ -12,6 +12,8 @@ import { SessionOrganizer, __resetSessionOrganizerForTests } from '../lib/sessio
 import { __drainListModelWarmForTests, __resetListModelMemoForTests, listModelStats } from '../lib/list-model-memo.js'
 import { resetDesktopAliasMemo } from '../lib/agent-session-store.js'
 import { __resetOlderTitleMemoForTests } from '../lib/agent-session-older.js'
+import { __resetCosStartedForTests } from '../lib/cos-started-sessions.js'
+import { dataPath } from '../lib/data-dir.js'
 
 const temps: string[] = []
 afterAll(() => { for (const t of temps.splice(0)) rmSync(t, { recursive: true, force: true }) })
@@ -55,6 +57,8 @@ beforeEach(async () => {
   resetDesktopAliasMemo()
   __resetOlderTitleMemoForTests()
   __resetListModelMemoForTests()
+  __resetCosStartedForTests()
+  rmSync(dataPath('query-jobs'), { recursive: true, force: true }) // vitest.config.ts points COS_DATA_DIR at a scratch dir
   logs = []
   __resetSessionOrganizerForTests(new SessionOrganizer(join(temp('cos-organizer-data-'), 'session-organizer.json'), line => logs.push(line)))
   // A Claude Desktop session whose CLI transcript is CLI: the two ids are one session.
@@ -185,5 +189,23 @@ describe('Claude alias changes through the routes (Q1 FIX 2)', () => {
     resetDesktopAliasMemo()
     const list = await call('GET', '/agent-sessions')
     expect(list.json.sessions.find((r: any) => r.session_id === NEW)).toMatchObject({ cos_pinned: true })
+  })
+})
+
+describe('sessions a COS job started (Miles, 2026-11-10: kept 7 days)', () => {
+  it('the list keeps one past the per-agent cap, and /older lists it too (the client keeps the main row)', async () => {
+    for (let i = 0; i < 22; i++) transcript(`${String(i).padStart(8, '0')}-cccc-4ddd-8eee-ffffffffffff`, `Busy ${i}`, (i + 1) * 60_000)
+    const STARTED = '5ea7ed00-1111-4222-8333-444455556666'
+    transcript(STARTED, 'Started from Work', 2 * DAY)
+    mkdirSync(dataPath('query-jobs'), { recursive: true })
+    const day = new Date().toISOString().slice(0, 10)
+    writeFileSync(dataPath('query-jobs', `${day}.jsonl`), [
+      { persistedAt: new Date().toISOString(), jobId: 'j-ask', type: 'accepted', request: { query: 'q', sessionId: 's' }, patch: {} },
+      { persistedAt: new Date().toISOString(), jobId: 'j-ask', type: 'running', patch: { provider: 'claude', cliSessionId: STARTED } },
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    const list = await call('GET', '/agent-sessions')
+    expect(list.json.sessions.map((r: any) => r.session_id)).toContain(STARTED)
+    const older = await call('GET', '/agent-sessions/older?days=30&limit=200')
+    expect(older.json.sessions.map((r: any) => r.session_id)).toContain(STARTED)
   })
 })

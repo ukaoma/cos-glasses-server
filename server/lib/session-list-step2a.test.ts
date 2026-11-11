@@ -198,4 +198,46 @@ describe('the keep ceiling (Q1 FIX 1)', () => {
     const rows = await listAgentSessions(agentSessionRoots(h), NOW, [], 3, 'updated', emptySessionListDropped())
     expect(rows).toHaveLength(3)
   })
+
+  it('a COS-started session (job journal) is kept past the cap', async () => {
+    const { cosStartedSessionIds, __resetCosStartedForTests } = await import('./cos-started-sessions.js')
+    __resetCosStartedForTests()
+    const h = home()
+    for (let i = 0; i < 25; i++) claude(h, i, i * 600_000)
+    const workStarted = claude(h, 500, 3 * DAY, 'Started from Work')
+    const jobs = join(h, 'query-jobs'); mkdirSync(jobs)
+    writeFileSync(join(jobs, '2026-11-07.jsonl'), [
+      { persistedAt: '2026-11-07T22:59:00.000Z', jobId: 'j-work', type: 'accepted', request: { query: 'q', sessionId: 's', sessionName: 'Work' }, patch: {} },
+      { persistedAt: '2026-11-07T23:00:00.000Z', jobId: 'j-work', type: 'running', patch: { provider: 'claude', cliSessionId: workStarted } },
+      { persistedAt: '2026-10-01T00:00:00.000Z', jobId: 'j-work-old', type: 'accepted', request: { query: 'q', sessionId: 's' }, patch: {} },
+      { persistedAt: '2026-10-01T00:00:00.000Z', jobId: 'j-work-old', type: 'running', patch: { provider: 'claude', cliSessionId: uuid(24) } }, // too old
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    const started = await cosStartedSessionIds(NOW.getTime(), jobs)
+    expect([...started.claude]).toEqual([workStarted])
+    const rows = await listAgentSessions(agentSessionRoots(h), NOW, [], 80, 'updated', emptySessionListDropped(), undefined, {}, started)
+    expect(rows.map(r => r.session_id)).toContain(workStarted)
+    expect(rows.map(r => r.session_id)).not.toContain(uuid(24))
+  })
+
+  it('only jobs a person started count (an allowlist): routines, maintenance, unknown kinds and unseen requests do not', async () => {
+    const { cosStartedSessionIds, __resetCosStartedForTests } = await import('./cos-started-sessions.js')
+    __resetCosStartedForTests()
+    const h = home()
+    const jobs = join(h, 'query-jobs'); mkdirSync(jobs)
+    const [ask, work, task, brief, consolidate, future, orphan] = [801, 802, 803, 804, 805, 806, 807].map(n => uuid(n))
+    const accepted = (jobId: string, request: object) => ({ persistedAt: '2026-11-08T10:00:00.000Z', jobId, type: 'accepted', request: { query: 'q', sessionId: 's', ...request }, patch: {} })
+    const running = (jobId: string, cliSessionId: string) => ({ persistedAt: '2026-11-09T10:00:00.000Z', jobId, type: 'running', patch: { provider: 'claude', cliSessionId } })
+    // Requests on the 8th, session ids on the 9th: a job that crossed midnight.
+    writeFileSync(join(jobs, '2026-11-08.jsonl'), [
+      accepted('j-ask', {}), accepted('j-work', { sessionName: 'New work' }), accepted('j-task', { origin: { kind: 'task', id: 'abcdef012345' } }),
+      accepted('j-brief', { origin: { kind: 'routine', id: 'morning-brief' } }), accepted('j-consolidate', { maintenanceWorkflow: 'meeting-consolidation-v1' }),
+      accepted('j-future', { origin: { kind: 'webhook', id: 'some-later-kind' } }), // a kind added later fails safe
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    writeFileSync(join(jobs, '2026-11-09.jsonl'), [
+      running('j-ask', ask), running('j-work', work), running('j-task', task), running('j-brief', brief), running('j-consolidate', consolidate),
+      running('j-future', future), running('j-orphan', orphan), // j-orphan's request is not in the window
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+    const started = await cosStartedSessionIds(NOW.getTime(), jobs)
+    expect([...started.claude].sort()).toEqual([ask, work, task].sort())
+  })
 })

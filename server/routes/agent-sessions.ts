@@ -94,6 +94,7 @@ import { createSessionPreviewRouter } from './session-preview.js'
 import { organizerKey, sessionOrganizer, type OrganizerRowFields } from '../lib/session-organizer.js'
 import { listOlderSessions, shortRowFor, OLDER_DEFAULT_DAYS, OLDER_DEFAULT_LIMIT, OLDER_MAX_DAYS, OLDER_MAX_LIMIT, OLDER_MIN_DAYS } from '../lib/agent-session-older.js'
 import { cachedListModel, warmListModels } from '../lib/list-model-memo.js'
+import { cosStartedSessionIds } from '../lib/cos-started-sessions.js'
 
 /** Step 2a: the organizer, or null when it is unavailable or empty (the list is then exactly today's). */
 function organizerForList(): ReturnType<typeof sessionOrganizer> | null {
@@ -542,7 +543,9 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     // Step 2a: COS pins and folder members are listed at any age, outside the cap and `limit`.
     const organizer = organizerForList()
     const desktopIds = organizer ? desktopIdsByCli(aliases) : undefined
-    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases, organizer ? organizer.keptIds() : {})
+    // Miles, 2026-11-10: sessions a COS job started in the last 7 days stay listed (memoized journal read).
+    const started = await cosStartedSessionIds()
+    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases, organizer ? organizer.keptIds() : {}, started)
     // 6.45.5: each row's last real activity, read from its transcript records. Memoized on
     // mtime and size, so a steady poll re-reads nothing; bounded so a cold list of 80 rows
     // never holds 80 descriptors at once.
@@ -664,6 +667,8 @@ agentSessionsRouter.get('/agent-sessions/older', async (req, res) => {
     const aliases = await loadClaudeDesktopAliases(roots.claudeCodeSessions)
     const organizer = organizerForList()
     const kept = organizer ? organizer.keptIds() : { claude: new Set<string>(), codex: new Set<string>(), cursor: new Set<string>() }
+    const started = await cosStartedSessionIds()
+    for (const provider of ['claude', 'codex', 'cursor'] as const) for (const id of started[provider]) kept[provider].add(id)
     // Kept Claude ids may be Desktop ids; the walk names transcripts by CLI id.
     for (const id of [...kept.claude]) { const cli = aliases.get(id)?.cliSessionId; if (cli && !cli.startsWith('!')) kept.claude.add(cli) }
     const liveIds = new Set(liveClaudeRows(await liveClaudePeerRecords()).map(row => row.session_id.toLowerCase()))
