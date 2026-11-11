@@ -236,11 +236,12 @@ describe('parity: Today, the rail story and the Memories pane count the same ite
   })
 
   it('index.html loads the predicate before app.js and every pane', () => {
+    // The scripts are a list theme.js loads in order (index.html #boot-scripts); the lazy panes load after boot.
     const html = read('index.html')
-    const at = html.indexOf('<script src="/control/memory-review.js"></script>')
-    expect(at).toBeGreaterThan(0)
-    expect(at).toBeLessThan(html.indexOf('<script src="/control/app.js"></script>'))
-    expect(at).toBeLessThan(html.indexOf('id="lazy-panes"'))
+    const list = JSON.parse(/<script type="application\/json" id="boot-scripts">([^<]*)<\/script>/.exec(html)![1]) as string[]
+    expect(list.indexOf('/control/memory-review.js')).toBeGreaterThan(-1)
+    expect(list.indexOf('/control/memory-review.js')).toBeLessThan(list.indexOf('/control/app.js'))
+    expect(html.indexOf('id="boot-scripts"')).toBeLessThan(html.indexOf('id="lazy-panes"'))
   })
 })
 

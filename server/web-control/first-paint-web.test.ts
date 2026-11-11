@@ -28,7 +28,7 @@ describe('theme.js: the theme first, then the gate that lets the first paint sho
     const window = { matchMedia: () => ({ matches: dark, addEventListener() {} }) }
     const localStorage = { getItem: () => stored }
     // eslint-disable-next-line no-new-func
-    new Function('window', 'document', 'localStorage', THEME)(window, { documentElement: root }, localStorage)
+    new Function('window', 'document', 'localStorage', THEME)(window, { documentElement: root, readyState: 'loading', addEventListener() {} }, localStorage)
     return order
   }
   it('sets data-theme, then adds fp-wait, in that order, for system, light and dark', () => {
@@ -39,7 +39,8 @@ describe('theme.js: the theme first, then the gate that lets the first paint sho
   it('theme.js stays the first script, in the head, before the body: no frame in the wrong theme', () => {
     const head = HTML.slice(0, HTML.indexOf('</head>'))
     expect(head).toContain('<script src="/control/theme.js"></script>')
-    expect(HTML.indexOf('<script src="/control/theme.js">')).toBeLessThan(HTML.indexOf('<script src=', HTML.indexOf('<script src="/control/theme.js">') + 10))
+    // The app's scripts are a list theme.js loads (first-open-web.test.ts), so theme.js is the only script tag.
+    expect(HTML.match(/<script src=/g)?.length).toBe(1)
   })
 })
 
@@ -103,7 +104,7 @@ describe('app.js: the first paint ends once, when the sign-in card or the app sh
     const h = run({ fcp: 161.4, now: 351.7 })
     expect(h.fn('shell')).toBe(true)
     expect(h.removed).toEqual(['fp-wait'])
-    expect(h.crumbs).toEqual([{ what: 'open-time', extra: { fcp: 161, shown: 352, via: 'shell' } }])
+    expect(h.crumbs).toEqual([{ what: 'open-time', extra: { fcp: 161, shown: 352, via: 'shell', dcl: -1, boot: -1, rtt: -1 } }])
   })
   it('once: a later sign-in card (a lapsed sign-in) changes nothing and reports nothing', () => {
     const h = run({ fcp: 100 })
@@ -119,8 +120,8 @@ describe('app.js: the first paint ends once, when the sign-in card or the app sh
     expect(h.removed).toEqual(['fp-wait'])
   })
   it('the report fits the layout report’s rules: short keys, numbers and a short string', () => {
-    for (const k of ['fcp', 'shown', 'via']) expect(k).toMatch(/^[a-z][a-zA-Z0-9]{0,15}$/)
-    expect(APP).toContain("layoutCrumb('open-time', { fcp: fcp ? Math.round(fcp.startTime) : -1, shown: shown, via: via });")
+    for (const k of ['fcp', 'shown', 'via', 'dcl', 'boot', 'rtt']) expect(k).toMatch(/^[a-z][a-zA-Z0-9]{0,15}$/)
+    expect(APP).toContain("layoutCrumb('open-time', { fcp: fcp ? Math.round(fcp.startTime) : -1, shown: shown, via: via,")
   })
 })
 
@@ -134,7 +135,7 @@ describe('every way the wait ends takes the first paint away', () => {
     expect(APP.split("$('app-shell').classList.remove('hidden')").length - 1).toBe(1)
     expect(slice(APP, '  function showAuth(message) {', '  function showShell(info) {')).toContain("$('auth-gate').classList.remove('hidden')")
     expect(slice(APP, '  function showShell(info) {', '\n  }\n')).toContain("$('app-shell').classList.remove('hidden')")
-    const boot = slice(APP, '  function boot() {', "  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);")
+    const boot = slice(APP, '  function boot() {', "  if (document.readyState === 'loading' && !cosBootAfter()) document.addEventListener('DOMContentLoaded', boot);")
     for (const exit of ['.then(showShell)', 'showAuth(UNREACHABLE_COPY)', 'return linkFailed(', 'return showShell(st)', 'showAuth(err.message)', 'showAuth(); authOffline(true)']) expect(boot, exit).toContain(exit)
   })
 })

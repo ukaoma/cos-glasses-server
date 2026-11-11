@@ -638,7 +638,12 @@
     try {
       var perf = window.performance, fcp = perf && perf.getEntriesByName ? perf.getEntriesByName('first-contentful-paint')[0] : null;
       var shown = perf && perf.now ? Math.round(perf.now()) : -1;
-      if (typeof layoutCrumb === 'function') layoutCrumb('open-time', { fcp: fcp ? Math.round(fcp.startTime) : -1, shown: shown, via: via });
+      // dcl: the browser's DOMContentLoaded; boot: when every script had run and boot started; rtt: the sign-in check's
+      // round trip (-1 for a sign-in link, which checks with a login instead).
+      var nav = perf && perf.getEntriesByType ? perf.getEntriesByType('navigation')[0] : null;
+      var dcl = nav && typeof nav.domContentLoadedEventStart === 'number' ? Math.round(nav.domContentLoadedEventStart) : -1;
+      if (typeof layoutCrumb === 'function') layoutCrumb('open-time', { fcp: fcp ? Math.round(fcp.startTime) : -1, shown: shown, via: via,
+        dcl: dcl, boot: FIRST_PAINT.boot == null ? -1 : FIRST_PAINT.boot, rtt: FIRST_PAINT.rtt == null ? -1 : FIRST_PAINT.rtt });
     } catch (_e) { /* timing is a report only */ }
     return true;
   }
@@ -7030,13 +7035,44 @@
     return typeof v === 'number' && isFinite(v) ? v : null;
   }
   function lrMatch(q) { try { return !!window.matchMedia(q).matches; } catch (_e) { return false; } }
+  // The page wider than the screen (the Duo, 11/10: scale 0.85, scroll width 449 for a 382 screen). Two causes look the
+  // same from outside; these numbers narrow it: cw, the layout viewport; dw, the width this device shows at scale 1;
+  // scw, the document's scroll width. cw = scw, both above dw, says only that the layout viewport itself is wider: a
+  // browser or phone setting, or iOS widening the layout to fit content (Q1 15:27); nothing is named or scanned then, so
+  // '' is not proof of a setting. Our page overflowing a layout that stayed at the device width shows as scw above cw
+  // (the Duo's 11/10 rows: scroll width 449 while the width was 382 at scale 1): then `wide` names the
+  // element that sticks out, the first in page order whose right edge passes cw. Page order puts a parent before its
+  // children, so that element's parent ends within cw: it is the one that sticks out of its container, never a
+  // stretched container (those end at cw; Q1 15:20). One scan per layout (cached by cw and scw), at most 4000 elements.
+  var LR_WIDE = { key: '', out: null };
+  function lrWide() {
+    var num = function (v) { return typeof v === 'number' && isFinite(v) ? Math.round(v) : null; };
+    var de = document.documentElement, vv = window.visualViewport, out = { cw: num(de && de.clientWidth), dw: null, scw: null, wide: '' };
+    try {
+      var se = document.scrollingElement || de;
+      out.scw = num(se && se.scrollWidth);
+      out.dw = vv ? num(vv.width * vv.scale) : num(window.innerWidth);
+      if (!(out.cw && out.scw && out.scw > out.cw + 1)) return out;
+      var key = out.cw + 'x' + out.scw;
+      if (LR_WIDE.key === key && LR_WIDE.out) { out.wide = LR_WIDE.out.wide; return out; }
+      var all = document.body ? document.body.getElementsByTagName('*') : [], edge = out.cw + 1, sx = window.scrollX || 0;
+      for (var i = 0; i < all.length && i < 4000; i++) {
+        var el = all[i], r = el.getBoundingClientRect();
+        if (!(r.width > 0 && r.right + sx > edge)) continue;
+        out.wide = (el.tagName.toLowerCase() + (el.id ? '#' + el.id : (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/)[0] : ''))).slice(0, 24);
+        break;
+      }
+      LR_WIDE.key = key; LR_WIDE.out = { wide: out.wide };
+    } catch (_e) { /* a report only */ }
+    return out;
+  }
   function lrDevice() {
     if (LR.device) return;
     LR.device = true;
-    var sc = window.screen || {};
+    var sc = window.screen || {}, w = lrWide();
     layoutCrumb('device', { sw: sc.width, sh: sc.height, sah: sc.availHeight, oh: window.outerHeight, ow: window.outerWidth, dpr: window.devicePixelRatio,
       sat: lrProbe('padding-top:env(safe-area-inset-top)', 'paddingTop'), sab: lrProbe('padding-bottom:env(safe-area-inset-bottom)', 'paddingBottom'),
-      anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), phone: isPhone() });
+      anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), phone: isPhone(), cw: w.cw, dw: w.dw, scw: w.scw, wide: w.wide });
   }
   // The focus line is for touch screens only (QA W3): on a Mac it would only spend the budget.
   function lrFocus() {
@@ -7046,7 +7082,9 @@
     if (!lrMatch('(pointer: coarse)')) return;
     try { fs = parseFloat(getComputedStyle(a).fontSize); } catch (_e) { fs = null; }
     var s = lrScroll();
-    layoutCrumb('focus', { pane: lrPane(), field: lrKind(a), fs: fs, sy: s.sy, smax: s.smax, scw: s.sw, kb: LR.up, n: ++LR.focusN });
+    // The width numbers only when this focus line will be sent (its own budget), so a capped page never scans.
+    var w = typeof crumbs === 'object' && crumbs && crumbs.focus >= LAYOUT_FOCUS_MAX ? { cw: null, dw: null, wide: '' } : lrWide();
+    layoutCrumb('focus', { pane: lrPane(), field: lrKind(a), fs: fs, sy: s.sy, smax: s.smax, scw: s.sw, kb: LR.up, n: ++LR.focusN, cw: w.cw, dw: w.dw, wide: w.wide });
   }
   function lrHooks(what, v) { LR.hooks.forEach(function (fn) { try { fn(what, v); } catch (err) { console.error(err); } }); }
   function lrGap(v) {
@@ -7129,6 +7167,13 @@
 
   // Every pane module is a plain script after this one; boot waits for all of them.
   function boot() {
+    // The open-time report's clock (ms since navigation start, -1 where there is none) and the two numbers boot gives it:
+    // when boot started (every script had run) and the sign-in check's round trip. Kept inside boot, and FIRST_PAINT
+    // looked up, never assumed, because the harnesses that run boot alone have neither.
+    var openClock = function () { try { return typeof performance === 'object' && performance && performance.now ? performance.now() : -1; } catch (_e) { return -1; } };
+    var openTimes = typeof FIRST_PAINT === 'object' && FIRST_PAINT ? FIRST_PAINT : null;
+    var openRtt = function (asked) { if (openTimes && asked >= 0 && openTimes.rtt == null) openTimes.rtt = Math.round(openClock() - asked); };
+    if (openTimes && openTimes.boot == null) openTimes.boot = Math.round(openClock());
     var params = new URLSearchParams(location.search);
     var linkCode = params.get('code');
     if (linkCode && !params.get('handoff')) {
@@ -7151,7 +7196,9 @@
       return;
     }
     // The status read stays here in boot() itself (routes/web-phone-link.test.ts runs boot alone and pins it).
-    api('/api/web-session/status').then(function (st) { return bootAnswer(st); }, function (err) { return bootFail(err); });
+    // The open-time report carries its round trip (firstPaintDone).
+    var asked = openClock();
+    api('/api/web-session/status').then(function (st) { openRtt(asked); return bootAnswer(st); }, function (err) { openRtt(asked); return bootFail(err); });
   }
   // S1 item 7 (lead go, 20:11): a link or code the server refused may be old while this browser is still signed in (an
   // old QR, a reopened tab). Ask status first: signed in opens the app and says the link was old; signed out shows the
@@ -7204,5 +7251,10 @@
     authRetrySchedule(!!on);
     if (on) { var err = $('auth-error'); if (err) { setStatus(err, '', true); err.classList.add('hidden'); } }
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+  if (document.readyState === 'loading' && !cosBootAfter()) document.addEventListener('DOMContentLoaded', boot);
+  else if (cosBootAfter()) cosBootAfter()(boot);
+  else boot();
+  // The scripts come from theme.js's loader (index.html #boot-scripts), which runs boot once every one of them has run
+  // (window.CosBoot.after). Without it (a page from before the loader), as before.
+  function cosBootAfter() { return window.CosBoot && typeof window.CosBoot.after === 'function' ? window.CosBoot.after : null; }
 })();

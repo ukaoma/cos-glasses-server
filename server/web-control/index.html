@@ -24,6 +24,14 @@
   <link rel="stylesheet" href="/control/panes/memories.css">
   <link rel="stylesheet" href="/control/panes/today-actions.css">
   <script src="/control/theme.js"></script>
+  <!-- The app's scripts start downloading now, while the page parses; theme.js runs them after the first paint
+       (#boot-scripts, the same list). -->
+  <link rel="preload" href="/control/vendor/qrcode-encoder.js" as="script">
+  <link rel="preload" href="/control/memory-review.js" as="script">
+  <link rel="preload" href="/control/app.js" as="script">
+  <link rel="preload" href="/control/shell.js" as="script">
+  <link rel="preload" href="/control/panes/cos-chat.js" as="script">
+  <link rel="preload" href="/control/panes/questions.js" as="script">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -287,12 +295,9 @@
 
   <div id="toast" class="toast hidden" role="status"></div>
 
-  <script src="/control/vendor/qrcode-encoder.js"></script>
-  <script src="/control/memory-review.js"></script>
-  <script src="/control/app.js"></script>
-  <script src="/control/shell.js"></script>
-  <script src="/control/panes/cos-chat.js"></script>
-  <script src="/control/panes/questions.js"></script>
+  <!-- The app's scripts, in the order they run. theme.js adds them one frame after the page is drawn, so the first paint
+       (#first-paint) never waits for them, and runs boot only once every one of them has run (W1_first_open_speed.md). -->
+  <script type="application/json" id="boot-scripts">["/control/vendor/qrcode-encoder.js", "/control/memory-review.js", "/control/app.js", "/control/shell.js", "/control/panes/cos-chat.js", "/control/panes/questions.js"]</script>
   <!-- Loaded when first opened, then in the background once the page is idle (app.js ensurePane). -->
   <script type="application/json" id="lazy-panes">{
     "messages": "/control/panes/messages.js",
