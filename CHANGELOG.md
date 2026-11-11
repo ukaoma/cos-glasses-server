@@ -1,3 +1,23 @@
+## 7.0.23 - Control Web: a visible height under 80 px is no reading, and Sessions is one screen (layout, not a proven fix)
+
+2026-11-11. 7.0.22 (dca6a1a) plus two changes to Control Web, on the lead's go (00:17). Candidate only: nothing is installed or published by this commit. Neither change is claimed to fix his screenshots until his phone shows it.
+
+- **What his phone reported:** on the unfolded Duo (the open, 1119 wide layout), after a keyboard closed, the visible height read 0 for minutes at a time (19:55 to 20:01, 20:13 to 20:27 on 11/10), while the page height was back within 0.3 s. Never on the folded phone.
+- **What the code now does with that:** a visible height under 80 px, or none, counts as no reading. The page then uses the whole page height from the top, so the reply box, Today's panel, the question card and the image viewer are laid out on the real screen, not on a height of 0. Before, only exactly 0 fell back. Work's chat box reads the same corrected height. Each run of bad readings is counted, and every layout report carries the counts (vz, vzr).
+- **Sessions is one screen (the frame):** while Sessions shows its list and a session, the page never scrolls as a whole. The rail, the list and the conversation each scroll by themselves, and the reply area sits at the bottom of the session.
+  - A session opens at its newest turn and stays there as turns arrive, until you scroll away.
+  - The reply area takes at most 60 percent of the session (three quarters with the keyboard up). What it is doing now gives way first; the reply box never shrinks.
+  - The session's question cards end the conversation. Scrolled away from them, a Go to the question button sits over the end of the conversation and takes you back.
+  - Full width reads Hide list in Sessions. Usage and COS cost keep the page's own scroll.
+  - One position report on open and after a keyboard closes (at most 8 a page load): the visible box, and whether the rail, the list and the reply box are inside it. Numbers and yes or no only.
+- **Checked on this Mac** (WebKit, touch on, scale 1, six sizes from 449 to 1440 wide): 227 checks pass, with real wheel events, and two keyboard stand-ins whose limits are stated with the checks. Only his phone shows a real keyboard, real touch scrolling and the 0.85 scale.
+
+**Default-on for every install:** yes: both. The frame is a layout change for everyone who opens Sessions in Control Web. There is no switch.
+
+### If you roll back
+
+- To 7.0.22: the guard and the frame go; Sessions scrolls as one page again. Nothing is stored by this release.
+
 ## 7.0.22 - Control Web reports two more layout readings from the phone; nothing else changes
 
 2026-11-10. 7.0.21 (be6b117) plus two layout reports in Control Web, on the lead's go (20:52). It fixes nothing. Miles saw the Today panel move with the page under it, and the rail and list leave the screen when he squeezed a divider on his Duo. Neither happens on this Mac, so these reports let his phone say what the page did. Private on Miles's Mac first.
