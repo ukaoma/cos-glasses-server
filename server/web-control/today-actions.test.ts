@@ -4086,6 +4086,12 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
       expect(pans()).toHaveLength(1)
       expect(pans()[0]!.data).toMatchObject({ sx0: 0, sx: 214, sy: 0 })
     })
+    it('pageLeft alone moving is reported (iOS can move the visible area without a scrollX or offsetLeft change)', () => {
+      const { h, pans } = openPanel(0)
+      h.viewport({ pageLeft: 120 } as any, 'scroll')
+      expect(pans()).toHaveLength(1)
+      expect(pans()[0]!.data).toMatchObject({ pl0: 0, pl: 120, ol: 0, sx: 0 })
+    })
     it('offsetLeft alone moving is reported', () => {
       const { h, pans } = openPanel(0)
       h.viewport({ offsetLeft: 40 } as any, 'resize')
