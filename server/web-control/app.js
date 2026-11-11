@@ -2730,6 +2730,9 @@
     var hidden = false;
     if (has && body && body.getBoundingClientRect && q.getBoundingClientRect) hidden = q.getBoundingClientRect().top >= body.getBoundingClientRect().bottom - 8;
     var show = has && hidden && document.documentElement.classList.contains('sx-frame');
+    // Its place: just above the dock, whatever the dock's height is now (the reader holds it in --sx-dock-h).
+    var dock = $('session-dock'), rd = line.parentElement;
+    if (show && dock && rd && rd.style && dock.getBoundingClientRect) rd.style.setProperty('--sx-dock-h', Math.round(dock.getBoundingClientRect().height) + 'px');
     line.hidden = !show;
     return show;
   }
@@ -2763,6 +2766,8 @@
         SX_PIN.ro = new ResizeObserver(function () { if (SX_PIN.body === body && body.isConnected) bottom(); sxGoQuestionPaint(); });
         SX_PIN.ro.observe(body);
         [].forEach.call(body.children, function (c) { SX_PIN.ro.observe(c); });
+        // The dock too: files added to the reply box change its height, and Go to the question sits just above it.
+        if ($('session-dock')) SX_PIN.ro.observe($('session-dock'));
       }
     }
     SX_NEWEST_AGAIN_MS.forEach(function (ms) {
@@ -3901,8 +3906,6 @@
         // The dock, fixed at the bottom of the reader: what it is doing now (with Stop), the Mac's question, then the
         // verdict, the reply box, its status and the queue, all as before.
         '<div class="sx-dock" id="session-dock">' +
-        // Q1 (23:40): the question cards end the conversation; scrolled up away from them, the dock says one waits.
-        '<p class="sx-goq" id="session-goq" hidden><span>A question is waiting at the end.</span><button type="button" class="cx-btn quiet" data-sx="goto-question">Go to the question</button></p>' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
         '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
         '<div class="sx-chat">' +
@@ -3915,7 +3918,10 @@
           '</form><div class="status-line" id="session-status"></div>' +
           '<p class="sx-caution hidden" id="session-caution"></p>' +
           '<div id="session-queue"></div>' +
-        '</div></div>';
+        '</div></div>' +
+        // Q1 (23:40): the question cards end the conversation; scrolled up away from them, a button over the dock's top
+        // edge says one waits. It sits in the reader, not the dock, because the dock scrolls by itself as a last resort.
+        '<p class="sx-goq" id="session-goq" hidden><span>A question is waiting at the end.</span><button type="button" class="cx-btn quiet" data-sx="goto-question">Go to the question</button></p>';
       readerImagesMount($('session-turns'), r);
       sxNoteList(r, d);
       setLive({});

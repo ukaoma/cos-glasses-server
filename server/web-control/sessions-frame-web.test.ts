@@ -296,7 +296,7 @@ describe('panes/sessions.css: the frame', () => {
   it('the dock: at most 60 percent, the activity gives way first, the reply box never does', () => {
     expect(css).toContain('html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%;')
     expect(css).toContain('html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 32px; max-height: 96px;')
-    expect(css).toContain('html.sx-frame .sx-dock #session-queue { flex: none; max-height: 9rem; overflow: auto;')
+    expect(css).toContain('html.sx-frame .sx-dock #session-queue { flex: none; max-height: none; overflow: visible; }')
     expect(css).toContain('html.sx-frame .sx-dock .sx-chat > * { flex: none; }')
     // 951 by 539 with Go to the question shown: a shrinking reply part let the capped dock clip the reply box by 17 px.
     expect(css).toContain('html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: none;')
@@ -312,9 +312,22 @@ describe('panes/sessions.css: the frame', () => {
   it('touch at any size in the frame: Copy session and the rail Settings reach 44 px', () => {
     expect(css).toMatch(/@media \(any-pointer: coarse\) \{\s*html\.sx-frame \.sx-foot \.cx-btn, html\.sx-frame \.rail-settings \{ min-height: 44px; \}/)
   })
-  it('Go to the question floats on the dock edge and takes no room from it; only its button shows', () => {
-    expect(css).toContain('html.sx-frame .sx-dock > .sx-goq { position: absolute; right: 8px; left: auto; bottom: calc(100% + 6px);')
-    expect(css).toMatch(/html\.sx-frame \.sx-dock > \.sx-goq > span \{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset\(50%\);/)
+  it('Go to the question floats just above the dock, in the reader (the dock scrolls); only its button shows', () => {
+    expect(css).toContain('html.sx-frame #session-reader > .sx-goq { position: absolute; right: 8px; left: auto; bottom: calc(var(--sx-dock-h, 120px) + 6px);')
+    expect(css).toMatch(/html\.sx-frame #session-reader > \.sx-goq > span \{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset\(50%\);/)
+    expect(css).toContain('html.sx-frame #session-reader { position: relative; }')
+  })
+  it('THE DOCK RULE (lead 08:47): it scrolls inside, the reply box sticks to its bottom, and its rows are capped', () => {
+    expect(css).toContain('html.sx-frame .sx-dock { overflow-y: auto; overscroll-behavior: contain; }')
+    expect(css).toContain('html.sx-frame .sx-dock .sx-chat { display: contents; }')
+    expect(css).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
+    expect(css).toContain('html.sx-frame .sx-dock #session-input { max-height: min(140px, calc(var(--vv-h, 600px) * 0.1)); }')
+    expect(css).toContain('html.sx-frame .sx-dock #session-files:not(.hidden) { max-height: max(52px, min(104px, calc(var(--vv-h, 600px) * 0.1))); overflow-y: auto; }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock #session-files:not(.hidden) { max-height: 52px; }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock #session-input { max-height: min(4.5em, calc(var(--vv-h, 600px) * 0.17)); }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock { max-height: none; flex: 0 1 auto; }')
+    // A swipe over the activity line must carry on into the dock.
+    expect(css).not.toMatch(/html\.sx-frame \.sx-dock > \.sx-activity \{[^}]*overscroll-behavior: contain/)
   })
   it('what sits over every pane never takes the screen: the question cards as their one line, capped and scrolling', () => {
     expect(css).toContain('html.sx-frame #sq-host { max-height: 35%; overflow: auto;')
@@ -337,7 +350,7 @@ describe('Go to the question (Q1 23:40): the dock says a question waits when its
     const q: any = { children: o.cards ? [{}] : [], textContent: o.cards ? 'Which branch?' : '', getBoundingClientRect: () => ({ top: o.qTop }) }
     const body: any = { getBoundingClientRect: () => ({ bottom: 700 }) }
     h.deps.$ = (id: string) => (id === 'session-goq' ? line : id === 'session-body' ? body : id === 'session-questions' ? q : null)
-    return { show: h.k.goq(), line }
+    return { show: h.k.goq(), line, h }
   }
   it('a card at the end, below what shows: the line shows', () => {
     const g = goq({ cards: true, qTop: 1400 })
@@ -349,9 +362,22 @@ describe('Go to the question (Q1 23:40): the dock says a question waits when its
     expect(goq({ cards: false, qTop: 1400 }).line.hidden).toBe(true)
     expect(goq({ cards: true, qTop: 1400, frame: false }).line.hidden).toBe(true)
   })
-  it('the line is in the dock; it repaints on the body\u2019s scroll, its size changes and the cards\u2019 redraws; its button goes to the end', () => {
+  it('shown, it records the dock\u2019s height on the reader so it sits just above the dock', () => {
+    const h = kit(); h.de.classList.add('sx-frame')
+    const props: Record<string, string> = {}
+    const rd: any = { style: { setProperty: (k: string, v: string) => { props[k] = v } } }
+    const line: any = { hidden: true, parentElement: rd }
+    const q: any = { children: [{}], textContent: 'Which branch?', getBoundingClientRect: () => ({ top: 1400 }) }
+    const body: any = { getBoundingClientRect: () => ({ bottom: 700 }) }
+    const dock: any = { getBoundingClientRect: () => ({ height: 233.4 }) }
+    h.deps.$ = (id: string) => (id === 'session-goq' ? line : id === 'session-body' ? body : id === 'session-questions' ? q : id === 'session-dock' ? dock : null)
+    expect(h.k.goq()).toBe(true)
+    expect(props['--sx-dock-h']).toBe('233px')
+  })
+  it('the line is in the reader after the dock; it repaints on the body\u2019s scroll, its size changes and the cards\u2019 redraws; its button goes to the end', () => {
     const html = slice(APP, "      reader.innerHTML =\n        '<div class=\"sx-reader-head\">", '      readerImagesMount($')
-    expect(html.indexOf('id="session-goq"')).toBeGreaterThan(html.indexOf('id="session-dock"'))
+    expect(html.indexOf('id="session-goq"')).toBeGreaterThan(html.indexOf('id="session-queue"'))
+    expect(APP).toContain("if ($('session-dock')) SX_PIN.ro.observe($('session-dock'));")
     expect(APP).toContain("body.addEventListener('scroll', sxGoQuestionPaint, { passive: true });")
     expect(APP).toContain("if (SX_PIN.body === body && body.isConnected) bottom(); sxGoQuestionPaint(); });")
     expect(APP).toContain("if (typeof sxGoQuestionPaint === 'function') sxGoQuestionPaint(); });")
