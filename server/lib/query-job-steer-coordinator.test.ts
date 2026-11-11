@@ -31,6 +31,33 @@ const until = async (check: () => boolean, ms = 2_000) => {
   }
 }
 
+/** Poll an async read until it holds or `ms` passes (2026-11-11: the journal is written off the hot path). */
+const untilAsync = async (check: () => Promise<boolean>, ms = 4_000) => {
+  const deadline = Date.now() + ms
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error('condition not met')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
+/**
+ * A journal kept in memory, for tests about what a steer may do rather than what survives a restart (2026-11-11,
+ * S1: on a loaded disk the real journal's fsyncs pushed a five-coordinator test past 5 s in the 7.0.27 dry run).
+ */
+class MemoryJournal extends NodeQueryJobJournalStorage {
+  private readonly parts = new Map<string, string>()
+  override async prepare(): Promise<void> {}
+  override async listPartitions(root: string): Promise<string[]> {
+    return [...this.parts.keys()].filter(k => k.startsWith(`${root}\u0000`)).map(k => k.slice(root.length + 1)).sort()
+  }
+  override async readPartition(root: string, partition: string): Promise<string> { return this.parts.get(`${root}\u0000${partition}`) ?? '' }
+  override async removePartition(root: string, partition: string): Promise<void> { this.parts.delete(`${root}\u0000${partition}`) }
+  override async append(root: string, partitionDay: string, line: string): Promise<void> {
+    const key = `${root}\u0000${partitionDay}`
+    this.parts.set(key, (this.parts.get(key) ?? '') + line)
+  }
+}
+
 /** One run, as the bridge would drive it. */
 interface FakeRun {
   ctx: QueryJobRunnerContext
@@ -204,19 +231,21 @@ describe('what a steer cannot do', () => {
   })
 
   it('unsupported for a run that is not Claude, or not steerable, with no port at all', async () => {
-    const h = harness({ steer: { provider: () => 'codex' } })
+    // Five coordinators in sequence; this is about who may steer, not durability, so the journal is in memory.
+    const memory = { storage: new MemoryJournal() }
+    const h = harness({ steer: { provider: () => 'codex' }, ...memory })
     const { coordinator } = await h.make(await tempRoot())
     const { job, run } = await started(h, coordinator)
     expect(run.port).toBeUndefined()
     expect(await coordinator.steer(job.jobId, { generation: 1, steerId: S(), text: 'x' })).toMatchObject({ state: 'unsupported', fallback: 'queue_follow_up' })
     for (const steer of [{ enabled: () => false }, { cliSupported: async () => false }]) {
-      const h2 = harness({ steer })
+      const h2 = harness({ steer, ...memory })
       const { coordinator: c2 } = await h2.make(await tempRoot())
       const { run: r2 } = await started(h2, c2)
       expect(r2.port).toBeUndefined()
     }
     for (const extra of [{ steerable: undefined }, { dispatch: { restricted: true, tools: ['Read'] } }]) {
-      const h3 = harness()
+      const h3 = harness(memory)
       const { coordinator: c3 } = await h3.make(await tempRoot())
       const { job: j3, run: r3 } = await started(h3, c3, extra)
       expect(r3.port, JSON.stringify(extra)).toBeUndefined()
@@ -282,9 +311,13 @@ describe('steers sent before the run starts ride in the first line', () => {
     await until(() => h.runs[0]?.firstLine !== undefined)
     expect(h.runs[0]!.firstLine).toBe('read the README + keep it short')
     expect(h.runs[0]!.lines).toEqual([])
-    await until(() => false, 50).catch(() => {})
-    expect((await store.getSnapshot(job.jobId)).steers!.map(s => s.state)).toEqual(['included'])
-  })
+    // `included` is journaled through the run's ordered callback tail, after the first line is composed. Wait for
+    // the journal to say so, not a fixed 50 ms (2026-11-11: on a loaded disk an append took over 50 ms and the
+    // 7.0.27 dry run read `accepted`). If it never journals `included`, the wait runs out and this fails.
+    let states: string[] = []
+    await untilAsync(async () => { states = (await store.getSnapshot(job.jobId)).steers!.map(s => s.state); return states[0] === 'included' }).catch(() => {})
+    expect(states).toEqual(['included'])
+  }, 15_000)
 })
 
 describe('ST-3: carry-forward into generation + 1', () => {

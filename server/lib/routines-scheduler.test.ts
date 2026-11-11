@@ -128,7 +128,9 @@ describe('routine scheduler: the daily cap', () => {
     }
     expect(admitted).toBe(ROUTINE_LIMITS.globalRunsPerDay)
     expect(refused).toMatchObject({ status: 429, code: 'global_cap_reached' })
-  })
+    // Sized to its writes (2026-11-11, S1): 12 creates and 40 runs each persist with durableAtomicWriteFileSync
+    // (file and directory fsync), about 90 in all. 1.6 s median alone; 9.5 s in the 7.0.27 dry run on a busy disk.
+  }, 40_000)
 
   it('refuses a second Run now while one is still running', async () => {
     const r = await create()

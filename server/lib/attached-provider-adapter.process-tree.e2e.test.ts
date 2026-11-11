@@ -173,12 +173,14 @@ describe.skipIf(process.platform !== 'darwin').concurrent('attached turn cancel 
     expect(outcome(result)).toEqual({ reason: 'cancelled', delivery: 'cancelled', reaped: true })
     expect(survivors).toEqual([])
     // 6.53.2 held this result ~5.3 s; the poll after `close` settles it at ~1.2 s: the tool's
-    // own stop, then at most one TREE_POLL_MS poll to see it gone. The bound allows a second
-    // poll and one second of scheduling under a loaded suite (2.4 s today), and stays under
-    // the five-second grace so a regression to waiting it out still fails.
+    // own stop, then at most one TREE_POLL_MS poll to see it gone. The bound only has to tell
+    // that from waiting out the five-second cancel grace, so it sits a second under the grace
+    // (4 s). It was 2.4 s (stop + two polls + 1 s of scheduling), a TEST bound, not a product
+    // promise: a loaded suite measured 3.6 s on 2026-11-11 and failed while the product polled
+    // as designed. A regression to waiting out the grace (>= 5 s) still fails.
     const { GRACEFUL_TOOL_STOP_MS } = createRequire(import.meta.url)(FIXTURE) as { GRACEFUL_TOOL_STOP_MS: number }
-    const bound = GRACEFUL_TOOL_STOP_MS + 2 * TREE_POLL_MS + 1_000
-    expect(bound).toBeLessThan(CANCEL_KILL_GRACE_MS)
+    const bound = CANCEL_KILL_GRACE_MS - 1_000
+    expect(GRACEFUL_TOOL_STOP_MS + 2 * TREE_POLL_MS).toBeLessThan(bound)
     expect(settleMs).toBeLessThan(bound)
   }, PER_TEST_TIMEOUT_MS)
 
