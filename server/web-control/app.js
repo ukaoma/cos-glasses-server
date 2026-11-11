@@ -708,7 +708,9 @@
   function sessionList(maxAgeMs) {
     if (SL.data && Date.now() - SL.at < (maxAgeMs || 0)) return Promise.resolve(SL.data);
     if (SL.inflight) return SL.inflight;
-    SL.inflight = api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
+    // kept=1 (server 7.0.25, lead 10:29): only a client that asks gets the kept rows (COS pins, folders, COS-started
+    // sessions past the cap); the Mac app and the lens, which do not ask, get 7.0.18's list unchanged.
+    SL.inflight = api('/api/agent-sessions?limit=80&sort=updated&kept=1').then(function (d) {
       // 7.0.5: a sessions read (Sessions pane or Today) that follows a failed one is a reconnect: Today's next summary
       // ask says so (requestBrief), once.
       if (SL.failed) { SL.failed = false; if (typeof BRIEF === 'object' && BRIEF) BRIEF.reconnect = true; }

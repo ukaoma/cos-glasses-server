@@ -390,3 +390,10 @@ describe('scroll anchoring: rows added above keep the top visible row where it w
     expect(col.scrollTop).toBe(420)
   })
 })
+
+describe('the list asks the server for kept rows (lead 10:29: kept rows only to a client that asks)', () => {
+  it('the shared list load sends kept=1; nothing else in the request changes', () => {
+    expect(APP).toContain("SL.inflight = api('/api/agent-sessions?limit=80&sort=updated&kept=1')")
+    expect(APP.match(/api\('\/api\/agent-sessions\?[^']*'/g)).toEqual(["api('/api/agent-sessions?limit=80&sort=updated&kept=1'"])
+  })
+})
