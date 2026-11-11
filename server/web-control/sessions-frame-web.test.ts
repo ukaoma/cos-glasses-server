@@ -23,11 +23,11 @@ function slice(text: string, start: string, end: string): string {
 }
 const FRAME_SRC = slice(APP, '  function sxFrameSync() {', "  // 7.0.1: the hero's counts say")
 
-class FakeClass { s = new Set<string>(); toggle(c: string, on?: boolean) { const v = on === undefined ? !this.s.has(c) : on; if (v) this.s.add(c); else this.s.delete(c); return v } contains(c: string) { return this.s.has(c) } add(c: string) { this.s.add(c) } }
+class FakeClass { s = new Set<string>(); toggle(c: string, on?: boolean) { const v = on === undefined ? !this.s.has(c) : on; if (v) this.s.add(c); else this.s.delete(c); return v } contains(c: string) { return this.s.has(c) } add(c: string) { this.s.add(c) } remove(...cs: string[]) { cs.forEach(c => this.s.delete(c)) } }
 type Rect = { top: number; bottom: number; left: number; right: number; width: number; height: number }
 const rect = (top: number, bottom: number, left: number, right: number): Rect => ({ top, bottom, left, right, width: right - left, height: bottom - top })
 
-function kit(o: { pane?: string; view?: string; ro?: boolean; fit?: any; rects?: Record<string, Rect | null>; crumbOk?: boolean } = {}) {
+function kit(o: { pane?: string; view?: string; ro?: boolean; fit?: any; rects?: Record<string, Rect | null>; crumbOk?: boolean; shellHidden?: boolean } = {}) {
   const de: any = { classList: new FakeClass() }
   const listeners: Record<string, Array<() => void>> = {}
   const body: any = {
@@ -50,7 +50,7 @@ function kit(o: { pane?: string; view?: string; ro?: boolean; fit?: any; rects?:
   const deps: any = {
     window: win, document: { documentElement: de, querySelector: (s: string) => (s === '.rail' ? el('rail') : null) },
     state: { pane: o.pane ?? 'sessions' }, SX: { view: o.view ?? 'sessions' },
-    $: (id: string) => (id === 'session-body' ? body : id === 'sessions-list-col' ? el('list') : id === 'session-reader' ? el('rd') : id === 'session-form' ? el('reply') : null),
+    $: (id: string) => (id === 'app-shell' ? { classList: { contains: (c: string) => c === 'hidden' && !!o.shellHidden } } : id === 'session-body' ? body : id === 'sessions-list-col' ? el('list') : id === 'session-reader' ? el('rd') : id === 'session-form' ? el('reply') : null),
     viewportFit: () => o.fit ?? { top: 0, height: 787, vv: true },
     layoutCrumb: (what: string, data: any) => { crumbs.push({ what, data }); return o.crumbOk ?? true },
     ResizeObserver: o.ro === false ? undefined : RO,
@@ -61,6 +61,28 @@ function kit(o: { pane?: string; view?: string; ro?: boolean; fit?: any; rects?:
   const k = new Function('deps', `with (deps) {\n${FRAME_SRC}\nreturn { sync: sxFrameSync, newest: sxToNewest, crumb: sxFrameCrumb, goq: sxGoQuestionPaint, PIN: SX_PIN, FRAME: SX_FRAME, MAX: SX_FRAME_MAX, USER_MS: SX_PIN_USER_MS };\n}`)(deps)
   return { k, de, body, fire, observed, ros, timers, crumbs, hooks, scrolls, deps }
 }
+
+describe('the sign-in gate is a normal page: no frame while it shows (7.0.23 regression, lapse_check)', () => {
+  it('sxFrameSync is off while the shell is hidden, even in Sessions', () => {
+    const h = kit({ shellHidden: true })
+    h.de.classList.add('sx-frame')
+    expect(h.k.sync()).toBe(false)
+    expect(h.de.classList.contains('sx-frame')).toBe(false)
+  })
+  it('showAuth takes both frame classes off as it shows the gate (run on its own text)', () => {
+    const SRC = slice(APP, '  function showAuth(message) {', '  function signedInOnce() {')
+    const de: any = { classList: new FakeClass() }
+    de.classList.add('sx-frame'); de.classList.add('mx-frame'); de.classList.add('kb-up')
+    const els: Record<string, any> = {}
+    const $ = (id: string) => (els[id] ??= { classList: new FakeClass() })
+    // eslint-disable-next-line no-new-func
+    new Function('deps', `with (deps) {\n${SRC}\nshowAuth('Signed out');\n}`)({ $, document: { documentElement: de }, readerImagesStop: () => {}, setStatus: () => {}, CONN: {} })
+    expect(de.classList.contains('sx-frame')).toBe(false)
+    expect(de.classList.contains('mx-frame')).toBe(false)
+    expect(de.classList.contains('kb-up'), 'the keyboard kit owns kb-up').toBe(true)
+    expect(els['app-shell'].classList.contains('hidden')).toBe(true)
+  })
+})
 
 describe('html.sx-frame: on only while Sessions shows its list and reader', () => {
   it('Sessions with its list and reader: on, and the keyboard hook is added once', () => {

@@ -657,6 +657,10 @@
     if (typeof authOffline === 'function') authOffline(false);
     $('app-shell').classList.add('hidden');
     $('auth-gate').classList.remove('hidden');
+    // 7.0.23 regression (lapse_check, 08:2x): a frame class left on keeps html and body at one screen with overflow
+    // hidden, so the gate could not scroll and Connect sat below a keyboard-height screen. The gate is a normal page;
+    // showShell's route() puts the frame back (sxFrameSync) when the shell returns.
+    document.documentElement.classList.remove('sx-frame', 'mx-frame');
     // A later 401 from a pane still polling (W.api passes no message) must not blank what the gate already says:
     // the reason it opened, or "That code did not match" while the person retypes.
     if (!message && alreadyOpen) return;
@@ -2675,7 +2679,8 @@
   // Layout, not a proven fix for the 20:16 report: the frame reports where the rail, the list and the reply box sit
   // against the visible area (sxFrameCrumb).
   function sxFrameSync() {
-    var de = document.documentElement, on = state.pane === 'sessions' && SX.view === 'sessions';
+    // Never while the sign-in gate shows (the shell is hidden): the gate must scroll like a page.
+    var de = document.documentElement, shell = $('app-shell'), on = state.pane === 'sessions' && SX.view === 'sessions' && !(shell && shell.classList.contains('hidden'));
     if (de && de.classList) de.classList.toggle('sx-frame', on);
     if (on) sxFrameHook();
     return on;

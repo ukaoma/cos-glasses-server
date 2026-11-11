@@ -123,6 +123,8 @@ describe('native output images through the real viewer and app transport', () =>
     t.document.ids.get('auth-gate').classList.add('hidden')
     new Function('deps', 'with(deps){' + region(APP, '  function showAuth(message)', '  function showShell(info)') + 'showAuth();}')({
       $: t.document.getElementById, readerImagesStop: t.hooks.stop, setStatus() {},
+      // 7.0.23 fix: showAuth also takes the frame classes off <html> (sessions-frame-web runs that part).
+      document: { documentElement: { classList: { remove() {} } } },
     })
     expect(t.W.readerMedia.isOpen()).toBe(false); expect(t.revoked.sort()).toEqual(t.made.sort())
     expect(t.document.ids.get('auth-gate').classList.contains('hidden')).toBe(false)
