@@ -3037,8 +3037,9 @@
   var SX_SPLIT_KEY = 'cos_web_sessions_split', SX_LIST_MIN = 240, SX_READER_MIN = 380, SX_HANDLE_W = 18, SX_KEY_STEP = 16, SX_DOUBLE_MS = 350;
   // 11/10 (lead 20:39): Miles squeezes the reader on his Duo's Home Screen web app and the page breaks; WebKit at scale 1
   // does not (cw = scw, reader floor 380). One layout report when a drag ends, so his phone says what the page did:
-  // the split, list and reader widths, the share, clientWidth and scrollWidth, visualViewport.pageTop, and the rail's and
-  // list's tops (layoutCrumb adds the scale and offsetTop itself). Numbers only, at most SPLIT_DRAG_MAX a page load.
+  // the split, list and reader widths, the share, clientWidth and scrollWidth, visualViewport.pageTop, pageLeft and
+  // offsetLeft, scrollX, and the top, left and right of the rail, the list and the other column (layoutCrumb adds the
+  // scale and offsetTop itself). Numbers only, at most SPLIT_DRAG_MAX a page load.
   var SPLIT_DRAG = { n: 0 }, SPLIT_DRAG_MAX = 6;
   // o: key (storage), prefix (class names: <prefix>-sized, -full and -dragging), cssVar (the share, default
   // --<prefix>-list-share), label (what the divider sizes, for screen readers), sized (the column the share sizes,
@@ -3093,10 +3094,19 @@
       try {
         var de = document.documentElement, vv = window.visualViewport, t = total(), lw = listWidth(),
           hw = handle.getBoundingClientRect ? handle.getBoundingClientRect().width : HANDLE_W,
-          rail = document.querySelector('.rail'), list = split.querySelector(LIST_SEL);
+          rail = document.querySelector('.rail'), list = split.querySelector(LIST_SEL), other = null;
+        // The other column: the split's child that is neither the sized column nor the divider.
+        for (var c = split.firstElementChild; c; c = c.nextElementSibling) if (c !== list && c !== handle) other = c;
+        var vn = function (k) { return vv && typeof vv[k] === 'number' ? vv[k] : -1; };
+        var rr = rail ? rail.getBoundingClientRect() : null, lr = list ? list.getBoundingClientRect() : null, or = other ? other.getBoundingClientRect() : null;
+        // Up and down (pt, the tops) and sideways (pl, ol, sx, the left and right edges): a rail or list that left the
+        // screen to the side shows here too (Q1 20:44).
         if (layoutCrumb('split-drag', { key: String(KEY).slice(0, 24), t: t, sz: lw, rw: t - lw - hw, share: share == null ? -1 : share,
-          cw: de.clientWidth, scw: de.scrollWidth, pt: vv && typeof vv.pageTop === 'number' ? vv.pageTop : -1,
-          railTop: rail ? rail.getBoundingClientRect().top : -1, listTop: list ? list.getBoundingClientRect().top : -1 })) SPLIT_DRAG.n++;
+          cw: de.clientWidth, scw: de.scrollWidth, pt: vn('pageTop'), pl: vn('pageLeft'), ol: vn('offsetLeft'),
+          sx: typeof window.scrollX === 'number' ? window.scrollX : -1,
+          railTop: rr ? rr.top : -1, railL: rr ? rr.left : -1, railR: rr ? rr.right : -1,
+          listTop: lr ? lr.top : -1, listL: lr ? lr.left : -1, listR: lr ? lr.right : -1,
+          rdL: or ? or.left : -1, rdR: or ? or.right : -1 })) SPLIT_DRAG.n++;
       } catch (_e) { /* a report never stops a drag */ }
     }
     handle.addEventListener('pointerdown', function (e) {

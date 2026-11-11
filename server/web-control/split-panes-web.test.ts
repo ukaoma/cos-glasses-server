@@ -54,7 +54,8 @@ function page(opts: Opts = {}) {
   let clock = 1000
   // The drag-end layout report (11/10): app.js's layoutCrumb as a recorder, the page's width, the rail and the pan.
   const crumbs: Array<{ what: string; data: Record<string, unknown> }> = []
-  window.visualViewport = { pageTop: 85.4, offsetTop: 0, scale: 0.85 }
+  window.visualViewport = { pageTop: 85.4, offsetTop: 0, scale: 0.85, pageLeft: 197.5, offsetLeft: 197.5 }
+  window.scrollX = 0
   const ctx: any = vm.createContext({
     JSON, Math, String, Object, window, Date: { now: () => clock },
     matchMedia: (q: string) => ({ matches: wide, media: q }),
@@ -62,7 +63,7 @@ function page(opts: Opts = {}) {
     layoutCrumb: (what: string, data: Record<string, unknown>) => { if (opts.crumbThrows) throw new Error('x'); crumbs.push({ what, data }); return true },
     document: {
       documentElement: { clientWidth: 1119, scrollWidth: 1316 },
-      querySelector: (sel: string) => (sel === '.rail' ? { getBoundingClientRect: () => ({ top: -212 }) } : null),
+      querySelector: (sel: string) => (sel === '.rail' ? { getBoundingClientRect: () => ({ top: -212, left: -197, right: -123 }) } : null),
       querySelectorAll: (sel: string) => ({ forEach: (f: any) => buttons.filter(b => b.matches(sel)).forEach(f) }),
       addEventListener: (t: string, fn: any) => { (docListeners.get(t) ?? docListeners.set(t, []).get(t)!).push(fn) },
     },
@@ -77,24 +78,30 @@ function page(opts: Opts = {}) {
       style: { setProperty: (k: string, v: string) => props.set(k, v), removeProperty: (k: string) => props.delete(k) },
       getBoundingClientRect: () => ({ width: total }),
       // The list as the stylesheet sizes it: 300 px by default, else the share (any --*-list-share) clamped by the CSS.
-      querySelector: (sel: string) => sel !== listSel ? null : { getBoundingClientRect: () => {
-        const s = [...props.values()][0]
-        return { width: s ? parseFloat(s) / 100 * total : 300, top: -180 }
-      } },
+      querySelector: (sel: string) => sel !== listSel ? null : listEl,
     }
+    // The split's children in order: the sized column, the divider, the other column (reader).
+    const listEl: any = { getBoundingClientRect: () => {
+      const s = [...props.values()][0]
+      return { width: s ? parseFloat(s) / 100 * total : 300, top: -180, left: -99, right: 301 }
+    } }
+    const readerEl: any = { getBoundingClientRect: () => ({ left: 319, right: 901 }), nextElementSibling: null }
     const handle: any = {
       setAttribute: (k: string, v: string) => attrs.set(k, v),
       addEventListener: (t: string, fn: any) => { (listeners.get(t) ?? listeners.set(t, []).get(t)!).push(fn) },
       removeEventListener: (t: string, fn: any) => { const l = listeners.get(t); if (l) l.splice(l.indexOf(fn) >>> 0, 1) },
       setPointerCapture: () => {},
+      nextElementSibling: readerEl,
     }
+    listEl.nextElementSibling = handle
+    split.firstElementChild = listEl
     const fire = (type: string, e: any = {}) => {
       const ev = { pointerId: 1, pointerType: 'touch', button: 0, clientX: 0, shiftKey: false, type, prevented: false, preventDefault() { this.prevented = true }, ...e }
       for (const fn of [...(listeners.get(type) ?? [])]) fn(ev)
       return ev
     }
     const drag = (from: number, to: number) => { fire('pointerdown', { clientX: from }); fire('pointermove', { clientX: to }); fire('pointerup', { clientX: to }) }
-    return { split, handle, classes, props, attrs, fire, drag }
+    return { split, handle, classes, props, attrs, fire, drag, listEl, readerEl }
   }
   // A Full width button as the page would hold it after a pane drew fullButton(key).
   const addButton = (key: string) => {
@@ -472,7 +479,27 @@ describe('the drag-end layout report', () => {
     p.ctx.splitKit(a.split, a.handle, p.storage, MEM_OPTS)
     a.drag(400, 500)
     expect(p.crumbs).toEqual([{ what: 'split-drag', data: { key: 'cos_web_memories_split', t: 1000, sz: 400, rw: 582, share: 40,
-      cw: 1119, scw: 1316, pt: 85.4, railTop: -212, listTop: -180 } }])
+      cw: 1119, scw: 1316, pt: 85.4, pl: 197.5, ol: 197.5, sx: 0,
+      railTop: -212, railL: -197, railR: -123, listTop: -180, listL: -99, listR: 301, rdL: 319, rdR: 901 } }])
+  })
+  it('sideways: the page scrolled sideways reads in sx; no visualViewport or rail reads -1, never a missing key', () => {
+    const p = page()
+    const a = p.els()
+    p.ctx.window.scrollX = 214
+    delete p.ctx.window.visualViewport
+    p.ctx.document.querySelector = () => null
+    p.ctx.splitKit(a.split, a.handle, p.storage, MEM_OPTS)
+    a.drag(400, 500)
+    expect(p.crumbs[0]!.data).toMatchObject({ sx: 214, pt: -1, pl: -1, ol: -1, railTop: -1, railL: -1, railR: -1, listL: -99, rdL: 319, rdR: 901 })
+  })
+  it('a side panel on the right (the sized column last, as on a Work card): the other column is still the reader', () => {
+    const p = page()
+    const a = p.els()
+    // Order: reader, divider, sized column.
+    a.split.firstElementChild = a.readerEl; a.readerEl.nextElementSibling = a.handle; a.handle.nextElementSibling = a.listEl; a.listEl.nextElementSibling = null
+    p.ctx.splitKit(a.split, a.handle, p.storage, WRK_OPTS.sized ? { ...WRK_OPTS, sized: '.split-list' } : WRK_OPTS)
+    a.drag(500, 400)
+    expect(p.crumbs[0]!.data).toMatchObject({ rdL: 319, rdR: 901, listL: -99, listR: 301 })
   })
   it('a tap, a double tap, the arrow keys and a cancelled press send nothing', () => {
     const p = page()
