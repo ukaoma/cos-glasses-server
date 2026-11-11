@@ -518,11 +518,15 @@ describe('7.0.1: Sessions rows move in place', () => {
     a.parentNode = parent; b.parentNode = parent
     const list = { querySelectorAll: () => parent.kids.slice() }
     const calls = { groups: 0, hero: 0 }
-    const deps = {
+    const deps: any = {
       $: (id: string) => (id === 'sessions-list' ? list : null),
       sxQueryActive: () => !!opts.search, renderSessionGroups: () => { calls.groups++ }, paintSessionsHero: () => { calls.hero++ },
       sxAmbiguous: () => ({}), sxVisible: () => [], sxKeepWarm: () => false, splitSessionId: (p: string, id: string) => ({ provider: p, id }),
       sxRow: (s: { session_id: string; agent_state: string }) => { made.push(s.session_id); return '<row ' + s.session_id + ' ' + s.agent_state + '>' },
+      // 2b (Q1 07:22 FIX 1): the row goes through sxLiveRow; here it draws with sxRow and never moves group (the
+      // regroup itself is run in sessions-list-web.test.ts).
+      sxLiveRow: (s: { session_id: string; agent_state: string }) => ({ html: deps.sxRow(s), moved: false }),
+      sxRegroupLater: () => { calls.groups += 100 },
       document: { createElement: () => { const d: any = { set innerHTML(h: string) { d.firstElementChild = { html: h, getAttribute: () => null } } }; return d } },
     }
     const fn = new Function('deps', 'with (deps) {\n' + between(APP, '  function liveSessionRows(rows, structural) {', "  // ── Today's header line and Refresh ──") + '\nreturn liveSessionRows;\n}')(deps)
