@@ -2530,7 +2530,9 @@
 
   // ClaudeSession.title: the job label, else the name, else the workspace, else the id.
   function sxTitle(s) {
-    var t = plain(s.display_label || s.custom_title || '').replace(/\s+/g, ' ').trim();
+    // 7.0.23 step 2b-2: a title renamed in COS (S1's title_override) is the title everywhere; the agent's own stays
+    // in display_label, shown under it in the list and still searchable.
+    var t = plain(s.title_override || s.display_label || s.custom_title || '').replace(/\s+/g, ' ').trim();
     return t || String(s.project || '').trim() || String(s.session_id || s.id || 'Session');
   }
   function sxWarmWords(t) { t = String(t || '').trim().toLowerCase(); return t === 'ready' || t.indexOf('this is an automated local readiness check') === 0; }
@@ -2797,6 +2799,7 @@
       if (sxQueryActive()) SX.instant = sxInstant(SX.q);
       renderSessionGroups();
       sxLoadOlder(force === true);
+      if (typeof sxLoadFolders === 'function') sxLoadFolders(force === true);
     }).catch(function (err) {
       SX.loading = false;
       SX.error = (err && err.message) || 'Sessions did not load';
@@ -2849,8 +2852,18 @@
     var short = s.form === 'short', st = short ? '' : sxState(s), title = sxTitle(s);
     var when = toDate(SX.clock === 'opened' ? (s.created || s.modified) : s.modified);
     var edge = st === 'running' ? ' running' : st === 'waiting' ? ' waiting' : st === 'error' ? ' failed' : '';
-    var id = esc(key.provider) + '|' + esc(key.id);
-    var head = '<span class="sx-r-title">' + esc(title) + '</span>' + (when ? '<span class="sx-r-time">' + esc(sxShortDate(when)) + '</span>' : '');
+    var id = esc(key.provider) + '|' + esc(key.id), rowKey = key.provider + '|' + key.id;
+    var org = typeof SXF === 'object' && SXF.ok === true;
+    if (org && SXF.renaming && SXF.renaming.toLowerCase() === rowKey.toLowerCase()) {
+      // data-edit, not data-session, while the form is open: a form's Save (or Enter, which the browser turns into a
+      // click on Save) must not reach the page's row handler and open the session.
+      return '<div class="sx-r editing" data-edit="' + id + '">' + sxInlineHtml('rename', rowKey, 'Rename this session', s.title_override || title,
+        s.title_override ? 'The agent\u2019s own title stays underneath and in search.' : '') + '</div>';
+    }
+    var agent = s.title_override && s.display_label && String(s.display_label).trim() !== title ? plain(String(s.display_label)).replace(/\s+/g, ' ').trim() : '';
+    var head = '<span class="sx-r-title">' + esc(title) + '</span>' + (when ? '<span class="sx-r-time">' + esc(sxShortDate(when)) + '</span>' : '') +
+      (agent ? '<span class="sx-r-orig">' + esc(agent) + '</span>' : '');
+    var more = org && !short && !compact ? '<button type="button" class="sx-r-more" data-sx="row-menu" data-key="' + id + '" aria-haspopup="menu" aria-expanded="false" aria-label="' + esc('More for ' + title) + '"><span aria-hidden="true">\u2026</span></button>' : '';
     if (compact || short) {
       return '<div class="sx-r compact' + edge + '" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
         '<button type="button" class="sx-r-open" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '>' + head + '</button></div>';
@@ -2869,7 +2882,7 @@
       '<button type="button" class="sx-r-open" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '>' + head +
         '<span class="sx-r-sub">' + sxGlyph(key.provider) + (line ? '<span class="t">' + lineHtml + '</span>' : '') + (match ? '<span class="sx-tag">' + match + '</span>' : '') + '</span>' +
         (snippet && snippet !== title ? '<span class="sx-r-snip">' + esc(snippet) + '</span>' : '') +
-      '</button></div>';
+      '</button>' + more + '</div>';
   }
 
   // Groups, top to bottom; a session shows once. Needs you is what Today's needsModel counts for a session: waiting, or
@@ -2899,6 +2912,7 @@
       if (st === 'running') return 'working';
     }
     if (s.pinned || s.cos_pinned) return 'pinned';
+    if (s.folder_id && typeof SXF === 'object' && SXF.byId[s.folder_id]) return 'f:' + s.folder_id;
     var t = sxSortTime(s), today = sxDayStart(now);
     if (t >= today) return 'today';
     if (t >= today - SX_DAY_MS) return 'yesterday';
@@ -2942,7 +2956,28 @@
     all.forEach(function (s) { var k = sxRowKey(s), g = SXL.place[k] || want[k]; (by[g] = by[g] || []).push(s); });
     var amb = sxAmbiguous(all.filter(function (s) { return s.form !== 'short'; }));
     var html = '', holdUntil = 0;
+    // Folders sit after Pinned, each a heading that folds (open by default), with its own menu; New folder's field
+    // opens at the top of this area.
+    var groups = [];
     SX_GROUPS.forEach(function (g) {
+      groups.push(g);
+      if (g[0] === 'pinned' && typeof SXF === 'object' && SXF.ok) {
+        if (SXF.newOpen) groups.push(['newfolder', '', 'form']);
+        SXF.folders.forEach(function (f) { groups.push(['f:' + f.id, f.name, 'folder']); });
+      }
+    });
+    groups.forEach(function (g) {
+      if (g[2] === 'form') { html += '<section class="sx-g sx-g-form">' + sxInlineHtml('new-folder', '', 'New folder', '', '') + '</section>'; return; }
+      if (g[2] === 'folder') {
+        var fid = g[0].slice(2), frows = (by[g[0]] || []).sort(function (a, b) { return sxSortTime(b) - sxSortTime(a); }), fopen = SXL.open[g[0]] !== false;
+        if (SXF.folderRenaming === fid) { html += '<section class="sx-g" data-g="' + esc(g[0]) + '">' + sxInlineHtml('folder-rename', fid, 'Rename folder', g[1], '') + '</section>'; return; }
+        html += '<section class="sx-g sx-folder" data-g="' + esc(g[0]) + '"><div class="sx-gh-row"><button type="button" class="sx-gh" data-sx="fold" data-g="' + esc(g[0]) + '" aria-expanded="' + fopen + '">' +
+          '<span class="fold"><span class="chev" aria-hidden="true"></span>' + esc(g[1]) + '</span><span class="n">' + frows.length + '</span></button>' +
+          '<button type="button" class="sx-r-more" data-sx="folder-menu" data-id="' + esc(fid) + '" aria-haspopup="menu" aria-expanded="false" aria-label="' + esc('Folder menu for ' + g[1]) + '"><span aria-hidden="true">\u2026</span></button></div>' +
+          (fopen ? (frows.length ? '<div class="sx-rows">' + frows.map(function (s) { return sxRow(s, null, amb, s.form === 'short'); }).join('') + '</div>'
+            : '<p class="sx-empty-folder">Nothing here yet. Move a session in from its menu.</p>') : '') + '</section>';
+        return;
+      }
       var id = g[0], rows = (by[id] || []).sort(function (a, b) { return sxSortTime(b) - sxSortTime(a); }), n = rows.length;
       if (g[2] === 'state') {
         if (n) SXL.seen[id] = now;
@@ -3016,6 +3051,8 @@
     sel.value = cur;
   }
   function sxPaintListHead() {
+    var nf = $('sessions-new-folder'); if (nf) nf.classList.toggle('hidden', !(typeof SXF === 'object' && SXF.ok === true));
+    var on = $('sessions-org-note'); if (on) { var nt = typeof SXF === 'object' ? SXF.note : ''; on.textContent = nt; on.classList.toggle('hidden', !nt); }
     var line = $('sessions-quiet');
     if (line) { var t = sxQueryActive() ? '' : sxQuietLine(); line.textContent = t; line.classList.toggle('hidden', !t); }
     sxPaintSort();
@@ -3045,7 +3082,137 @@
       var menu = $('sessions-view-menu');
       if (menu && !menu.classList.contains('hidden') && !e.target.closest('#sessions-view-menu') && !e.target.closest('#sessions-view-btn')) sxViewMenu(false);
     });
+    // The row and folder menu lives on <body> (outside this pane): its items are handled here; a tap outside closes it.
+    document.addEventListener('click', function (e) {
+      var item = e.target.closest && e.target.closest('#sessions-pop [data-sx]');
+      if (item) { e.stopPropagation(); return sxOrgClick(item.getAttribute('data-sx'), item); }
+      if (SXF.pop && !(e.target.closest && (e.target.closest('#sessions-pop') || e.target.closest('[data-sx="row-menu"],[data-sx="folder-menu"]')))) sxPopClose();
+    }, true);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && SXF.pop) { var b = SXF.pop; sxPopClose(); if (b && b.focus) b.focus(); } });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { var menu = $('sessions-view-menu'); if (menu && !menu.classList.contains('hidden')) { sxViewMenu(false); var b = $('sessions-view-btn'); if (b) b.focus(); } } });
+  }
+  // ── folders, COS pins and rename (7.0.23, step 2b-2; S1's organizer, contract at 469a334) ──
+  // One store on the Mac (GET/POST/PATCH/DELETE /api/session-folders, PATCH /api/agent-sessions/:p/:id/organizer),
+  // shared by the phone and the Mac app. Every change is one small request; after it the folders and the list are
+  // read again. Folder names and renamed titles are untrusted text: drawn with esc() only, never as markup, never in a
+  // URL (S1 rule 6). An older server answers 404 to GET /api/session-folders: no More button and no New folder, and
+  // the list is as before.
+  var SXF = { ok: null, folders: [], byId: {}, at: 0, busy: false, note: '', newOpen: false, renaming: '', folderRenaming: '', armDelete: '', pop: null };
+  var SXF_REASONS = {
+    folder_name_taken: 'A folder already has that name.', invalid_name: 'A folder name is 1 to 60 characters.', too_many_folders: 'That is the most folders this Mac keeps (200).',
+    invalid_title: 'A title is 1 to 120 characters.', alias_conflict: 'Claude is still settling which session this is. Try again in a moment.',
+    session_not_found: 'This session is no longer on the Mac.', folder_not_found: 'That folder is gone. The list has been read again.',
+    too_many_entries: 'This Mac keeps folders, pins and titles for 5,000 sessions at most.', organizer_unavailable: 'Folders, pins and titles are not available on the Mac right now.'
+  };
+  function sxOrgWords(err) { var c = err && (err.code || ''); return SXF_REASONS[c] || 'That did not save. Check that the Mac is awake, then try again.'; }
+  function sxLoadFolders(force) {
+    if (SXF.ok === false || SXF.busy) return Promise.resolve();
+    if (!force && SXF.at && Date.now() - SXF.at < SX_OLDER_MS) return Promise.resolve();
+    SXF.busy = true;
+    return api('/api/session-folders').then(function (d) {
+      SXF.folders = (d && Array.isArray(d.folders) ? d.folders : []).filter(function (f) { return f && typeof f.id === 'string'; });
+      SXF.byId = {}; SXF.folders.forEach(function (f) { SXF.byId[f.id] = f; });
+      SXF.ok = true; SXF.at = Date.now();
+    }, function (err) { if (err && err.status === 404) SXF.ok = false; }).then(function () {
+      SXF.busy = false;
+      if (state.pane === 'sessions' && SX.view === 'sessions' && !sxQueryActive()) renderSessionGroups();
+    });
+  }
+  // A move the person asked for (pin, folder, rename, a deleted folder) applies at once, like a sort change: the rest
+  // rule holds only moves the person did not make.
+  function sxOrgDone(note) {
+    SXF.note = note || ''; SXF.at = 0; SXL.place = null;
+    // A list read already in flight started before this change: wait for it, then read again, so the list shows it.
+    var settled = function () { return SL.inflight ? SL.inflight.then(function () {}, function () {}) : Promise.resolve(); };
+    // The placement is reset once the new list is in (a redraw in between, with the old rows, would use it up).
+    return sxLoadFolders(true).then(settled).then(function () { return loadSessions(true); }).then(function () { SXL.place = null; renderSessionGroups(); });
+  }
+  function sxOrgFail(err) { SXF.note = sxOrgWords(err); sxPaintListHead(); }
+  // A text field inside the list keeps the list from redrawing over what is being typed.
+  function sxEditing() { var a = document.activeElement; return !!(a && a.closest && a.closest('#sessions-list form.sx-inline')); }
+  function sxRowByKey(key) { return sxAllRows().filter(function (s) { return sxRowKey(s) === String(key).toLowerCase(); })[0] || null; }
+  function sxOrgPatch(key, body) {
+    var s = sxRowByKey(key); if (!s) return Promise.resolve();
+    var k = splitSessionId(s.provider, s.session_id || s.id);
+    return api('/api/agent-sessions/' + encodeURIComponent(k.provider) + '/' + encodeURIComponent(k.id) + '/organizer', { method: 'PATCH', body: body });
+  }
+  function sxInlineHtml(kind, id, label, value, hint) {
+    return '<form class="sx-inline" data-sx-form="' + kind + '" data-id="' + esc(id) + '"><label class="sx-inline-label" for="sx-inline-' + kind + '">' + esc(label) + '</label>' +
+      '<input class="field" id="sx-inline-' + kind + '" maxlength="' + (kind === 'rename' ? 120 : 60) + '" autocomplete="off" enterkeyhint="done" value="' + esc(value || '') + '">' +
+      (hint ? '<p class="sx-inline-hint">' + esc(hint) + '</p>' : '') +
+      '<div class="sx-inline-acts"><button type="submit" class="cx-btn primary">' + (kind === 'new-folder' ? 'Create' : 'Save') + '</button>' +
+      (kind === 'rename' && value ? '<button type="button" class="cx-btn quiet" data-sx="rename-clear" data-id="' + esc(id) + '">Use the agent’s title</button>' : '') +
+      '<button type="button" class="cx-btn quiet" data-sx="inline-cancel">Cancel</button></div></form>';
+  }
+  // The row's menu: Pin or Unpin (a COS pin); an agent's own pin is said and has no Unpin; Move to folder; Rename.
+  function sxRowMenuHtml(s, key, moving) {
+    var k = splitSessionId(s.provider, s.session_id || s.id);
+    if (moving) {
+      var cur = s.folder_id || '';
+      return (SXF.folders.length ? SXF.folders.map(function (f) {
+        return '<button type="button" role="menuitemradio" aria-checked="' + (cur === f.id) + '" data-sx="org-move" data-key="' + esc(key) + '" data-folder="' + esc(f.id) + '">' + esc(f.name) + '</button>';
+      }).join('') : '<p class="sx-pop-note">No folders yet. Make one with New folder at the top of the list.</p>') +
+        '<button type="button" role="menuitemradio" aria-checked="' + (!cur) + '" data-sx="org-move" data-key="' + esc(key) + '" data-folder="">No folder</button>';
+    }
+    return (s.pinned ? '<p class="sx-pop-note">Pinned in ' + sxProviderLabel(k.provider) + '</p>'
+        : '<button type="button" role="menuitem" data-sx="org-pin" data-key="' + esc(key) + '">' + (s.cos_pinned ? 'Unpin' : 'Pin') + '</button>') +
+      '<button type="button" role="menuitem" data-sx="org-move-menu" data-key="' + esc(key) + '">Move to folder</button>' +
+      '<button type="button" role="menuitem" data-sx="org-rename" data-key="' + esc(key) + '">Rename</button>';
+  }
+  function sxFolderMenuHtml(id) {
+    return '<button type="button" role="menuitem" data-sx="folder-rename" data-id="' + esc(id) + '">Rename</button>' +
+      '<button type="button" role="menuitem" data-sx="folder-delete" data-id="' + esc(id) + '">' + (SXF.armDelete === id ? 'Tap again to delete the folder. Its sessions go back to their day group.' : 'Delete folder') + '</button>';
+  }
+  // One small menu at a time, under its button, inside the visible frame; Escape or a tap outside closes it.
+  function sxPopClose() {
+    var pop = $('sessions-pop'); if (pop) { pop.classList.add('hidden'); pop.innerHTML = ''; }
+    if (SXF.pop && SXF.pop.setAttribute) SXF.pop.setAttribute('aria-expanded', 'false');
+    SXF.pop = null;
+  }
+  function sxPopOpen(btn, html, label) {
+    var pop = $('sessions-pop');
+    if (!pop) { pop = document.createElement('div'); pop.id = 'sessions-pop'; pop.className = 'sx-menu sx-pop hidden'; pop.setAttribute('role', 'menu'); document.body.appendChild(pop); }
+    if (SXF.pop && SXF.pop !== btn && SXF.pop.setAttribute) SXF.pop.setAttribute('aria-expanded', 'false');
+    pop.setAttribute('aria-label', label || 'Menu');
+    pop.innerHTML = html; pop.classList.remove('hidden');
+    SXF.pop = btn; btn.setAttribute('aria-expanded', 'true');
+    var r = btn.getBoundingClientRect(), w = pop.offsetWidth || 220, h = pop.offsetHeight || 160, vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+    pop.style.left = Math.max(8, Math.min(r.right - w, vw - w - 8)) + 'px';
+    pop.style.top = (r.bottom + 4 + h > vh - 8 ? Math.max(8, r.top - 4 - h) : r.bottom + 4) + 'px';
+    var first = pop.querySelector('[role^="menuitem"]'); if (first && first.focus) first.focus();
+  }
+  function sxOrgClick(act, t) {
+    var key = t.getAttribute('data-key') || '', id = t.getAttribute('data-id') || '', s = key ? sxRowByKey(key) : null;
+    if (act === 'row-menu') { if (SXF.pop === t) return sxPopClose(); return s ? sxPopOpen(t, sxRowMenuHtml(s, key, false), 'Session menu') : null; }
+    if (act === 'org-move-menu') { var b = SXF.pop; return s && b ? sxPopOpen(b, sxRowMenuHtml(s, key, true), 'Move to folder') : null; }
+    if (act === 'folder-menu') { SXF.armDelete = ''; if (SXF.pop === t) return sxPopClose(); return sxPopOpen(t, sxFolderMenuHtml(id), 'Folder menu'); }
+    if (act === 'org-pin' && s) { sxPopClose(); return sxOrgPatch(key, { cos_pinned: !s.cos_pinned }).then(function () { return sxOrgDone(); }, sxOrgFail); }
+    if (act === 'org-move' && s) { sxPopClose(); var f = t.getAttribute('data-folder') || null; return sxOrgPatch(key, { folder_id: f }).then(function () { return sxOrgDone(); }, sxOrgFail); }
+    if (act === 'org-rename') { sxPopClose(); SXF.renaming = key; SXF.note = ''; renderSessionGroups(); var i = $('sx-inline-rename'); if (i) { i.focus(); i.select && i.select(); } return; }
+    if (act === 'rename-clear') { SXF.renaming = ''; return sxOrgPatch(id, { title: null }).then(function () { return sxOrgDone(); }, sxOrgFail); }
+    if (act === 'new-folder') { SXF.newOpen = true; SXF.note = ''; renderSessionGroups(); var n = $('sx-inline-new-folder'); if (n) n.focus(); return; }
+    if (act === 'folder-rename') { sxPopClose(); SXF.folderRenaming = id; SXF.note = ''; renderSessionGroups(); var fr = $('sx-inline-folder-rename'); if (fr) { fr.focus(); fr.select && fr.select(); } return; }
+    if (act === 'folder-delete') {
+      if (SXF.armDelete !== id) { SXF.armDelete = id; if (SXF.pop) sxPopOpen(SXF.pop, sxFolderMenuHtml(id), 'Folder menu'); return; }
+      SXF.armDelete = ''; sxPopClose();
+      return api('/api/session-folders/' + encodeURIComponent(id), { method: 'DELETE' }).then(function () { return sxOrgDone(); }, sxOrgFail);
+    }
+    if (act === 'inline-cancel') { SXF.newOpen = false; SXF.renaming = ''; SXF.folderRenaming = ''; var a = document.activeElement; if (a && a.blur) a.blur(); return renderSessionGroups(); }
+  }
+  function sxOrgSubmit(form) {
+    var kind = form.getAttribute('data-sx-form'), id = form.getAttribute('data-id') || '', input = form.querySelector('input');
+    var v = input ? String(input.value || '').trim() : '';
+    if (kind === 'new-folder') {
+      if (!v) { SXF.note = SXF_REASONS.invalid_name; return sxPaintListHead(); }
+      return api('/api/session-folders', { method: 'POST', body: { name: v } }).then(function () { SXF.newOpen = false; if (input) input.blur(); return sxOrgDone(); }, sxOrgFail);
+    }
+    if (kind === 'folder-rename') {
+      if (!v) { SXF.note = SXF_REASONS.invalid_name; return sxPaintListHead(); }
+      return api('/api/session-folders/' + encodeURIComponent(id), { method: 'PATCH', body: { name: v } }).then(function () { SXF.folderRenaming = ''; if (input) input.blur(); return sxOrgDone(); }, sxOrgFail);
+    }
+    if (kind === 'rename') {
+      return sxOrgPatch(id, { title: v || null }).then(function () { SXF.renaming = ''; if (input) input.blur(); return sxOrgDone(); }, sxOrgFail);
+    }
   }
   // The list, under the hero. The name stays: the shared input handler calls it when the search clears.
   function renderSessionGroups() {
@@ -3063,6 +3230,8 @@
     sxListWatch();
     sxPaintListHead();
     var list = $('sessions-list'); if (!list) return;
+    // A field in the list being typed in (New folder, a rename) is never drawn over; the list waits for it.
+    if (!sxQueryActive() && typeof sxEditing === 'function' && sxEditing()) { sxRegroupLater(); return; }
     var col = $('sessions-list-col'), at = sxQueryActive() ? null : sxAnchor(col);
     list.innerHTML = sxQueryActive() ? sxSearchHtml() : sxListHtml();
     sxRestoreAnchor(col, at);
@@ -3291,7 +3460,8 @@
       if (act === 'view') { sxViewMenu(false); return setSessionsView(t.getAttribute('data-view')); }
       if (act === 'view-menu') return sxViewMenu();
       if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint(); var gq = $('session-questions'), first = gq && gq.querySelector('button, input, [tabindex]'); if (first && first.focus) first.focus({ preventScroll: true }); return; }
-      if (act === 'fold') { var g = t.getAttribute('data-g'); SXL.open[g] = !SXL.open[g]; return renderSessionGroups(); }
+      if (act === 'fold') { var g = t.getAttribute('data-g'), isF = g.indexOf('f:') === 0; SXL.open[g] = isF ? SXL.open[g] === false : !SXL.open[g]; return renderSessionGroups(); }
+      if (/^(row-menu|org-|folder-|new-folder|rename-clear|inline-cancel)/.test(act)) { e.stopPropagation(); return sxOrgClick(act, t); }
       if (act === 'older-more') return sxLoadOlder(false, true);
       if (act === 'clock') { SX.clock = t.getAttribute('data-clock'); sxSave(); return renderSessionGroups(); }
       if (act === 'refresh') {
@@ -3324,6 +3494,13 @@
       SX.instant = sxInstant(SX.q);
       renderSessionGroups();
       SX.searchTimer = setTimeout(searchSessions, 350);
+    });
+    // 7.0.23 step 2b-2: New folder and the renames are inline forms in the list.
+    sxPane.addEventListener('submit', function (e) {
+      var f = e.target;
+      if (!f || !f.matches || !f.matches('form.sx-inline')) return;
+      e.preventDefault();
+      sxOrgSubmit(f);
     });
     sxPane.addEventListener('change', function (e) {
       var id = e.target.id;

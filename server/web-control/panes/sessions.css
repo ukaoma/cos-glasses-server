@@ -691,6 +691,31 @@ button.sx-gh[aria-expanded='false'] .chev { transform: rotate(-45deg); }
   .sx-lhead #sessions-q, .sx-lhead #sessions-sort { height: 44px; min-height: 44px; }
 }
 
+/* ── folders, COS pins and rename (7.0.23, step 2b-2) ── */
+.sx-r { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.sx-r-more { width: 32px; height: 32px; margin-right: 6px; border-radius: 8px; display: grid; place-items: center; color: var(--sub); font: 600 18px/1 var(--body); }
+.sx-r-more:hover, .sx-r-more[aria-expanded='true'] { background: var(--qopen); color: var(--ink); }
+.sx-r-orig { grid-column: 1 / -1; font-size: 12px; line-height: 1.3; color: var(--tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sx-gh-row { display: flex; align-items: center; }
+.sx-gh-row .sx-gh { flex: 1 1 auto; }
+.sx-empty-folder { margin: 2px 12px 8px; font-size: 13px; color: var(--sub); }
+.sx-new-folder { flex: none; }
+.sx-org-note { margin: 0; font-size: 13px; color: var(--hot); }
+.sx-org-note.hidden { display: none; }
+.sx-inline { display: grid; gap: 8px; padding: 10px 12px 12px; margin: 6px 0; border-radius: 10px; background: var(--qopen); }
+.sx-inline-label { font: 600 13px/1.3 var(--body); color: var(--ink); }
+.sx-inline-hint { margin: 0; font-size: 12.5px; color: var(--sub); }
+.sx-inline-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.sx-pop { position: fixed; z-index: 60; max-width: min(320px, calc(100vw - 16px)); }
+.sx-pop .sx-pop-note { margin: 0; padding: 8px 12px; font-size: 13px; color: var(--sub); }
+.sx-pop [role='menuitemradio'] { min-height: 40px; padding: 0 12px; border-radius: 8px; text-align: left; font: 500 15px/1.2 var(--body); color: var(--ink); }
+.sx-pop [role='menuitemradio'][aria-checked='true']::after { content: ' (here)'; color: var(--sub); }
+.sx-pop [role='menuitemradio']:hover, .sx-pop [role='menuitemradio']:focus-visible { background: var(--qopen); }
+@media (any-pointer: coarse) {
+  .sx-r-more { width: 44px; height: 44px; }
+  .sx-pop [role='menuitemradio'], .sx-pop [role='menuitem'], .sx-new-folder, .sx-inline .cx-btn { min-height: 44px; }
+}
+
 /* Q1 (23:40): a question waits at the end of the conversation, out of view. */
 .sx-goq { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 8px; padding: 6px 6px 6px 12px; border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--panel-border)); background: var(--panel); font-size: 14px; color: var(--ink); }
