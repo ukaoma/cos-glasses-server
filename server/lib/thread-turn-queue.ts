@@ -122,6 +122,14 @@ export interface QueuedThreadTurn {
    * the words alone, so the pending row and its preview never show a path. Absent on a turn without files.
    */
   attachmentIds?: string[]
+  /**
+   * 2026-11-11 (S1, Miles's note held 08:01): WHY a `waiting` row is held, as a short code the drain decided, and
+   * since when that code has held (epoch ms). Written only when the code CHANGES, never per sweep, so a held row
+   * costs no extra writes. Additive: an older server or client ignores both. Codes only, never text
+   * (`holdReasonFor`, `HOLD_REASON_CODE`).
+   */
+  holdReason?: string
+  holdSince?: number
 }
 
 // ------------------------------------------------------------------- 6.78.0 flags
@@ -374,6 +382,22 @@ export function drainDecision(
   if (seen.turnOpen === true) return 'hold'
   if (seen.turnEnded) return 'deliver'
   return seen.activity === 'idle' ? 'deliver' : 'hold'
+}
+
+/** A hold reason is a short code: lowercase letters, digits and underscores. Anything else reads `gate_closed`. */
+export const HOLD_REASON_CODE = /^[a-z0-9_]{1,48}$/
+
+/**
+ * Why `drainDecision` held this row, as a code (2026-11-11). Same order as the decision, so the code names the
+ * branch that held: a cancel hold, then the gate (its own reason), then an open turn, then a turn not yet ended.
+ * Only meaningful for a row the decision held; `files_wait_for_turn_end` is set by the drain itself, when the
+ * row's files are the only thing that kept it from going into the running turn.
+ */
+export function holdReasonFor(seen: DrainObservation, now: number): string {
+  if (typeof seen.cancelHoldUntil === 'number' && Number.isFinite(seen.cancelHoldUntil) && now < seen.cancelHoldUntil) return 'cancel_hold'
+  if (!seen.attachable) return typeof seen.reason === 'string' && HOLD_REASON_CODE.test(seen.reason) ? seen.reason : 'gate_closed'
+  if (seen.turnOpen === true) return 'turn_open'
+  return 'turn_not_ended'
 }
 
 /**

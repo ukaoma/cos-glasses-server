@@ -21,7 +21,7 @@ import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-
 import { nativeQueueControl, plainQueueText, type NativeQueueControl } from '../lib/codex-queue-control.js'
 import { CLIENT_TURN_ID_RE, COS_SESSION_ID_RE, DEFAULT_MAX_PROMPT_CHARS } from './agent-session-bindings.js'
 import {
-  admitToQueue, drainDecision, queueableRefusal, queuePosition,
+  admitToQueue, drainDecision, holdReasonFor, queueableRefusal, queuePosition,
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
   queueReconcileEnabled, queueResendEnabled, queuedTurnReasonCopy, sessionSteerAvailability, sessionSteerEnabled,
   steerMidturnEnabled, type SessionSteerAvailability,
@@ -153,6 +153,14 @@ export function steerAvailabilityFor(deps: Pick<ThreadTurnQueueDeps, 'steerProbe
   return sessionSteerAvailability({ provider, gateReason, continueLive, peerInbox: probe.peerInbox, waitingOnPrompt: probe.waitingOnPrompt })
 }
 
+/**
+ * When a sweep last decided each held row (epoch ms), in memory only: the row file is written when its hold
+ * reason CHANGES, not every 20 s. Bounded; a settled row is forgotten.
+ */
+const holdCheckedAt = new Map<string, number>()
+const HOLD_CHECKED_MAX = 1_000
+export function __resetHoldCheckedForTests(): void { holdCheckedAt.clear() }
+
 /** Public shape of a queued turn. No prompt echo beyond a short preview. */
 export function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unknown> {
   const row: Record<string, unknown> = {
@@ -169,6 +177,12 @@ export function publicRow(turn: QueuedThreadTurn, position: number): Record<stri
     ...(turn.settledAt ? { settledAt: turn.settledAt } : {}),
     // 11/07: how many files wait with the words (never their ids or paths). Absent without files.
     ...(Array.isArray(turn.attachmentIds) && turn.attachmentIds.length > 0 ? { attachments: turn.attachmentIds.length } : {}),
+    // 2026-11-11: why a waiting row is held (a code), since when, and when a sweep last decided it. Additive.
+    ...(turn.status === 'waiting' && typeof turn.holdReason === 'string' ? {
+      waiting_reason: turn.holdReason,
+      ...(typeof turn.holdSince === 'number' ? { waiting_since: turn.holdSince } : {}),
+      ...(holdCheckedAt.has(turn.clientTurnId) ? { waiting_checked_at: holdCheckedAt.get(turn.clientTurnId) } : {}),
+    } : {}),
   }
   // 6.78.0: additive, and only while a P3 flag is on, so the row is the 6.77 bytes otherwise.
   // `resendable` is the per-row capability: present only when Send again can act on it.
@@ -242,7 +256,7 @@ function localDrainVerdict(at: number): OriginVerdict {
 }
 
 /** What one mid-turn attempt did to its row: delivered, settled some other way, or left waiting. */
-type MidTurnOutcome = 'delivered' | 'settled' | 'held'
+type MidTurnOutcome = 'delivered' | 'settled' | 'held' | 'held_files'
 
 /**
  * Steer mid-turn (COS_STEER_MIDTURN, Miles 2026-11-07): put ONE waiting row into the running turn
@@ -279,9 +293,11 @@ async function steerHeldTurn(
   deps: ThreadTurnQueueDeps,
 ): Promise<MidTurnOutcome> {
   if (turn.status !== 'waiting' || turn.attempts !== 0) return 'held'
-  if (Array.isArray(turn.attachmentIds) && turn.attachmentIds.length > 0) return 'held'
   const availability = midTurnAvailabilityFor(deps, provider, threadId, gateReason)
   if (!availability || !availability.available) return 'held'
+  // Files never go into a running turn (the peer inbox carries words only). Checked AFTER availability, so
+  // `held_files` means exactly this: the turn could have gone in now but for its files (the row's hold reason).
+  if (Array.isArray(turn.attachmentIds) && turn.attachmentIds.length > 0) return 'held_files'
   const { clientTurnId, prompt } = turn
 
   const rewrite = (apply: (row: QueuedThreadTurn) => void): QueuedThreadTurn | null => {
@@ -465,11 +481,19 @@ export async function drainThread(
       // which also means the hold is the busy GATE: the rule answers only for a refusal that
       // names a desk run (an attachable thread has no reason). Anything else holds as before.
       const cancelHeld = typeof seen.cancelHoldUntil === 'number' && Number.isFinite(seen.cancelHoldUntil) && deps.now() < seen.cancelHoldUntil
+      let reason = holdReasonFor(seen, deps.now())
       if (!midTurnOrderHeld && !cancelHeld) {
         const outcome = await steerHeldTurn(provider, threadId, turn, gate.reason, deps)
-        if (outcome === 'delivered') { delivered += 1; continue }
-        if (outcome === 'settled') { retired += 1; continue }
+        if (outcome === 'delivered') { holdCheckedAt.delete(turn.clientTurnId); delivered += 1; continue }
+        if (outcome === 'settled') { holdCheckedAt.delete(turn.clientTurnId); retired += 1; continue }
+        if (outcome === 'held_files') reason = 'files_wait_for_turn_end'
       }
+      // The hold reason: written only when it changes; the check time is kept in memory (2026-11-11).
+      const at = deps.now()
+      if (turn.holdReason !== reason) { turn.holdReason = reason; turn.holdSince = at; persist(turn) }
+      holdCheckedAt.delete(turn.clientTurnId)
+      holdCheckedAt.set(turn.clientTurnId, at)
+      while (holdCheckedAt.size > HOLD_CHECKED_MAX) holdCheckedAt.delete(holdCheckedAt.keys().next().value!)
       midTurnOrderHeld = true
       held += 1
       continue
@@ -480,6 +504,7 @@ export async function drainThread(
       turn.settledAt = deps.now()
       retired += 1; persist(turn)
       forgetIfSettled(turn)
+      holdCheckedAt.delete(turn.clientTurnId)
       continue
     }
 
@@ -488,6 +513,10 @@ export async function drainThread(
     // forever; the ceiling only bounds anything if it survives the crash it is bounding.
     turn.attempts += 1
     turn.status = 'delivering'
+    // No longer held: the reason belonged to the wait that just ended.
+    delete turn.holdReason
+    delete turn.holdSince
+    holdCheckedAt.delete(turn.clientTurnId)
     // 6.78.0: the stamp the restart reconcile reads. `journal: 1` says this build keeps an
     // attempt record for the delivery that follows; `deliveringBootId` says which boot owns
     // it, so a sweep never touches a row this process is delivering right now. Durable:
