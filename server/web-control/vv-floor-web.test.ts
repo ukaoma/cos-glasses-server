@@ -31,7 +31,7 @@ function fitKit(win: any) {
   return new Function('window', 'document', 'Date', src + '\nreturn { fit: viewportFit, VP: VP, MIN: VV_MIN_PX };')(win, doc, Date) as {
     fit: () => any; VP: any; MIN: number }
 }
-function duo(vv: Record<string, number> | null, innerHeight = 787) {
+function duo(vv: Record<string, number> | null, innerHeight = 787): any {
   return { innerHeight, innerWidth: 1119, visualViewport: vv ? { scale: 0.85, offsetTop: 0, ...vv } : undefined, matchMedia: () => ({ matches: true }) }
 }
 
