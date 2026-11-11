@@ -332,11 +332,15 @@
   function panNum(v) { return typeof v === 'number' && isFinite(v) ? Math.round(v) : null; }
   function panOffsets() {
     var vv = window.visualViewport;
-    return { sy: panNum(window.scrollY), pt: vv ? panNum(vv.pageTop) : null, ot: vv ? panNum(vv.offsetTop) : null };
+    return { sy: panNum(window.scrollY), pt: vv ? panNum(vv.pageTop) : null, ot: vv ? panNum(vv.offsetTop) : null,
+      sx: panNum(window.scrollX), pl: vv ? panNum(vv.pageLeft) : null, ol: vv ? panNum(vv.offsetLeft) : null };
   }
   function panState() {
     var r = layer && typeof layer.getBoundingClientRect === 'function' ? layer.getBoundingClientRect() : null, o = panOffsets();
-    return { sy: o.sy, pt: o.pt, ot: o.ot, pTop: r ? panNum(r.top) : null, pBot: r ? panNum(r.bottom) : null };
+    var rail = document.querySelector ? document.querySelector('.rail') : null, rr = rail && rail.getBoundingClientRect ? rail.getBoundingClientRect() : null;
+    o.pTop = r ? panNum(r.top) : null; o.pBot = r ? panNum(r.bottom) : null; o.pL = r ? panNum(r.left) : null; o.pR = r ? panNum(r.right) : null;
+    o.railL = rr ? panNum(rr.left) : null; o.railR = rr ? panNum(rr.right) : null;
+    return o;
   }
   // Runs on the window's scroll and, through fit, on every visualViewport resize and scroll while the panel is open.
   // The panel's box is read only once something has moved, and only once per open.
@@ -344,11 +348,13 @@
     // PAN.at is set only between open and close (close stops the watch before it clears O.open).
     if (PAN.sent || !PAN.at) return;
     var moved = panOffsets(), was = PAN.at;
-    if (moved.sy === was.sy && moved.pt === was.pt && moved.ot === was.ot) return;
+    // Up and down (sy, pt, ot) and, like split-drag, sideways (sx, pl, ol: Q1 20:44, lead 20:4x).
+    if (moved.sy === was.sy && moved.pt === was.pt && moved.ot === was.ot && moved.sx === was.sx && moved.pl === was.pl && moved.ol === was.ol) return;
     PAN.sent = true;
     var now = panState();
     if (W.layoutCrumb) W.layoutCrumb('ta-pan', { kind: O.open.kind, kb: !!KB.on, sy0: was.sy, pt0: was.pt, ot0: was.ot, sy: now.sy, pt: now.pt, ot: now.ot,
-      pTop: now.pTop, pBot: now.pBot });
+      sx0: was.sx, pl0: was.pl, ol0: was.ol, sx: now.sx, pl: now.pl, ol: now.ol,
+      pTop: now.pTop, pBot: now.pBot, pL: now.pL, pR: now.pR, railL: now.railL, railR: now.railR });
   }
   function panWatch(on) {
     if (on) {

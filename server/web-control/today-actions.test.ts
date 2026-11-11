@@ -4044,11 +4044,12 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
   // tells "the page scrolled behind it" (sy moves) from "the visible area panned" (pt or ot moves). Diagnostic only.
   describe('ta-pan: one report per open when the page or the visible area moves under the panel', () => {
     function openPanel(sy = 0) {
-      const h = load({ vv: { height: 1000, pageTop: 0 } as any, innerHeight: 1000 })
+      const h = load({ vv: { height: 1000, pageTop: 0, pageLeft: 0, offsetLeft: 0 } as any, innerHeight: 1000 })
       const w = (h.ctx as any).window
-      w.scrollY = sy
+      w.scrollY = sy; w.scrollX = 0
+      h.document.selectors = { '.rail': { getBoundingClientRect: () => ({ left: -197.4, right: -123 }) } }
       h.ta.open('meeting', 'Surcharging Push', h.opener())
-      h.document.appended.getBoundingClientRect = () => ({ top: -64.4, bottom: 935.6 })
+      h.document.appended.getBoundingClientRect = () => ({ top: -64.4, bottom: 935.6, left: 0, right: 951.4 })
       const pans = () => h.crumbs.filter(c => c.what === 'ta-pan')
       return { h, w, pans }
     }
@@ -4056,7 +4057,8 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
       const { h, w, pans } = openPanel(0)
       expect(h.winListeners.scroll, 'listens to the page scroll while open').toBeTypeOf('function')
       w.scrollY = 120.4; h.winListeners.scroll!()
-      expect(pans()).toEqual([{ what: 'ta-pan', data: { kind: 'meeting', kb: false, sy0: 0, pt0: 0, ot0: 0, sy: 120, pt: 0, ot: 0, pTop: -64, pBot: 936 } }])
+      expect(pans()).toEqual([{ what: 'ta-pan', data: { kind: 'meeting', kb: false, sy0: 0, pt0: 0, ot0: 0, sy: 120, pt: 0, ot: 0,
+        sx0: 0, pl0: 0, ol0: 0, sx: 0, pl: 0, ol: 0, pTop: -64, pBot: 936, pL: 0, pR: 951, railL: -197, railR: -123 } }])
       w.scrollY = 300; h.winListeners.scroll!()
       expect(pans(), 'once per open, however far it goes').toHaveLength(1)
     })
@@ -4071,6 +4073,24 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
       h.viewport({ offsetTop: 40 }, 'resize')
       expect(pans()).toHaveLength(1)
       expect(pans()[0]!.data).toMatchObject({ ot0: 0, ot: 40, pt: 0, sy: 0 })
+    })
+    it('sideways: the visible area panned left or right (pageLeft, offsetLeft) is reported, with the panel and rail edges', () => {
+      const { h, pans } = openPanel(0)
+      h.viewport({ pageLeft: 197.5, offsetLeft: 197.5 } as any, 'scroll')
+      expect(pans()).toHaveLength(1)
+      expect(pans()[0]!.data).toMatchObject({ sy: 0, pt: 0, ot: 0, pl0: 0, pl: 198, ol0: 0, ol: 198, sx: 0, pL: 0, pR: 951, railL: -197, railR: -123 })
+    })
+    it('sideways: the page scrolled sideways (scrollX) is reported through the page scroll', () => {
+      const { h, w, pans } = openPanel(0)
+      w.scrollX = 214; h.winListeners.scroll!()
+      expect(pans()).toHaveLength(1)
+      expect(pans()[0]!.data).toMatchObject({ sx0: 0, sx: 214, sy: 0 })
+    })
+    it('offsetLeft alone moving is reported', () => {
+      const { h, pans } = openPanel(0)
+      h.viewport({ offsetLeft: 40 } as any, 'resize')
+      expect(pans()).toHaveLength(1)
+      expect(pans()[0]!.data).toMatchObject({ ol: 40, pl: 0, sx: 0 })
     })
     it('a resize that moves nothing (the keyboard changing the height) sends nothing', () => {
       const { h, w, pans } = openPanel(0)
