@@ -1,3 +1,18 @@
+## 7.0.22 - Control Web reports two more layout readings from the phone; nothing else changes
+
+2026-11-10. 7.0.21 (be6b117) plus two layout reports in Control Web, on the lead's go (20:52). It fixes nothing. Miles saw the Today panel move with the page under it, and the rail and list leave the screen when he squeezed a divider on his Duo. Neither happens on this Mac, so these reports let his phone say what the page did. Private on Miles's Mac first.
+
+- **The Today panel report:** while the panel is open, the first time the page scrolls or the visible area moves (up, down or sideways), one report with those positions at open and now, and where the panel and the rail sit. Once per open.
+- **The divider report:** when a drag on any divider ends, one report with the column widths, the page width and scroll width, how far the visible area has moved, and where the rail, the list and the reader sit. At most six a page load.
+- **Numbers only,** plus the panel kind and the divider name. No text, titles or ids. Both go through the existing layout report limits.
+- **Not proven off the device:** what his phone reports. On this Mac (WebKit, scale 1, 951 and 1119 wide) neither problem reproduces.
+
+**Default-on for every install:** yes: both reports. There is no switch.
+
+### If you roll back
+
+- To 7.0.21: the two reports stop. Nothing else changes and nothing is stored by this release.
+
 ## 7.0.21 - Control Web shows the COS mark first on every reopen, and the phone reports where its open time goes
 
 2026-11-10. 7.0.19 (1a7c322) plus one change to Control Web, on the lead's go (14:55) after Miles's first 7.0.19 open on his phone: the mark showed only 72 ms before the app (first paint 520 ms, the app 592 ms). Not 7.0.20: that number stays with the phone approvals work, which is on hold. Private on Miles's Mac first.
