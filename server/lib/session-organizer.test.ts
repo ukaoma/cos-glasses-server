@@ -46,9 +46,21 @@ describe('session organizer store', () => {
   })
 
   it('caps folders and entries', () => {
+    // Seeded from a full store file rather than 5,200 durable writes (each fsyncs): the bulk-write version took
+    // 6.5 s under a parallel suite and timed out (2026-11-11). The caps are what is under test, not the writes.
+    const at = '2026-11-10T23:00:00.000Z'
+    const folders: Record<string, { name: string; created_at: string }> = {}
+    for (let i = 0; i < ORGANIZER_LIMITS.folders; i++) folders[`f_${i.toString(16).padStart(16, '0')}`] = { name: `F${i}`, created_at: at }
+    const sessions: Record<string, { cos_pinned: true; updated_at: string }> = {}
+    for (let i = 0; i < ORGANIZER_LIMITS.entries; i++) sessions[`claude:s-${i}`] = { cos_pinned: true, updated_at: at }
+    writeFileSync(path, JSON.stringify({ version: 1, rev: 1, folders, sessions }), { mode: 0o600 })
     const o = make()
-    for (let i = 0; i < ORGANIZER_LIMITS.folders; i++) o.createFolder(`F${i}`)
+    expect(o.isAvailable()).toBe(true)
+    expect(o.listFolders()).toHaveLength(ORGANIZER_LIMITS.folders)
     expect(code(() => o.createFolder('one more'))).toBe('409 too_many_folders')
+    expect(code(() => o.updateSession('claude:one-more', { cos_pinned: true }))).toBe('409 too_many_entries')
+    // An existing entry can still change; only a NEW entry is refused at the cap.
+    expect(code(() => o.updateSession('claude:s-0', { title: 'Renamed' }))).toBe('ok')
   })
 
   it('a session lives in one folder; a change touches only the keys it names; null clears', () => {
