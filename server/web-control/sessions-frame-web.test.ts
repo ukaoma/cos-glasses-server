@@ -280,6 +280,16 @@ describe('panes/sessions.css: the frame', () => {
     expect(css).toContain('html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: none;')
     expect(css).not.toMatch(/html\.sx-frame \.sx-dock \{[^}]*overflow: hidden/)
   })
+  it('while typing the dock drops its spacing, and an empty status line takes no room (382 by 557, keyboard up)', () => {
+    expect(css).toContain('html.sx-frame .sx-dock #session-status:empty { min-height: 0; margin: 0; }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock { padding-top: 4px; }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock > .sx-activity { margin-bottom: 4px; }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock .sx-chat { padding-top: 0; }')
+    expect(css).toContain('html.sx-frame.kb-up .sx-dock #session-form { margin-top: 0; }')
+  })
+  it('touch at any size in the frame: Copy session and the rail Settings reach 44 px', () => {
+    expect(css).toMatch(/@media \(any-pointer: coarse\) \{\s*html\.sx-frame \.sx-foot \.cx-btn, html\.sx-frame \.rail-settings \{ min-height: 44px; \}/)
+  })
   it('Go to the question floats on the dock edge and takes no room from it; only its button shows', () => {
     expect(css).toContain('html.sx-frame .sx-dock > .sx-goq { position: absolute; right: 8px; left: auto; bottom: calc(100% + 6px);')
     expect(css).toMatch(/html\.sx-frame \.sx-dock > \.sx-goq > span \{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset\(50%\);/)

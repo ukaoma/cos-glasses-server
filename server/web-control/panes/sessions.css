@@ -574,7 +574,7 @@ html.sx-frame .sx-dock > .sx-goq .cx-btn { background: var(--panel); border-colo
    (Submit) sticks to the bottom of the conversation the way it sticks to the page elsewhere. */
 html.sx-frame .sx-body #session-questions:not(:empty) { margin-top: 12px; }
 /* An empty status line under the reply box takes no room in the frame (it keeps its 20 px when it says something). */
-html.sx-frame .sx-dock #session-status:empty { min-height: 0; }
+html.sx-frame .sx-dock #session-status:empty { min-height: 0; margin: 0; }
 html.sx-frame .sx-dock #session-queue { flex: none; max-height: 9rem; overflow: auto; overscroll-behavior: contain; }
 
 /* Phone and narrow (under 760): one column at a time, the list or the reader, each filling the frame. */
@@ -626,6 +626,17 @@ html.sx-frame.kb-up .sx-reader-head { padding: 2px 0 6px; margin-bottom: 4px; }
 html.sx-frame.kb-up .sx-reader-title { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 html.sx-frame.kb-up .sx-dock { max-height: 75%; }
 html.sx-frame.kb-up #session-input { max-height: 4.5em; }
+/* While typing, the dock drops the spacing around the reply box: at 382 by 557 with the keyboard up (267 px visible) the
+   dock needed 187 px inside its 155 and the reply box ran 18 px past the screen (MX's step 6 found the same in Messages). */
+html.sx-frame.kb-up .sx-dock { padding-top: 4px; }
+html.sx-frame.kb-up .sx-dock > .sx-activity { margin-bottom: 4px; }
+html.sx-frame.kb-up .sx-dock .sx-chat { padding-top: 0; }
+html.sx-frame.kb-up .sx-dock #session-form { margin-top: 0; }
+/* Touch at any size in the frame: app.css floors controls to 44 px only under 600 wide or 720 tall, so on the open Duo
+   (1119 by 787 at 0.85) Copy session was 32 px and the labelled rail's Settings 28 px (MX's step 6 found the same gap). */
+@media (any-pointer: coarse) {
+  html.sx-frame .sx-foot .cx-btn, html.sx-frame .rail-settings { min-height: 44px; }
+}
 
 /* ── the list (7.0.23, step 2b-1; DESIGN_PLAN v2 "The list", the 23:33 mock) ─────────────────────────────────────────
    The list's own head (the Sessions menu, Search, one quiet line, the sort menu), then groups with plain headings and
