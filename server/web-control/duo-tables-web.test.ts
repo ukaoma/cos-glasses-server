@@ -282,12 +282,16 @@ describe('Duo tables: the divider between the Sessions list and the reader', () 
     t.kit.toggleFull()
     expect(t.classes.has('sx-full')).toBe(true)
   })
-  it('Full width hides the list and Show list brings it back, with the button saying which', () => {
+  // 7.0.23 (DESIGN_PLAN v2): in Sessions the button says what it does, Hide list; Memories and Messages keep Full width.
+  it('Hide list hides the list and Show list brings it back, with the button saying which', () => {
     const k = splitKit()
-    expect(k.buttons[0].textContent).toBe('Full width')
+    expect(k.buttons[0].textContent).toBe('Hide list')
     k.kit.toggleFull()
     expect(k.classes.has('sx-full')).toBe(true)
     expect(k.buttons[0].textContent).toBe('Show list')
+    k.kit.toggleFull()
+    expect(k.buttons[0].textContent, 'and back').toBe('Hide list')
+    k.kit.toggleFull()
     expect(JSON.parse(k.writes.at(-1)!)).toEqual({ share: null, full: true })
     k.kit.toggleFull()
     expect(k.classes.has('sx-full')).toBe(false)

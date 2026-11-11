@@ -555,6 +555,7 @@
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
 
     var reading = r.args.length > 0 && !isTabRoute(r.args);
+    if (typeof sxFrameSync === 'function') sxFrameSync();
     var paneEl = $('pane-' + r.pane);
     if (paneEl) paneEl.classList.toggle('reading', reading);
     var split = paneEl && paneEl.querySelector('.split');
@@ -2651,6 +2652,89 @@
     var split = $('sessions-split'), usage = $('sessions-usage');
     if (split) split.classList.toggle('hidden', view !== 'sessions');
     if (usage) usage.classList.toggle('hidden', view === 'sessions');
+    sxFrameSync();
+  }
+  // 7.0.23 (step 1 of the chat-style Sessions, DESIGN_PLAN v2 "The frame"): while Sessions shows its list and reader,
+  // html.sx-frame makes the page one screen, never taller: the app shell is the visible box (--vv-top, --vv-h from
+  // viewportFit, the same kit kb-chat uses), and the rail, the list and the reader's body each scroll by themselves, with
+  // the reply area fixed at the bottom of the reader (panes/sessions.css). Usage and COS cost keep the page's own scroll.
+  // Layout, not a proven fix for the 20:16 report: the frame reports where the rail, the list and the reply box sit
+  // against the visible area (sxFrameCrumb).
+  function sxFrameSync() {
+    var de = document.documentElement, on = state.pane === 'sessions' && SX.view === 'sessions';
+    if (de && de.classList) de.classList.toggle('sx-frame', on);
+    if (on) sxFrameHook();
+    return on;
+  }
+  // Where the frame's parts sit against the VISIBLE area (step 1's position report, lead 23:00): on a reader's open, and
+  // KB_AFTER_MS after an on-screen keyboard closes while the frame is on. The visible area is viewportFit's box (a
+  // visible height under 80 px is no reading, so it is innerHeight from 0, and fb says so) and, across, visualViewport's
+  // offsetLeft and width. For the rail, the list, the reader and the reply box: their top, bottom, left and right in
+  // the same coordinates, and whether each lies inside the visible area (railIn, listIn, replyIn: within 1 px on every
+  // side; a part that is not shown reads -1 and false). Numbers and fixed labels only, at most SX_FRAME_MAX a page load.
+  var SX_FRAME_MAX = 8, SX_FRAME = { n: 0, hooked: false };
+  function sxFrameCrumb(why) {
+    if (SX_FRAME.n >= SX_FRAME_MAX || !document.documentElement.classList.contains('sx-frame') || typeof layoutCrumb !== 'function') return false;
+    try {
+      var v = viewportFit(), vv = window.visualViewport, iw = window.innerWidth || 0;
+      var left = vv && !v.bad && typeof vv.offsetLeft === 'number' ? vv.offsetLeft : 0;
+      var width = vv && !v.bad && vv.width > 0 ? vv.width : iw;
+      var box = { t: v.top, b: v.top + v.height, l: left, r: left + width };
+      var out = { why: String(why || '').slice(0, 24), fb: !!v.bad, boxT: box.t, boxB: box.b, boxL: box.l, boxR: box.r };
+      var part = function (name, el) {
+        var r = el && el.getBoundingClientRect && el.offsetParent !== null ? el.getBoundingClientRect() : null;
+        var shown = !!(r && r.width > 0 && r.height > 0);
+        out[name + 'T'] = shown ? r.top : -1; out[name + 'B'] = shown ? r.bottom : -1; out[name + 'L'] = shown ? r.left : -1; out[name + 'R'] = shown ? r.right : -1;
+        out[name + 'In'] = shown && r.top >= box.t - 1 && r.bottom <= box.b + 1 && r.left >= box.l - 1 && r.right <= box.r + 1;
+      };
+      part('rail', document.querySelector('.rail'));
+      part('list', $('sessions-list-col'));
+      part('rd', $('session-reader'));
+      part('reply', $('session-form'));
+      if (layoutCrumb('sx-frame', out)) { SX_FRAME.n++; return true; }
+    } catch (_e) { /* a report never stops the page */ }
+    return false;
+  }
+  // The keyboard's after-close moment (app.js lrAfter, KB_AFTER_MS), heard once, reported while the frame is on.
+  function sxFrameHook() {
+    if (SX_FRAME.hooked || !window.COSWeb || typeof window.COSWeb.onKeyboard !== 'function') return;
+    SX_FRAME.hooked = true;
+    window.COSWeb.onKeyboard(function (what) { if (what === 'after') sxFrameCrumb('kb-after'); });
+  }
+  // The reader's own scroll (#session-body); the window's only where the frame is off.
+  // What mounts after the first paint (the session's question cards, the queue, the activity, image previews) changes
+  // the body's height and would leave it short of the end. So the body stays at the newest turn while its size or its
+  // content changes, until the person scrolls it themself: a wheel, touch, pointer or key on the body within the last
+  // SX_PIN_USER_MS, then a scroll that leaves the end by more than 4 px. A scroll the browser makes on its own (scroll
+  // anchoring while turns and previews land) never counts. Two more passes (250 and 900 ms) cover a browser without
+  // ResizeObserver.
+  var SX_NEWEST_AGAIN_MS = [250, 900], SX_PIN_USER_MS = 1000;
+  var SX_PIN = { body: null, ro: null, put: -1, userAt: 0 };
+  function sxUnpin() { if (SX_PIN.ro) { try { SX_PIN.ro.disconnect(); } catch (_e) {} } SX_PIN.ro = null; SX_PIN.body = null; }
+  function sxToNewest() {
+    var body = $('session-body');
+    if (!(body && document.documentElement.classList.contains('sx-frame'))) { window.scrollTo(0, document.documentElement.scrollHeight); return; }
+    var bottom = function () { body.scrollTop = body.scrollHeight; SX_PIN.put = body.scrollTop; };
+    bottom();
+    if (SX_PIN.body !== body) {
+      sxUnpin();
+      SX_PIN.body = body;
+      var touched = function () { SX_PIN.userAt = Date.now(); };
+      ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(function (t) { body.addEventListener(t, touched, { passive: true }); });
+      body.addEventListener('scroll', function () {
+        if (SX_PIN.body !== body || Date.now() - SX_PIN.userAt > SX_PIN_USER_MS) return;
+        if (Math.abs(body.scrollTop - SX_PIN.put) > 4 && body.scrollTop < body.scrollHeight - body.clientHeight - 4) sxUnpin();
+      }, { passive: true });
+      if (typeof ResizeObserver === 'function') {
+        // The body and everything in it (the note, the turns, Copy session, its note): any of them can grow.
+        SX_PIN.ro = new ResizeObserver(function () { if (SX_PIN.body === body && body.isConnected) bottom(); });
+        SX_PIN.ro.observe(body);
+        [].forEach.call(body.children, function (c) { SX_PIN.ro.observe(c); });
+      }
+    }
+    SX_NEWEST_AGAIN_MS.forEach(function (ms) {
+      setTimeout(function () { if (body.isConnected && SX_PIN.body === body) bottom(); }, ms);
+    });
   }
 
   // 7.0.1: the hero's counts say when they are not live ("Reconnecting", "as of 2 min ago"); nothing without a stream.
@@ -3076,7 +3160,7 @@
       split.classList.toggle(PRE + '-sized', share != null);
       if (share != null) split.style.setProperty(VAR, share.toFixed(2) + '%'); else split.style.removeProperty(VAR);
       split.classList.toggle(PRE + '-full', full);
-      document.querySelectorAll(FULL_SEL).forEach(function (b) { b.setAttribute('aria-pressed', String(full)); b.textContent = full ? 'Show list' : 'Full width'; });
+      document.querySelectorAll(FULL_SEL).forEach(function (b) { b.setAttribute('aria-pressed', String(full)); b.textContent = full ? 'Show list' : (o.hideText || 'Full width'); });
       aria();
     }
     // px: the sized column's width asked for; kept inside both columns' minimums for the split's width now.
@@ -3155,7 +3239,8 @@
     };
   }
   // Sessions: the first pane with the divider, unchanged (its markup is in index.html, its CSS in panes/sessions.css).
-  var SX_SPLIT_OPTS = { key: SX_SPLIT_KEY, prefix: 'sx', label: 'Session list', fullSel: '[data-sx="full"]', media: '(min-width: 760px)',
+  // 7.0.23: in Sessions the button says what it does, Hide list (DESIGN_PLAN v2); Memories and Messages keep Full width.
+  var SX_SPLIT_OPTS = { key: SX_SPLIT_KEY, prefix: 'sx', label: 'Session list', fullSel: '[data-sx="full"]', media: '(min-width: 760px)', hideText: 'Hide list',
     listMin: SX_LIST_MIN, readerMin: SX_READER_MIN, handleW: SX_HANDLE_W };
   function sxSplitKit(split, handle, storage) { return splitKit(split, handle, storage, SX_SPLIT_OPTS); }
   // The other panes (W.splitKit): the divider's markup, a Full width button, and mount, which binds the kit to a split
@@ -3338,7 +3423,7 @@
   // Wide layouts: give the reader the whole width, or bring the list back (sxSplitKit). Hidden under 760 px by CSS.
   function sxFullButton() {
     var full = !!(SX_SPLIT && SX_SPLIT.state().full);
-    return '<button type="button" class="cx-btn quiet sx-full-btn" data-sx="full" aria-controls="sessions-list-col" aria-pressed="' + full + '">' + (full ? 'Show list' : 'Full width') + '</button>';
+    return '<button type="button" class="cx-btn quiet sx-full-btn" data-sx="full" aria-controls="sessions-list-col" aria-pressed="' + full + '">' + (full ? 'Show list' : 'Hide list') + '</button>';
   }
   function openSession(provider, id) {
     var reader = $('session-reader');
@@ -3365,13 +3450,19 @@
       reader.innerHTML =
         '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2>' + sxFullButton() + '</div>' +
           '<p class="sx-subtitle">' + esc(sxSubtitle(d, provider, turns, r.more)) + '</p></div>' +
+        // 7.0.23 frame: the conversation scrolls by itself between the header and the dock.
+        '<div class="sx-body" id="session-body">' +
+          (trunc ? '<p class="sx-note">' + esc(trunc) + '</p>' : '') +
+          '<div class="turns sx-turns" id="session-turns">' + renderTurns(turns, d) + '</div>' +
+          '<div class="sx-foot"><button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button>' +
+            '<span class="sx-foot-note">Kickstart brief for another agent. Not a Claude Code resume.</span></div>' +
+          '<p class="sx-copy-note hidden" id="session-copy-note" role="status"></p>' +
+        '</div>' +
+        // The dock, fixed at the bottom of the reader: what it is doing now (with Stop), the Mac's question, then the
+        // question cards, the reply box, its status and the queue, all as before.
+        '<div class="sx-dock" id="session-dock">' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
         '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
-        (trunc ? '<p class="sx-note">' + esc(trunc) + '</p>' : '') +
-        '<div class="turns sx-turns" id="session-turns">' + renderTurns(turns, d) + '</div>' +
-        '<div class="sx-foot"><button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button>' +
-          '<span class="sx-foot-note">Kickstart brief for another agent. Not a Claude Code resume.</span></div>' +
-        '<p class="sx-copy-note hidden" id="session-copy-note" role="status"></p>' +
         '<div class="sx-chat">' +
           // DESIGN.md step 4 #3: this session's question cards (held and answerable, or at the Mac with its words), above
           // the verdict and the Send box, the same component Today's sheet mounts, so the full hold lights up here.
@@ -3385,7 +3476,7 @@
           '</form><div class="status-line" id="session-status"></div>' +
           '<p class="sx-caution hidden" id="session-caution"></p>' +
           '<div id="session-queue"></div>' +
-        '</div>';
+        '</div></div>';
       readerImagesMount($('session-turns'), r);
       sxNoteList(r, d);
       setLive({});
@@ -3403,7 +3494,8 @@
         sessionStatus('Waiting for the current reply. ' + (state.reading.held.length > 1 ? state.reading.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don’t send</button>');
         startHeldTimer(state.reading);
       }
-      if (turns.length) requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
+      if (turns.length) requestAnimationFrame(function () { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); });
+      requestAnimationFrame(function () { if (typeof sxFrameCrumb === 'function') sxFrameCrumb('open'); });
       watchSession(provider, id);
     }).catch(function (err) {
       if (state.reading !== r) return;
@@ -3866,7 +3958,7 @@
     if (heldKey) el.setAttribute('data-held-key', heldKey);
     el.innerHTML = '<span class="who">You, ' + esc(note) + '</span>' + md(text);
     box.appendChild(el);
-    requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
+    requestAnimationFrame(function () { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); });
   }
   function heldBubble(key) { return document.querySelector('#session-turns .turn.pending[data-held-key="' + key.replace(/[^A-Za-z0-9_-]/g, '') + '"]'); }
   function renderHeld(r) {
@@ -4719,15 +4811,23 @@
       box.insertAdjacentHTML('beforeend', fresh.map(sxTurnHtml).join(''));
       return;
     }
+    // In the frame the conversation scrolls inside #session-body: the card kept is the first one showing in it, and the
+    // body (not the window) moves back by what the redraw moved it.
+    var body = document.documentElement.classList.contains('sx-frame') ? $('session-body') : null;
+    var edge = body && body.getBoundingClientRect ? body.getBoundingClientRect().top : 0;
     var anchor = null, top = 0, cards = box.querySelectorAll('.turn[data-sig]');
     for (var i = 0; i < cards.length; i++) {
       var rect = cards[i].getBoundingClientRect();
-      if (rect.bottom > 0) { anchor = cards[i].getAttribute('data-sig'); top = rect.top; break; }
+      if (rect.bottom > edge) { anchor = cards[i].getAttribute('data-sig'); top = rect.top; break; }
     }
     box.innerHTML = renderTurns(next, d);
+    // Still at the newest turn since it opened (sxToNewest's pin): stay there, rather than keep a card in place.
+    if (body && typeof SX_PIN === 'object' && SX_PIN.body === body) { body.scrollTop = body.scrollHeight; SX_PIN.put = body.scrollTop; return; }
     if (!anchor) return;
     var same = [].filter.call(box.querySelectorAll('.turn[data-sig]'), function (el) { return el.getAttribute('data-sig') === anchor; })[0];
-    if (same) window.scrollBy(0, same.getBoundingClientRect().top - top);
+    if (!same) return;
+    if (body) body.scrollTop += same.getBoundingClientRect().top - top;
+    else window.scrollBy(0, same.getBoundingClientRect().top - top);
   }
 
   // ── Ask COS (the Ask sheet's first row) ─────────────────

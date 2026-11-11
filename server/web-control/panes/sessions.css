@@ -492,3 +492,130 @@
 .u-breakdown summary::-webkit-details-marker { display: none; }
 .u-breakdown summary .u-chev { color: var(--accent); transform: rotate(-90deg); transition: transform 120ms ease; }
 .u-breakdown[open] summary .u-chev { transform: none; }
+
+/* ── the frame (7.0.23, step 1 of the chat-style Sessions; DESIGN_PLAN v2 "The frame") ──────────────────────────────
+   While Sessions shows its list and reader (app.js sxFrameSync sets html.sx-frame), the page is one screen, never
+   taller: the app shell is the visible box the keyboard kit publishes (--vv-top, --vv-h from viewportFit, as kb-chat
+   uses them), so the document has nothing left to scroll. The rail, the list and the reader's body each scroll by
+   themselves; the reader's header stays at its top and the dock (activity with Stop, the Mac's question, the question
+   cards, the reply box, its status and the queue) stays at its bottom. Layout, not a proven fix for the 20:16 report:
+   app.js sxFrameCrumb reports where the parts sit against the visible area. In a Safari tab (not the Home Screen app)
+   a fixed shell ends above Safari's own bottom bar; the app has no such bar. */
+html.sx-frame, html.sx-frame body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+html.sx-frame body { min-height: 0; }
+html.sx-frame .app-shell {
+  position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh); min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+html.sx-frame .main-col { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+html.sx-frame .topbar, html.sx-frame .navbar { flex: none; position: relative; }
+html.sx-frame .workspace {
+  flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden;
+  padding-bottom: calc(var(--safe-bottom) + 8px);
+}
+html.sx-frame #pane-sessions { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; width: 100%; }
+/* What sits over every pane (the Mac not answering, the sign-in ending, a session's waiting question cards) keeps its
+   place above Sessions, but never takes the screen: past 35 percent it scrolls by itself. */
+html.sx-frame #conn-notice, html.sx-frame #sq-host, html.sx-frame .workspace > :not(.pane) { flex: none; }
+html.sx-frame #sq-host { max-height: 35%; overflow: auto; overscroll-behavior: contain; margin-bottom: 10px; }
+/* In the frame a waiting question is its one line at every width (questions.css shows it so under 600 px): a tap opens
+   the cards. The open session's own cards sit in the reader's dock either way. */
+html.sx-frame .sq-host .sq-banner { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 10px 14px; border-radius: 14px;
+  background: var(--panel); border: 1px solid color-mix(in srgb, var(--hot) 45%, var(--panel-border)); color: var(--ink); font: 600 15px/1.3 var(--body); text-align: left; }
+html.sx-frame .sq-host .sq-banner-text { flex: 1; min-width: 0; }
+html.sx-frame .sq-host .sq-banner-act { flex: none; color: var(--accent); }
+html.sx-frame .sq-host .sq-cards:not(.open) { display: none; }
+html.sx-frame #pane-sessions > .sx { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+html.sx-frame .sx-hero, html.sx-frame .sx-views { flex: none; }
+/* In the frame the Sessions header is one line (the same title, sources line, counts and Refresh), so the list and the
+   reader keep the height; the view switch keeps its own row. */
+html.sx-frame .sx-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding-top: 0; padding-bottom: 8px; margin-bottom: 0; }
+html.sx-frame .sx-hero .cx-glyph { display: none; }
+html.sx-frame .sx-hero .cx-hero-text { flex: 1 1 260px; display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+html.sx-frame .sx-hero .cx-title { font-size: 22px; flex: none; }
+html.sx-frame .sx-hero .cx-detail-line { margin: 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html.sx-frame .sx-hero .cx-stats { order: 2; margin-top: 0; flex: none; }
+html.sx-frame .sx-hero .cx-actions { order: 3; flex: none; }
+html.sx-frame .sx-views { margin: 4px 0 8px; }
+/* The reader's header in one row: the badge, the title on one line, Hide list; the subtitle is one line under it. */
+html.sx-frame .sx-head-line { flex-wrap: nowrap; }
+html.sx-frame .sx-reader-title { min-width: 0; flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 20px; }
+html.sx-frame .sx-subtitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
+html.sx-frame .sx-reader-head { padding-bottom: 8px; margin-bottom: 0; }
+html.sx-frame .sx-split { flex: 1 1 auto; min-height: 0; margin-top: 0; }
+html.sx-frame .sx-split > .split-list { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+html.sx-frame .sx-split > .sx-reader { min-height: 0; flex-direction: column; overflow: hidden; }
+html.sx-frame .sx-reader-head { flex: none; }
+/* The conversation between the header and the dock; it opens at the newest turn (app.js sxToNewest). */
+.sx-body { min-height: 0; }
+html.sx-frame .sx-body { flex: 1 1 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 8px; }
+/* The dock takes at most 60 percent of the reader (three quarters with the keyboard up). The reply box and its status always
+   show: what can grow above or below them (the session's question cards, the queue) scrolls inside its own box. */
+html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+  padding-top: 8px; border-top: 1px solid var(--hairline); }
+html.sx-frame .sx-dock > .sx-activity, html.sx-frame .sx-dock > .sx-mac-q { flex: none; }
+/* What it is doing now keeps about four lines in the dock and scrolls past that, so it never pushes the reply box out. */
+html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 0; max-height: 96px; overflow: auto; overscroll-behavior: contain; }
+/* The activity above gives way four times as fast as the reply part; inside the reply part only the question cards
+   (and the queue) give way, so the reply box and its status keep their full height. */
+html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+html.sx-frame .sx-dock .sx-chat > * { flex: none; }
+html.sx-frame .sx-dock #session-questions { flex: 0 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+/* A waiting question keeps at least 112 px (its question and the first two choices) while the dock has the room. */
+html.sx-frame .sx-dock #session-questions:not(:empty) { min-height: min(112px, 24vh); min-height: min(112px, 24dvh); }
+/* An empty status line under the reply box takes no room in the frame (it keeps its 20 px when it says something). */
+html.sx-frame .sx-dock #session-status:empty { min-height: 0; }
+html.sx-frame .sx-dock #session-queue { flex: 0 1 auto; min-height: 0; max-height: 30%; overflow: auto; overscroll-behavior: contain; }
+
+/* Phone and narrow (under 760): one column at a time, the list or the reader, each filling the frame. */
+@media (max-width: 759px) {
+  html.sx-frame .sx-split { display: flex; flex-direction: column; }
+  html.sx-frame .sx-split > .split-list { flex: 1 1 auto; }
+  html.sx-frame .sx-split.reading > .sx-reader { flex: 1 1 auto; display: flex; }
+}
+/* From 600: the rail is a column of the shell and scrolls by itself (its labels from 1100 wide and 721 tall, control.css). */
+@media (min-width: 600px) {
+  html.sx-frame .app-shell { display: grid; grid-template-columns: 74px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  html.sx-frame .rail { position: static; top: auto; height: auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+}
+@media (min-width: 1100px) and (min-height: 721px) {
+  html.sx-frame .app-shell { grid-template-columns: 248px minmax(0, 1fr); }
+}
+/* From 760: the list, the divider and the reader side by side, each the full height of the split. */
+@media (min-width: 760px) {
+  html.sx-frame .split.sx-split { grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+  html.sx-frame .sx-split > .split-list { position: static; top: auto; max-height: none; height: 100%; }
+  /* relative, not static: the divider's 44 px touch area (::before) is placed against it and must stay its own size. */
+  html.sx-frame .sx-handle { position: relative; top: auto; height: auto; align-self: stretch; }
+  html.sx-frame .sx-split > .sx-reader { display: flex; height: 100%; }
+}
+/* An on-screen keyboard up (app.js html.kb-up): the header goes to one line and the conversation keeps the rest. */
+html.sx-frame.kb-up .sx-hero, html.sx-frame.kb-up .sx-views, html.sx-frame.kb-up .sx-subtitle,
+html.sx-frame.kb-up .navbar, html.sx-frame.kb-up #conn-notice, html.sx-frame.kb-up #sq-host { display: none; }
+/* Typing in the reply box: the question cards give way; typing in a card's Other field: they keep their room. */
+html.sx-frame.kb-up .sx-dock #session-questions:not(:focus-within) { min-height: 0; }
+/* Short screens (under 600 tall, Comet's 951 x 539): no floor for the cards, and the subtitle and counts step aside. */
+@media (max-height: 599px) {
+  html.sx-frame .sx-dock #session-questions:not(:empty) { min-height: 0; }
+  /* The notices over the pane (the Mac not answering, the sign-in ending) are one line each: the same words, cut with
+     an ellipsis, their buttons kept. */
+  html.sx-frame .conn-notice { margin-bottom: 8px; gap: 6px; grid-template-columns: minmax(0, 1fr); }
+  html.sx-frame .conn-line { flex-wrap: nowrap; min-width: 0; padding: 6px 10px 6px 14px; }
+  html.sx-frame .conn-line > .btn { flex: none; }
+  html.sx-frame .conn-line > :not(.btn):not(button) { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  html.sx-frame .conn-line .conn-sub { flex: 1 1 0; }
+  html.sx-frame #sq-host { margin-bottom: 8px; }
+  html.sx-frame .sq-host .sq-banner { min-height: 44px; padding: 6px 14px; }
+  html.sx-frame .sx-views { margin: 2px 0 6px; }
+  /* The Sessions header (title and Refresh) and the view switch share one row. */
+  html.sx-frame #pane-sessions > .sx { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); column-gap: 18px; }
+  html.sx-frame .sx-hero { grid-column: 1; grid-row: 1; flex-wrap: nowrap; padding-bottom: 6px; border-bottom: 0; background: none; margin: 0; padding-left: 0; padding-right: 0; }
+  html.sx-frame .sx-hero .cx-hero-text { flex: none; }
+  html.sx-frame .sx-views { grid-column: 2; grid-row: 1; align-self: center; margin: 0 0 6px; }
+  html.sx-frame .sx-split, html.sx-frame .sx-usage { grid-column: 1 / -1; grid-row: 2; }
+  html.sx-frame .sx-subtitle, html.sx-frame .sx-hero .cx-stats, html.sx-frame .sx-hero .cx-detail-line { display: none; }
+}
+html.sx-frame.kb-up .sx-reader-head { padding: 2px 0 6px; margin-bottom: 4px; }
+html.sx-frame.kb-up .sx-reader-title { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html.sx-frame.kb-up .sx-dock { max-height: 75%; }
+html.sx-frame.kb-up #session-input { max-height: 4.5em; }
