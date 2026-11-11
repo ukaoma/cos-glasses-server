@@ -1,3 +1,17 @@
+## 7.0.27 - Control Web: the Sessions list fits its column at every width
+
+2026-11-11. 7.0.26 plus one Control Web layout fix.
+
+- **The list no longer scrolls sideways when its column is narrow.** With the divider dragged to its narrowest (240 px), the list was 32 px wider than its column, so the column panned sideways and cut its left edge ("ssions", "earch titles and transcripts", half the row icons). The reach line ("Last 30 days. 582 older through search.") shared a row with New folder and the sort menu and was squeezed to one word a line, and with the keyboard up the sort menu and search field were cut at the right. Now the reach line has its own full-width row, New folder and the sort menu share the next one and wrap under each other if they must, and a long folder name ends in an ellipsis like a title. Nothing is hidden to make it fit: the content fits the column.
+- Tested in a browser by dragging the divider from its narrowest to its widest at both open-phone sizes, keyboard up and down, with and without a session open: 7.0.26 fails, this build passes. The reply area and the reader are unchanged.
+
+**Default-on for every install:** yes, the layout fix; there is no switch.
+
+### If you roll back
+
+- To 7.0.26: the narrow list scrolls sideways again. Nothing is stored by this change.
+- To 7.0.18: as in 7.0.26 below.
+
 ## 7.0.26 - 7.0.25, with kept sessions only where they were asked for: the Mac app and the glasses keep their list
 
 2026-11-11. 7.0.25 plus one server change and one Control Web line.
