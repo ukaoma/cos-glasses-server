@@ -294,7 +294,7 @@ describe('panes/sessions.css: the frame', () => {
     expect(css).toContain('html.sx-frame .sx-handle { position: relative;')
   })
   it('the dock: at most 60 percent, the activity gives way first, the reply box never does', () => {
-    expect(css).toContain('html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%;')
+    expect(css).toContain('html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 72%;')
     expect(css).toContain('html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 32px; max-height: 96px;')
     expect(css).toContain('html.sx-frame .sx-dock #session-queue { flex: none; max-height: none; overflow: visible; }')
     expect(css).toContain('html.sx-frame .sx-dock .sx-chat > * { flex: none; }')

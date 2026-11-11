@@ -549,9 +549,11 @@ html.sx-frame .sx-reader-head { flex: none; }
 /* The conversation between the header and the dock; it opens at the newest turn (app.js sxToNewest). */
 .sx-body { min-height: 0; }
 html.sx-frame .sx-body { flex: 1 1 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 8px; }
-/* The dock takes at most 60 percent of the reader (three quarters with the keyboard up). The reply box and its status always
+/* The dock takes at most 72 percent of the reader (with the keyboard up, what the reader has below its head). 72, not 60:
+   at 951 by 539 with files, a queued note and the busy note, 60 left a 33 px window above the pinned reply box, too
+   short for a 44 px Cancel (dock_sweep). The reply box and its status always
    show: what can grow above or below them (the activity, the queue) gives way or scrolls inside its own box. */
-html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%; min-height: 0; display: flex; flex-direction: column; position: relative;
+html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 72%; min-height: 0; display: flex; flex-direction: column; position: relative;
   padding-top: 8px; border-top: 1px solid var(--hairline); }
 html.sx-frame .sx-dock > .sx-activity, html.sx-frame .sx-dock > .sx-mac-q { flex: none; }
 /* What it is doing now keeps about four lines in the dock and scrolls past that, so it never pushes the reply box out. */
