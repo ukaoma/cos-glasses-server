@@ -62,7 +62,7 @@ function kit(o: { rows?: Row[]; older?: Row[]; held?: Array<{ provider: string; 
     encodeURIComponent,
   }
   // eslint-disable-next-line no-new-func
-  const k = new Function('deps', `with (deps) {\n${SRC}\nreturn { row: sxRow, group: sxGroupFor, all: sxAllRows, html: sxListHtml, rest: sxListAtRest, SXL, quiet: sxQuietLine, older: sxLoadOlder, held: sxHeldKeys, words: sxRowWords, GROUPS: SX_GROUPS };\n}`)(deps)
+  const k = new Function('deps', `with (deps) {\n${SRC}\nreturn { row: sxRow, group: sxGroupFor, all: sxAllRows, html: sxListHtml, rest: sxListAtRest, SXL, quiet: sxQuietLine, older: sxLoadOlder, held: sxHeldKeys, words: sxRowWords, GROUPS: SX_GROUPS, live: sxLiveRow, anchor: sxAnchor, restore: sxRestoreAnchor };\n}`)(deps)
   if (o.older) k.SXL.older = o.older.map(r => ({ ...r, form: 'short' }))
   return { k, SX, timers, later: (ms: number) => { now += ms }, setActive: (a: any) => { active = a }, renders: () => renders, apiCalls }
 }
@@ -266,6 +266,11 @@ describe('the quiet line and /older', () => {
     await h.k.older(true)
     expect(h.apiCalls).toHaveLength(1)
   })
+  it('only a 404 status or code means an older server; an error whose words say "not found" does not (Q1 07:22 b)', async () => {
+    const h = kit({ api: () => Promise.reject(Object.assign(new Error('Session folder not found.'), { status: 500 })) })
+    await h.k.older()
+    expect(h.k.SXL.olderOk).not.toBe(false)
+  })
   it('it is read with the list load, not on the 5 s poll', () => {
     expect(slice(APP, '  function loadSessions(force) {', '\n  }\n')).toContain('sxLoadOlder(force === true);')
     expect(slice(APP, '  function liveSessionRows(rows, structural) {', '\n  }\n')).not.toContain('sxLoadOlder')
@@ -283,5 +288,105 @@ describe('the list head: the Sessions menu and one sort menu', () => {
     const menu = slice(html, '<div class="sx-menu hidden" id="sessions-view-menu" role="menu" aria-label="Sessions">', '</div>')
     for (const item of ['data-view="sessions">Sessions<', 'data-view="usage">Usage<', 'data-view="cost">COS cost<', 'data-sx="refresh">Refresh<']) expect(menu).toContain(item)
     expect(APP).toContain("hero.classList.toggle('hidden', view === 'sessions');")
+  })
+})
+
+// Q1 07:22 FIX 1: liveSessionRows' paint without a structural change. Its own text runs against a fake list.
+const LIVE = slice(APP, '  function liveSessionRows(rows, structural) {', '\n  }\n') + '\n  }\n'
+function liveRun(h: ReturnType<typeof kit>, drawn: string[], rows: Row[]) {
+  const replaced: Array<{ id: string; html: string }> = [], calls = { regroup: 0, render: 0 }
+  const els = drawn.map(id => ({ id, getAttribute: () => id, parentNode: { replaceChild: (next: any) => replaced.push({ id, html: next.__liveHtml }) } }))
+  const deps: any = {
+    $: (id: string) => (id === 'sessions-list' ? { querySelectorAll: () => els } : null),
+    sxQueryActive: () => false, paintSessionsHero: () => {}, renderSessionGroups: () => { calls.render++ },
+    sxAmbiguous: () => ({}), sxVisible: () => [], sxKeepWarm: (s: Row) => !!s.warm, sxLiveRow: h.k.live,
+    splitSessionId: (p: string, id: string) => ({ provider: p || 'claude', id: String(id || '') }),
+    sxRegroupLater: () => { calls.regroup++ },
+    document: { createElement: () => { const d: any = {}; Object.defineProperty(d, 'innerHTML', { set(v: string) { d.firstElementChild = { html: v } } }); return d } },
+  }
+  // eslint-disable-next-line no-new-func
+  new Function('deps', 'rows', `with (deps) {\n${LIVE}\nliveSessionRows(rows, false);\n}`)(deps, rows)
+  return { replaced, calls }
+}
+describe('a live state change moves its row between groups, under the rest rule (Q1 07:22 FIX 1)', () => {
+  it('Working now to waiting on a question: the row is redrawn in place and a regroup is asked for', () => {
+    const rows = [row('r', H, { agent_state: 'running' }), row('t', 2 * H)]
+    const h = kit({ rows })
+    expect(rowsIn(h.k.html(), 'working')).toEqual(['claude|r'])
+    rows[0]!.agent_state = 'waiting'; rows[0]!.waiting_kind = 'question'
+    const run = liveRun(h, ['claude|r', 'claude|t'], [rows[0]!])
+    expect(run.calls.regroup, 'a regroup is asked for').toBe(1)
+    expect(run.replaced.map(x => x.id)).toEqual(['claude|r'])
+  })
+  it('held while the list is pressed, applied together at rest: the row lands under Needs you', () => {
+    const rows = [row('r', H, { agent_state: 'running' })]
+    const h = kit({ rows })
+    h.k.html()
+    rows[0]!.agent_state = 'waiting'
+    h.k.SXL.down = true
+    expect(rowsIn(h.k.html(), 'working'), 'held while pressed').toEqual(['claude|r'])
+    h.k.SXL.down = false; h.later(2100)
+    const html = h.k.html()
+    expect(rowsIn(html, 'needs')).toEqual(['claude|r'])
+    expect(rowsIn(html, 'working')).toEqual([])
+  })
+  it('a row in a folded group (not drawn) that starts running still asks for the regroup', () => {
+    const rows = [row('old', 9 * D), row('t', H)]
+    const h = kit({ rows })
+    expect(rowsIn(h.k.html(), 'lastweek'), 'folded: not drawn').toEqual([])
+    rows[0]!.agent_state = 'running'
+    expect(liveRun(h, ['claude|t'], [rows[0]!]).calls.regroup).toBe(1)
+  })
+  it('a row patched inside a compact group keeps the compact form', () => {
+    const rows = [row('old', 9 * D), row('t', H)]
+    const h = kit({ rows })
+    h.k.SXL.open.lastweek = true
+    expect(rowsIn(h.k.html(), 'lastweek')).toEqual(['claude|old'])
+    rows[0]!.display_label = 'Renamed'
+    const run = liveRun(h, ['claude|old', 'claude|t'], [rows[0]!])
+    expect(run.replaced[0]!.html).toMatch(/class="sx-r[^"]*\bcompact\b/)
+    expect(run.calls.regroup, 'same group: nothing to regroup').toBe(0)
+  })
+  it('a change that keeps the group asks for no regroup', () => {
+    const rows = [row('t', H)]
+    const h = kit({ rows })
+    h.k.html()
+    rows[0]!.display_label = 'New title'
+    expect(liveRun(h, ['claude|t'], [rows[0]!]).calls.regroup).toBe(0)
+  })
+})
+
+// Q1 07:22 FIX 2: the list keeps its place across a redraw (the top visible row stays at the same height).
+function fakeCol(ids: string[]) {
+  const col: any = { scrollTop: 300, shift: 0, getBoundingClientRect: () => ({ top: 100 }) }
+  col.querySelectorAll = () => ids.map((id, i) => ({ getAttribute: () => id, getBoundingClientRect: () => { const t = 100 + i * 60 - col.scrollTop + col.shift; return { top: t, bottom: t + 60 } } }))
+  return col
+}
+describe('scroll anchoring: rows added above keep the top visible row where it was (Q1 07:22 FIX 2)', () => {
+  it('the anchor is the first row still showing at the top, and the restore moves the scroll by its shift', () => {
+    const h = kit()
+    const col = fakeCol(['a', 'b', 'c', 'd', 'e', 'f', 'g'])
+    const at = h.k.anchor(col)
+    expect(at).toEqual({ key: 'f', top: 100 })
+    col.shift = 120                                       // two rows drawn above it
+    h.k.restore(col, at)
+    expect(col.scrollTop).toBe(420)
+    expect(col.querySelectorAll()[5].getBoundingClientRect().top, 'the anchor row is back at the top').toBe(100)
+  })
+  it('renderSessionGroups takes the anchor before the redraw and restores it after', () => {
+    const h = kit()
+    const col = fakeCol(['a', 'b', 'c', 'd', 'e', 'f', 'g'])
+    const list: any = {}
+    Object.defineProperty(list, 'innerHTML', { set() { col.shift = 120 } })
+    const els: Record<string, any> = { 'sessions-list': list, 'sessions-list-col': col, 'sessions-q': { value: '' } }
+    const deps: any = {
+      $: (id: string) => els[id] || null, SX: { q: '' }, paintSessionsHero: () => {}, paintHooks: () => {}, sxQueryActive: () => false,
+      sxSemanticHint: () => '', sxListWatch: () => {}, sxPaintListHead: () => {}, sxEditing: () => false, sxRegroupLater: () => {},
+      sxAnchor: h.k.anchor, sxRestoreAnchor: h.k.restore, sxListHtml: () => '<rows>', sxSearchHtml: () => '',
+    }
+    const RSG = slice(APP, '  function renderSessionGroups() {', '\n  }\n') + '\n  }\n'
+    // eslint-disable-next-line no-new-func
+    new Function('deps', `with (deps) {\n${RSG}\nrenderSessionGroups();\n}`)(deps)
+    expect(col.scrollTop).toBe(420)
   })
 })

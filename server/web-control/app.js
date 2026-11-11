@@ -1755,14 +1755,17 @@
     if (!list) return;
     if (sxQueryActive()) { paintSessionsHero(); return; }
     if (structural) { renderSessionGroups(); return; }
-    var amb = sxAmbiguous(sxVisible());
+    var amb = sxAmbiguous(sxVisible()), moved = false;
     (rows || []).forEach(function (s) {
       if (!s || sxKeepWarm(s)) return;
+      // Checked before the row is looked for: a row in a folded group is not drawn, and its move still counts.
+      var live = sxLiveRow(s, amb);
+      if (live.moved) moved = true;
       var k = splitSessionId(s.provider, s.session_id || s.id), want = k.provider + '|' + k.id;
       var els = list.querySelectorAll('[data-session]');
       for (var i = 0; i < els.length; i++) {
         if (els[i].getAttribute('data-session') !== want) continue;
-        var html = sxRow(s, null, amb);
+        var html = live.html;
         if (els[i].__liveHtml !== html) {
           var tmp = document.createElement('div'); tmp.innerHTML = html;
           var next = tmp.firstElementChild || tmp.firstChild;
@@ -1771,6 +1774,7 @@
         break;
       }
     });
+    if (moved) sxRegroupLater();
     paintSessionsHero();
   }
   // ── Today's header line and Refresh ──
@@ -2942,6 +2946,19 @@
       if (sxListAtRest()) renderSessionGroups(); else sxRegroupLater();
     }, ms || SX_REST_MS + 50);
   }
+  // A group's row form: compact in Last week and Earlier this month, full under Needs you and Working now, and elsewhere
+  // short when the row is one of /older's short rows (the same rule sxListHtml draws with).
+  function sxGroupCompact(g, s) {
+    for (var i = 0; i < SX_GROUPS.length; i++) if (SX_GROUPS[i][0] === g) return SX_GROUPS[i][2] === 'compact' ? true : SX_GROUPS[i][2] === 'state' ? false : s.form === 'short';
+    return s.form === 'short';
+  }
+  // A live state change (liveSessionRows' paint without a structural change, Q1 07:22 FIX 1): the row is redrawn where
+  // it was placed, in that group's form, and when its group would now differ (Working now to Needs you, say) the list
+  // asks for a regroup, which the rest rule applies (at once at rest, held while the list is pressed, scrolled or focused).
+  function sxLiveRow(s, amb) {
+    var k = sxRowKey(s), placed = SXL.place ? SXL.place[k] : null, want = sxGroupFor(s, Date.now(), sxHeldKeys());
+    return { html: sxRow(s, null, amb, sxGroupCompact(placed || want, s)), moved: !!placed && placed !== want };
+  }
   function sxListHtml() {
     if (!SX.rows) return SX.error ? sxEmpty(SX.error) : skeletonRows(6);
     if (!SX.enabled && !SX.rows.length) return sxEmpty('AI sessions are off. Turn on Show AI sessions in Settings, Work and agents.');
@@ -3031,7 +3048,7 @@
       SXL.olderNext = d && d.next_before ? d.next_before : null;
       SXL.olderOk = true; SXL.olderAt = Date.now();
     }, function (err) {
-      if (err && (err.status === 404 || err.code === 'not_found' || /404|not found/i.test(String(err.message || '')))) SXL.olderOk = false;
+      if (err && (err.status === 404 || err.code === 'not_found')) SXL.olderOk = false;
     }).then(function () { SXL.olderBusy = false; if (state.pane === 'sessions' && SX.view === 'sessions' && !sxQueryActive()) renderSessionGroups(); });
   }
   // The one quiet line at the top of the list: how far back it reaches and how many more are found by search.
