@@ -30,9 +30,9 @@
 - **COS pins and rename:** Pin and Unpin from a row's menu, and Rename, which search matches. An agent's own pin shows as "Pinned in Claude" and only the agent can undo it; a COS pin under it shows Unpin in COS.
 - **The Sessions menu** (Sessions, Usage, COS cost, Refresh) and one sort menu (Updated or Opened; Best match while searching) head the list.
 
-**What changes for every client, the lens and COS Control on the Mac included:**
-- **Kept sessions:** a session pinned in COS or put in a folder stays in the list at any age and past the per-agent cap of 20; a session a person started through COS stays past that cap for 7 days. At most 40 kept rows per response, across agents; the rest are counted (`dropped.kept`) and come back as short rows through `/older`, so none is lost. About +150 ms and +27 KB per list read when all 40 are in use.
-- **PROVISIONAL: sessions a person started through COS (Ask, Work, Continue, tasks) are kept for 7 days with no action from anyone.** COS routines and maintenance jobs are left out. A job counts only when a person started it: no origin or a task origin, and no maintenance workflow, so a new kind of background job is left out by default. This is Miles's call (11/10 23:16) and stays provisional. It is its own commit, 11a4f52, so it can be dropped on its own; without it the build is 90a58e6 plus the list.
+**What changes on the server, for every client:**
+- **Kept sessions (changed in 7.0.26: Control Web only).** In 7.0.26 the server adds them only when a client asks (`kept=1`); Control Web asks, and the Mac app 0.5.389 and the glasses 6.11.681 get the same list as 7.0.18. What a kept session is: a session pinned in COS or put in a folder stays in the list at any age and past the per-agent cap of 20; a session a person started through COS stays past that cap for 7 days. At most 40 kept rows per response, across agents; the rest are counted (`dropped.kept`) and come back as short rows through `/older`, so none is lost. About +150 ms and +27 KB per list read when all 40 are in use.
+- **PROVISIONAL: sessions a person started through COS (Ask, Work, Continue, tasks) are kept for 7 days with no action from anyone** (in 7.0.26, in Control Web only). COS routines and maintenance jobs are left out. A job counts only when a person started it: no origin or a task origin, and no maintenance workflow, so a new kind of background job is left out by default. This is Miles's call (11/10 23:16) and stays provisional. It is its own commit, 11a4f52, so it can be dropped on its own; without it the build is 90a58e6 plus the list.
 - `/api/models` gains each agent's efforts. List rows gain `folder_id`, `cos_pinned`, `title_override` and the reported model where known. Older clients ignore unknown keys.
 - **New disk reads:** a model warm after each list read (Claude and Codex, at most 4 at a time, each file at most once a minute), and the query-job journal for session ids and times only (each day file at most every 30 s). No prompts or answers are read.
 
@@ -40,11 +40,11 @@
 
 **Not proven off the device:** how the list feels on his phone. Checked on this Mac in WebKit on a mock (the list, folders and frame checks pass) and by the full test suite.
 
-**Default-on for every install:** yes: the grouped list, the 30 days, the kept sessions, the store, the reply area rule, the sign-in screen fix, the queue fix and the reason line. There is no switch.
+**Default-on for every install:** yes: the grouped list, the 30 days, the kept sessions (Control Web only from 7.0.26), the store, the reply area rule, the sign-in screen fix, the queue fix and the reason line. There is no switch.
 
 ### If you roll back
 
-- To 7.0.23: Control Web shows the frame with the old flat 7-day list, both 7.0.23 faults above come back, and a queued note can wait after a turn has ended again. The other clients drop back to today's list. `session-organizer.json` stays on disk untouched and is ignored; reinstalling 7.0.25 picks it up again. Nothing else is stored by this release.
+- To 7.0.23: Control Web shows the frame with the old flat 7-day list, both 7.0.23 faults above come back, and a queued note can wait after a turn has ended again. The other clients drop back to today's list (on 7.0.26 they never received kept sessions). `session-organizer.json` stays on disk untouched and is ignored; reinstalling 7.0.25 picks it up again. Nothing else is stored by this release.
 - To 7.0.18 (the public build before this one): everything from 7.0.19 to 7.0.25 in Control Web goes back to the 7.0.18 page, and a queued note can wait after a turn has ended again. `session-organizer.json` stays on disk and 7.0.18 ignores it (it reads no such file); the queued-note fields this release adds (the hold reason and its time) are ignored too. Nothing is rewritten.
 
 ## 7.0.23 - Control Web: a visible height under 80 px is no reading, and Sessions is one screen (layout, not a proven fix)
