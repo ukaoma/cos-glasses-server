@@ -2499,7 +2499,8 @@
   }
   var SX = {
     rows: null, dropped: null, enabled: true, loading: false, error: '', loadedAt: 0,
-    clock: sxPref('clock', 'updated', ['updated', 'opened', 'pinned']),
+    // 7.0.23 step 2b: Pinned is a group now, not a clock; a saved 'pinned' reads as Updated.
+    clock: sxPref('clock', 'updated', ['updated', 'opened']),
     view: sxPref('view', 'sessions', ['sessions', 'usage', 'cost']),
     recency: sxPref('recency', 'newest', ['newest', 'oldest', 'match']),
     q: '', instant: [], remote: [], searching: false, searchError: '', ranFor: '', semantic: null, semanticReason: '', searchSeq: 0, searchTimer: null,
@@ -2642,7 +2643,8 @@
       '<div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">' + esc(detail) + liveHeroNote(view) + '</p></div>' +
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-sx="refresh"' + (busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>' +
       (stats.length ? '<div class="cx-stats">' + stats.map(function (s) { return '<span class="cx-stat"><b>' + esc(typeof s[0] === 'number' ? s[0].toLocaleString() : s[0]) + '</b><span>' + s[1] + '</span></span>'; }).join('') + '</div>' : '');
-    var clockOn = view === 'sessions' && !sxQueryActive();
+    // 7.0.23 step 2b: Updated and Opened are the sort menu now, and Pinned a group; no clock switches here.
+    var clockOn = false;
     views.innerHTML = '<div class="cx-switch" role="group" aria-label="Sessions view">' +
         Object.keys(SX_VIEWS).map(function (v) { return '<button type="button" data-sx="view" data-view="' + v + '" aria-pressed="' + (v === view) + '">' + SX_VIEWS[v] + '</button>'; }).join('') +
       '</div>' +
@@ -2652,6 +2654,12 @@
     var split = $('sessions-split'), usage = $('sessions-usage');
     if (split) split.classList.toggle('hidden', view !== 'sessions');
     if (usage) usage.classList.toggle('hidden', view === 'sessions');
+    // 7.0.23 step 2b: in Sessions the list's own head (the Sessions menu, Search, the quiet line, the sort menu) takes
+    // the place of this header and the switches; Usage and COS cost keep them, so there is a way back.
+    hero.classList.toggle('hidden', view === 'sessions');
+    // Under 600 px the list's own Sessions button steps aside for the top bar's (sessions.css), and this switch stays
+    // the way to Usage and COS cost there; from 600 px the Sessions menu is that way.
+    views.classList.toggle('sx-wide-hide', view === 'sessions');
     sxFrameSync();
   }
   // 7.0.23 (step 1 of the chat-style Sessions, DESIGN_PLAN v2 "The frame"): while Sessions shows its list and reader,
@@ -2788,6 +2796,7 @@
       state.sessions = SX.rows;
       if (sxQueryActive()) SX.instant = sxInstant(SX.q);
       renderSessionGroups();
+      sxLoadOlder(force === true);
     }).catch(function (err) {
       SX.loading = false;
       SX.error = (err && err.message) || 'Sessions did not load';
@@ -2813,36 +2822,230 @@
   }
   // Control's row: glyph, title, a snippet on search hits, then badge · PINNED · state · Updated ·
   // Opened (twins only, amber) · workspace; a match chip and a chevron on the right.
-  function sxRow(s, hit, ambiguous) {
+  // ── the grouped list (7.0.23, step 2b-1 of the chat-style Sessions; DESIGN_PLAN v2 "The list", the 23:33 mock) ──
+  // A row, full or compact. sxRow stays the one renderer: live updates (liveSessionRows) replace a row's root, the
+  // element with data-session, with this; search draws its hits with it (a snippet and the Keyword or Meaning tag).
+  // Line two is the product's own state words, then the project, in plain words with commas: Running; Waiting and its
+  // kind; Stale; Failed and its reason; "2 queued"; Not sent; "Pinned in Claude" for an agent's own pin; "Opened
+  // Nov 9" when two rows on screen share a title. The left edge is green running, accent waiting, red failed, and the
+  // state is always in the words too. A compact row (days 8 to 30, the short form from /older) is the title and date.
+  function sxRowWords(s, st, key) {
+    var w = [];
+    if (st === 'running') w.push('Running');
+    else if (st === 'waiting') { var k = sxWaitingKind(s.waiting_kind, s.waiting_detail); w.push(k ? 'Waiting, ' + k.charAt(0).toLowerCase() + k.slice(1) : 'Waiting'); }
+    else if (st === 'stale') w.push('Stale');
+    else if (st === 'error') w.push(s.failure ? 'Failed, ' + String(s.failure).replace(/_/g, ' ') : 'Failed');
+    var queued = Number(s.queued_turns) || 0;
+    if (queued > 0) w.push(queued + ' queued');
+    var ns = notSentFor(key.provider, key.id);
+    if (ns) w.push(ns.label || 'Not sent');
+    if (s.pinned) w.push('Pinned in ' + sxProviderLabel(key.provider));
+    return w;
+  }
+  function sxRow(s, hit, ambiguous, compact) {
     var key = splitSessionId(s.provider, s.session_id || s.id);
     var r = parseRoute();
     var selected = r.pane === 'sessions' && r.args[0] === key.provider && r.args[1] === key.id;
-    var st = sxState(s), label = sxStateLabel(s, st), title = sxTitle(s);
-    var upd = toDate(s.modified), opened = toDate(s.created);
-    var meta = sxBadge(key.provider) +
-      (s.pinned ? '<span class="sx-pinned">PINNED</span>' : '') +
-      (label ? '<span class="sx-chip ' + st + '">' + esc(label) + '</span>' : '') +
-      (notSentFor(key.provider, key.id) ? '<span class="sx-chip refused" title="' + esc(notSentFor(key.provider, key.id).line) + '">' + esc(notSentFor(key.provider, key.id).label || 'Not sent') + '</span>' : '') +
-      (upd ? '<span class="sx-when">Updated ' + esc(sxShortDate(upd)) + '</span>' : '') +
-      (ambiguous[title] && opened ? '<span class="sx-opened" title="Another session on screen has the same name. This one was opened ' + esc(sxShortDate(opened)) + '.">Opened ' + esc(sxShortDate(opened)) + '</span>' : '') +
-      (s.project && String(s.project) !== title ? '<span class="sx-ws">' + esc(s.project) + '</span>' : '');
-    var match = hit ? (hit.match === 'both' ? 'Keyword + meaning' : hit.match === 'semantic' ? 'Meaning' : 'Keyword') : '';
+    var short = s.form === 'short', st = short ? '' : sxState(s), title = sxTitle(s);
+    var when = toDate(SX.clock === 'opened' ? (s.created || s.modified) : s.modified);
+    var edge = st === 'running' ? ' running' : st === 'waiting' ? ' waiting' : st === 'error' ? ' failed' : '';
+    var id = esc(key.provider) + '|' + esc(key.id);
+    var head = '<span class="sx-r-title">' + esc(title) + '</span>' + (when ? '<span class="sx-r-time">' + esc(sxShortDate(when)) + '</span>' : '');
+    if (compact || short) {
+      return '<div class="sx-r compact' + edge + '" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
+        '<button type="button" class="sx-r-open" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '>' + head + '</button></div>';
+    }
+    var words = sxRowWords(s, st, key);
+    var opened = toDate(s.created);
+    if (ambiguous && ambiguous[title] && opened) words.push('Opened ' + sxShortDate(opened));
+    var proj = s.project && String(s.project) !== title ? String(s.project) : '';
+    var line = words.concat(proj ? [proj] : []).join(', ');
+    var failedWord = st === 'error' ? words[0] : '';
+    var lineHtml = failedWord ? '<b class="failed">' + esc(failedWord) + '</b>' + esc(line.slice(failedWord.length)) : esc(line);
+    var match = hit ? (hit.match === 'both' ? 'Keyword and meaning' : hit.match === 'semantic' ? 'Meaning' : 'Keyword') : '';
     // An instant title hit's snippet is the title itself; it says nothing twice.
     var snippet = hit && hit.snippet ? plain(hit.snippet).replace(/\s+/g, ' ').trim() : '';
-    return '<button type="button" class="cx-row sx-row" data-session="' + esc(key.provider) + '|' + esc(key.id) + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
-      sxGlyph(key.provider) +
-      '<span class="cx-row-body"><span class="sx-title">' + esc(title) + '</span>' +
-      (snippet && snippet !== title ? '<span class="sx-snippet">' + esc(snippet) + '</span>' : '') +
-      '<span class="sx-meta">' + meta + '</span></span>' +
-      '<span class="sx-side">' + (match ? '<span class="sx-match">' + match + '</span>' : '') + '<span class="chev"></span></span></button>';
+    return '<div class="sx-r full' + edge + '" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '><span class="sx-r-edge" aria-hidden="true"></span>' +
+      '<button type="button" class="sx-r-open" data-session="' + id + '"' + (selected ? ' aria-selected="true"' : '') + '>' + head +
+        '<span class="sx-r-sub">' + sxGlyph(key.provider) + (line ? '<span class="t">' + lineHtml + '</span>' : '') + (match ? '<span class="sx-tag">' + match + '</span>' : '') + '</span>' +
+        (snippet && snippet !== title ? '<span class="sx-r-snip">' + esc(snippet) + '</span>' : '') +
+      '</button></div>';
+  }
+
+  // Groups, top to bottom; a session shows once. Needs you is what Today's needsModel counts for a session: waiting, or
+  // a question this page holds for it; plus failed (DESIGN_PLAN v2). Working now is running. Pinned is an agent's own
+  // pin or a COS pin. Then by day of the sort's time: Today, Yesterday, Earlier this week as full rows; Last week and
+  // Earlier this month as compact rows, folded shut with a count. Days are counted back from today (2 to 6 days ago is
+  // Earlier this week, 7 to 13 Last week, 14 to 30 Earlier this month), so no group is empty only because of the
+  // calendar.
+  var SX_GROUPS = [['needs', 'Needs you', 'state'], ['working', 'Working now', 'state'], ['pinned', 'Pinned', ''], ['today', 'Today', ''],
+    ['yesterday', 'Yesterday', ''], ['week', 'Earlier this week', ''], ['lastweek', 'Last week', 'compact'], ['month', 'Earlier this month', 'compact']];
+  var SX_DAY_MS = 86400000, SX_REST_MS = 2000, SX_EMPTY_HOLD_MS = 5000;
+  // place: each row's group as last drawn at rest; seen: when Needs you and Working now last had rows; open: unfolded
+  // compact groups; older: /older's short rows (olderOk false: an older server, 404).
+  var SXL = { place: null, down: false, touchAt: 0, scrollAt: 0, timer: 0, seen: {}, open: {}, older: [], olderN: null, olderOk: null, olderNext: null, olderAt: 0, olderBusy: false };
+  function sxRowKey(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider + '|' + String(k.id).toLowerCase(); }
+  function sxDayStart(t) { var d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  function sxSortTime(s) { return SX.clock === 'opened' ? (sxTime(s.created) || sxTime(s.modified)) : sxTime(s.modified); }
+  function sxHeldKeys() {
+    var qs = typeof sessionQs === 'function' ? sessionQs() : null, out = {};
+    (qs && qs.itemsFor ? qs.itemsFor('') : []).forEach(function (it) { var k = splitSessionId(it.provider, it.sessionId); if (k.id) out[k.provider + '|' + String(k.id).toLowerCase()] = 1; });
+    return out;
+  }
+  function sxGroupFor(s, now, held) {
+    if (s.form !== 'short') {
+      var st = sxState(s);
+      if (st === 'waiting' || st === 'error' || held[sxRowKey(s)]) return 'needs';
+      if (st === 'running') return 'working';
+    }
+    if (s.pinned || s.cos_pinned) return 'pinned';
+    var t = sxSortTime(s), today = sxDayStart(now);
+    if (t >= today) return 'today';
+    if (t >= today - SX_DAY_MS) return 'yesterday';
+    if (t >= today - 6 * SX_DAY_MS) return 'week';
+    if (t >= today - 13 * SX_DAY_MS) return 'lastweek';
+    return 'month';
+  }
+  // The main list's rows, then /older's short rows it does not have (the main row wins on a repeat).
+  function sxAllRows() {
+    var main = sxReal(), have = {};
+    main.forEach(function (s) { have[sxRowKey(s)] = 1; });
+    return main.concat((SXL.older || []).filter(function (s) { return !sxKeepWarm(s) && !have[sxRowKey(s)]; }));
+  }
+  // At rest: nothing pressed, no touch or scroll in the last SX_REST_MS, and no row holding keyboard focus.
+  function sxListAtRest() {
+    if (SXL.down) return false;
+    var now = Date.now();
+    if (now - SXL.touchAt < SX_REST_MS || now - SXL.scrollAt < SX_REST_MS) return false;
+    var a = document.activeElement;
+    return !(a && a.closest && a.closest('#sessions-list [data-session]'));
+  }
+  function sxRegroupLater(ms) {
+    if (SXL.timer) return;
+    SXL.timer = setTimeout(function () {
+      SXL.timer = 0;
+      if (state.pane !== 'sessions' || SX.view !== 'sessions' || sxQueryActive()) return;
+      if (sxListAtRest()) renderSessionGroups(); else sxRegroupLater();
+    }, ms || SX_REST_MS + 50);
   }
   function sxListHtml() {
     if (!SX.rows) return SX.error ? sxEmpty(SX.error) : skeletonRows(6);
     if (!SX.enabled && !SX.rows.length) return sxEmpty('AI sessions are off. Turn on Show AI sessions in Settings, Work and agents.');
-    var vis = sxVisible();
-    if (!vis.length) return sxEmpty(SX.error || sxEmptyCopy());
-    var amb = sxAmbiguous(vis);
-    return '<div class="cx-list sx-list">' + vis.map(function (s) { return sxRow(s, null, amb); }).join('') + '</div>';
+    var all = sxAllRows();
+    if (!all.length) return sxEmpty(SX.error || sxEmptyCopy());
+    var now = Date.now(), held = sxHeldKeys(), want = {}, by = {}, moves = 0;
+    all.forEach(function (s) { want[sxRowKey(s)] = sxGroupFor(s, now, held); });
+    // A row changes group only at rest; held moves apply together on the next rest (sxRegroupLater).
+    if (!SXL.place || sxListAtRest()) SXL.place = want;
+    else Object.keys(want).forEach(function (k) { if (!(k in SXL.place)) SXL.place[k] = want[k]; else if (SXL.place[k] !== want[k]) moves++; });
+    if (moves) sxRegroupLater();
+    all.forEach(function (s) { var k = sxRowKey(s), g = SXL.place[k] || want[k]; (by[g] = by[g] || []).push(s); });
+    var amb = sxAmbiguous(all.filter(function (s) { return s.form !== 'short'; }));
+    var html = '', holdUntil = 0;
+    SX_GROUPS.forEach(function (g) {
+      var id = g[0], rows = (by[id] || []).sort(function (a, b) { return sxSortTime(b) - sxSortTime(a); }), n = rows.length;
+      if (g[2] === 'state') {
+        if (n) SXL.seen[id] = now;
+        else if (SXL.seen[id] && now - SXL.seen[id] < SX_EMPTY_HOLD_MS) holdUntil = Math.max(holdUntil, SXL.seen[id] + SX_EMPTY_HOLD_MS);
+        else return;
+        html += '<section class="sx-g" data-g="' + id + '"><h3 class="sx-gh state ' + id + '"><span>' + g[1] + '</span><span class="n">' + n + '</span></h3>' +
+          '<div class="sx-rows">' + rows.map(function (s) { return sxRow(s, null, amb); }).join('') + '</div></section>';
+        return;
+      }
+      if (!n) return;
+      if (g[2] === 'compact') {
+        var open = !!SXL.open[id];
+        html += '<section class="sx-g" data-g="' + id + '"><button type="button" class="sx-gh" data-sx="fold" data-g="' + id + '" aria-expanded="' + open + '">' +
+          '<span class="fold"><span class="chev" aria-hidden="true"></span>' + g[1] + '</span><span class="n">' + n + '</span></button>' +
+          (open ? '<div class="sx-rows">' + rows.map(function (s) { return sxRow(s, null, amb, true); }).join('') + '</div>' +
+            (id === 'month' && SXL.olderNext ? '<p class="sx-more-older"><button type="button" class="cx-btn quiet" data-sx="older-more">Show older</button></p>' : '') : '') + '</section>';
+        return;
+      }
+      html += '<section class="sx-g" data-g="' + id + '"><h3 class="sx-gh"><span>' + g[1] + '</span><span class="n">' + n + '</span></h3>' +
+        '<div class="sx-rows">' + rows.map(function (s) { return sxRow(s, null, amb, s.form === 'short'); }).join('') + '</div></section>';
+    });
+    // A Needs you or Working now heading at 0 stays for SX_EMPTY_HOLD_MS, then the list draws again without it.
+    if (holdUntil) sxRegroupLater(holdUntil - now + 20);
+    return '<div class="sx-list sx-groups">' + html + '</div>';
+  }
+  // The list keeps its place across a redraw: the top visible row stays where it was in the list's own scroll.
+  function sxAnchor(col) {
+    if (!col || !col.getBoundingClientRect) return null;
+    var top = col.getBoundingClientRect().top, rows = col.querySelectorAll('.sx-r[data-session]');
+    for (var i = 0; i < rows.length; i++) { var b = rows[i].getBoundingClientRect(); if (b.bottom > top) return { key: rows[i].getAttribute('data-session'), top: b.top }; }
+    return null;
+  }
+  function sxRestoreAnchor(col, a) {
+    if (!col || !a) return;
+    var rows = col.querySelectorAll('.sx-r[data-session]');
+    for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute('data-session') === a.key) { col.scrollTop += rows[i].getBoundingClientRect().top - a.top; return; }
+  }
+  // GET /api/agent-sessions/older (server step 2a): the short rows for days 8 to 30 and the kept ones, newest first,
+  // paged; read when the list loads (at most once a minute) and for Show older, never on the poll. An older server
+  // answers 404: the list stays at 7 days and says so.
+  var SX_OLDER_MS = 60000;
+  function sxLoadOlder(force, more) {
+    if (SXL.olderBusy || SXL.olderOk === false) return Promise.resolve();
+    if (!more && !force && SXL.olderAt && Date.now() - SXL.olderAt < SX_OLDER_MS) return Promise.resolve();
+    SXL.olderBusy = true;
+    var q = '?days=30&limit=200' + (more && SXL.olderNext ? '&before=' + encodeURIComponent(SXL.olderNext) : '');
+    return api('/api/agent-sessions/older' + q).then(function (d) {
+      var rows = (d && Array.isArray(d.sessions) ? d.sessions : []).map(function (x) { return Object.assign({}, x, { form: 'short' }); });
+      SXL.older = more ? (SXL.older || []).concat(rows) : rows;
+      if (!more && typeof d.older_than_window === 'number') SXL.olderN = d.older_than_window;
+      SXL.olderNext = d && d.next_before ? d.next_before : null;
+      SXL.olderOk = true; SXL.olderAt = Date.now();
+    }, function (err) {
+      if (err && (err.status === 404 || err.code === 'not_found' || /404|not found/i.test(String(err.message || '')))) SXL.olderOk = false;
+    }).then(function () { SXL.olderBusy = false; if (state.pane === 'sessions' && SX.view === 'sessions' && !sxQueryActive()) renderSessionGroups(); });
+  }
+  // The one quiet line at the top of the list: how far back it reaches and how many more are found by search.
+  function sxQuietLine() {
+    if (SXL.olderOk) return 'Last 30 days. ' + (SXL.olderN ? SXL.olderN + ' older through search.' : 'Older ones through search.');
+    var age = sxDropped().age;
+    return 'Last 7 days. ' + (age ? age + ' older through search.' : 'Older ones through search.');
+  }
+  // The sort menu: Updated or Opened; while searching, Best match or Updated.
+  function sxPaintSort() {
+    var sel = $('sessions-sort'); if (!sel) return;
+    var searching = sxQueryActive();
+    var opts = searching ? [['match', 'Best match'], ['newest', 'Updated']] : [['updated', 'Updated'], ['opened', 'Opened']];
+    var cur = searching ? (SX.recency === 'match' ? 'match' : 'newest') : (SX.clock === 'opened' ? 'opened' : 'updated');
+    var html = opts.map(function (o) { return '<option value="' + o[0] + '">' + o[1] + '</option>'; }).join('');
+    if (sel.__html !== html) { sel.innerHTML = html; sel.__html = html; }
+    sel.value = cur;
+  }
+  function sxPaintListHead() {
+    var line = $('sessions-quiet');
+    if (line) { var t = sxQueryActive() ? '' : sxQuietLine(); line.textContent = t; line.classList.toggle('hidden', !t); }
+    sxPaintSort();
+  }
+  // The Sessions menu: Sessions, Usage, COS cost, and Refresh.
+  function sxViewMenu(open) {
+    var btn = $('sessions-view-btn'), menu = $('sessions-view-menu');
+    if (!btn || !menu) return;
+    if (open == null) open = menu.classList.contains('hidden');
+    menu.classList.toggle('hidden', !open);
+    btn.setAttribute('aria-expanded', String(open));
+    if (open) { var first = menu.querySelector('[role="menuitem"]'); if (first && first.focus) first.focus(); }
+  }
+  function sxListWatch() {
+    var col = $('sessions-list-col');
+    if (!col || col.__sxWatch) return;
+    col.__sxWatch = true;
+    var down = function () { SXL.down = true; SXL.touchAt = Date.now(); };
+    var up = function () { SXL.down = false; SXL.touchAt = Date.now(); sxRegroupLater(); };
+    var moved = function () { SXL.scrollAt = Date.now(); };
+    col.addEventListener('pointerdown', down, { passive: true });
+    col.addEventListener('touchstart', down, { passive: true });
+    ['pointerup', 'pointercancel', 'touchend', 'touchcancel'].forEach(function (t) { col.addEventListener(t, up, { passive: true }); });
+    col.addEventListener('scroll', moved, { passive: true });
+    col.addEventListener('wheel', moved, { passive: true });
+    document.addEventListener('click', function (e) {
+      var menu = $('sessions-view-menu');
+      if (menu && !menu.classList.contains('hidden') && !e.target.closest('#sessions-view-menu') && !e.target.closest('#sessions-view-btn')) sxViewMenu(false);
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { var menu = $('sessions-view-menu'); if (menu && !menu.classList.contains('hidden')) { sxViewMenu(false); var b = $('sessions-view-btn'); if (b) b.focus(); } } });
   }
   // The list, under the hero. The name stays: the shared input handler calls it when the search clears.
   function renderSessionGroups() {
@@ -2857,8 +3060,12 @@
       var note = sxQueryActive() && SX.ranFor === SX.q && SX.semantic === false ? sxSemanticHint(SX.semanticReason) : '';
       hint.textContent = note; hint.classList.toggle('hidden', !note);
     }
+    sxListWatch();
+    sxPaintListHead();
     var list = $('sessions-list'); if (!list) return;
+    var col = $('sessions-list-col'), at = sxQueryActive() ? null : sxAnchor(col);
     list.innerHTML = sxQueryActive() ? sxSearchHtml() : sxListHtml();
+    sxRestoreAnchor(col, at);
   }
 
   // Search (ActivityWindow.swift sessionsSearchBar 2652-2712, ControllerModel scheduleSessionSearch):
@@ -3076,16 +3283,21 @@
   // keep their data-action names, which the shared listener handles.
   var sxPane = $('pane-sessions');
   if (sxPane) {
-    if ($('sessions-recency')) $('sessions-recency').value = SX.recency;
+    sxPaintSort();
     sxPane.addEventListener('click', function (e) {
       var t = e.target.closest('[data-sx]');
       if (!t || !sxPane.contains(t)) return;
       var act = t.getAttribute('data-sx'), rd = state.reading;
-      if (act === 'view') return setSessionsView(t.getAttribute('data-view'));
+      if (act === 'view') { sxViewMenu(false); return setSessionsView(t.getAttribute('data-view')); }
+      if (act === 'view-menu') return sxViewMenu();
       if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint(); var gq = $('session-questions'), first = gq && gq.querySelector('button, input, [tabindex]'); if (first && first.focus) first.focus({ preventScroll: true }); return; }
+      if (act === 'fold') { var g = t.getAttribute('data-g'); SXL.open[g] = !SXL.open[g]; return renderSessionGroups(); }
+      if (act === 'older-more') return sxLoadOlder(false, true);
       if (act === 'clock') { SX.clock = t.getAttribute('data-clock'); sxSave(); return renderSessionGroups(); }
       if (act === 'refresh') {
+        sxViewMenu(false);
         if (SX.view !== 'sessions') return renderUsageView(true);
+        sxLoadOlder(true);
         SX.hooksAt = 0;
         loadSessions(true);
         if (sxQueryActive()) searchSessions();
@@ -3115,7 +3327,14 @@
     });
     sxPane.addEventListener('change', function (e) {
       var id = e.target.id;
-      if (id === 'sessions-recency') { SX.recency = e.target.value; sxSave(); return renderSessionGroups(); }
+      // 7.0.23 step 2b: one sort menu. Updated or Opened orders the groups (the rows move together: the list redraws
+      // at once, not on rest, because the person chose it); while searching it is Best match or Updated.
+      if (id === 'sessions-sort') {
+        var v = e.target.value;
+        if (sxQueryActive()) SX.recency = v === 'match' ? 'match' : 'newest';
+        else { SX.clock = v === 'opened' ? 'opened' : 'updated'; SXL.place = null; }
+        sxSave(); return renderSessionGroups();
+      }
       // Custom dates opens the date sheet; the menu goes back to the range in force if it is cancelled.
       if (id === 'usage-period') { if (e.target.value === U_CUSTOM) return uOpenRange(e.target, true); SX.uPeriod = e.target.value; uPeriodChanged(); return paintUsage(); }
       if (id === 'usage-tool') { SX.uTool = e.target.value; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }

@@ -211,16 +211,27 @@
             <div class="cx-controls sx-views" id="sessions-views"></div>
             <div class="split sx-split" id="sessions-split">
               <div class="split-list" id="sessions-list-col">
-                <div class="sx-tools">
-                  <form class="cx-search sx-search" id="sessions-search-form" role="search">
-                    <input id="sessions-q" class="field" type="search" placeholder="Search titles, transcripts…" enterkeyhint="search" autocomplete="off" aria-label="Search titles, transcripts">
-                    <button type="button" class="cx-clear hidden" id="sessions-clear" data-sx="clear" aria-label="Clear search">Clear</button>
-                  </form>
-                  <select id="sessions-recency" class="field sx-select" aria-label="Recency">
-                    <option value="newest">Newest</option>
-                    <option value="oldest">Oldest</option>
-                    <option value="match">Best match</option>
-                  </select>
+                <!-- 7.0.23 step 2b: the list's own head (DESIGN_PLAN v2 "The list"): the Sessions menu, Search, one quiet line and the sort menu. -->
+                <div class="sx-lhead" id="sessions-lhead">
+                  <div class="sx-lh-top">
+                    <button type="button" class="sx-view-btn" id="sessions-view-btn" data-sx="view-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="sessions-view-menu"><span>Sessions</span><span class="caret" aria-hidden="true"></span></button>
+                    <div class="sx-menu hidden" id="sessions-view-menu" role="menu" aria-label="Sessions">
+                      <button type="button" role="menuitem" data-sx="view" data-view="sessions">Sessions</button>
+                      <button type="button" role="menuitem" data-sx="view" data-view="usage">Usage</button>
+                      <button type="button" role="menuitem" data-sx="view" data-view="cost">COS cost</button>
+                      <button type="button" role="menuitem" data-sx="refresh">Refresh</button>
+                    </div>
+                  </div>
+                  <div class="sx-tools">
+                    <form class="cx-search sx-search" id="sessions-search-form" role="search">
+                      <input id="sessions-q" class="field" type="search" placeholder="Search titles and transcripts" enterkeyhint="search" autocomplete="off" aria-label="Search titles and transcripts">
+                      <button type="button" class="cx-clear hidden" id="sessions-clear" data-sx="clear" aria-label="Clear search">Clear</button>
+                    </form>
+                  </div>
+                  <div class="sx-tools sx-tools-line">
+                    <p class="sx-quiet hidden" id="sessions-quiet"></p>
+                    <select id="sessions-sort" class="field sx-select" aria-label="Sort"><option value="updated">Updated</option><option value="opened">Opened</option></select>
+                  </div>
                 </div>
                 <p class="cx-note sx-hint hidden" id="sessions-hint"></p>
                 <div id="sessions-hooks"></div>

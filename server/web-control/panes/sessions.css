@@ -627,6 +627,70 @@ html.sx-frame.kb-up .sx-reader-title { font-size: 17px; white-space: nowrap; ove
 html.sx-frame.kb-up .sx-dock { max-height: 75%; }
 html.sx-frame.kb-up #session-input { max-height: 4.5em; }
 
+/* ── the list (7.0.23, step 2b-1; DESIGN_PLAN v2 "The list", the 23:33 mock) ─────────────────────────────────────────
+   The list's own head (the Sessions menu, Search, one quiet line, the sort menu), then groups with plain headings and
+   rows divided by hairlines (no boxed cards). A row's state is on its left edge and always in words too; the open row
+   has the panel background and a 1 px outline, so selection never rests on colour alone. */
+.sx-lhead { display: grid; gap: 8px; padding: 2px 2px 8px; border-bottom: 1px solid var(--hairline); position: sticky; top: 0; z-index: 3; background: var(--page); }
+/* Under 600 px the top bar already names Sessions; the view switch (Sessions, Usage, COS cost) stays for the other two. */
+@media (max-width: 599px) { .sx-lhead .sx-lh-top { display: none; } }
+@media (min-width: 600px) { .sx-views.sx-wide-hide { display: none; } }
+.sx-lh-top { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.sx-view-btn { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; font: 600 18px/1.1 var(--body); color: var(--ink); }
+.sx-view-btn .caret { width: 7px; height: 7px; border-right: 2px solid var(--sub); border-bottom: 2px solid var(--sub); transform: rotate(45deg) translateY(-2px); }
+.sx-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 200px; display: grid; padding: 6px; border-radius: 12px;
+  background: var(--panel); border: 1px solid var(--panel-border); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28); }
+.sx-menu.hidden { display: none; }
+.sx-menu [role='menuitem'] { min-height: 40px; padding: 0 12px; border-radius: 8px; text-align: left; font: 500 15px/1.2 var(--body); color: var(--ink); }
+.sx-menu [role='menuitem']:hover, .sx-menu [role='menuitem']:focus-visible { background: var(--qopen); }
+.sx-lhead .sx-tools { margin: 0; }
+.sx-tools-line { display: flex; align-items: center; gap: 8px; }
+.sx-quiet { margin: 0; flex: 1 1 auto; min-width: 0; font-size: 12.5px; line-height: 1.35; color: var(--sub); }
+.sx-tools-line .sx-select { margin-left: auto; }
+
+.sx-groups { padding-bottom: 8px; }
+.sx-gh { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; margin: 0; padding: 14px 12px 6px; font: 600 13px/1.3 var(--body); color: var(--sub); }
+.sx-g:first-child .sx-gh { padding-top: 10px; }
+.sx-gh .n { font: 500 12.5px/1.3 var(--body); color: var(--tertiary); font-variant-numeric: tabular-nums; }
+.sx-gh.state { color: var(--ink); }
+.sx-gh.needs .n { color: var(--accent); }
+.sx-gh.working .n { color: var(--run-green); }
+button.sx-gh { align-items: center; text-align: left; min-height: 36px; }
+button.sx-gh:hover { color: var(--ink); }
+.sx-gh .fold { display: inline-flex; align-items: center; gap: 8px; }
+.sx-gh .chev { width: 7px; height: 7px; border-right: 1.6px solid currentColor; border-bottom: 1.6px solid currentColor; transform: rotate(45deg) translate(-2px, -1px); }
+button.sx-gh[aria-expanded='false'] .chev { transform: rotate(-45deg); }
+.sx-rows { display: grid; }
+.sx-r { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); border-radius: 10px; }
+.sx-rows > .sx-r + .sx-r::before { content: ''; position: absolute; top: 0; left: 12px; right: 0; height: 1px; background: var(--hairline); }
+.sx-r:hover { background: color-mix(in srgb, var(--panel) 55%, transparent); }
+.sx-r[aria-selected='true'] { background: var(--panel); box-shadow: inset 0 0 0 1px var(--btn-border); }
+.sx-r[aria-selected='true']::before, .sx-r[aria-selected='true'] + .sx-r::before { background: transparent !important; }
+.sx-r-edge { position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; }
+.sx-r.running .sx-r-edge { background: var(--run-green); }
+.sx-r.waiting .sx-r-edge { background: var(--accent); }
+.sx-r.failed .sx-r-edge { background: var(--hot); }
+.sx-r-open { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; align-items: baseline; min-width: 0; min-height: 56px; padding: 9px 12px 9px 12px; text-align: left; color: inherit; width: 100%; }
+.sx-r-open:focus-visible { outline-offset: -2px; }
+.sx-r-title { font: 600 14px/1.3 var(--body); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sx-r-time { font-size: 12px; line-height: 1.3; color: var(--sub); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sx-r-sub { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 12.5px; line-height: 1.35; color: var(--sub); }
+.sx-r-sub .sx-glyph { width: 18px; height: 18px; flex: none; }
+.sx-r-sub .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sx-r-sub .t b.failed { color: var(--hot); font-weight: 600; }
+.sx-r-snip { grid-column: 1 / -1; font-size: 12.5px; line-height: 1.4; color: var(--sub); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sx-tag { flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px; border: 1px solid var(--panel-border); font: 600 11px/1 var(--body); color: var(--ink); }
+.sx-r.compact .sx-r-open { min-height: 40px; padding-top: 6px; padding-bottom: 6px; align-items: center; }
+.sx-r.compact .sx-r-title { font-weight: 500; }
+.sx-more-older { margin: 6px 12px 0; }
+/* Touch: every target in the list reaches 44 px. */
+@media (any-pointer: coarse) {
+  .sx-r-open { min-height: 58px; }
+  .sx-r.compact .sx-r-open { min-height: 44px; }
+  button.sx-gh, .sx-view-btn, .sx-menu [role='menuitem'] { min-height: 44px; }
+  .sx-lhead #sessions-q, .sx-lhead #sessions-sort { height: 44px; min-height: 44px; }
+}
+
 /* Q1 (23:40): a question waits at the end of the conversation, out of view. */
 .sx-goq { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 8px; padding: 6px 6px 6px 12px; border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--panel-border)); background: var(--panel); font-size: 14px; color: var(--ink); }
