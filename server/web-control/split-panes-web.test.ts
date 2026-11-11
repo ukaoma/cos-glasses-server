@@ -37,7 +37,7 @@ const paneOpts = (src: string, name = 'SPLIT'): any => {
 }
 const MEM_OPTS = paneOpts(MEM), MSG_OPTS = paneOpts(MSG), MTG_OPTS = paneOpts(MTG), WRK_OPTS = paneOpts(WRK, 'DIVIDER')
 
-type Opts = { total?: number; stored?: Record<string, string>; throwing?: boolean; wide?: boolean; listSel?: string; storageGetterThrows?: boolean }
+type Opts = { total?: number; stored?: Record<string, string>; throwing?: boolean; wide?: boolean; listSel?: string; storageGetterThrows?: boolean; crumbThrows?: boolean }
 function page(opts: Opts = {}) {
   const total = opts.total ?? 1000
   const store = new Map<string, string>(Object.entries(opts.stored ?? {}))
@@ -52,11 +52,17 @@ function page(opts: Opts = {}) {
   if (opts.storageGetterThrows) Object.defineProperty(window, 'localStorage', { get() { throw new Error('SecurityError') } })
   else window.localStorage = storage
   let clock = 1000
+  // The drag-end layout report (11/10): app.js's layoutCrumb as a recorder, the page's width, the rail and the pan.
+  const crumbs: Array<{ what: string; data: Record<string, unknown> }> = []
+  window.visualViewport = { pageTop: 85.4, offsetTop: 0, scale: 0.85 }
   const ctx: any = vm.createContext({
     JSON, Math, String, Object, window, Date: { now: () => clock },
     matchMedia: (q: string) => ({ matches: wide, media: q }),
     $: () => null,
+    layoutCrumb: (what: string, data: Record<string, unknown>) => { if (opts.crumbThrows) throw new Error('x'); crumbs.push({ what, data }); return true },
     document: {
+      documentElement: { clientWidth: 1119, scrollWidth: 1316 },
+      querySelector: (sel: string) => (sel === '.rail' ? { getBoundingClientRect: () => ({ top: -212 }) } : null),
       querySelectorAll: (sel: string) => ({ forEach: (f: any) => buttons.filter(b => b.matches(sel)).forEach(f) }),
       addEventListener: (t: string, fn: any) => { (docListeners.get(t) ?? docListeners.set(t, []).get(t)!).push(fn) },
     },
@@ -73,7 +79,7 @@ function page(opts: Opts = {}) {
       // The list as the stylesheet sizes it: 300 px by default, else the share (any --*-list-share) clamped by the CSS.
       querySelector: (sel: string) => sel !== listSel ? null : { getBoundingClientRect: () => {
         const s = [...props.values()][0]
-        return { width: s ? parseFloat(s) / 100 * total : 300 }
+        return { width: s ? parseFloat(s) / 100 * total : 300, top: -180 }
       } },
     }
     const handle: any = {
@@ -100,7 +106,7 @@ function page(opts: Opts = {}) {
   }
   const click = (target: any) => { for (const fn of docListeners.get('click') ?? []) fn({ target }) }
   const resize = () => { for (const fn of winListeners.get('resize') ?? []) fn({}) }
-  return { ctx, els, storage, store, writes, reads, addButton, click, resize, setWide: (w: boolean) => { wide = w }, tick: (ms: number) => { clock += ms } }
+  return { ctx, els, storage, store, writes, reads, addButton, click, resize, crumbs, setWide: (w: boolean) => { wide = w }, tick: (ms: number) => { clock += ms } }
 }
 
 describe('one kit: Sessions is the same kit with its own options', () => {
@@ -454,5 +460,56 @@ describe('a side panel on the right: the line moves the same way, the panel on t
     expect(wk).toContain('.wk-detail.split-side.split-sized { grid-template-columns: minmax(0, 1fr) 22px clamp(320px, var(--split-side-share, 30%), calc(100% - 402px)); }')
     expect(wk).toContain('.wk-detail.split-side > .split-handle { display: flex; }')
     expect(WK).toContain('@media (min-width: 1300px) { .wk-detail.split-side { grid-template-columns: minmax(0, 1fr) 22px 452px; } }')
+  })
+})
+
+// 11/10 (lead 20:39): Miles squeezes the reader on his Duo's Home Screen web app and the page breaks; WebKit at scale 1
+// does not. One report when a drag ends says what his page did. Diagnostic only: the drag itself is unchanged.
+describe('the drag-end layout report', () => {
+  it('a drag sends one split-drag report: the widths, the share, the page width and scroll width, the pan, the rail and list tops', () => {
+    const p = page()
+    const a = p.els()
+    p.ctx.splitKit(a.split, a.handle, p.storage, MEM_OPTS)
+    a.drag(400, 500)
+    expect(p.crumbs).toEqual([{ what: 'split-drag', data: { key: 'cos_web_memories_split', t: 1000, sz: 400, rw: 582, share: 40,
+      cw: 1119, scw: 1316, pt: 85.4, railTop: -212, listTop: -180 } }])
+  })
+  it('a tap, a double tap, the arrow keys and a cancelled press send nothing', () => {
+    const p = page()
+    const a = p.els()
+    p.ctx.splitKit(a.split, a.handle, p.storage, MEM_OPTS)
+    a.fire('pointerdown', { clientX: 400 }); a.fire('pointerup', { clientX: 400 })
+    a.fire('pointerdown', { clientX: 400 }); a.fire('pointerup', { clientX: 400 })
+    a.fire('keydown', { key: 'ArrowRight' }); a.fire('keydown', { key: 'End' })
+    a.fire('pointerdown', { clientX: 400 }); a.fire('pointercancel', { clientX: 400 })
+    expect(p.crumbs).toEqual([])
+  })
+  it('at most six a page load, across every divider on the page', () => {
+    const p = page()
+    const a = p.els(), b = p.els('.msg-left')
+    p.ctx.splitKit(a.split, a.handle, p.storage, MEM_OPTS)
+    p.ctx.splitKit(b.split, b.handle, p.storage, MSG_OPTS)
+    for (let i = 0; i < 5; i++) { a.drag(400, 420 + i * 10); b.drag(400, 420 + i * 10) }
+    expect(p.crumbs).toHaveLength(6)
+    expect(new Set(p.crumbs.map(c => c.data.key))).toEqual(new Set(['cos_web_memories_split', 'cos_web_messages_split']))
+  })
+  it('a failing report never stops the drag or its saved width', () => {
+    const p = page({ crumbThrows: true })
+    const a = p.els()
+    p.ctx.splitKit(a.split, a.handle, p.storage, MEM_OPTS)
+    a.drag(400, 500)
+    expect(a.props.get('--split-list-share')).toBe('40.00%')
+    expect(JSON.parse(p.store.get('cos_web_memories_split')!)).toEqual({ share: 40, full: false })
+  })
+  it('fits layoutCrumb: short keys, numbers, and a key name of 24 characters or fewer', () => {
+    const p = page()
+    const a = p.els()
+    p.ctx.splitKit(a.split, a.handle, p.storage, MSG_OPTS)
+    a.drag(400, 500)
+    for (const [k, v] of Object.entries(p.crumbs[0]!.data)) {
+      expect(k).toMatch(/^[a-z][a-zA-Z0-9]{0,15}$/)
+      expect(typeof v === 'number' || (typeof v === 'string' && v.length <= 24), k).toBe(true)
+    }
+    for (const o of [MEM_OPTS, MSG_OPTS, MTG_OPTS, WRK_OPTS, p.ctx.SX]) expect(String(o.key).length, o.key).toBeLessThanOrEqual(24)
   })
 })

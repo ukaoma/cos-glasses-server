@@ -3035,6 +3035,11 @@
   // window) only means the choice lasts this visit. Below a pane's own breakpoint the divider is hidden by CSS and the
   // kit does nothing (o.media), so a phone's layout never changes.
   var SX_SPLIT_KEY = 'cos_web_sessions_split', SX_LIST_MIN = 240, SX_READER_MIN = 380, SX_HANDLE_W = 18, SX_KEY_STEP = 16, SX_DOUBLE_MS = 350;
+  // 11/10 (lead 20:39): Miles squeezes the reader on his Duo's Home Screen web app and the page breaks; WebKit at scale 1
+  // does not (cw = scw, reader floor 380). One layout report when a drag ends, so his phone says what the page did:
+  // the split, list and reader widths, the share, clientWidth and scrollWidth, visualViewport.pageTop, and the rail's and
+  // list's tops (layoutCrumb adds the scale and offsetTop itself). Numbers only, at most SPLIT_DRAG_MAX a page load.
+  var SPLIT_DRAG = { n: 0 }, SPLIT_DRAG_MAX = 6;
   // o: key (storage), prefix (class names: <prefix>-sized, -full and -dragging), cssVar (the share, default
   // --<prefix>-list-share), label (what the divider sizes, for screen readers), sized (the column the share sizes,
   // default the list), side ('end' when that column is on the right: a side panel grows as the line moves left),
@@ -3083,6 +3088,17 @@
       if (persist) save();
     }
     function reset() { share = null; paint(); save(); }
+    function dragReport() {
+      if (SPLIT_DRAG.n >= SPLIT_DRAG_MAX || typeof layoutCrumb !== 'function') return;
+      try {
+        var de = document.documentElement, vv = window.visualViewport, t = total(), lw = listWidth(),
+          hw = handle.getBoundingClientRect ? handle.getBoundingClientRect().width : HANDLE_W,
+          rail = document.querySelector('.rail'), list = split.querySelector(LIST_SEL);
+        if (layoutCrumb('split-drag', { key: String(KEY).slice(0, 24), t: t, sz: lw, rw: t - lw - hw, share: share == null ? -1 : share,
+          cw: de.clientWidth, scw: de.scrollWidth, pt: vv && typeof vv.pageTop === 'number' ? vv.pageTop : -1,
+          railTop: rail ? rail.getBoundingClientRect().top : -1, listTop: list ? list.getBoundingClientRect().top : -1 })) SPLIT_DRAG.n++;
+      } catch (_e) { /* a report never stops a drag */ }
+    }
     handle.addEventListener('pointerdown', function (e) {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       if (narrow()) return;
@@ -3103,7 +3119,7 @@
         handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
         split.classList.remove(PRE + '-dragging');
         // The lift's own position counts: a browser may fold the last moves into it.
-        if (moved) { if (ev.type === 'pointerup') setWidth(start + dx(ev), false); save(); lastTap = 0; return; }
+        if (moved) { if (ev.type === 'pointerup') setWidth(start + dx(ev), false); save(); lastTap = 0; dragReport(); return; }
         if (ev.type !== 'pointerup') return;
         var now = Date.now();
         if (now - lastTap < SX_DOUBLE_MS) { lastTap = 0; reset(); } else lastTap = now;
