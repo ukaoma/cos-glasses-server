@@ -104,6 +104,7 @@ describe('the groups: a session shows once, top to bottom', () => {
     expect(h.k.group(row('a', 1 * H), NOW, held)).toBe('today')
     expect(h.k.group(row('a', 23 * H), NOW, held)).toBe('yesterday')
     expect(h.k.group(row('a', 6 * D), NOW, held)).toBe('week')
+    expect(h.k.group(row('a', 7 * D), NOW, held), 'a week ago this evening is Last week').toBe('lastweek')
     expect(h.k.group(row('a', 8 * D), NOW, held)).toBe('lastweek')
     expect(h.k.group(row('a', 20 * D), NOW, held)).toBe('month')
   })
