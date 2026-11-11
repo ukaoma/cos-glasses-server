@@ -1354,6 +1354,16 @@ export function draftsFromLine(provider: SessionStreamProvider, line: string): S
  *
  * Skipped: `isMeta` and `isCompactSummary` rows (injected context, not a prompt), tool
  * results, and the bookkeeping rows (`system`, `last-prompt`, `attachment`, `mode`...).
+ *
+ * ONLY `type: 'user'` AND `type: 'assistant'` ROWS ARE THE CONVERSATION (2026-11-11). Every
+ * other row type is skipped, whatever its `message.role`. Claude Code 2.1.300 (first seen
+ * 2026-10-14) writes `api-request-blob` rows: no timestamp, `message.role` user or assistant,
+ * copies of earlier blocks, written AFTER the tool results they repeat. Read as a reply, a
+ * copied `tool_use` re-opened a tool that had already answered, the tail read `tool_pending`,
+ * and the queue held a turn parked for an idle Desktop session until 30 minutes of quiet
+ * (S1, lanes/S1_queue_hold_diagnosis.md: 15 of 56 ended transcripts read open). An UNKNOWN
+ * row type therefore never opens a turn: it fails toward "ended", and the hooks, the registry
+ * and the gate still decide whether anything is sent.
  * Codex keeps its event rule (task_complete / turn_complete end, task_started opens).
  *
  * PURE, like everything else here. The queue store reads the tail; this decides.
@@ -1400,7 +1410,9 @@ export function turnFromTail(provider: SessionStreamProvider, lines: readonly st
     const content = Array.isArray(message.content) ? message.content : typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : []
     const blocks = content.map(asRecord).filter((b): b is Record<string, unknown> => b !== null)
 
-    if (type === 'user' || message.role === 'user') {
+    // The conversation is `user` and `assistant` rows only, by row TYPE, never by `message.role` (see the header:
+    // an api-request-blob carries a role, and any row type this build does not know falls through both branches).
+    if (type === 'user') {
       const results = blocks.filter(b => b.type === 'tool_result')
       if (results.length > 0) {
         for (const b of results) if (typeof b.tool_use_id === 'string') pendingToolUses.delete(b.tool_use_id)
@@ -1413,7 +1425,7 @@ export function turnFromTail(provider: SessionStreamProvider, lines: readonly st
       continue
     }
 
-    if (type === 'assistant' || message.role === 'assistant') {
+    if (type === 'assistant') {
       for (const b of blocks) if (b.type === 'tool_use' && typeof b.id === 'string') pendingToolUses.add(b.id)
       const stop = typeof message.stop_reason === 'string' ? message.stop_reason : ''
       if (TERMINAL_STOP_REASONS.has(stop)) {
