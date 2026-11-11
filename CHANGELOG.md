@@ -1,3 +1,17 @@
+## 7.0.26 - 7.0.25, with kept sessions only where they were asked for: the Mac app and the glasses keep their list
+
+2026-11-11. 7.0.25 (c422be8) plus one server change and one Control Web line, on the lead's ruling (10:29). Candidate only: nothing is installed or published by this commit.
+
+- **Kept sessions only for a client that asks.** In 7.0.25 every client received the kept sessions (COS pins, folders, sessions a person started through COS) on top of its usual list, so after a server update the Mac app and the glasses would have shown up to 40 more rows with no app update. Now the server adds them only when the request asks (`kept=1`). The Mac app 0.5.389 and the glasses 6.11.681 do not ask, so they get the same list as 7.0.18. Control Web asks, so Sessions in Control Web shows them as in 7.0.25.
+- Nothing else changes: `/older` and the folder, pin and rename routes are as in 7.0.25.
+
+**Default-on for every install:** everything in 7.0.25 below; the one difference is that kept sessions reach Control Web only.
+
+### If you roll back
+
+- To 7.0.25: the Mac app and the glasses list kept sessions again. Nothing is stored by this change.
+- To 7.0.18: as in 7.0.25 below.
+
 ## 7.0.25 - Control Web: the Sessions list in groups, 30 days, folders, COS pins and rename; the server keeps them; two 7.0.23 faults fixed; a queued note is no longer stuck
 
 2026-11-11. 7.0.23 (d04cb67, the frame) plus fixes to it (below), the server's session store (S1, 90a58e6 and 11a4f52, the same server code Q1 passed at 469a334 plus the allowlist), S1's queue fixes (4cbae26, 0449992, 3e6fe55, Q1 PASS 08:55) and the grouped list (W1, a821b7f), on the lead's rulings (07:36, 08:31, 08:47). Candidate only: nothing is installed or published by this commit. 7.0.24 (packed, never installed) is retired.
