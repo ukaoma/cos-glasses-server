@@ -3457,16 +3457,18 @@
           '<div class="sx-foot"><button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button>' +
             '<span class="sx-foot-note">Kickstart brief for another agent. Not a Claude Code resume.</span></div>' +
           '<p class="sx-copy-note hidden" id="session-copy-note" role="status"></p>' +
+          // DESIGN.md step 4 #3: this session's question cards (held and answerable, or at the Mac with its words), the
+          // same component Today's sheet mounts. 7.0.23: at the end of the conversation, the newest thing in it, right
+          // above the reply box: a card is too tall for the dock on the Duo (it hid the choices or the reply box), and
+          // here it opens in view with the reader and scrolls with it.
+          '<div class="sx-questions" id="session-questions"></div>' +
         '</div>' +
         // The dock, fixed at the bottom of the reader: what it is doing now (with Stop), the Mac's question, then the
-        // question cards, the reply box, its status and the queue, all as before.
+        // verdict, the reply box, its status and the queue, all as before.
         '<div class="sx-dock" id="session-dock">' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
         '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
         '<div class="sx-chat">' +
-          // DESIGN.md step 4 #3: this session's question cards (held and answerable, or at the Mac with its words), above
-          // the verdict and the Send box, the same component Today's sheet mounts, so the full hold lights up here.
-          '<div class="sx-questions" id="session-questions"></div>' +
           '<div id="session-verdict"></div>' +
           '<form class="composer att-composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
             '<div class="cc-chips att-files hidden" id="session-files"></div>' +

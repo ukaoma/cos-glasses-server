@@ -550,19 +550,19 @@ html.sx-frame .sx-reader-head { flex: none; }
 .sx-body { min-height: 0; }
 html.sx-frame .sx-body { flex: 1 1 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 8px; }
 /* The dock takes at most 60 percent of the reader (three quarters with the keyboard up). The reply box and its status always
-   show: what can grow above or below them (the session's question cards, the queue) scrolls inside its own box. */
+   show: what can grow above or below them (the activity, the queue) gives way or scrolls inside its own box. */
 html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
   padding-top: 8px; border-top: 1px solid var(--hairline); }
 html.sx-frame .sx-dock > .sx-activity, html.sx-frame .sx-dock > .sx-mac-q { flex: none; }
 /* What it is doing now keeps about four lines in the dock and scrolls past that, so it never pushes the reply box out. */
-html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 0; max-height: 96px; overflow: auto; overscroll-behavior: contain; }
-/* The activity above gives way four times as fast as the reply part; inside the reply part only the question cards
-   (and the queue) give way, so the reply box and its status keep their full height. */
+html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 32px; max-height: 96px; overflow: auto; overscroll-behavior: contain; }
+/* The activity above gives way four times as fast as the reply part; inside the reply part only the queue gives way,
+   so the reply box and its status keep their full height. */
 html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
 html.sx-frame .sx-dock .sx-chat > * { flex: none; }
-html.sx-frame .sx-dock #session-questions { flex: 0 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-/* A waiting question keeps at least 112 px (its question and the first two choices) while the dock has the room. */
-html.sx-frame .sx-dock #session-questions:not(:empty) { min-height: min(112px, 24vh); min-height: min(112px, 24dvh); }
+/* The session's question cards end the conversation (app.js openSession), so they scroll with it; their own footer
+   (Submit) sticks to the bottom of the conversation the way it sticks to the page elsewhere. */
+html.sx-frame .sx-body #session-questions:not(:empty) { margin-top: 12px; }
 /* An empty status line under the reply box takes no room in the frame (it keeps its 20 px when it says something). */
 html.sx-frame .sx-dock #session-status:empty { min-height: 0; }
 html.sx-frame .sx-dock #session-queue { flex: 0 1 auto; min-height: 0; max-height: 30%; overflow: auto; overscroll-behavior: contain; }
@@ -592,11 +592,8 @@ html.sx-frame .sx-dock #session-queue { flex: 0 1 auto; min-height: 0; max-heigh
 /* An on-screen keyboard up (app.js html.kb-up): the header goes to one line and the conversation keeps the rest. */
 html.sx-frame.kb-up .sx-hero, html.sx-frame.kb-up .sx-views, html.sx-frame.kb-up .sx-subtitle,
 html.sx-frame.kb-up .navbar, html.sx-frame.kb-up #conn-notice, html.sx-frame.kb-up #sq-host { display: none; }
-/* Typing in the reply box: the question cards give way; typing in a card's Other field: they keep their room. */
-html.sx-frame.kb-up .sx-dock #session-questions:not(:focus-within) { min-height: 0; }
-/* Short screens (under 600 tall, Comet's 951 x 539): no floor for the cards, and the subtitle and counts step aside. */
+/* Short screens (under 600 tall, Comet's 951 x 539): the subtitle and counts step aside. */
 @media (max-height: 599px) {
-  html.sx-frame .sx-dock #session-questions:not(:empty) { min-height: 0; }
   /* The notices over the pane (the Mac not answering, the sign-in ending) are one line each: the same words, cut with
      an ellipsis, their buttons kept. */
   html.sx-frame .conn-notice { margin-bottom: 8px; gap: 6px; grid-template-columns: minmax(0, 1fr); }

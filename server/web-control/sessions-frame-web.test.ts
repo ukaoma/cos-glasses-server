@@ -156,19 +156,24 @@ describe('the reader opens at the newest turn and stays there until the person s
 
 describe('the reader: header, the conversation, then the dock with everything it had', () => {
   const html = slice(APP, "      reader.innerHTML =\n        '<div class=\"sx-reader-head\">", '      readerImagesMount($')
-  it('the conversation (note, turns, Copy session) is in #session-body, between the header and the dock', () => {
+  it('the conversation (note, turns, Copy session, and the session\u2019s question cards last) is in #session-body, between the header and the dock', () => {
     const head = html.indexOf('sx-reader-head'), body = html.indexOf('id="session-body"'), dock = html.indexOf('id="session-dock"')
     expect(head).toBeGreaterThan(-1)
     expect(body).toBeGreaterThan(head)
     expect(dock).toBeGreaterThan(body)
-    for (const part of ['sx-note', 'id="session-turns"', 'data-sx="copy-session"', 'id="session-copy-note"']) {
+    for (const part of ['sx-note', 'id="session-turns"', 'data-sx="copy-session"', 'id="session-copy-note"', 'id="session-questions"']) {
       const at = html.indexOf(part)
       expect(at > body && at < dock, part).toBe(true)
     }
   })
-  it('the dock keeps the activity with Stop, the Mac question, the question cards, the reply box, its status and the queue', () => {
+  it('the question cards end the conversation, right above the dock (the newest thing in it)', () => {
+    const q = html.indexOf('id="session-questions"')
+    expect(q).toBeGreaterThan(html.indexOf('id="session-copy-note"'))
+    expect(q).toBeLessThan(html.indexOf('id="session-dock"'))
+  })
+  it('the dock keeps the activity with Stop, the Mac question, the verdict, the reply box, its status and the queue', () => {
     const dock = html.indexOf('id="session-dock"')
-    for (const part of ['id="session-live"', 'id="session-mac-q"', 'id="session-questions"', 'id="session-verdict"', 'id="session-form"', 'data-action="fork-session"', 'id="session-send"', 'id="session-status"', 'id="session-caution"', 'id="session-queue"'])
+    for (const part of ['id="session-live"', 'id="session-mac-q"', 'id="session-verdict"', 'id="session-form"', 'data-action="fork-session"', 'id="session-send"', 'id="session-status"', 'id="session-caution"', 'id="session-queue"'])
       expect(html.indexOf(part), part).toBeGreaterThan(dock)
   })
 })
@@ -268,9 +273,9 @@ describe('panes/sessions.css: the frame', () => {
   })
   it('the dock: at most 60 percent, the activity gives way first, the reply box never does', () => {
     expect(css).toContain('html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%;')
-    expect(css).toContain('html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 0; max-height: 96px;')
+    expect(css).toContain('html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 32px; max-height: 96px;')
+    expect(css).toContain('html.sx-frame .sx-dock #session-queue { flex: 0 1 auto; min-height: 0; max-height: 30%; overflow: auto;')
     expect(css).toContain('html.sx-frame .sx-dock .sx-chat > * { flex: none; }')
-    expect(css).toContain('html.sx-frame .sx-dock #session-questions { flex: 0 1 auto; min-height: 0; overflow: auto;')
   })
   it('what sits over every pane never takes the screen: the question cards as their one line, capped and scrolling', () => {
     expect(css).toContain('html.sx-frame #sq-host { max-height: 35%; overflow: auto;')
