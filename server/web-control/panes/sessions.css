@@ -551,21 +551,31 @@ html.sx-frame .sx-reader-head { flex: none; }
 html.sx-frame .sx-body { flex: 1 1 0; overflow: auto; overscroll-behavior: contain; padding-bottom: 8px; }
 /* The dock takes at most 60 percent of the reader (three quarters with the keyboard up). The reply box and its status always
    show: what can grow above or below them (the activity, the queue) gives way or scrolls inside its own box. */
-html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%; min-height: 0; display: flex; flex-direction: column; position: relative;
   padding-top: 8px; border-top: 1px solid var(--hairline); }
 html.sx-frame .sx-dock > .sx-activity, html.sx-frame .sx-dock > .sx-mac-q { flex: none; }
 /* What it is doing now keeps about four lines in the dock and scrolls past that, so it never pushes the reply box out. */
 html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 32px; max-height: 96px; overflow: auto; overscroll-behavior: contain; }
-/* The activity above gives way four times as fast as the reply part; inside the reply part only the queue gives way,
-   so the reply box and its status keep their full height. */
-html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* The reply part never shrinks: a dock capped at 60 percent with overflow hidden would clip the reply box instead (951 by
+   539, Go to the question shown: the box ran 17 px past the screen). What gives way is the activity; the queue inside the
+   reply part has its own cap and scrolls. */
+html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: none; display: flex; flex-direction: column; }
 html.sx-frame .sx-dock .sx-chat > * { flex: none; }
+/* Go to the question sits on the dock's top edge, over the last line of the conversation, so it takes no room from the
+   dock at any height (a dock line squeezed its own 44 px button on short screens). */
+html.sx-frame .sx-dock > .sx-goq { position: absolute; right: 8px; left: auto; bottom: calc(100% + 6px); margin: 0; z-index: 2;
+  padding: 0; border: 0; background: transparent; }
+/* Only the button shows there, so it covers the end of one line, not the conversation; the sentence stays for screen
+   readers. */
+html.sx-frame .sx-dock > .sx-goq > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+html.sx-frame .sx-dock > .sx-goq .cx-btn { background: var(--panel); border-color: color-mix(in srgb, var(--accent) 55%, var(--panel-border));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25); }
 /* The session's question cards end the conversation (app.js openSession), so they scroll with it; their own footer
    (Submit) sticks to the bottom of the conversation the way it sticks to the page elsewhere. */
 html.sx-frame .sx-body #session-questions:not(:empty) { margin-top: 12px; }
 /* An empty status line under the reply box takes no room in the frame (it keeps its 20 px when it says something). */
 html.sx-frame .sx-dock #session-status:empty { min-height: 0; }
-html.sx-frame .sx-dock #session-queue { flex: 0 1 auto; min-height: 0; max-height: 30%; overflow: auto; overscroll-behavior: contain; }
+html.sx-frame .sx-dock #session-queue { flex: none; max-height: 9rem; overflow: auto; overscroll-behavior: contain; }
 
 /* Phone and narrow (under 760): one column at a time, the list or the reader, each filling the frame. */
 @media (max-width: 759px) {

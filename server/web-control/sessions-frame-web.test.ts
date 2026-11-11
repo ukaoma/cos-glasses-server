@@ -274,8 +274,15 @@ describe('panes/sessions.css: the frame', () => {
   it('the dock: at most 60 percent, the activity gives way first, the reply box never does', () => {
     expect(css).toContain('html.sx-frame .sx-dock { flex: 0 0 auto; max-height: 60%;')
     expect(css).toContain('html.sx-frame .sx-dock > .sx-activity { flex: 0 4 auto; min-height: 32px; max-height: 96px;')
-    expect(css).toContain('html.sx-frame .sx-dock #session-queue { flex: 0 1 auto; min-height: 0; max-height: 30%; overflow: auto;')
+    expect(css).toContain('html.sx-frame .sx-dock #session-queue { flex: none; max-height: 9rem; overflow: auto;')
     expect(css).toContain('html.sx-frame .sx-dock .sx-chat > * { flex: none; }')
+    // 951 by 539 with Go to the question shown: a shrinking reply part let the capped dock clip the reply box by 17 px.
+    expect(css).toContain('html.sx-frame .sx-dock .sx-chat { margin-top: 0; flex: none;')
+    expect(css).not.toMatch(/html\.sx-frame \.sx-dock \{[^}]*overflow: hidden/)
+  })
+  it('Go to the question floats on the dock edge and takes no room from it; only its button shows', () => {
+    expect(css).toContain('html.sx-frame .sx-dock > .sx-goq { position: absolute; right: 8px; left: auto; bottom: calc(100% + 6px);')
+    expect(css).toMatch(/html\.sx-frame \.sx-dock > \.sx-goq > span \{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset\(50%\);/)
   })
   it('what sits over every pane never takes the screen: the question cards as their one line, capped and scrolling', () => {
     expect(css).toContain('html.sx-frame #sq-host { max-height: 35%; overflow: auto;')
