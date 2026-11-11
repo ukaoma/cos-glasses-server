@@ -60,13 +60,27 @@ async function scenario(routerOptions: Record<string, unknown>): Promise<Record<
     out[name] = `${res.status} ${await res.text()}`
     return out[name]!
   }
+  // 2026-11-11 (S1): the recording was made with the runner's first steps already in the store when the streams
+  // connect (the trail entry, then chunk 6). Those are journaled through the run's ordered callback tail, so a fixed
+  // 80 ms is not enough on a loaded disk: the 7.0.27 publish run connected before the trail append landed and got
+  // the trail live after event 5. Wait for the store itself, not the clock. Reads the coordinator, not a route, so
+  // nothing is added to the recorded responses.
+  const stored = async (jobId: string) => {
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      const snap = await coordinator.getSnapshot(jobId)
+      if ((snap.trail?.length ?? 0) >= 1 && snap.eventSeq >= 6) return
+      if (Date.now() > deadline) throw new Error(`job ${jobId} did not reach its first chunk (eventSeq ${snap.eventSeq})`)
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+  }
   try {
     const admit = (clientJobId: string) => call(`admit:${clientJobId.slice(-1)}`, '/query-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientJobId, generation: 1, query: 'read the README', activityToolMode: 'preview' }),
     })
     const first = JSON.parse((await admit(CLIENT[0]!)).slice(4)).job.jobId as string
-    await new Promise(resolve => setTimeout(resolve, 80))
+    await stored(first)
     // A live stream that sees the end, for a plain client and a trail client.
     const stream = (name: string, query: string) => fetch(`${base}/api/query-jobs/${first}/events?generation=1&after=0${query}`)
       .then(async res => { out[name] = `${res.status} ${await res.text()}` })
@@ -81,7 +95,7 @@ async function scenario(routerOptions: Record<string, unknown>): Promise<Record<
     await call('sse:replay', `/query-jobs/${first}/events?generation=1&after=2`)
     await call('ack', `/query-jobs/${first}/ack`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ generation: 1 }) })
     const second = JSON.parse((await admit(CLIENT[1]!)).slice(4)).job.jobId as string
-    await new Promise(resolve => setTimeout(resolve, 80))
+    await stored(second)
     await call('cancel', `/query-jobs/${second}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ generation: 1 }) })
     await call('missing', `/query-jobs/by-client/0e5a9c1d-2222-4222-8222-00000000000f?generation=1`)
   } finally {
