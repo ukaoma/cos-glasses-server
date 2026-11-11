@@ -114,14 +114,14 @@ describe('organizer routes', () => {
 describe('what the list, /older and search carry', () => {
   it('a COS-pinned 40-day-old session is in the main list with its fields; pinned stays the agent’s own', async () => {
     expect((await call('PATCH', `/agent-sessions/claude/${OLD}/organizer`, { cos_pinned: true, title: 'Renamed October' })).status).toBe(200)
-    const list = await call('GET', '/agent-sessions')
+    const list = await call('GET', '/agent-sessions?kept=1')
     const row = list.json.sessions.find((r: any) => r.session_id === OLD)
     expect(row).toMatchObject({ cos_pinned: true, title_override: 'Renamed October', display_label: 'October notes', pinned: false })
     expect(list.json.organizer.rev).toBeGreaterThan(0)
   })
 
   it('with an empty store the list carries none of the new keys (an older client sees today’s payload)', async () => {
-    const list = await call('GET', '/agent-sessions')
+    const list = await call('GET', '/agent-sessions?kept=1')
     expect(list.json).not.toHaveProperty('organizer')
     for (const row of list.json.sessions) {
       for (const key of ['folder_id', 'cos_pinned', 'title_override']) expect(row).not.toHaveProperty(key)
@@ -130,11 +130,11 @@ describe('what the list, /older and search carry', () => {
   })
 
   it('the list never waits on a model read: the first answer has none, the background warm fills it for the next', async () => {
-    const first = await call('GET', '/agent-sessions')
+    const first = await call('GET', '/agent-sessions?kept=1')
     expect(first.json.sessions.find((r: any) => r.session_id === CLI)).not.toHaveProperty('reported_model')
     await __drainListModelWarmForTests()
     expect(listModelStats.reads).toBeGreaterThan(0)
-    const second = await call('GET', '/agent-sessions')
+    const second = await call('GET', '/agent-sessions?kept=1')
     expect(second.json.sessions.find((r: any) => r.session_id === CLI).reported_model).toBe('claude-opus-5-5')
   })
 
@@ -163,7 +163,7 @@ describe('what the list, /older and search carry', () => {
   it('no folder name or title reaches a log line', async () => {
     const f = (await call('POST', '/session-folders', { name: 'Project Falcon' })).json.folder
     await call('PATCH', `/agent-sessions/claude/${CLI}/organizer`, { folder_id: f.id, title: 'Secret board deck' })
-    await call('GET', '/agent-sessions')
+    await call('GET', '/agent-sessions?kept=1')
     expect(logs.join('\n')).not.toMatch(/Falcon|Secret board deck/)
   })
 })
@@ -187,7 +187,7 @@ describe('Claude alias changes through the routes (Q1 FIX 2)', () => {
     const desktopDir = join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions', 'acct', 'ws')
     writeFileSync(join(desktopDir, `local_${DESKTOP}.json`), JSON.stringify({ sessionId: `local_${DESKTOP}`, cliSessionId: NEW, cwd: '/x/MU-Chief-Staff', title: 'Desktop title' }))
     resetDesktopAliasMemo()
-    const list = await call('GET', '/agent-sessions')
+    const list = await call('GET', '/agent-sessions?kept=1')
     expect(list.json.sessions.find((r: any) => r.session_id === NEW)).toMatchObject({ cos_pinned: true })
   })
 })
@@ -203,7 +203,7 @@ describe('sessions a COS job started (Miles, 2026-11-10: kept 7 days)', () => {
       { persistedAt: new Date().toISOString(), jobId: 'j-ask', type: 'accepted', request: { query: 'q', sessionId: 's' }, patch: {} },
       { persistedAt: new Date().toISOString(), jobId: 'j-ask', type: 'running', patch: { provider: 'claude', cliSessionId: STARTED } },
     ].map(r => JSON.stringify(r)).join('\n') + '\n')
-    const list = await call('GET', '/agent-sessions')
+    const list = await call('GET', '/agent-sessions?kept=1')
     expect(list.json.sessions.map((r: any) => r.session_id)).toContain(STARTED)
     const older = await call('GET', '/agent-sessions/older?days=30&limit=200')
     expect(older.json.sessions.map((r: any) => r.session_id)).toContain(STARTED)

@@ -543,9 +543,14 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     // Step 2a: COS pins and folder members are listed at any age, outside the cap and `limit`.
     const organizer = organizerForList()
     const desktopIds = organizer ? desktopIdsByCli(aliases) : undefined
+    // 7.0.25 (lead 2026-11-11 10:29): kept rows only for a client that ASKS (`kept=1`, Control Web). The public lens
+    // (6.11.681) and Control Mac (0.5.389) do not clamp to their own limit, so a server-only update would have added
+    // up to KEPT_LIST_MAX rows to their lists unasked. Without the parameter the walk gets no keep set at all: exactly
+    // the 7.0.18 selection (same rows, same limit). The organizer fields on rows stay (additive, ignored by them).
+    const wantsKept = req.query.kept === '1'
     // Miles, 2026-11-10: sessions a COS job started in the last 7 days stay listed (memoized journal read).
-    const started = await cosStartedSessionIds()
-    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases, organizer ? organizer.keptIds() : {}, started)
+    const started = wantsKept ? await cosStartedSessionIds() : {}
+    const sessions = await listAgentSessions(roots, new Date(), live, limit, sort, dropped, aliases, wantsKept && organizer ? organizer.keptIds() : {}, started)
     // 6.45.5: each row's last real activity, read from its transcript records. Memoized on
     // mtime and size, so a steady poll re-reads nothing; bounded so a cold list of 80 rows
     // never holds 80 descriptors at once.
