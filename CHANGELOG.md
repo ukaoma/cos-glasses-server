@@ -1,4 +1,4 @@
-## 7.0.25 - Control Web: the Sessions list in groups, 30 days, folders, COS pins and rename; the server keeps them; two 7.0.23 faults fixed; a queued note with files is no longer stuck
+## 7.0.25 - Control Web: the Sessions list in groups, 30 days, folders, COS pins and rename; the server keeps them; two 7.0.23 faults fixed; a queued note is no longer stuck
 
 2026-11-11. 7.0.23 (d04cb67, the frame) plus fixes to it (below), the server's session store (S1, 90a58e6 and 11a4f52, the same server code Q1 passed at 469a334 plus the allowlist), S1's queue fixes (4cbae26, 0449992, 3e6fe55, Q1 PASS 08:55) and the grouped list (W1, a821b7f), on the lead's rulings (07:36, 08:31, 08:47). Candidate only: nothing is installed or published by this commit. 7.0.24 (packed, never installed) is retired.
 
@@ -6,7 +6,7 @@
 
 **A second fault in 7.0.23, fixed here:** when the web sign-in lapsed while Sessions was open, the sign-in screen came up but kept the Sessions frame (the page fixed at one screen, no scrolling). With the keyboard up the Connect button sat below the screen and could not be reached; only quitting and reopening cleared it. 7.0.22 did not do this. Now the frame comes off whenever the sign-in screen shows, and comes back with the app. Checked in WebKit with a real scroll and a real tap on Connect at four sizes (7.0.23 fails, this build passes). Whether this was the error Miles hit on 11/11 is not known yet.
 
-**A queued note is no longer stuck (S1, server):** a follow-up sent while a session was busy could wait up to 30 minutes after the session's turn had really ended: COS's reading of newer Claude Code transcripts mistook a kind of record for an open turn. Miles's 08:01 note waited this way. Now that reading treats a record it does not know as a turn that has ended. Each waiting note also carries why it waits, and the queued-note line in Control Web says it in words, for example "It has files, so it waits for the current turn to end."
+**A queued note is no longer stuck (S1, server):** a follow-up sent while a session was busy could wait long after the session's turn had really ended: COS's reading of newer Claude Code transcripts took a copied tool request for an open turn, and while the session kept writing, the wait kept renewing. Miles's 08:01 note on 7.0.23 waited 124.5 minutes this way; it was not about its attachment. Now that reading ignores records that are not the user's or the assistant's own turns, so a copied tool request no longer reopens a turn. Each waiting note also carries why it waits, and the queued-note line in Control Web says it in words, for example "It has files, so it waits for the current turn to end."
 
 **What changes in the Sessions list, for everyone who opens it in Control Web:**
 - **Groups, top to bottom:** Needs you, Working now, Pinned, your folders, then Today, Yesterday, Earlier this week, Last week, Earlier this month. A session shows once. Needs you uses the same rule as Today, so the two agree.
@@ -17,7 +17,7 @@
 - **The Sessions menu** (Sessions, Usage, COS cost, Refresh) and one sort menu (Updated or Opened; Best match while searching) head the list.
 
 **What changes for every client, the lens and COS Control on the Mac included:**
-- **Kept sessions:** a session pinned in COS, put in a folder, or started by a person through COS stays in the list past 7 days and past the per-agent cap of 20. At most 40 kept rows per response, across agents; the rest are counted (`dropped.kept`) and come back as short rows through `/older`, so none is lost. About +150 ms and +27 KB per list read when all 40 are in use.
+- **Kept sessions:** a session pinned in COS or put in a folder stays in the list at any age and past the per-agent cap of 20; a session a person started through COS stays past that cap for 7 days. At most 40 kept rows per response, across agents; the rest are counted (`dropped.kept`) and come back as short rows through `/older`, so none is lost. About +150 ms and +27 KB per list read when all 40 are in use.
 - **PROVISIONAL: sessions a person started through COS (Ask, Work, Continue, tasks) are kept for 7 days with no action from anyone.** COS routines and maintenance jobs are left out. A job counts only when a person started it: no origin or a task origin, and no maintenance workflow, so a new kind of background job is left out by default. This is Miles's call (11/10 23:16) and stays provisional. It is its own commit, 11a4f52, so it can be dropped on its own; without it the build is 90a58e6 plus the list.
 - `/api/models` gains each agent's efforts. List rows gain `folder_id`, `cos_pinned`, `title_override` and the reported model where known. Older clients ignore unknown keys.
 - **New disk reads:** a model warm after each list read (Claude and Codex, at most 4 at a time, each file at most once a minute), and the query-job journal for session ids and times only (each day file at most every 30 s). No prompts or answers are read.
@@ -31,6 +31,7 @@
 ### If you roll back
 
 - To 7.0.23: Control Web shows the frame with the old flat 7-day list, both 7.0.23 faults above come back, and a queued note can wait after a turn has ended again. The other clients drop back to today's list. `session-organizer.json` stays on disk untouched and is ignored; reinstalling 7.0.25 picks it up again. Nothing else is stored by this release.
+- To 7.0.18 (the public build before this one): everything from 7.0.19 to 7.0.25 in Control Web goes back to the 7.0.18 page, and a queued note can wait after a turn has ended again. `session-organizer.json` stays on disk and 7.0.18 ignores it (it reads no such file); the queued-note fields this release adds (the hold reason and its time) are ignored too. Nothing is rewritten.
 
 ## 7.0.23 - Control Web: a visible height under 80 px is no reading, and Sessions is one screen (layout, not a proven fix)
 
