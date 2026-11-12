@@ -1,3 +1,22 @@
+## 7.0.30 - Control Web: Back goes the way you came, Reply stays at the bottom of a message, Meetings opens on today, and clearer copy buttons
+
+2026-11-12. 7.0.29 plus five Control Web changes from a tester's phone feedback.
+
+- **Back goes the way you came.** Back now returns to the page you came from, not a fixed parent. Open a meeting from Speakers, and Back takes you to Speakers, not to Meetings. It is the browser's own Back, so the two always agree, and it adds nothing to the browser's history. Opened straight from a link or after a reload, Back goes one level up as before. Back names where it goes ("Speakers", "Meetings").
+- **Back stays in reach on a tall phone.** On a page you are reading (a session, a message, a meeting), the top bar with Back no longer slides away as you scroll down.
+- **Reply stays at the bottom of a message.** Opening a message from Messages, the Reply box now sits at the bottom of the screen while you read, and above the keyboard while you type, as the COS chat already did.
+- **Speakers: the copy buttons say they copy.** "Summary" and "Full (N KB)" now read "Copy summary" and "Copy full (N KB)". The one you tap says "Copied" for a moment, and a screen reader hears what was copied.
+- **Meetings opens on today.** The calendar opens on today, marked with a ring, even when today has no meetings. Then the list says "No meetings today." with one tap to the latest day that has meetings (or to last month when this month has none).
+- **Settings says "your phone's camera"**, not "your iPhone Camera". COS on the web works on Android too.
+- Tested in a browser (WebKit) at a tall iPhone size, the folded Duo with its side rail, and the open Duo, in light and dark. Before this build the same checks fail. Not yet tested on a real phone; Android was not tested.
+
+**Default-on for every install:** yes, all six, with no switch, at every screen size.
+
+### If you roll back
+
+- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, and Settings says iPhone. Nothing is stored.
+- Further back: as in 7.0.29 below.
+
 ## 7.0.29 - Control Web: on the folded Duo, the panes sit in a side rail at the right edge, and Back is at thumb height
 
 2026-11-12. 7.0.28 plus Control Web changes: a side rail for the folded Duo only, and small Sessions list changes for every screen.
