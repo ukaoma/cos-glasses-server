@@ -2851,6 +2851,8 @@
       var touched = function () { SX_PIN.userAt = Date.now(); };
       ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(function (t) { body.addEventListener(t, touched, { passive: true }); });
       body.addEventListener('scroll', sxGoQuestionPaint, { passive: true });
+      // 7.0.29 ADD 3: reaching the end shows him what is there.
+      body.addEventListener('scroll', function () { if (typeof sxMarkShown === 'function' && state.reading) sxMarkShown(state.reading); }, { passive: true });
       body.addEventListener('scroll', function () {
         if (SX_PIN.body !== body || Date.now() - SX_PIN.userAt > SX_PIN_USER_MS) return;
         if (Math.abs(body.scrollTop - SX_PIN.put) > 4 && body.scrollTop < body.scrollHeight - body.clientHeight - 4) sxUnpin();
@@ -3623,7 +3625,6 @@
       if (act === 'clear') { var input = $('sessions-q'); input.value = ''; searchSessions(); input.focus(); return; }
       if (act === 'copy-session') return copySessionBrief();
       if (act === 'full') { if (SX_SPLIT) SX_SPLIT.toggleFull(); return; }
-      if (act === 'refresh-turns' && rd) { rd.refusal = null; renderVerdict(rd); refreshTurns(rd.provider, rd.id); return; }
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
       if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
       if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; renderVerdict(rd); return; }
@@ -4060,6 +4061,8 @@
         startHeldTimer(state.reading);
       }
       if (turns.length) requestAnimationFrame(function () { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); });
+      // 7.0.29 ADD 3: the newest turns he was just taken to count as shown (this frame runs after the one above).
+      if (turns.length) requestAnimationFrame(function () { if (typeof sxMarkShown === 'function') sxMarkShown(r); });
       requestAnimationFrame(function () { if (typeof sxFrameCrumb === 'function') sxFrameCrumb('open'); });
       watchSession(provider, id);
     }).catch(function (err) {
@@ -4348,6 +4351,53 @@
     paintActivity(r);
     if (moved) renderVerdict(r);
   }
+  // ── 7.0.29 ADD 3 (Miles 00:01 "we have to hit continue to steer the session"; 00:03 "Refresh doesn't seem to do
+  // anything"; the lead's ruling 00:02 and A1 to A3 00:47): the changed-thread stop. The server guard is unchanged; the
+  // page does the acknowledging. Shown, not just drawn (A1): a turn counts as shown only while the reader is at the
+  // newest turn (following it, or scrolled to the end since). Read from the reader's own pin and scroll, no observer per
+  // turn. Only turns with words count; tool steps are not turns here.
+  function sxTextTurns(turns) { return (turns || []).filter(function (t) { return t && String(t.text || t.content || '').trim(); }); }
+  function sxAtEnd() {
+    try {
+      var body = $('session-body');
+      if (body && document.documentElement.classList.contains('sx-frame')) return SX_PIN.body === body || body.scrollTop >= body.scrollHeight - body.clientHeight - 4;
+      var de = document.documentElement;
+      return (window.scrollY || 0) + window.innerHeight >= de.scrollHeight - 4;
+    } catch (_e) { return false; }   // a page without these (a test harness): nothing counts as shown, so nothing resends
+  }
+  function sxMarkShown(r) {
+    if (!r || state.reading !== r || !sxAtEnd()) return;
+    r.shown = r.shown || {};
+    sxTextTurns(r.turns).forEach(function (t) { r.shown[sxTurnSig(t)] = 1; });
+  }
+  // At Send: what he had been shown, and whether the session was already waiting on him.
+  function sxPressSeen(r) {
+    sxMarkShown(r);
+    return { shown: Object.assign({}, r.shown || {}), waiting: !!r.waitingNow };
+  }
+  // After a changed-thread refusal: fetch the turns (the refreshTurns request), draw them, and say what is new since Send:
+  // turns with words he had not been shown, or a question or permission now waiting that was not (A2). null: the fetch
+  // failed, so nothing can be said and the box shows.
+  function sxChangedLook(r, seen) {
+    return api(sessionPath(r.provider, r.id, '?turns=' + SX_TURNS + '&cards=1')).then(function (d) {
+      if (state.reading !== r) return null;
+      var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];
+      var box = $('session-turns'); if (box) { sxMergeTurns(box, r.turns || [], turns, d); readerImagesMount(box, r); }
+      r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
+      var fresh = sxTextTurns(turns).filter(function (t) { return !seen.shown[sxTurnSig(t)]; });
+      // Waiting by the reader's own rule, or by the detail's own word (a session read as stale may still say it waits):
+      // either way stopping is the safe side.
+      return { fresh: fresh, newWait: (sxState(d) === 'waiting' || (d && d.agent_state === 'waiting')) && !seen.waiting };
+    }, function () { return null; });
+  }
+  // Take him to the first new turn: it is drawn, and the stop is about it.
+  function sxShowFresh(fresh) {
+    if (!fresh || !fresh.length) return;
+    var sig = sxTurnSig(fresh[0]), el = null;
+    document.querySelectorAll('#session-turns .turn[data-sig]').forEach(function (n) { if (!el && n.getAttribute('data-sig') === sig) el = n; });
+    sxUnpin();
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' }); else sxToNewest();
+  }
   function refreshTurns(provider, id) {
     var reading = state.reading;
     api(sessionPath(provider, id, '?turns=' + SX_TURNS + '&cards=1')).then(function (d) {
@@ -4357,6 +4407,7 @@
       var box = $('session-turns'); if (box) { sxMergeTurns(box, r.turns || [], turns, d); readerImagesMount(box, r); }
       // The header keeps the subtitle it opened with: a rewrap above the turns would move them.
       r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
+      sxMarkShown(r);
       renderHeld(r);
       loadQueue(provider, id);
       sxProbeAttach(r);
@@ -4480,9 +4531,10 @@
     } else if (r.refusal) {
       var f = r.refusal;
       html = refusalBox(f.copy, f.supplement,
-        (f.changed ? '<button type="button" class="cx-btn quiet" data-sx="refresh-turns">Refresh</button><button type="button" class="cx-btn quiet" data-action="send-anyway">Continue anyway</button>' : '') +
+        // 7.0.29 ADD 3: a changed thread says what each button does. The page has already refreshed, so no Refresh.
+        (f.changed ? '<button type="button" class="cx-btn quiet" data-action="send-anyway">Send it anyway</button>' : '') +
         (f.retry ? '<button type="button" class="cx-btn quiet" data-sx="retry">Retry</button>' : '') +
-        (f.fork ? forkBtn : ''));
+        (f.fork ? (f.changed ? '<button type="button" class="cx-btn quiet" data-action="fork-session" title="Runs your message in a copy of this thread. The original is untouched.">Send to a copy</button>' : forkBtn) : ''));
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
       // 6.99.29: "Working right now" only while the one state says so.
       if (sxParkNoteShows(r)) html = '<div class="sx-park"><p>' + esc(sxParkLine(r)) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
@@ -4691,6 +4743,8 @@
     // 7.0.18: while a turn-end ask is open, the box's words are his own answer ('Other' in the contract): sent with the
     // same attribution as a choice. A fork goes to a copy and is not an answer, so it is sent as written.
     if (!fork && r.turnEnd && turnEndOf(readerRowOf(r))) text = turnEndPrompt(text);
+    // 7.0.29 ADD 3: what he had been shown when he pressed Send (a turn-end answer never resends by itself).
+    if (!fork && typeof sxPressSeen === 'function') opts = Object.assign({}, opts || {}, { seen: r.turnEnd ? null : sxPressSeen(r) });
     r.sending = true;
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
     var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); paintReaderFiles(); };
@@ -4771,14 +4825,25 @@
         // it under the same key and sends it the moment the reply ends.
         if (reason === 'native_turn_in_progress') { if (!opts.held) view.hold(r, draft); return 'held'; }
         if (reason === 'native_thread_changed' && b.revision) {
-          if (opts.held) settleHeld(r, opts.held, 'refused', 'This session changed on your Mac while your message waited.');
-          else {
-            // Control's refusal box for a changed thread: Refresh, Continue anyway, Fork with this message.
-            r.sendAnyway = b.revision;
-            view.status(r, '');
-            r.refusal = { copy: b.reasonCopy || 'This session changed on your Mac since you opened it.', changed: true, fork: true };
-            view.verdict(r);
+          // The box. Send it anyway always carries the revision of THIS refusal, the newest (A3).
+          var changedBox = function (copy) { r.sendAnyway = b.revision; view.status(r, ''); r.refusal = { copy: copy, changed: true, fork: true }; view.verdict(r); };
+          if (opts.held) { settleHeld(r, opts.held, 'refused', 'This session changed on your Mac while your message waited.'); return 'changed'; }
+          // 7.0.29 ADD 3, the session reader only (opts.seen; Today's panel keeps its own path): never for a held or
+          // queued message, a turn-end answer (seen is null), or a send that already carries a revision, which the one
+          // automatic resend always does. So at most one resend, and a second refusal shows the box.
+          if (opts.seen && !opts.acknowledgedRevision && state.reading === r) {
+            return sxChangedLook(r, opts.seen).then(function (look) {
+              if (look && !look.fresh.length && !look.newWait && state.reading === r) return continueSession(r, text, Object.assign({}, opts, { acknowledgedRevision: b.revision }));
+              changedBox(!look ? 'This session changed on your Mac, and COS could not load what changed. Your message is not sent yet.'
+                : look.fresh.length ? 'A new reply arrived while you were writing. Your message is not sent yet.'
+                : 'The session is now waiting on a question. Your message is not sent yet.');
+              if (look) sxShowFresh(look.fresh);
+              return 'changed';
+            });
           }
+          changedBox(opts.seen === undefined ? (b.reasonCopy || 'This session changed on your Mac since you opened it.')
+            : opts.seen === null ? 'This session changed on your Mac. Your answer is not sent yet.'
+            : 'This session changed on your Mac again. Your message is not sent yet.');
           return 'changed';
         }
         if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding)$/.test(reason) && !opts.reattached) {
