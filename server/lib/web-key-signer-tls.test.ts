@@ -905,7 +905,7 @@ describe('SR-03: the signer\'s own status call, without peers; an oversized answ
 
 describe('SR-11: one reason list, pinned, for the server and COS Control\'s generated golden', () => {
   it('SIGNER_TLS_REASONS is the pinned list (a change here means regenerating Control\'s golden.json), with no duplicates', () => {
-    expect([...SIGNER_TLS_REASONS]).toEqual(['ok', 'pending', 'tailnet_name_unknown', 'tailnet_https_certs_off', 'cert_domain_mismatch', 'tailscale_not_running', 'tailscale_cli_missing', 'tailscale_cli_timeout', 'tailscale_cli_gui_unavailable', 'tailscale_output_too_large', 'tailscale_status_failed', 'tailscale_cert_failed', 'cert_invalid', 'cert_expired', 'cert_not_yet_valid', 'cert_untrusted', 'cert_store_failed', 'cert_daily_cap', 'stored_symlink', 'stored_not_file', 'stored_owner', 'stored_writable', 'stored_too_large'])
+    expect([...SIGNER_TLS_REASONS]).toEqual(['ok', 'pending', 'tailnet_name_unknown', 'tailnet_https_certs_off', 'cert_domain_mismatch', 'tailscale_not_running', 'tailscale_cli_missing', 'tailscale_cli_timeout', 'tailscale_cli_gui_unavailable', 'tailscale_output_too_large', 'tailscale_status_failed', 'tailscale_cert_failed', 'cert_invalid', 'cert_expired', 'cert_not_yet_valid', 'cert_untrusted', 'cert_store_failed', 'cert_daily_cap', 'stored_symlink', 'stored_not_file', 'stored_owner', 'stored_writable', 'stored_too_large', 'stored_readable'])
     expect(new Set(SIGNER_TLS_REASONS).size).toBe(SIGNER_TLS_REASONS.length)
     expect(Object.isFrozen(SIGNER_TLS_REASONS)).toBe(true)
   })
@@ -979,6 +979,11 @@ describe('SR-08: a stored pair is read only from a plain, private file in a priv
       ['another owner', 'stored_owner', () => ({ ownerUid: uid + 1 })],
       ['group- or other-writable cert', 'stored_writable', ({ dir }) => { chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o666); return {} }],
       ['group- or other-writable folder', 'stored_writable', ({ dir }) => { chmodSync(dir, 0o777); return {} }],
+      // Security review 2026-11-12, finding 5: the key and its folder may not be readable (or searchable) by anyone else.
+      ['group-readable key', 'stored_readable', ({ dir }) => { chmodSync(join(dir, SIGNER_TLS_KEY_FILE), 0o640); return {} }],
+      ['other-readable key', 'stored_readable', ({ dir }) => { chmodSync(join(dir, SIGNER_TLS_KEY_FILE), 0o604); return {} }],
+      ['group-readable folder', 'stored_readable', ({ dir }) => { chmodSync(dir, 0o750); return {} }],
+      ['other-searchable folder (execute only)', 'stored_readable', ({ dir }) => { chmodSync(dir, 0o701); return {} }],
       ['cert over 64 KiB', 'stored_too_large', ({ dir }) => {
         writeFileSync(join(dir, SIGNER_TLS_CERT_FILE), `${pairA.certPem}${tailCa.pem}${'#'.repeat(SIGNER_TLS_STORED_MAX_BYTES)}`, { mode: 0o644 })
         return {}
@@ -991,6 +996,24 @@ describe('SR-08: a stored pair is read only from a plain, private file in a priv
       expect({ label, served: r.tls.served() === null, ...pick(r.tls.status()) }).toEqual({ label, served: true, trusted: false, storedRefused: reason })
     }
     function pick(s: { trusted: boolean; storedRefused: string | null }) { return { trusted: s.trusted, storedRefused: s.storedRefused } }
+  })
+
+  it('the certificate is public: readable by group and others (0644, as this server writes it) it is taken', () => {
+    const { dir } = goodStore()
+    expect(statSync(join(dir, SIGNER_TLS_CERT_FILE)).mode & 0o777).toBe(0o644)
+    chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o444)
+    const r = rig({ dir })
+    expect(r.tls.status()).toMatchObject({ trusted: true, storedRefused: null })
+  })
+
+  it('a key made readable by others after it was stored stops serving at the next pickup, and is taken again once fixed', () => {
+    const { dir } = goodStore()
+    chmodSync(join(dir, SIGNER_TLS_KEY_FILE), 0o644)
+    const r = rig({ dir })
+    expect(r.tls.served()).toBeNull()
+    expect(r.tls.status()).toMatchObject({ trusted: false, storedRefused: 'stored_readable' })
+    chmodSync(join(dir, SIGNER_TLS_KEY_FILE), 0o600)
+    expect(r.tls.status()).toMatchObject({ trusted: true, storedRefused: null, host: NAME })
   })
 
   it('a refused file, once fixed, is taken at the next status read with no restart; the pickup log names the reason, never the host', () => {

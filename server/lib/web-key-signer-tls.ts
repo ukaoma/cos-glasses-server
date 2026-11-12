@@ -178,6 +178,7 @@ export const SIGNER_TLS_REASONS = Object.freeze([
   'stored_owner',
   'stored_writable',
   'stored_too_large',
+  'stored_readable',
 ] as const)
 
 export type SignerTlsReason = typeof SIGNER_TLS_REASONS[number]
@@ -377,13 +378,22 @@ function firstLine(s: string): string {
   return (s.split('\n').find(l => l.trim()) ?? '').replace(/[^\x20-\x7e]/g, '').slice(0, 160)
 }
 
-type StoredRefusal = 'stored_symlink' | 'stored_not_file' | 'stored_owner' | 'stored_writable' | 'stored_too_large'
+type StoredRefusal = 'stored_symlink' | 'stored_not_file' | 'stored_owner' | 'stored_writable' | 'stored_too_large' | 'stored_readable'
 type StoredRead = { kind: 'none' } | { kind: 'refused'; reason: StoredRefusal } | { kind: 'ok'; text: string }
 
-/** SR-08: the owner and mode rules shared by the folder and each file. */
-function ownerOrModeRefusal(uid: number, mode: number, ownerUid: number | null): StoredRefusal | null {
+/**
+ * SR-08: the owner and mode rules shared by the folder and each file.
+ *
+ * `secret` (security review 2026-11-12, finding 5): the folder and the private key may carry no group or other
+ * bits at all, read and search included, so a key another user can read is never served. The certificate is
+ * public and the fetch state holds counts only, so there only write bits are refused. This server has written
+ * the folder 0700, the key 0600, the state 0600 and the certificate 0644 since the store was added (d4f3ee6,
+ * 2026-11-09), so no pair it wrote is refused by this rule.
+ */
+function ownerOrModeRefusal(uid: number, mode: number, ownerUid: number | null, secret = false): StoredRefusal | null {
   if (ownerUid !== null && uid !== ownerUid) return 'stored_owner'
   if ((mode & 0o022) !== 0) return 'stored_writable'
+  if (secret && (mode & 0o077) !== 0) return 'stored_readable'
   return null
 }
 
@@ -396,7 +406,7 @@ function storedDirRefusal(dir: string, ownerUid: number | null): 'none' | Stored
   if (!st) return 'none'
   if (st.isSymbolicLink()) return 'stored_symlink'
   if (!st.isDirectory()) return 'stored_not_file'
-  return ownerOrModeRefusal(st.uid, st.mode, ownerUid)
+  return ownerOrModeRefusal(st.uid, st.mode, ownerUid, true)
 }
 
 /**
@@ -404,7 +414,7 @@ function storedDirRefusal(dir: string, ownerUid: number | null): 'none' | Stored
  * (no swap between the check and the read): a regular file, owned by this server's user, not writable by
  * group or others, at most SIGNER_TLS_STORED_MAX_BYTES (read with that cap, never the whole file).
  */
-function readStoredFile(path: string, ownerUid: number | null): StoredRead {
+function readStoredFile(path: string, ownerUid: number | null, secret = false): StoredRead {
   const pre = lstatSync(path, { throwIfNoEntry: false })
   if (!pre) return { kind: 'none' }
   if (pre.isSymbolicLink()) return { kind: 'refused', reason: 'stored_symlink' }
@@ -420,7 +430,7 @@ function readStoredFile(path: string, ownerUid: number | null): StoredRead {
   try {
     const st = fstatSync(fd)
     if (!st.isFile()) return { kind: 'refused', reason: 'stored_not_file' }
-    const refusal = ownerOrModeRefusal(st.uid, st.mode, ownerUid)
+    const refusal = ownerOrModeRefusal(st.uid, st.mode, ownerUid, secret)
     if (refusal) return { kind: 'refused', reason: refusal }
     if (st.size > SIGNER_TLS_STORED_MAX_BYTES) return { kind: 'refused', reason: 'stored_too_large' }
     const buf = Buffer.alloc(SIGNER_TLS_STORED_MAX_BYTES + 1)
@@ -761,7 +771,7 @@ export class SignerTls {
       if (dir === 'none') { this.storedRefused = null; return }
       if (dir !== null) { this.storedRefused = dir; return }
       const cert = readStoredFile(join(this.deps.dir, SIGNER_TLS_CERT_FILE), this.ownerUid)
-      const key = readStoredFile(join(this.deps.dir, SIGNER_TLS_KEY_FILE), this.ownerUid)
+      const key = readStoredFile(join(this.deps.dir, SIGNER_TLS_KEY_FILE), this.ownerUid, true)
       if (cert.kind === 'none' || key.kind === 'none') { this.storedRefused = null; return }
       if (cert.kind === 'refused') { this.storedRefused = cert.reason; return }
       if (key.kind === 'refused') { this.storedRefused = key.reason; return }
