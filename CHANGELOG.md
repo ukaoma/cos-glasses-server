@@ -12,7 +12,15 @@
 - **A phone shows how you got here.** On a page you opened (a meeting, a message, a session), one line under the top bar names the steps that led there, for example "Today / Speakers / Naming voices / Meeting". Each earlier step is a link that goes back to it, the same way Back does; the page you are on is last and is not a link. The line never wraps: a long path drops steps from the middle and shows "…" in their place. There is no line on a pane's list, on a page opened from a link, or after a reload. Screens 600 px and wider are unchanged; they keep the navigation bar.
 - Tested in a browser (WebKit) at a tall iPhone size, the folded Duo with its side rail, and the open Duo, in light and dark. Before this build the same checks fail. Not yet tested on a real phone; Android was not tested.
 
-**Default-on for every install:** yes, all eight, with no switch, at every screen size (the how-you-got-here line below 600 px only).
+Server:
+
+- **A sign-in that ran out says so.** When Claude Code reports "Failed to authenticate: OAuth session expired and could not be refreshed", COS now names it as a sign-in problem, not "provider process exited".
+- **Phone approvals, off by default, unchanged for everyone until switched on:**
+  - A phone can sign every action this build supports except pushing main, which stays typed at the desk (Miles, 2026-11-12 11:11).
+  - The phone-approval signer refuses a stored key or folder that other users can read (stored_readable). It runs only when the phone-approval switch is on.
+  - The web-key mutation gate's two dead targets now match. The script ships in the npm pack, so pack bytes change; server behaviour does not.
+
+**Default-on for every install:** yes, all eight, with no switch, at every screen size (the how-you-got-here line below 600 px only). The sign-in line is on for everyone. The phone-approval items do nothing while the switch is off, which is the default everywhere.
 
 ### If you roll back
 
