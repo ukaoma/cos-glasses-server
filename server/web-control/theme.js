@@ -25,6 +25,22 @@
   if (media && media.addEventListener) media.addEventListener('change', function () { if (read() === 'system') apply('system'); });
 })();
 
+/* 7.0.29 (Miles 21:42): "for shorter screens like the duo we should use the side rail when it's folded"; tall phones keep
+   the top menu. The test is the SCREEN's shape, never the window's: screen.width and screen.height are points that no
+   zoom, keyboard, browser bar or Home Screen mode changes (the Duo reports 466 by 678 at 85 and 100 percent, folded and
+   open, and its web view is 449 by 797 or 382 by 678 inside that). A screen whose long side is under 1.6 times its short
+   side is short: the Duo is 1.46; every iPhone is 1.78 (SE, 8 Plus) or 2.16 and taller, in a Safari tab or not. app.css
+   draws the side rail only with this class AND a page under 600 px wide on a touch screen. Missing or odd numbers add
+   no class: no rail, the layout as before. Runs before the first paint, so the rail never moves the page on load. */
+(function () {
+  try {
+    var s = window.screen, a = s ? Number(s.width) : 0, b = s ? Number(s.height) : 0;
+    if (!(a > 0 && b > 0 && isFinite(a) && isFinite(b))) return;
+    var lo = Math.min(a, b), hi = Math.max(a, b);
+    if (lo < 600 && hi / lo < 1.6) document.documentElement.classList.add('short-screen');
+  } catch (_e) { /* no class: no rail */ }
+})();
+
 /* The app's scripts (index.html #boot-scripts), loaded one frame after the page is drawn so the first paint never waits
    for them. Same files, same order (async=false keeps insertion order), and app.js's boot runs only once every one of
    them has run, as when they were in the page: window.CosBoot.after(boot). The frame wait has a 50 ms fallback, because

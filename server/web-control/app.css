@@ -653,3 +653,57 @@ html { touch-action: manipulation; }
 .sx-te-choices, .ta-te-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 6px; }
 .sx-te-choices .cx-btn, .ta-te-choices .cx-btn { flex: 1 1 12rem; min-height: 44px; white-space: normal; text-align: center; line-height: 1.25; }
 .sx-mac-q .sx-note { margin: 6px 0 0; }
+
+/* ── 7.0.29: the folded Duo's side rail (Miles 21:39 "These side buttons are a must on the duo"; 21:42 tall phones keep
+   the top menu). theme.js sets html.short-screen from the screen's shape; this draws it only under 600 px on a touch
+   screen, so nothing changes from 600 px, on a mouse, or on a tall phone. It is the same nav.rail as the wide rail, so
+   the panes, their order, icons, badges and aria-current are one list: here it moves to the right edge as icons only,
+   with the top bar's Back at its foot on a reader. --rail-hit is 44 points on the phone: app.js railHitSync sets it from
+   the zoom (52 px at Safari's 85 percent Page Zoom, 44 px at 100); 52 px until it runs. Colours are the rail's own
+   tokens; the current pane keeps the wide rail's look (rail-active fill and its small shadow, no border). */
+.rail-back { display: none; }
+@media (max-width: 599px) and (pointer: coarse) {
+  html.short-screen { --rail-w: calc(var(--rail-hit, 52px) + 6px); }
+  html.short-screen .app-shell { display: flex; flex-direction: row; align-items: flex-start; }
+  html.short-screen.sx-frame .app-shell { flex-direction: row; align-items: stretch; }
+  html.short-screen .main-col { flex: 1 1 auto; min-width: 0; --safe-right: 0px; }
+  html.short-screen .rail {
+    order: 2; flex: none; width: calc(var(--rail-w) + var(--safe-right)); box-sizing: border-box;
+    display: flex; flex-direction: column; align-items: center; gap: 0;
+    position: sticky; top: 0; height: 100dvh; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+    padding: calc(var(--safe-top) + 4px) var(--safe-right) calc(var(--safe-bottom) + 6px) 0;
+    background: var(--rail); border-left: 1px solid var(--rail-border);
+  }
+  html.short-screen.sx-frame .rail { position: static; height: auto; min-height: 0; }
+  html.short-screen .rail::-webkit-scrollbar { display: none; }
+  html.short-screen .rail-head, html.short-screen .rail-text, html.short-screen .rail-settings .rail-label, html.short-screen .server-line { display: none; }
+  html.short-screen .rail-btn, html.short-screen .rail-settings {
+    position: relative; flex: none; display: grid; place-items: center;
+    width: var(--rail-hit, 52px); height: var(--rail-hit, 52px); min-height: 0; padding: 0;
+    border-radius: 12px; color: var(--grey);
+  }
+  html.short-screen .rail-btn .icon, html.short-screen .rail-settings .icon { width: 22px; height: 22px; }
+  html.short-screen .rail-btn[aria-current='page'], html.short-screen .rail-settings[aria-current='page'] { background: var(--rail-active); color: var(--ink); box-shadow: 0 1px 2px rgba(43, 33, 26, 0.08); }
+  html.short-screen .rail-btn:active:not([aria-current='page']), html.short-screen .rail-settings:active:not([aria-current='page']) { background: var(--rail-border); color: var(--ink); }
+  html.short-screen .rail-btn .badge-dot { top: 9px; right: 9px; }
+  html.short-screen .rail-btn.hot::after { content: ''; position: absolute; top: 9px; right: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--hot); }
+  html.short-screen .rail-btn .inbox-count { position: absolute; top: 4px; right: 2px; }
+  html.short-screen .rail-btn .inbox-dot { position: absolute; top: 9px; right: 9px; }
+  html.short-screen .rail-sep { flex: none; width: 24px; height: 1px; margin: 3px 0; background: var(--rail-border); }
+  html.short-screen .rail-spacer { display: none; }
+  /* Back: alone at the foot, outlined so it never reads as a pane; it stays on screen when the panes scroll. */
+  html.short-screen .rail-back:not([hidden]) {
+    display: grid; place-items: center; flex: none; margin-top: auto;
+    position: sticky; bottom: 0; z-index: 1;
+    width: var(--rail-hit, 52px); height: var(--rail-hit, 52px);
+    border: 1px solid var(--btn-border); border-radius: 12px; background: var(--rail); color: var(--ink);
+  }
+  html.short-screen .rail-back .icon { width: 22px; height: 22px; stroke-width: 2; }
+  html.short-screen .rail-back:active { background: var(--rail-border); }
+  /* The focus ring sits inside the button: the rail clips anything past its edge. */
+  html.short-screen .rail :focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 12px; }
+  /* One way to switch panes on a screen: the rail. The top bar keeps the pane's name, without the caret and its menu
+     (app.js makes the button inert), and its Back moves to the rail. */
+  html.short-screen .section-btn .caret, html.short-screen #topbar-back { display: none !important; }
+  html.short-screen .section-btn { cursor: default; }
+}

@@ -148,6 +148,9 @@
       <div class="rail-spacer"></div>
       <button type="button" class="rail-settings" data-pane="settings" aria-label="Settings"><svg class="icon"><use href="#i-settings"/></svg><span class="rail-label">Settings</span></button>
       <p class="server-line" data-server-line><span class="dot ok" data-host-dot></span><span class="server-text" data-server-text>Server connected</span></p>
+      <!-- 7.0.29: the folded Duo's side rail only (app.css, html.short-screen): the top bar's Back, at thumb height. Shown
+           where the top bar shows Back today, on a reader, and it calls the same goBack. Never drawn from 600 px. -->
+      <button type="button" class="rail-back" id="rail-back" aria-label="Back" hidden><svg class="icon"><use href="#i-back"/></svg></button>
     </nav>
 
     <div class="main-col">

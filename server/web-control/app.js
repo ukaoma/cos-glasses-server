@@ -529,6 +529,48 @@
   // Comet): height is its scarce axis, so it gets the phone Ask sheet and the 44 px tap floor (app.css), as folded does.
   var SHORT_TOUCH_MQ = '(pointer: coarse) and (max-height: 720px)';
   function isPhone() { return !window.matchMedia('(min-width: 600px)').matches || window.matchMedia(SHORT_TOUCH_MQ).matches; }
+  // 7.0.29: the folded Duo's side rail (app.css "the folded Duo's side rail"). theme.js decides from the screen's shape
+  // (html.short-screen); this media query is app.css's own, so the two never disagree. When it is on, the rail is the one
+  // way to switch panes: the top bar's section button keeps the name and loses its menu (inert), and its Back moves to
+  // the rail's foot (#rail-back, the same goBack).
+  var SIDE_RAIL_MQ = '(max-width: 599px) and (pointer: coarse)';
+  function sideRail() {
+    var de = document.documentElement;
+    return !!(de && de.classList && de.classList.contains('short-screen') && window.matchMedia && window.matchMedia(SIDE_RAIL_MQ).matches);
+  }
+  // 44 points on the phone. Safari's Page Zoom lays the page out wider and draws it at visualViewport.scale (his Duo: 449 px
+  // at 0.85), so 44 px would be 37 points: the rail's buttons are ceil(44 / scale) px: 44 at 100 percent, 52 at 85, 88 at 50 (the lowest Page Zoom). Read at boot and when the
+  // layout width changes (rotation), never on a pinch: a pinch must not resize the rail.
+  var RAIL = { hit: 0, cw: -1, hooked: false };
+  function railHitSync() {
+    var de = document.documentElement, cw = de ? de.clientWidth : 0;
+    if (RAIL.hit && cw === RAIL.cw) return RAIL.hit;
+    var vv = window.visualViewport, s = vv && typeof vv.scale === 'number' ? vv.scale : 1;
+    if (!(s >= 0.5 && s <= 1)) s = 1;
+    RAIL.hit = Math.ceil(44 / s - 0.01);   // s is 0.5 to 1 here, so 44 to 88
+    RAIL.cw = cw;
+    if (de && de.style) de.style.setProperty('--rail-hit', RAIL.hit + 'px');
+    return RAIL.hit;
+  }
+  function railSync() {
+    var on = false;
+    try {
+      on = sideRail();
+      var btn = typeof $ === 'function' ? $('section-btn') : null;
+      if (btn) {
+        btn.inert = on;
+        if (on) btn.removeAttribute('aria-haspopup'); else btn.setAttribute('aria-haspopup', 'dialog');
+      }
+      if (on) { railHitSync(); closeMenu(); }
+      if (!RAIL.hooked && typeof window.matchMedia === 'function' && typeof window.addEventListener === 'function') {
+        RAIL.hooked = true;
+        var mq = window.matchMedia(SIDE_RAIL_MQ);
+        if (mq && mq.addEventListener) mq.addEventListener('change', railSync); else if (mq && mq.addListener) mq.addListener(railSync);
+        window.addEventListener('resize', function () { if (sideRail()) railHitSync(); });
+      }
+    } catch (_e) { /* a harness without a page: no rail */ }
+    return on;
+  }
   /** A keyboard and a fine pointer are the way in (a Mac, a PC): Return sends. Touch screens type a new line. */
   function keyboardFirst() { return !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches); }
   // Return in a text box sends only where a keyboard and a pointer are the way in (cos-chat.js keyboardFirst): never on
@@ -563,6 +605,8 @@
 
     // Top bar (phone): the section switcher at a list, a back button on a reader.
     $('topbar-back').classList.toggle('hidden', !reading);
+    var railBack = $('rail-back');
+    if (railBack) railBack.hidden = !reading;
     $('section-btn').classList.toggle('hidden', reading);
     $('topbar-back-label').textContent = TITLES[r.pane] || 'Back';
     $('section-name').textContent = TITLES[r.pane] || 'Today';
@@ -624,7 +668,7 @@
     else if (y > lastY + 4 && isPhone()) bar.classList.add('tucked');
     lastY = y;
   }
-  function openMenu() { $('section-menu').classList.remove('hidden'); var cur = document.querySelector('#section-menu [aria-current="page"]') || document.querySelector('#section-menu [data-goto]'); if (cur) cur.focus(); }
+  function openMenu() { if (sideRail()) return; $('section-menu').classList.remove('hidden'); var cur = document.querySelector('#section-menu [aria-current="page"]') || document.querySelector('#section-menu [data-goto]'); if (cur) cur.focus(); }
   function closeMenu() { $('section-menu').classList.add('hidden'); }
 
   // ── auth ────────────────────────────────────────────────
@@ -7136,10 +7180,11 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#auth-retry,#device-code-btn');
+    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#rail-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#auth-retry,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
+    if (t.id === 'rail-back') return goBack();
     if (t.id === 'section-btn') return openMenu();
     if (t.id === 'auth-retry') { t.disabled = true; t.textContent = 'Checking'; bootStatus().then(function () { t.disabled = false; t.textContent = 'Try again'; }); return; }
     if (t.id === 'auth-switch') {
@@ -7720,7 +7765,7 @@
     var sc = window.screen || {}, w = lrWide();
     layoutCrumb('device', { sw: sc.width, sh: sc.height, sah: sc.availHeight, oh: window.outerHeight, ow: window.outerWidth, dpr: window.devicePixelRatio,
       sat: lrProbe('padding-top:env(safe-area-inset-top)', 'paddingTop'), sab: lrProbe('padding-bottom:env(safe-area-inset-bottom)', 'paddingBottom'),
-      anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), phone: isPhone(), cw: w.cw, dw: w.dw, scw: w.scw, wide: w.wide });
+      anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), rail: typeof sideRail === 'function' ? sideRail() : false, railHit: typeof RAIL === 'object' ? RAIL.hit : 0, phone: isPhone(), cw: w.cw, dw: w.dw, scw: w.scw, wide: w.wide });
   }
   // The focus line is for touch screens only (QA W3): on a Mac it would only spend the budget.
   function lrFocus() {
@@ -7815,6 +7860,7 @@
 
   // Every pane module is a plain script after this one; boot waits for all of them.
   function boot() {
+    if (typeof railSync === 'function') railSync();   // 7.0.29: before the shell shows, so the rail never moves the page
     // The open-time report's clock (ms since navigation start, -1 where there is none) and the two numbers boot gives it:
     // when boot started (every script had run) and the sign-in check's round trip. Kept inside boot, and FIRST_PAINT
     // looked up, never assumed, because the harnesses that run boot alone have neither.
