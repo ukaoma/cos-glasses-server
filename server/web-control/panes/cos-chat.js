@@ -1549,8 +1549,11 @@
     return '<section class="cc cx-reply" data-reply-host="' + esc(key) + '" aria-label="' + esc(label) + '">' +
       '<h3 class="cx-reply-title">Reply</h3>' +
       '<p class="cx-reply-sub">' + esc(k.sessionId ? 'Continues this conversation. The answer lands in Messages with its own number.' : 'Starts a conversation. The answer lands in Messages with its own number.') + '</p>' +
-      '<div class="cc-feed cx-reply-feed" data-reply-feed="' + esc(key) + '" aria-live="polite">' + replyFeedHtml(key) + '</div>' +
-      composerHtml(k, { drop: false, placeholder: label, label: label }) + '</section>';
+      '<div class="cc-feed cx-reply-feed" data-reply-feed="' + esc(key) + '" aria-live="polite">' + replyFeedHtml(key) + '</div>' + '</section>' +
+      // 7.0.30 item 2 (Anand: "the reply box stays at the bottom"): the box sits OUTSIDE the section, as a child of the
+      // reader's column, so the composer's own sticky rule keeps it at the bottom of the screen while he reads the
+      // message above (a sticky box cannot leave its parent, and the section is only at the end of the page).
+      composerHtml(k, { drop: false, placeholder: label, label: label }).replace('class="cc-composer"', 'class="cc-composer cx-reply-form"');
   }
   function replyFeedHtml(key) {
     return C.asks.filter(function (a) { return a.replyKey === replyName(key); }).map(function (a) { return askHtml(a, false); }).join('');
@@ -2396,6 +2399,9 @@
     if (form && form.classList) form.classList.add('cc-kb');
     var inChat = !!(a && C.host && C.host.contains && C.host.contains(a));
     if (de && de.classList) de.classList.toggle('kb-chat', inChat);
+    // 7.0.30 item 2: the message reader's Reply box, the same kit (cos-chat.css lifts it onto the keyboard).
+    var inReply = !!(form && form.classList && typeof form.classList.contains === 'function' && form.classList.contains('cx-reply-form'));
+    if (de && de.classList) de.classList.toggle('kb-reply', inReply);
     return inChat;
   }
   // The composer that has the keyboard, brought into view on open and on every later change of the visible box (a fold
@@ -2403,7 +2409,7 @@
   // (a steer box or the search box is left where it is).
   function revealComposer() {
     var a = document.activeElement, de = document.documentElement;
-    if (!a || !de || !de.classList || !de.classList.contains('kb-chat')) return false;
+    if (!a || !de || !de.classList || !(de.classList.contains('kb-chat') || de.classList.contains('kb-reply'))) return false;
     var form = a.closest ? a.closest('[data-cos-form]') : null;
     if (!form || !form.scrollIntoView) return false;
     form.scrollIntoView({ block: 'nearest' });

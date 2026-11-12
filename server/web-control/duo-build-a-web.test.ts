@@ -605,6 +605,26 @@ describe('7.0.2 A4: two columns with the keyboard up, the chat column is scrolle
     h.kbHooks.forEach(fn => fn('close'))
     expect(h.htmlCls.has('kb-chat')).toBe(false)
   })
+  it('7.0.30 item 2: the message reader\'s Reply box gets the keyboard kit (html.kb-reply); a field in the chat or the search box does not', () => {
+    const { h } = wideChat(64, { top: 0, height: 209 }, 280)
+    const rcls = new Set<string>(['cc-composer', 'cx-reply-form'])
+    let shown = 0
+    const replyForm: any = { classList: { add: (c: string) => rcls.add(c), remove: (c: string) => rcls.delete(c), contains: (c: string) => rcls.has(c), toggle() {} }, scrollIntoView: () => { shown++ } }
+    h.document.activeElement = { id: 'cos-reply-x', closest: () => replyForm }
+    h.c._state.host.contains = (x: any) => x && x.id === 'cos-input'
+    h.kbHooks.forEach(fn => fn('open'))
+    expect(h.htmlCls.has('kb-reply')).toBe(true)
+    expect(h.htmlCls.has('kb-chat')).toBe(false)
+    expect(shown, 'the Reply box is brought into view with the keyboard').toBeGreaterThan(0)
+    h.document.activeElement = { id: 'cos-input', closest: () => h.form }
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 209 }))
+    expect(h.htmlCls.has('kb-reply'), 'a chat field is not the Reply box').toBe(false)
+    h.document.activeElement = { id: 'cos-reply-x', closest: () => replyForm }
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 209 }))
+    expect(h.htmlCls.has('kb-reply')).toBe(true)
+    h.kbHooks.forEach(fn => fn('close'))
+    expect(h.htmlCls.has('kb-reply'), 'gone with the keyboard').toBe(false)
+  })
   it('canary WARNING 2: an unfold with the keyboard up leaves the column’s top too low: the page scrolls it up on that move too', () => {
     const { h, mr } = wideChat(582, { top: 0, height: 239 }, 1000)
     h.kbHooks.forEach(fn => fn('move', { top: 0, height: 239 }))

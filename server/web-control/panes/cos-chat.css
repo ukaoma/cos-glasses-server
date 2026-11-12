@@ -215,7 +215,11 @@ html.kb-up .cc-kb .cc-model .field { width: 100%; }
 .cx-reply-sub { margin: 2px 0 0; font-size: 13px; line-height: 1.4; color: var(--sub); }
 .cx-reply-feed { min-height: 0; padding: 10px 0 0; }
 .cx-reply-feed:empty { display: none; }
-.cx-reply .cc-composer { position: static; background: transparent; border-top: 0; padding: 10px 0 0; }
+/* 7.0.30 item 2: the Reply box is the reader's last child, outside .cx-reply, so .cc-composer's own rule pins it to the
+   bottom of the screen (sticky, the page's colour, a hairline above). With the keyboard up for it (cos-chat.js sets
+   html.kb-reply; app.js publishes --vv-below, the layout viewport under the visible box) it sits on the keyboard, the
+   same way the chat's box does; the home indicator is under the keyboard, so its inset goes. */
+html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px; }
 
 /* ── the Messages badge in the rail and the section menu ─ */
 .inbox-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--hot); color: var(--panel); font: 600 11px/18px var(--body); text-align: center; }
