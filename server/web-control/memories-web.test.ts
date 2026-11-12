@@ -57,6 +57,8 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
     parseRoute: () => route,
     go: (p: string, args: string[] = []) => { route = { pane: p, args }; def.load(args) },
     goBack: () => { route = { pane: 'memories', args: [] }; def.load([]) },
+    // W.replace (7.0.30 H1) is app.js's location.replace with the Back flag set; here, the page's location.replace.
+    replace: (h: string) => location.replace(h),
     setCrumb: () => {}, crumb: () => '',
     registerPane: (name: string, d: unknown) => { if (name === 'memories') def = d },
     api: (path: string, o: { method?: string; body: any } = { body: undefined }) => {

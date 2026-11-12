@@ -2107,7 +2107,7 @@
       var hit = lists.reduce(function (all, l) { return all.concat(l); }, []).filter(function (m) { return m.sessionId === f.sid || (m.g2SessionIds || []).indexOf(f.sid) >= 0; })[0];
       if (hit && S.view === 'live' && S.liveSid === f.sid) {
         S.rowsStale = true;
-        location.replace('#/meetings/' + [hit.domain, hit.month, hit.filename].map(encodeURIComponent).join('/'));
+        W.replace('#/meetings/' + [hit.domain, hit.month, hit.filename].map(encodeURIComponent).join('/'));
       } else if (!hit && f.endedAt && now - (f.retryAt || f.endedAt) >= FINAL_DEADLINE_MS + (f.start ? Math.max(0, f.endedAt - f.start) / 12 : 0)) {
         f.notFound = true; paintLiveHead();
       }

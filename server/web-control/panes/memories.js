@@ -105,7 +105,7 @@
   function readerArgs(r) { return r.pane === 'memories' && !tabRoute(r.args) ? r.args : []; }
   function showTab(v) {
     var h = '#/memories/t/' + encodeURIComponent(v);
-    if (location.hash === h) paint(); else location.replace(h);
+    if (location.hash === h) paint(); else W.replace(h);
   }
   function isWide() { return !!(window.matchMedia && window.matchMedia('(min-width: 760px)').matches); }
   function el(id) { return document.getElementById(id); }
@@ -2262,7 +2262,7 @@
       // #/memories/view/<view> (older links) and a bare #/memories become the tab's own address; an unknown tab, the stored one.
       if (args[0] === 'view' || !args.length || (args[0] === 't' && !knownView(args[1]))) {
         if (args[0] === 'view' && knownView(args[1])) { S.view = args[1]; persist(); }
-        location.replace('#/memories/t/' + encodeURIComponent(S.view)); return;
+        W.replace('#/memories/t/' + encodeURIComponent(S.view)); return;
       }
       if (tabRoute(args) && S.view !== args[1]) { S.view = args[1]; persist(); }
       if (args[0] === 'k') { S.view = 'knowledge'; if (KTABS.indexOf(args[1]) >= 0) { S.ktab = args[1]; S.ktabChosen = true; } persist(); }

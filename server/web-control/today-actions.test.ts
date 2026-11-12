@@ -182,7 +182,7 @@ function load(o: Opts = {}) {
   class VDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + skew) } static now() { return realNow() + skew } }
   const W: Record<string, unknown> = {
     confirmReady: realConfirmReady(VDate),
-    esc, api, go: (p: string, a: string[]) => { location.hash = '#/' + [p].concat(a || []).join('/') }, isPhone: () => true, autoGrow: () => {},
+    esc, api, go: (p: string, a: string[]) => { location.hash = '#/' + [p].concat(a || []).join('/') }, replace: (h: string) => location.replace(h), isPhone: () => true, autoGrow: () => {},
     parseRoute: () => ({ pane: (location as any).pane ?? 'today', args: [] }),
     readStore: (k: string) => { try { return JSON.parse(webStore.get(k) ?? '{}') } catch { return {} } },
     writeStore: (k: string, v: unknown) => { webStore.set(k, JSON.stringify(v)) },
@@ -1007,7 +1007,7 @@ function todayRegion(over: Record<string, unknown> = {}) {
     $: (id: string) => (els[id] ??= new El()), esc, api: () => Promise.resolve({}), state: { pane: 'today', sessions: [] }, loadToday: () => {},
     toast: (t: string) => seen.toasts.push(t), go: (p: string, a: string[]) => seen.gone.push([p, a]),
     console: { error: (...a: unknown[]) => seen.errors.push(a) },
-    history: { state: null }, location: { replace: (h: string) => seen.replaced.push(h) },
+    history: { state: null }, location: { replace: (h: string) => seen.replaced.push(h) }, navReplace: (h: string) => { seen.replaced.push(h); return true },
     ensurePane: () => Promise.reject(new Error('unset')), ...over,
   }
   // eslint-disable-next-line no-new-func

@@ -663,7 +663,8 @@
     more.hidden = true;
     el.classList.remove('trail-fit');
     var cut = trailCut(widths, moreW, el.clientWidth);
-    cut.forEach(function (i) { items[i].classList.add('trail-cut'); });
+    // A left-out step stays for a screen reader but takes no keyboard focus (Q1 L1): it is not on screen.
+    cut.forEach(function (i) { items[i].classList.add('trail-cut'); var a = items[i].querySelector('a'); if (a) a.setAttribute('tabindex', '-1'); });
     more.hidden = !cut.length;
   }
   // Where Back goes from here: { pane, path } (path true: the way he came; false: the parent chain).
@@ -678,13 +679,25 @@
     var r = parseRoute(), up = PANES[r.pane] && PANES[r.pane].up ? PANES[r.pane].up(r.args) : null;
     return { pane: up || (r.args.length && !isTabRoute(r.args)) ? r.pane : 'today', path: false };
   }
+  // The one way this page replaces an address (W.replace for the panes; Q1 7.0.30 H1). It tells navStamp the entry was
+  // replaced, never pushed, so a replaced entry never gets a path: a pane switching a tab with location.replace after a
+  // Back (a forward entry left) was stamped as a push at history.length - 1, and Back then called history.back() from
+  // the first entry, out of the app. Its position is this entry's mark, or one above the last mark when an overlay's
+  // entry (Today's sheet, the image viewer) is the one replaced. Returns false, doing nothing, when the address is the
+  // same (location.replace would not route, and the flag would wrongly mark the next address).
+  function navReplace(hash) {
+    if (location.hash === hash) return false;
+    var st = navState(), pos;
+    if (navOverlay(st)) pos = NAV.last && typeof NAV.last.pos === 'number' ? NAV.last.pos + 1 : history.length - 1;
+    else pos = st && st.cosNav && typeof st.cosNav.pos === 'number' ? st.cosNav.pos : history.length - 1;
+    NAV.replace = { pos: pos };
+    try { location.replace(location.pathname + location.search + hash); } catch (_e) { NAV.replace = null; location.hash = hash; }
+    return true;
+  }
   // The parent chain, replacing this entry (never adding one).
   function goReplace(pane, args) {
     var hash = '#/' + [pane].concat(args || []).map(encodeURIComponent).join('/');
-    if (location.hash === hash) { route(); return; }
-    var st = navState();
-    NAV.replace = { pos: st && st.cosNav && typeof st.cosNav.pos === 'number' ? st.cosNav.pos : history.length - 1 };
-    try { location.replace(location.pathname + location.search + hash); } catch (_e) { NAV.replace = null; location.hash = hash; }
+    if (!navReplace(hash)) route();
   }
   // ── end back by path
   // 7.0.2 (A8): a phone is under 600 px wide, or a short touch screen at any width (the unfolded Duo is 951x539 in
@@ -782,6 +795,8 @@
     // 7.0.30: Back names where it goes, the way he came or the parent (navBackTo).
     var backTo = typeof navBackTo === 'function' ? navBackTo() : { pane: r.pane };
     $('topbar-back-label').textContent = TITLES[backTo.pane] || 'Back';
+    var topBack = $('topbar-back');
+    if (topBack && topBack.setAttribute) topBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list'));
     if (railBack && railBack.setAttribute) railBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list'));
     // From 600 px Back is the navigation bar's (shell.js): its word stays "Back", as on the Mac's bar, and its name and
     // tooltip say where it goes, as the rail's do (7.0.30 counted run, items_check B1 and B2 at the open Duo).
@@ -845,7 +860,9 @@
   var lastY = 0;
   function onScroll() {
     var y = Math.max(0, window.scrollY || 0);
-    var bar = $('topbar'), back = $('topbar-back'), onReader = !!(back && !back.classList.contains('hidden'));
+    // On a reader the bar stays (its Back is there). The folded Duo's Back is on the side rail (the bar's is hidden by CSS,
+    // not the class), so there the bar tucks as before (Q1 7.0.30 M1).
+    var bar = $('topbar'), back = $('topbar-back'), onReader = !!(back && !back.classList.contains('hidden')) && !(typeof sideRail === 'function' && sideRail());
     bar.classList.toggle('scrolled', y > 8);
     if (y < 60 || y < lastY - 4 || onReader) bar.classList.remove('tucked');
     else if (y > lastY + 4 && isPhone()) bar.classList.add('tucked');
@@ -2715,7 +2732,7 @@
       var dest = session ? ['sessions', s[0], s.slice(1).join('|')] : kind === 'pet' ? ['sessions'] : ['work'].concat(kind === 'need' ? [] : ['sort']);
       console.error('[today] the overlay did not open (' + kind + '); opening ' + dest.join('/') + ' instead.', err);
       toast(session ? 'Could not open that here. Opening the session.' : kind === 'pet' ? 'Could not open that here. Opening Sessions.' : 'Could not open that here. Opening it in Work.');
-      if (history.state && history.state.cosTodayOverlay) location.replace('#/' + dest.map(encodeURIComponent).join('/'));
+      if (history.state && history.state.cosTodayOverlay) navReplace('#/' + dest.map(encodeURIComponent).join('/'));
       else go(dest[0], dest.slice(1));
     });
   }
@@ -5718,7 +5735,7 @@
   // estimates into them, and its rows keep Control's category titles.
   function loadUsage() {
     SX.view = 'usage'; sxSave();
-    location.replace('#/sessions');
+    navReplace('#/sessions');
   }
   function renderUsageView(force) {
     var box = $('sessions-usage'); if (!box) return;
@@ -7915,7 +7932,7 @@
     plural: plural, countWord: countWord, dayWord: dayWord, plainDay: plainDay, providerLabel: providerLabel, domainLabel: domainLabel,
     skeletonRows: skeletonRows, emptyBox: emptyBox, setStatus: setStatus, autoGrow: autoGrow,
     readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,
-    state: state, titles: TITLES, go: go, parseRoute: parseRoute, goBack: goBack,
+    state: state, titles: TITLES, go: go, replace: navReplace, parseRoute: parseRoute, goBack: goBack,
     registerPane: function (name, def) { PANES[name] = def; },
     sessionList: sessionList,
     petPrefs: petPrefs,

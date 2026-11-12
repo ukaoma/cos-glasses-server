@@ -2813,7 +2813,7 @@
       if (args[0] === 'sort') {
         S.tab = 'sort'; S.sortGroupId = ''; S.sortIndex = 0; S.moreOpen = false;
         if (!S.intake && !S.intakeLoading) loadIntake(true);
-        location.replace('#/work');
+        W.replace('#/work');
         return;
       }
       startPoll(); resumeHandoffPolls();

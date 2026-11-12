@@ -471,8 +471,8 @@
     close('leave');
     O.depth = 1;
     if (!replace) { W.go(pane, args || []); return; }
-    if (extra) { quietBack(extra, function () { location.replace(hash); }); return; }
-    location.replace(hash);
+    if (extra) { quietBack(extra, function () { W.replace(hash); }); return; }
+    W.replace(hash);
   }
   // A Back step the overlay takes itself (X, Back to sessions, leaving for a tab): its popstate is ours, not the phone's
   // Back, and `then` runs once it lands. If it never arrives (history.go with nothing to go back to, or a browser that

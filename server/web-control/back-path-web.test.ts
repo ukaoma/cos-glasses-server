@@ -5,7 +5,7 @@
  * location.replace replaces the current one). The browser check is W1_evidence/two_column/back_path_check.cjs.
  */
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,7 +42,7 @@ function browser(start: string, o: { panes?: Record<string, any>; document?: any
   }
   const deps: any = { history, location, PANES: o.panes || {}, crumbDetail: '', document: o.document }
   // eslint-disable-next-line no-new-func
-  const k: any = new Function('deps', `with (deps) {\n${SRC}\nfunction route() { navStamp(); deps.routes.push(location.hash) }\nreturn { route, go, goBack, navBackTo, navStamp, NAV, TITLES, navLabel, navTrail, trailName, trailCut, paintTrail };\n}`)(Object.assign(deps, { routes }))
+  const k: any = new Function('deps', `with (deps) {\n${SRC}\nfunction route() { navStamp(); deps.routes.push(location.hash) }\nreturn { route, go, goBack, navBackTo, navStamp, NAV, TITLES, navLabel, navTrail, trailName, trailCut, paintTrail, navReplace };\n}`)(Object.assign(deps, { routes }))
   k.route()   // the first page
   return { k, deps, entries, get i() { return i }, history, location, routes, link: (h: string) => { location.hash = h }, name: (t: string) => { deps.crumbDetail = t; k.navLabel(t) } }
 }
@@ -134,7 +134,7 @@ describe('the label names where Back goes', () => {
     // Runs route()'s own naming lines (7.0.30 counted run: B1 and B2 failed at the open Duo, where Back is #nav-back).
     const NAMING = cut('    // 7.0.30: Back names where it goes, the way he came or the parent (navBackTo).', "    $('section-name').textContent")
     const el = () => { const a: Record<string, string> = {}; return { textContent: '', attrs: a, setAttribute: (k: string, v: string) => { a[k] = v } } }
-    const els: Record<string, any> = { 'topbar-back-label': el(), 'nav-back': el() }
+    const els: Record<string, any> = { 'topbar-back-label': el(), 'nav-back': el(), 'topbar-back': el() }
     const railBack = el()
     for (const [pane, title] of [['speakers', 'Speakers'], ['meetings', 'Meetings']]) {
       // eslint-disable-next-line no-new-func
@@ -143,18 +143,19 @@ describe('the label names where Back goes', () => {
       expect(railBack.attrs['aria-label']).toBe('Back to ' + title)
       expect(els['nav-back'].attrs['aria-label']).toBe('Back to ' + title)
       expect(els['nav-back'].attrs.title).toBe('Back to ' + title)
+      expect(els['topbar-back'].attrs['aria-label'], 'the top bar Back says it the same way (Q1 L3)').toBe('Back to ' + title)
     }
   })
 })
 
 describe('Back stays in reach on a tall phone', () => {
   const SCROLL = cut('  var lastY = 0;\n  function onScroll() {', '  function openMenu()')
-  function bar(onReader: boolean) {
+  function bar(onReader: boolean, rail = false) {
     const cls = new Set<string>(), win: any = { scrollY: 0 }
     const els: any = { topbar: { classList: { toggle: (c: string, on: boolean) => (on ? cls.add(c) : cls.delete(c)), add: (c: string) => cls.add(c), remove: (c: string) => cls.delete(c) } },
       'topbar-back': { classList: { contains: (c: string) => c === 'hidden' && !onReader } } }
     // eslint-disable-next-line no-new-func
-    const f = new Function('deps', `with (deps) {\n${SCROLL}\nreturn onScroll;\n}`)({ window: win, $: (id: string) => els[id], isPhone: () => true })
+    const f = new Function('deps', `with (deps) {\n${SCROLL}\nreturn onScroll;\n}`)({ window: win, $: (id: string) => els[id], isPhone: () => true, sideRail: () => rail })
     return { scroll: (y: number) => { win.scrollY = y; f() }, tucked: () => cls.has('tucked') }
   }
   it('on a list the top bar tucks away while scrolling down, as before', () => {
@@ -164,6 +165,10 @@ describe('Back stays in reach on a tall phone', () => {
   it('on a reader it never tucks, so Back is always there', () => {
     const b = bar(true); b.scroll(100); b.scroll(400); b.scroll(900)
     expect(b.tucked()).toBe(false)
+  })
+  it('the folded Duo (side rail): on a reader the bar tucks as before, since its Back is on the rail (Q1 M1)', () => {
+    const b = bar(true, true); b.scroll(100); b.scroll(400)
+    expect(b.tucked()).toBe(true)
   })
 })
 
@@ -231,5 +236,77 @@ describe('the trail shortens from the middle, never wrapping', () => {
     expect(b.k.trailCut([60, 70, 80, 90, 100, 60], 20, 420)).toEqual([1])
     expect(b.k.trailCut([60, 70, 80, 90, 100, 60], 20, 330)).toEqual([1, 2])
     expect(b.k.trailCut([60, 70, 80, 90, 100, 60], 20, 100)).toEqual([1, 2, 3])
+  })
+})
+
+// Q1 7.0.30 H1: a pane that replaced its address with location.replace after a Back (a forward entry left) was stamped as
+// a push, so Back called history.back() from the first entry and left the app. Every replace now goes through navReplace.
+describe('a replaced address never gets a path, so Back stays in the app', () => {
+  const READ = (f: string) => readFileSync(join(HERE, f), 'utf8')
+  it('Q1\'s case: open on Memories, open a memory, Back, switch tab; Back stays in the app', () => {
+    const b = browser('#/memories')
+    b.link('#/memories/m/x')
+    b.k.goBack()
+    expect(b.i).toBe(0)
+    expect(b.entries.length, 'the memory is still Forward').toBe(2)
+    expect(b.k.navReplace('#/memories/t/knowledge')).toBe(true)   // memories.js showTab
+    expect(b.k.navBackTo().path, 'a replaced entry has no path').toBe(false)
+    expect(b.k.navTrail()).toBeNull()
+    b.k.goBack()
+    expect(b.i, 'still the first entry: no history.back out of the app').toBe(0)
+    expect(b.location.hash).toBe('#/today')
+  })
+  it('meetings.js: a live meeting replaced by its file on a reader, after a Back, at the first entry', () => {
+    const b = browser('#/meetings/live/x')
+    b.link('#/meetings/quilt/2026-11/a.md')
+    b.k.goBack()
+    expect(b.i).toBe(0)
+    b.k.navReplace('#/meetings/quilt/2026-11/f.md')
+    expect(b.k.navBackTo().path).toBe(false)
+    b.k.goBack()
+    expect(b.i).toBe(0)
+    expect(b.location.hash).toBe('#/meetings')
+  })
+  it('replacing an overlay\'s entry (Today\'s sheet) marks it one above the page under the sheet, with no path', () => {
+    const b = browser('#/today')
+    b.link('#/messages')
+    b.history.pushState({ cosTodayOverlay: 1, kind: 'need', key: 'x' })
+    b.k.navReplace('#/work/sort')
+    const mark = b.entries[b.i]!.state.cosNav
+    expect(mark.pos).toBe(2)
+    expect(mark.back).toBeNull()
+  })
+  it('the same address: nothing replaced, and the next address is not mistaken for a replace', () => {
+    const b = browser('#/today')
+    b.link('#/memories')
+    expect(b.k.navReplace('#/memories')).toBe(false)
+    expect(b.k.NAV.replace).toBeNull()
+    b.link('#/memories/m/x')
+    expect(b.k.navBackTo().path).toBe(true)
+  })
+  it('pin: no pane, and nothing else in app.js, calls location.replace itself', () => {
+    const panes = readdirSync(join(HERE, 'panes')).filter(f => f.endsWith('.js'))
+    for (const f of panes) expect(READ('panes/' + f).match(/location\.replace\(/g), f).toBeNull()
+    const calls = APP.split('\n').filter(l => /location\.replace\(/.test(l) && !/^\s*\/\//.test(l))
+    expect(calls).toEqual(["    try { location.replace(location.pathname + location.search + hash); } catch (_e) { NAV.replace = null; location.hash = hash; }"])
+  })
+})
+
+describe('a step left out of the trail takes no keyboard focus (Q1 L1)', () => {
+  it('cut steps get tabindex -1; the steps shown and this page keep theirs', () => {
+    const items: any[] = [], mk = (w: number) => { const a: any = { attrs: {} as Record<string, string>, setAttribute(k: string, v: string) { a.attrs[k] = v } }; const li: any = { offsetWidth: w, cls: new Set<string>(), classList: { add: (c: string) => li.cls.add(c) }, querySelector: () => a, a }; return li }
+    const more: any = { hidden: true, offsetWidth: 20 }
+    const el: any = { hidden: true, innerHTML: '', clientWidth: 300, classList: { add() {}, remove() {} },
+      querySelectorAll: () => items, querySelector: (q: string) => (q === '.trail-more' ? more : null) }
+    const b = browser('#/today', { document: { getElementById: (id: string) => (id === 'nav-trail' ? el : null) } })
+    for (const h of ['#/messages', '#/messages/m/a', '#/speakers', '#/speakers/review/m1']) b.link(h)
+    b.link('#/meetings/quilt/2026-11/m1.md')
+    for (const w of [60, 90, 90, 90, 90, 90]) items.push(mk(w))   // five steps, then this page
+    b.k.paintTrail()
+    const cut = items.map((li, i) => (li.cls.has('trail-cut') ? i : -1)).filter(i => i >= 0)
+    expect(cut.length).toBeGreaterThan(0)
+    for (const i of cut) expect(items[i].a.attrs.tabindex, 'step ' + i).toBe('-1')
+    for (const i of [0, items.length - 2]) expect(items[i].a.attrs.tabindex).toBeUndefined()
+    expect(more.hidden).toBe(false)
   })
 })
