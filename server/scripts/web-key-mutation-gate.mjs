@@ -254,10 +254,11 @@ const mutations = [
   m('bootstrap-routes-off', WKR, ["    if (deps.authority.mode() === 'off') { next('router'); return }", "    if (false) { next('router'); return }"], INTT),
   m('bootstrap-routes-need-mode', WKR, ["    if (deps.authority.mode() === 'off') { next('router'); return }", "    if (!deps.authority.enabled()) { next('router'); return }"], INTT),
   m('bootstrap-anchor-route-gated', WKR, ["  router.post('/web-key/anchor', anchorRoutes, (req, res) => {", "  router.post('/web-key/anchor', (req, res) => {"], INTT),
-  m('bootstrap-status-route-gated', WKR, ["  router.get('/web-key/status', anchorRoutes, (req, res) => {", "  router.get('/web-key/status', (req, res) => {"], INTT),
+  // Re-aimed 2026-11-12: the handler became async with learnSelfName (867db2ff); the old targets matched nothing.
+  m('bootstrap-status-route-gated', WKR, ["  router.get('/web-key/status', anchorRoutes, async (req, res) => {", "  router.get('/web-key/status', async (req, res) => {"], INTT),
   m('bootstrap-on-authority-only', WKR, ["    if (!deps.authority.enabled()) { next('router'); return }", "    if (deps.authority.mode() === 'off') { next('router'); return }"], INTT),
   m('bootstrap-status-branch', WKR, ["    if (deps.authority.mode() !== 'authority') {", '    if (false) {'], INTT),
-  m('bootstrap-status-token-only', WKR, ["      if (!hasToken(req)) return refuse(res, 401, 'unauthorized')\n      const anchor", '      const anchor'], INTT),
+  m('bootstrap-status-token-only', WKR, ["      if (!hasToken(req)) return refuse(res, 401, 'unauthorized')\n      await learnSelfName()", '      await learnSelfName()'], INTT),
   m('bootstrap-status-enabled-false', WKR, ["        enabled: false,\n        mode: 'bootstrap',", "        enabled: true,\n        mode: 'bootstrap',"], INTT),
   m('bootstrap-status-setat', WKR, ['        anchorSetAt: anchor ? anchor.setAt : null,', '        anchorSetAt: null,'], INTT),
   m('bootstrap-no-signer-listener', IDX, ['webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT', "webKeyAuthority: webKeyAuthorityEnabled() || process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP === '1', httpPort: PORT"], BOOTT),
