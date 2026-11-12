@@ -13,6 +13,7 @@ import { WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from '
 import { WebKeyAuthority } from '../lib/web-key-authority.js'
 import { WebKeySignHandoffs } from '../lib/web-key-handoff.js'
 import { parseEnvelopeHeader } from '../lib/web-key-envelope.js'
+import { APPROVE_CHANNEL_EFFECT } from '../../shared/web-turn-envelope.js'
 import { kidOfSpki } from '../lib/web-key-envelope.js'
 import { anchoredEntry, INTEGRITY_OK, ORIGIN, p256, seedRegistry, SELF_DNS, signB64, type TestKey } from '../lib/__fixtures__/web-key-kit.js'
 
@@ -304,11 +305,10 @@ describe('per-turn signing', () => {
     expect(packet).not.toBeNull()
     const shown = r.el('sign-packet').textContent
     for (const value of [packet!.packet.artifact, packet!.packet.version, packet!.packet.channel, packet!.packet.digest, SID, packet!.packetSha256]) expect(shown).toContain(value)
-    const targets: Record<string, string> = { 'gotcos-site': 'gotcos.com website (cos-starter Pages)', 'control-downloads': 'COS Control GitHub release downloads and approved latest aliases', 'release-docs': 'Public COS release documentation' }
-    if (targets[channel]) {
-      expect(shown).toContain('Deployment target: ' + targets[channel])
-      expect(shown).toContain('limited to this exact manifest SHA-256')
-    }
+    // 2026-11-12: the phone names what the approval does, one fixed line from the channel (APPROVE_CHANNEL_EFFECT).
+    expect(shown.split('\n').filter(l => l.startsWith('What this approves: '))).toEqual(['What this approves: ' + APPROVE_CHANNEL_EFFECT[channel]])
+    const manifest = ['gotcos-site', 'control-downloads', 'release-docs'].includes(channel)
+    expect(shown.includes('limited to this exact manifest SHA-256')).toBe(manifest)
     expect(r.gets).toEqual([])
     await r.el('sign-approve').tap(true)
     expect(r.gets).toHaveLength(1)

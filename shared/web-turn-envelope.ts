@@ -67,6 +67,25 @@ export const APPROVE_ACTION_CHANNELS: Readonly<Record<'install' | 'publish', rea
   publish: Object.freeze(['npm-next', 'npm-latest', 'control-appcast', 'hub-alias', 'gotcos-site', 'control-downloads', 'release-docs']),
 })
 
+/**
+ * What an approval on each channel does, in one fixed line the phone shows (Miles, 2026-11-12: "Publish includes its
+ * own push"). A publish approval covers the push that publish consists of, and only that: cos-starter main for the
+ * site, the appcast and the docs; evenhub-g2-cos main for the Hub alias; npm goes out from the tested package with no
+ * push. Pushing the code main of any repo stays typed at the desk. The line is derived from the CHANNEL alone, never
+ * from text the requester sent. The phone's page keeps a copy (server/web-signer/signer-proof.js, CHANNEL_EFFECT),
+ * pinned to this one by signer-proof.test.ts.
+ */
+export const APPROVE_CHANNEL_EFFECT: Readonly<Record<string, string>> = Object.freeze({
+  'mac-local': 'Installs on this Mac. No git push.',
+  'npm-next': 'Publishes to npm under the next tag, from the tested package. No git push.',
+  'npm-latest': 'Publishes to npm under the latest tag, from the tested package. No git push.',
+  'control-appcast': 'Pushes ukaoma/cos-starter main (control/appcast.json): the COS Control update feed on gotcos.com.',
+  'hub-alias': 'Pushes ukaoma/evenhub-g2-cos main: moves the Even Hub alias to this package.',
+  'gotcos-site': 'Pushes ukaoma/cos-starter main: republishes www.gotcos.com.',
+  'control-downloads': 'Creates a GitHub Release on ukaoma/cos-starter (a tag, no branch push) with the ZIP and its SHA-256 file.',
+  'release-docs': 'Pushes ukaoma/cos-starter main (docs/): republishes the public COS docs.',
+})
+
 export const APPROVE_ARTIFACT_RE = /^[a-z0-9@][a-z0-9@._/-]{0,127}$/
 export const APPROVE_VERSION_RE = /^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,6}(-[0-9A-Za-z.-]{1,32})?$/
 /** sha256:<hex64>, sha512:<hex128>, or an npm SRI sha512-<base64>. Nothing else. */

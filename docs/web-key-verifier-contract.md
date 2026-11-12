@@ -197,6 +197,26 @@ refuses to create one (`action_not_allowed`). Pushing a feature branch and addin
 A message scope never authorizes either action. The phone's signer page keeps its own copy of this table
 (`server/web-signer/signer-proof.js`); a test fails if the two differ.
 
+**What each channel's approval includes** (Miles, 2026-11-12: "Publish includes its own push"). A publish approval
+covers the push that the publish consists of, and nothing else. Pushing the code `main` of any repo (the server, the
+COS repo) stays typed at the desk. The phone shows the line below for the signed channel, taken from the channel alone
+(`APPROVE_CHANNEL_EFFECT` in `shared/web-turn-envelope.ts`, copied as `CHANNEL_EFFECT` in the signer page and pinned to
+it by test), never from text the requester sent. A channel not in the table shows nothing and is refused.
+
+| Channel | The push or upload it includes | Line the phone shows |
+| --- | --- | --- |
+| `mac-local` | none | Installs on this Mac. No git push. |
+| `npm-next` | none (npm registry only, from the tested package) | Publishes to npm under the next tag, from the tested package. No git push. |
+| `npm-latest` | none (npm registry only, from the tested package) | Publishes to npm under the latest tag, from the tested package. No git push. |
+| `control-appcast` | `ukaoma/cos-starter` `main` (`control/appcast.json`, served by GitHub Pages) | Pushes ukaoma/cos-starter main (control/appcast.json): the COS Control update feed on gotcos.com. |
+| `hub-alias` | `ukaoma/evenhub-g2-cos` `main` (the alias file) | Pushes ukaoma/evenhub-g2-cos main: moves the Even Hub alias to this package. |
+| `gotcos-site` | `ukaoma/cos-starter` `main` (GitHub Pages) | Pushes ukaoma/cos-starter main: republishes www.gotcos.com. |
+| `control-downloads` | a GitHub Release on `ukaoma/cos-starter` (tag `control-v<version>`, the ZIP and its `.sha256`); no branch push. The site's links move only with `gotcos-site` or `control-appcast`, each its own approval | Creates a GitHub Release on ukaoma/cos-starter (a tag, no branch push) with the ZIP and its SHA-256 file. |
+| `release-docs` | `ukaoma/cos-starter` `main` (`docs/`, GitHub Pages) | Pushes ukaoma/cos-starter main (docs/): republishes the public COS docs. |
+
+The npm release flow as practised also commits the release files to the server repo and pushes its `main`
+(cos-glasses skill, step 5). That push is NOT part of an npm approval: it is a code `main`, typed at the desk.
+
 ### Handoff from Control Web (3143) to the signer (3144), Phase 3
 
 The composer never signs and never frames the signer. It posts the turn it wants approved, then navigates

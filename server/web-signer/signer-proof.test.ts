@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { APPROVE_ACTION_CHANNELS, canonicalJson, PUBLISH_MANIFEST_ARTIFACTS } from '../../shared/web-turn-envelope.js'
+import { APPROVE_ACTION_CHANNELS, APPROVE_CHANNEL_EFFECT, canonicalJson, PUBLISH_MANIFEST_ARTIFACTS } from '../../shared/web-turn-envelope.js'
 import { fingerprintOfSpki, kidOfSpki, parseEnvelopeHeader } from '../lib/web-key-envelope.js'
 import { sasOf, WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from '../lib/web-key-registry.js'
 import { coseP256ToSpki, parsePasskeyHeader, turnPasskeyChallenge } from '../lib/web-key-passkey.js'
@@ -280,6 +280,26 @@ describe('the signer checks the full packet preimage before signing', () => {
     expect(literal, 'the page keeps one channels literal').toBeTruthy()
     const pageTable = JSON.parse(literal!.replace(/'/g, '"').replace(/([{,]\s*)([a-z][\w-]*)\s*:/g, '$1"$2":'))
     expect(pageTable).toEqual(Object.fromEntries(Object.entries(APPROVE_ACTION_CHANNELS).map(([k, v]) => [k, [...v]])))
+  })
+  // 2026-11-12 (Miles: "Publish includes its own push"): the page names what each approval does from a fixed line per
+  // channel, copied from APPROVE_CHANNEL_EFFECT and pinned to it here, never from the requester's text.
+  const allChannels = [...new Set(Object.values(APPROVE_ACTION_CHANNELS).flat())]
+  it('every signable channel has exactly one fixed line in the envelope, and no other channel has one', () => {
+    expect(Object.keys(APPROVE_CHANNEL_EFFECT).sort()).toEqual([...allChannels].sort())
+    for (const line of Object.values(APPROVE_CHANNEL_EFFECT)) expect(line).toMatch(/^[A-Z][^\n]{10,160}\.$/)
+  })
+  it.each(allChannels)('the page shows the envelope\'s fixed line for %s', channel => {
+    expect(P.channelEffect(channel)).toBe(APPROVE_CHANNEL_EFFECT[channel])
+  })
+  it('the page\'s own line table has exactly the envelope\'s channels (an extra or missing line on the page fails)', () => {
+    const src = readFileSync(fileURLToPath(new URL('./signer-proof.js', import.meta.url)), 'utf8')
+    const literal = /var CHANNEL_EFFECT = (\{[^\n]*\})/.exec(src)?.[1]
+    expect(literal, 'the page keeps one CHANNEL_EFFECT literal').toBeTruthy()
+    expect(Object.keys(JSON.parse(literal!.replace(/'/g, '"'))).sort()).toEqual([...allChannels].sort())
+  })
+  it('an unknown channel shows nothing and is refused', async () => {
+    for (const channel of ['git-main', 'npm', 'gotcos-site/*', '__proto__', 'toString', '', undefined]) expect(P.channelEffect(channel)).toBe('')
+    await expect(P.validateHandoffPacket(consistent({ channel: 'unknown-channel' }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')
   })
   it('push-main on git-main is refused by the page (scope_not_allowed)', async () => {
     await expect(P.validateHandoffPacket(consistent({ action: 'push-main', channel: 'git-main' }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')

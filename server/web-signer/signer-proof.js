@@ -136,6 +136,14 @@
     throw fail('scope_not_allowed')
   }
 
+  // What an approval on each channel does, one fixed line per channel (Miles, 2026-11-12: a publish approval covers
+  // its own push). A copy of APPROVE_CHANNEL_EFFECT in shared/web-turn-envelope.ts; signer-proof.test.ts pins the two.
+  var CHANNEL_EFFECT = { 'mac-local': 'Installs on this Mac. No git push.', 'npm-next': 'Publishes to npm under the next tag, from the tested package. No git push.', 'npm-latest': 'Publishes to npm under the latest tag, from the tested package. No git push.', 'control-appcast': 'Pushes ukaoma/cos-starter main (control/appcast.json): the COS Control update feed on gotcos.com.', 'hub-alias': 'Pushes ukaoma/evenhub-g2-cos main: moves the Even Hub alias to this package.', 'gotcos-site': 'Pushes ukaoma/cos-starter main: republishes www.gotcos.com.', 'control-downloads': 'Creates a GitHub Release on ukaoma/cos-starter (a tag, no branch push) with the ZIP and its SHA-256 file.', 'release-docs': 'Pushes ukaoma/cos-starter main (docs/): republishes the public COS docs.' }
+  /** The fixed line for a channel this page can sign, or '' for anything else. Never built from packet text. */
+  function channelEffect(channel) {
+    return typeof channel === 'string' && Object.prototype.hasOwnProperty.call(CHANNEL_EFFECT, channel) ? CHANNEL_EFFECT[channel] : ''
+  }
+
   /** Verify the full packet before display AND again before signing. A packet is still only a request. */
   function validateHandoffPacket(h, nowMs) {
     return Promise.resolve().then(function () {
@@ -340,7 +348,7 @@
     canonicalJson: canonicalJson, jcsBytes: jcsBytes,
     signedWords: signedWords, wordsDigest: wordsDigest,
     buildEnvelope: buildEnvelope, passkeyChallenge: passkeyChallenge, passkeyHeader: passkeyHeader,
-    assembleTurnProof: assembleTurnProof, validateHandoffPacket: validateHandoffPacket,
+    assembleTurnProof: assembleTurnProof, validateHandoffPacket: validateHandoffPacket, channelEffect: channelEffect,
     sasCommit: sasCommit, sasCode: sasCode, kidOf: kidOf, fingerprintOf: fingerprintOf, enrollProofMessage: enrollProofMessage,
     spkiFromXY: spkiFromXY, xyFromSpki: xyFromSpki, coseFromXY: coseFromXY, xyFromCose: xyFromCose,
     xyFromAttestation: xyFromAttestation, passkeyXY: passkeyXY,
