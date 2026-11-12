@@ -1,7 +1,7 @@
 /* COS Control Web: Control's own chrome and pane kit, loaded after app.css.
    Measurements follow Control 0.5.366 (ActivityWindow.swift, COSBrand.swift): the 248pt rail with a
    story under each name from 1100px, the icon rail below that, the navigation bar off Today, and
-   the shared pane pieces (tinted hero, text switch with a gold rule, rows, tags, YOU/COS cards).
+   the shared pane pieces (tinted hero, text switch with a gold rule, rows, tags, and the reader's sides for who said what).
    Phone sizes are set for reading on the iPhone Duo; the desktop steps down toward Control's. */
 
 :root {
@@ -236,6 +236,18 @@
 .cx-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; padding: 12px 14px 14px; margin-bottom: 12px; }
 .cx-card.you { background: var(--qopen); }
 .cx-card-label { font: 600 9.5px/1 var(--mono); letter-spacing: 0.08em; color: var(--tertiary); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+/* 7.0.30, Miles's pick A (who said what): sides, in the COS chat's shapes (.cc-bubble, .cc-line.cos). His bubble's edge
+   is opaque in light, gold 85% with ink, 3.48:1 against the page; the chat's 45% gold edge composites to 1.52:1 there.
+   Dark keeps the chat's edge as it is (2.79:1 composited). */
+:root { --said-edge: color-mix(in srgb, var(--gold) 85%, var(--ink)); }
+:root[data-theme='dark'] { --said-edge: color-mix(in srgb, var(--gold) 45%, transparent); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) { --said-edge: color-mix(in srgb, var(--gold) 45%, transparent); } }
+.cx-said.you { display: flex; flex-direction: column; align-items: flex-end; margin: 4px 0 16px; }
+.cx-said-bubble { max-width: min(80%, 560px); background: color-mix(in srgb, var(--gold) 22%, var(--panel)); border: 1px solid var(--said-edge);
+  border-radius: 18px 18px 6px 18px; padding: 10px 14px; line-height: 1.45; }
+.cx-said-who { font-size: 12px; color: var(--sub); margin: 4px 4px 0; }
+.cx-said.cos { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; margin: 0 0 14px; }
+.cx-said-text { min-width: 0; }
 .cx-card-body { font-size: 15px; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; }
 /* md() keeps line breaks as text (shared with the session reader), so the body keeps them too. */
 .cx-card-body.md { white-space: pre-wrap; }
@@ -262,7 +274,8 @@
 .cx-find .cx-find-count { font: 400 11.5px/1 var(--mono); color: var(--sub); }
 .cx-find button { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--panel-border); display: grid; place-items: center; color: var(--ink); }
 .cx-find button .icon { width: 14px; height: 14px; }
-.cx-turn.match .cx-card { background: color-mix(in srgb, var(--green) 7%, var(--panel)); }
+.cx-turn.match .cx-said-bubble, .cx-turn.match .cx-said-text { background: color-mix(in srgb, var(--green) 7%, var(--panel)); }
+.cx-turn.match .cx-said-text { border-radius: 10px; }
 @media (max-width: 599px) { .cx-find { top: calc(var(--topbar-h) + var(--safe-top)); } .cx-thumb { width: 132px; height: 92px; } }
 
 /* ── Dictation and Dictionary ─────────────────────────── */

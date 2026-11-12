@@ -294,7 +294,7 @@ describe('the Messages reader (panes/messages.js turnCards) structures the COS a
     { md: K.md, structureLensAnswer: K.f }, K.esc, () => [], () => true, () => '') as (t: Record<string, unknown>, key: string) => string
   it('the COS card of #455 draws the same structured answer as the chat card', () => {
     const html = turnCards({ query: 'What does this unlock?', text: T455 }, 'm-455')
-    const m = /<div class="cx-card-label">COS<\/div><div class="cx-card-body md" data-hl>([\s\S]*?)<\/div>/.exec(html)
+    const m = /<span class="sr-only">COS said<\/span><div class="cx-card-body md" data-hl>([\s\S]*?)<\/div><\/div><\/div>/.exec(html)
     expect(m).not.toBeNull()
     expect(m![1]).toBe(K.md(E455))
   })

@@ -8,13 +8,14 @@
 - **Speakers: the copy buttons say they copy.** "Summary" and "Full (N KB)" now read "Copy summary" and "Copy full (N KB)". The one you tap says "Copied" for a moment, and a screen reader hears what was copied.
 - **Meetings opens on today.** The calendar opens on today, marked with a ring, even when today has no meetings. Then the list says "No meetings today." with one tap to the latest day that has meetings (or to last month when this month has none).
 - **Settings says "your phone's camera"**, not "your iPhone Camera". COS on the web works on Android too.
+- **A message shows who said what by side.** Your words sit on the right in the COS chat's gold bubble, with "You" under it; COS's answer sits on the left beside its mark. The two cards marked YOU and COS are gone. The bubble's edge is darker in light mode, so it reads against the page (3.48 to 1; it was 1.52 to 1). A screen reader hears "You said" and "COS said". The same applies to a chat opened from the archive.
 - Tested in a browser (WebKit) at a tall iPhone size, the folded Duo with its side rail, and the open Duo, in light and dark. Before this build the same checks fail. Not yet tested on a real phone; Android was not tested.
 
-**Default-on for every install:** yes, all six, with no switch, at every screen size.
+**Default-on for every install:** yes, all seven, with no switch, at every screen size.
 
 ### If you roll back
 
-- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, and Settings says iPhone. Nothing is stored.
+- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, Settings says iPhone, and a message shows the YOU and COS cards. Nothing is stored.
 - Further back: as in 7.0.29 below.
 
 ## 7.0.29 - Control Web: on the folded Duo, the panes sit in a side rail at the right edge, and Back is at thumb height

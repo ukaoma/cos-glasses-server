@@ -469,9 +469,14 @@
   }
   function turnCards(t, msgKey) {
     var a = atts(t);
-    return '<div class="cx-card you"><div class="cx-card-label">YOU</div><div class="cx-card-body" data-hl>' + esc(String(t.query || '').trim() || '(empty query)').replace(/\n/g, '<br>') + '</div></div>' +
+    // 7.0.30, Miles's pick A: who said what by side, in the COS chat's own shapes. His words on the right in the chat's
+    // gold bubble with "You" under it; COS on the left beside its mark, on the page. A screen reader hears "You said"
+    // and "COS said" first, since the side and the mark are visual only.
+    return '<div class="cx-said you"><span class="sr-only">You said</span><div class="cx-said-bubble cx-card-body" data-hl>' + esc(String(t.query || '').trim() || '(empty query)').replace(/\n/g, '<br>') + '</div>' +
+      '<span class="cx-said-who" aria-hidden="true">You</span></div>' +
       stripHtml(a.filter(isUserAtt), true, msgKey) +
-      '<div class="cx-card"><div class="cx-card-label">COS</div><div class="cx-card-body md" data-hl>' + W.md(W.structureLensAnswer(String(t.text || ''))) + '</div></div>' +
+      '<div class="cx-said cos"><span class="cc-avatar" aria-hidden="true"><svg class="icon"><use href="#i-mark"/></svg></span><div class="cx-said-text"><span class="sr-only">COS said</span>' +
+      '<div class="cx-card-body md" data-hl>' + W.md(W.structureLensAnswer(String(t.text || ''))) + '</div></div></div>' +
       stripHtml(a.filter(function (x) { return !isUserAtt(x); }), false, msgKey);
   }
   function copyTurnText(t) {
