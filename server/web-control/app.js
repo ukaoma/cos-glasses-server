@@ -3252,6 +3252,9 @@
         (s.cos_pinned ? '<button type="button" role="menuitem" data-sx="org-pin" data-key="' + esc(key) + '">Unpin in COS</button>' : '')
         : '<button type="button" role="menuitem" data-sx="org-pin" data-key="' + esc(key) + '">' + (s.cos_pinned ? 'Unpin' : 'Pin') + '</button>') +
       '<button type="button" role="menuitem" data-sx="org-move-menu" data-key="' + esc(key) + '">Move to folder</button>' +
+      // 7.0.29 ADD 2 (Miles 23:53: he could not find how to take a session out of a folder; "No folder" sat at the foot
+      // of Move to folder): a row in a folder gets Remove from folder, the same write as No folder (folder_id null).
+      (s.folder_id && SXF.byId[s.folder_id] ? '<button type="button" role="menuitem" data-sx="org-move" data-key="' + esc(key) + '" data-folder="">Remove from folder</button>' : '') +
       '<button type="button" role="menuitem" data-sx="org-rename" data-key="' + esc(key) + '">Rename</button>';
   }
   function sxFolderMenuHtml(id) {

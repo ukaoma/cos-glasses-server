@@ -100,6 +100,24 @@ describe('the menus', () => {
     expect(html).toContain('data-folder="">No folder</button>')
     expect(html).not.toContain('<b>')
   })
+  it('7.0.29: a row in a folder has Remove from folder, right after Move to folder; a row in none, or in a folder that is gone, does not', () => {
+    const h = kit()
+    h.k.SXF.folders = [{ id: 'f_2', name: 'Ops' }]; h.k.SXF.byId = { f_2: h.k.SXF.folders[0] }
+    const inF = h.k.rowMenu({ provider: 'claude', session_id: 'a', folder_id: 'f_2' }, 'claude|a', false)
+    expect([...inF.matchAll(/data-sx="([a-z-]+)"[^>]*>([^<]+)</g)].map(m => m[2])).toEqual(['Pin', 'Move to folder', 'Remove from folder', 'Rename'])
+    expect(inF).toContain('<button type="button" role="menuitem" data-sx="org-move" data-key="claude|a" data-folder="">Remove from folder</button>')
+    expect(h.k.rowMenu({ provider: 'claude', session_id: 'a' }, 'claude|a', false)).not.toContain('Remove from folder')
+    expect(h.k.rowMenu({ provider: 'claude', session_id: 'a', folder_id: 'f_gone' }, 'claude|a', false)).not.toContain('Remove from folder')
+  })
+  it('7.0.29: Remove from folder sends the one write that takes the session out (folder_id null)', async () => {
+    const h = kit({ rows: [{ provider: 'claude', session_id: 'AbC/1', folder_id: 'f_2' }] })
+    h.k.SXF.folders = [{ id: 'f_2', name: 'Ops' }]; h.k.SXF.byId = { f_2: h.k.SXF.folders[0] }
+    const menu = h.k.rowMenu({ provider: 'claude', session_id: 'AbC/1', folder_id: 'f_2' }, 'claude|abc/1', false)
+    const m = menu.match(/data-sx="(org-move)" data-key="([^"]+)" data-folder="([^"]*)">Remove from folder</)!
+    h.k.click(m[1], btn({ 'data-key': m[2], 'data-folder': m[3] }))
+    await flush()
+    expect(h.calls.filter(c => c.method !== 'GET')).toEqual([{ path: '/api/agent-sessions/claude/AbC%2F1/organizer', method: 'PATCH', body: { folder_id: null } }])
+  })
   it('no folders yet: says how to make one', () => {
     expect(kit().k.rowMenu({ provider: 'claude', session_id: 'a' }, 'claude|a', true)).toContain('No folders yet. Make one with New folder at the top of the list.')
   })

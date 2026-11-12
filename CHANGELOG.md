@@ -10,9 +10,10 @@
 - **What it costs:** the rail takes 58 of 449 layout px at 85 percent zoom (49 points), 50 of 382 at 100. A long session title shows about one character fewer at 85 percent and seven fewer at 100. Wide tables in a session still scroll inside their own box, never the page.
 - The page's existing layout report says whether the rail showed and its button size, so the phone tells the Mac what it saw.
 - **Sessions: Pinned folds.** The Pinned heading folds and unfolds like a folder, with its count, and this browser remembers the choice. It starts open, so nothing changes until you fold it. A pinned session that is working still shows under Working now, and one that is waiting or failed under Needs you, folded or not; it goes back under Pinned when it is idle. Needs you and Working now never fold. This is for every screen size.
+- **Sessions: Remove from folder.** A session in a folder now has Remove from folder in its menu, right under Move to folder. Before, the only way out was Move to folder, then No folder at the bottom of that list, which still works. This is for every screen size.
 - Tested in a browser (WebKit) at the Duo's folded sizes (449 by 797 at 85 percent zoom, 382 by 678, and a shorter Safari tab), an iPhone SE, 16 and Pro Max (the Pro Max also in a tab), and the open Duo, in light and dark, on the Sessions list, a session, Today, Messages and with the keyboard up. Where the rail does not show, every element sits where it did in 7.0.28. Not yet tested on a real device.
 
-**Default-on for every install:** yes, with no switch: the rail only on a screen of that shape; the folding Pinned heading everywhere, open until folded.
+**Default-on for every install:** yes, with no switch: the rail only on a screen of that shape; the folding Pinned heading everywhere, open until folded; Remove from folder everywhere.
 
 ### If you roll back
 
