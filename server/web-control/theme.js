@@ -26,19 +26,29 @@
 })();
 
 /* 7.0.29 (Miles 21:42): "for shorter screens like the duo we should use the side rail when it's folded"; tall phones keep
-   the top menu. The test is the SCREEN's shape, never the window's: screen.width and screen.height are points that no
-   zoom, keyboard, browser bar or Home Screen mode changes (the Duo reports 466 by 678 at 85 and 100 percent, folded and
-   open, and its web view is 449 by 797 or 382 by 678 inside that). A screen whose long side is under 1.6 times its short
-   side is short: the Duo is 1.46; every iPhone is 1.78 (SE, 8 Plus) or 2.16 and taller, in a Safari tab or not. app.css
-   draws the side rail only with this class AND a page under 600 px wide on a touch screen. Missing or odd numbers add
-   no class: no rail, the layout as before. Runs before the first paint, so the rail never moves the page on load. */
+   the top menu. The test is the SCREEN's shape, never the window's: a screen whose short side is under 600 and whose long
+   side is under 1.6 times its short side is short (html.short-screen). app.css draws the side rail only with this class
+   AND a page under 600 px wide on a touch screen. Missing or odd numbers give no class: no rail, the layout as before.
+   MEASURED: his phone's own device reports (2026-11-10 and 11-11) give screen.width 466 and screen.height 678 in rows laid
+   out 449, 548 and 1119 px wide at visualViewport.scale 0.85, and the canary (11-11 21:56) read screen.width 466 in a
+   Safari tab, folded, at scale 1. 678 / 466 is 1.46. Every iPhone's published screen is 1.78 (SE, 8 Plus) or 2.16 and up.
+   ASSUMED, not measured: which of those rows were the Home Screen app and which a tab, that other zoom settings report
+   the same, and that folding or opening never changes the numbers. So this one function runs at load (before the first
+   paint, so the rail never moves the page on load) and again on every resize and orientation change, and the page's
+   device report and a 'rail' report on each change carry screen.width and screen.height, so his phone settles it. */
 (function () {
-  try {
-    var s = window.screen, a = s ? Number(s.width) : 0, b = s ? Number(s.height) : 0;
-    if (!(a > 0 && b > 0 && isFinite(a) && isFinite(b))) return;
-    var lo = Math.min(a, b), hi = Math.max(a, b);
-    if (lo < 600 && hi / lo < 1.6) document.documentElement.classList.add('short-screen');
-  } catch (_e) { /* no class: no rail */ }
+  function shortScreen() {
+    var de = document.documentElement, on = false;
+    try {
+      var s = window.screen, a = s ? Number(s.width) : 0, b = s ? Number(s.height) : 0;
+      if (a > 0 && b > 0 && isFinite(a) && isFinite(b)) { var lo = Math.min(a, b), hi = Math.max(a, b); on = lo < 600 && hi / lo < 1.6; }
+    } catch (_e) { on = false; }
+    try { if (de && de.classList) { if (on) de.classList.add('short-screen'); else de.classList.remove('short-screen'); } } catch (_e) { /* no class: no rail */ }
+    return on;
+  }
+  window.CosShortScreen = shortScreen;
+  shortScreen();
+  if (typeof window.addEventListener === 'function') { window.addEventListener('resize', shortScreen); window.addEventListener('orientationchange', shortScreen); }
 })();
 
 /* The app's scripts (index.html #boot-scripts), loaded one frame after the page is drawn so the first paint never waits

@@ -41,14 +41,15 @@ describe('one pane list', () => {
 
 // theme.js's screen test, run against fakes.
 const SHAPE = (() => { const a = THEME.indexOf('/* 7.0.29 (Miles 21:42)'); expect(a).toBeGreaterThan(-1); const s = THEME.indexOf('(function () {', a); return THEME.slice(s, THEME.indexOf('})();', s) + 5) })()
-function shape(screen: unknown) {
-  const cls = new Set<string>()
-  const window = { screen }
-  const document = { documentElement: { classList: { add: (c: string) => cls.add(c) } } }
+function shapeKit(screen: unknown) {
+  const cls = new Set<string>(), listeners: Record<string, Array<() => void>> = {}
+  const window: any = { screen, addEventListener: (t: string, f: () => void) => { (listeners[t] = listeners[t] || []).push(f) } }
+  const document = { documentElement: { classList: { add: (c: string) => cls.add(c), remove: (c: string) => cls.delete(c) } } }
   // eslint-disable-next-line no-new-func
   new Function('window', 'document', SHAPE)(window, document)
-  return cls.has('short-screen')
+  return { window, cls, listeners, on: () => cls.has('short-screen') }
 }
+function shape(screen: unknown) { return shapeKit(screen).on() }
 describe("theme.js: which screens are short (the rail's first condition)", () => {
   it('the folded Duo is short, as the phone reports it at 85 and 100 percent, and turned sideways', () => {
     expect(shape({ width: 466, height: 678 })).toBe(true)
@@ -62,6 +63,26 @@ describe("theme.js: which screens are short (the rail's first condition)", () =>
   })
   it('cannot decide, no class: no screen, zero, or numbers that are not numbers', () => {
     for (const s of [undefined, null, {}, { width: 0, height: 678 }, { width: 466, height: 0 }, { width: NaN, height: 678 }, { width: 'x', height: 678 }, { width: Infinity, height: 678 }, { width: -466, height: 678 }]) expect(shape(s), JSON.stringify(s)).toBe(false)
+  })
+  it('worked out again on every resize and orientation change, from the one function (load open, then fold)', () => {
+    const k = shapeKit({ width: 1119, height: 787 })
+    expect(k.on()).toBe(false)
+    expect(k.listeners.resize).toHaveLength(1)
+    expect(k.listeners.orientationchange).toHaveLength(1)
+    expect(k.listeners.resize![0]).toBe(k.window.CosShortScreen)
+    k.window.screen = { width: 466, height: 678 }
+    k.listeners.resize![0]!()
+    expect(k.on(), 'folded: the class comes on without a reload').toBe(true)
+    k.window.screen = { width: 393, height: 852 }
+    k.listeners.orientationchange![0]!()
+    expect(k.on(), 'and goes off again').toBe(false)
+    k.window.screen = undefined
+    expect(k.window.CosShortScreen()).toBe(false)
+  })
+  it('its comment says what was measured and what is assumed, not the other way round', () => {
+    expect(THEME).toContain('MEASURED:')
+    expect(THEME).toContain('ASSUMED, not measured:')
+    expect(THEME).not.toContain('the Duo reports 466 by 678 at 85 and 100 percent, folded and open')
   })
   it('the line is 1.6: the Duo (1.46) is under it, a 16:9 phone (1.78) is over it', () => {
     expect(shape({ width: 500, height: 799 })).toBe(true)
@@ -113,18 +134,21 @@ function rail(o: { short?: boolean; narrowTouch?: boolean; scale?: number | null
   const props: Record<string, string> = {}, listeners: Record<string, Array<() => void>> = {}, mqListeners: Array<() => void> = []
   const attrs: Record<string, string> = { 'aria-haspopup': 'dialog' }
   const btn = { inert: false, setAttribute: (k: string, v: string) => { attrs[k] = v }, removeAttribute: (k: string) => { delete attrs[k] } }
-  let menuClosed = 0
+  let menuClosed = 0, shapeCalls = 0
   const env = { short: o.short ?? true, narrowTouch: o.narrowTouch ?? true, cw: o.cw ?? 449, scale: o.scale === undefined ? 0.85 : o.scale }
   const document = { documentElement: { get clientWidth() { return env.cw }, classList: { contains: (c: string) => c === 'short-screen' && env.short }, style: { setProperty: (k: string, v: string) => { props[k] = v } } } }
+  const crumbs: Array<{ what: string; data: any }> = []
   const window: any = {
+    screen: { width: 466, height: 678 },
+    CosShortScreen: () => { shapeCalls++ },
     get visualViewport() { return env.scale === null ? undefined : { scale: env.scale } },
     matchMedia: (q: string) => ({ get matches() { return q === '(max-width: 599px) and (pointer: coarse)' ? env.narrowTouch : false }, addEventListener: (_t: string, f: () => void) => mqListeners.push(f) }),
     addEventListener: (t: string, f: () => void) => { (listeners[t] = listeners[t] || []).push(f) },
   }
   const $ = (id: string) => (id === 'section-btn' ? btn : null)
   // eslint-disable-next-line no-new-func
-  const fns = new Function('window', 'document', '$', 'closeMenu', `${RAILJS}\nreturn { sideRail, railHitSync, railSync, RAIL };`)(window, document, $, () => { menuClosed++ })
-  return { fns, env, props, attrs, btn, listeners, mqListeners, get menuClosed() { return menuClosed } }
+  const fns = new Function('window', 'document', '$', 'closeMenu', 'layoutCrumb', `${RAILJS}\nreturn { sideRail, railHitSync, railSync, RAIL };`)(window, document, $, () => { menuClosed++ }, (what: string, data: any) => { crumbs.push({ what, data }) })
+  return { fns, env, props, attrs, btn, listeners, mqListeners, crumbs, get menuClosed() { return menuClosed }, get shapeCalls() { return shapeCalls } }
 }
 
 describe('app.js: when the rail is on', () => {
@@ -143,6 +167,23 @@ describe('app.js: when the rail is on', () => {
     h.mqListeners.forEach(f => f())
     expect(h.btn.inert).toBe(false)
     expect(h.attrs['aria-haspopup']).toBe('dialog')
+  })
+  it('a resize or an orientation change runs the screen test again, then the rail; a change after boot is reported once with the screen numbers', () => {
+    const h = rail({ short: false })
+    h.fns.railSync()
+    expect(h.shapeCalls).toBe(1)
+    expect(h.crumbs, 'boot is the device report\'s, not this one').toHaveLength(0)
+    h.env.short = true
+    h.listeners.resize!.forEach(f => f())
+    expect(h.shapeCalls).toBe(2)
+    expect(h.btn.inert).toBe(true)
+    expect(h.crumbs).toEqual([{ what: 'rail', data: { sw: 466, sh: 678, rail: true, railHit: 52 } }])
+    h.listeners.orientationchange!.forEach(f => f())
+    expect(h.crumbs, 'no change, no report').toHaveLength(1)
+    h.env.short = false
+    h.listeners.orientationchange!.forEach(f => f())
+    expect(h.btn.inert).toBe(false)
+    expect(h.crumbs.map(c => c.data.rail)).toEqual([true, false])
   })
   it('without the rail nothing changes: the button keeps its menu and no size is set', () => {
     const h = rail({ short: false })
@@ -206,5 +247,23 @@ describe('F3: unsent words in the reply box survive leaving the session', () => 
     expect(APP).toContain("      readerImagesMount($('session-turns'), r);\n      if (typeof unsentRestore === 'function') unsentRestore(r);")
     expect(APP).toContain("input.value = text; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); sessionStatus(why + ' Your message is back in the box.'")
     expect(APP).toContain("  function clearBoxOf(text) {\n    if (typeof unsentDrop === 'function') unsentDrop(text);")
+  })
+})
+
+// F2 (lead 00:35): with the rail at 382 px the reply box's words wrapped and the second line was cut. Measured in WebKit
+// (rail_check.cjs R10 at every size and view, keyboard up too); these pin how it is done.
+describe('F2: the reply box never cuts its placeholder', () => {
+  it('the long words are kept where they fit; where they would wrap the box says the short form', () => {
+    expect(APP).toContain("box.phShort = open && !te ? 'Message (not an answer)' : '';")
+    expect(APP).toContain("if (box.phShort) { var one = placeholderHeight(box, 'M'), two = placeholderHeight(box, box.phLong); if (one > 0 && two > one + 2) ph = box.phShort; }")
+  })
+  it('an empty box is as tall as its placeholder, measured in a hidden copy (the box itself is never written to)', () => {
+    expect(APP).toContain("if (!ta.value && ta.id === 'session-input' && ta.placeholder) h = Math.max(h, placeholderHeight(ta, ta.placeholder));")
+    const fn = APP.slice(APP.indexOf('  function placeholderHeight(ta, text) {'), APP.indexOf('  }\n', APP.indexOf('  function placeholderHeight(ta, text) {')))
+    expect(fn).toContain('c.value = text;')
+    expect(fn).not.toMatch(/ta\.value\s*=/)
+  })
+  it('a width change (the rail coming or going, a rotation) fits it again', () => {
+    expect(APP).toContain("if (si && typeof sxPlaceholderFit === 'function' && si.phLong) sxPlaceholderFit(si);")
   })
 })

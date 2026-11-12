@@ -245,7 +245,43 @@
     clearTimeout(toastTimer); toastTimer = setTimeout(function () { el.classList.add('hidden'); }, 3200);
   }
   function setStatus(el, text, isError) { if (!el) return; el.textContent = text || ''; el.classList.toggle('error', !!isError); }
-  function autoGrow(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 140) + 'px'; }
+  // 7.0.29 (lead F2): an empty session reply box is as tall as its placeholder, so a placeholder that wraps (the rail's
+  // width at 382 px wraps "Message this session (not an answer)") is never cut off. Only #session-input; where the
+  // placeholder fits on one line the height is the same as before.
+  function autoGrow(ta) {
+    ta.style.height = 'auto';
+    var h = ta.scrollHeight;
+    if (!ta.value && ta.id === 'session-input' && ta.placeholder) h = Math.max(h, placeholderHeight(ta, ta.placeholder));
+    ta.style.height = Math.min(h, 140) + 'px';
+  }
+  // 7.0.29 (lead F2): with the rail at 382 px, "Message this session (not an answer)" wraps; with the keyboard up the box
+  // is capped under two lines, so the second line would be cut. Where the long words would wrap in the box's width, the
+  // box says the short form instead; checked again when the width changes (railSync). Elsewhere the words are as before.
+  function sxPlaceholderFit(box) {
+    if (!box || !box.setAttribute || !box.phLong) return;
+    var ph = box.phLong;
+    if (box.phShort) { var one = placeholderHeight(box, 'M'), two = placeholderHeight(box, box.phLong); if (one > 0 && two > one + 2) ph = box.phShort; }
+    if (!box.getAttribute || box.getAttribute('placeholder') !== ph) box.setAttribute('placeholder', ph);
+    if (!box.value && box.style) autoGrow(box);
+  }
+  // The placeholder's height in a hidden copy of the box: same width, font, padding and line height. The box's own value
+  // is never touched (setting it would drop its undo history and move the caret).
+  var PH_PROBE = null;
+  function placeholderHeight(ta, text) {
+    try {
+      if (typeof getComputedStyle !== 'function' || !document.body || !ta.getBoundingClientRect) return 0;
+      var cs = getComputedStyle(ta), w = ta.getBoundingClientRect().width;
+      if (!(w > 0)) return 0;
+      var c = PH_PROBE;
+      if (!c) { c = PH_PROBE = document.createElement('textarea'); c.setAttribute('aria-hidden', 'true'); c.tabIndex = -1; c.rows = 1; }
+      c.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;height:auto;min-height:0;max-height:none;overflow:hidden;resize:none;border:0;' +
+        'box-sizing:' + cs.boxSizing + ';width:' + w + 'px;padding:' + cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft + ';' +
+        'font:' + cs.font + ';letter-spacing:' + cs.letterSpacing + ';line-height:' + cs.lineHeight + ';white-space:' + cs.whiteSpace + ';word-break:' + cs.wordBreak + ';';
+      c.value = text;
+      if (c.parentNode !== document.body) document.body.appendChild(c);
+      return c.scrollHeight;
+    } catch (_e) { return 0; }
+  }
 
   // ── API ─────────────────────────────────────────────────
   function api(path, opts) {
@@ -541,7 +577,7 @@
   // 44 points on the phone. Safari's Page Zoom lays the page out wider and draws it at visualViewport.scale (his Duo: 449 px
   // at 0.85), so 44 px would be 37 points: the rail's buttons are ceil(44 / scale) px: 44 at 100 percent, 52 at 85, 88 at 50 (the lowest Page Zoom). Read at boot and when the
   // layout width changes (rotation), never on a pinch: a pinch must not resize the rail.
-  var RAIL = { hit: 0, cw: -1, hooked: false };
+  var RAIL = { hit: 0, cw: -1, hooked: false, on: null };
   function railHitSync() {
     var de = document.documentElement, cw = de ? de.clientWidth : 0;
     if (RAIL.hit && cw === RAIL.cw) return RAIL.hit;
@@ -555,6 +591,8 @@
   function railSync() {
     var on = false;
     try {
+      // theme.js's one screen test first (its own resize listener ran too; this keeps the order certain), then the page.
+      if (typeof window.CosShortScreen === 'function') window.CosShortScreen();
       on = sideRail();
       var btn = typeof $ === 'function' ? $('section-btn') : null;
       if (btn) {
@@ -562,11 +600,17 @@
         if (on) btn.removeAttribute('aria-haspopup'); else btn.setAttribute('aria-haspopup', 'dialog');
       }
       if (on) { railHitSync(); closeMenu(); }
+      // The rail changes the reply box's width: an empty box re-fits its placeholder (autoGrow, F2).
+      var si = typeof $ === 'function' ? $('session-input') : null; if (si && typeof sxPlaceholderFit === 'function' && si.phLong) sxPlaceholderFit(si); else if (si && !si.value && typeof autoGrow === 'function') autoGrow(si);
+      // A change after boot (a fold, a rotation, a new screen) is reported once, with the screen's own numbers.
+      if (RAIL.on !== null && RAIL.on !== on && typeof layoutCrumb === 'function') { var sc = window.screen || {}; layoutCrumb('rail', { sw: sc.width, sh: sc.height, rail: on, railHit: RAIL.hit }); }
+      RAIL.on = on;
       if (!RAIL.hooked && typeof window.matchMedia === 'function' && typeof window.addEventListener === 'function') {
         RAIL.hooked = true;
         var mq = window.matchMedia(SIDE_RAIL_MQ);
         if (mq && mq.addEventListener) mq.addEventListener('change', railSync); else if (mq && mq.addListener) mq.addListener(railSync);
-        window.addEventListener('resize', function () { if (sideRail()) railHitSync(); });
+        window.addEventListener('resize', function () { railSync(); });
+        window.addEventListener('orientationchange', function () { railSync(); });
       }
     } catch (_e) { /* a harness without a page: no rail */ }
     return on;
@@ -2112,7 +2156,11 @@
     var qs1 = sessionQs(), open = (!!html && !te) || !!(qs1 && ((qs1.itemsFor && qs1.itemsFor(r.id).length) || (qs1.atMacFor && qs1.atMacFor(r.id).length)));
     var box = $('session-input');
     // 7.0.18: here a reply IS the answer (sent with the contract's attribution), so the box says so.
-    if (box && box.setAttribute) box.setAttribute('placeholder', te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…');
+    if (box && box.setAttribute) {
+      box.phLong = te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…';
+      box.phShort = open && !te ? 'Message (not an answer)' : '';
+      if (typeof sxPlaceholderFit === 'function') sxPlaceholderFit(box); else box.setAttribute('placeholder', box.phLong);
+    }
   }
   // ── end at the Mac's prompt
 
@@ -3994,6 +4042,7 @@
         '<p class="sx-goq" id="session-goq" hidden><span>A question is waiting at the end.</span><button type="button" class="cx-btn quiet" data-sx="goto-question">Go to the question</button></p>';
       readerImagesMount($('session-turns'), r);
       if (typeof unsentRestore === 'function') unsentRestore(r);
+      var si0 = $('session-input'); if (si0 && !si0.value && typeof autoGrow === 'function') autoGrow(si0);
       sxNoteList(r, d);
       setLive({});
       if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
