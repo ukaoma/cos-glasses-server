@@ -28,6 +28,21 @@ let finalizing = false
 let holdDisplay: Promise<void> | null = null
 let displayReads = 0
 const dataHome = () => process.env.COS_DATA_DIR as string
+/**
+ * The data home a "writes nothing" fingerprint may cover. Those tests compare every file under the home, which only
+ * means something if no other test file can write there. test-support/setup-data-home.ts gives each file its own home
+ * under the run root (ef71c9c). Before that, every worker shared the run root, and on the 6.99.19 full run (2026-11-06)
+ * a concurrent suite's web-lookup-ledger.json write false-failed the click test below. If the per-file home ever
+ * regresses, fail here with the reason instead of flaking under parallel load.
+ */
+function privateDataHome(): string {
+  const home = dataHome()
+  const runRoot = process.env.COS_VITEST_RUN_DATA_DIR
+  expect(runRoot, 'vitest.config.ts sets the run root').toBeTruthy()
+  expect(home, 'this file must not fingerprint the run root every worker shares').not.toBe(runRoot)
+  expect(home.startsWith(`${runRoot}/`), 'the data home is a per-file home under the run root').toBe(true)
+  return home
+}
 
 const axis = (i: number): number[] => { const v = new Array<number>(DIM).fill(0); v[i] = 1; return v }
 
@@ -322,12 +337,12 @@ describe('GET /speakers voiceDisplay', () => {
     seedMacMeeting()
     seedShadow([SHADOW_RECORD])
     await startServer()
-    const before = fingerprint(dataHome())
+    const before = fingerprint(privateDataHome())
     await speakers()
     await speakers()
     expect(extracts).toBe(0)
     expect((await readState()).json.state).toBe('idle')
-    expect(fingerprint(dataHome())).toEqual(before)
+    expect(fingerprint(privateDataHome())).toEqual(before)
   })
 })
 
@@ -414,11 +429,11 @@ describe('/voice-suggestions', () => {
     seedMacMeeting()
     seedShadow([SHADOW_RECORD])
     await startServer()
-    const before = { data: fingerprint(dataHome()), meetings: fingerprint(root) }
+    const before = { data: fingerprint(privateDataHome()), meetings: fingerprint(root) }
     await click()
     const done = await untilSettled()
     expect(done.state).toBe('done')
-    expect({ data: fingerprint(dataHome()), meetings: fingerprint(root) }).toEqual(before)
+    expect({ data: fingerprint(privateDataHome()), meetings: fingerprint(root) }).toEqual(before)
   })
 
   it('refuses while a recording is live, and runs once it ends', async () => {
