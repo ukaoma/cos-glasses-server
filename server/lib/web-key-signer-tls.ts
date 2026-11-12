@@ -149,31 +149,38 @@ export const signerTlsCliRunner: SignerTlsRunner = (bin, args, timeoutMs, env) =
 /** What the macOS CLI prints, with exit 0, when it cannot reach the GUI app (no SHLVL; see signerTlsCliEnv). */
 const CLI_GUI_UNAVAILABLE = /Tailscale GUI failed to start|Tailscale\.CLIError error 3\b/i
 
-export type SignerTlsReason =
-  | 'ok'
-  | 'pending'
-  | 'tailnet_name_unknown'
-  | 'tailnet_https_certs_off'
-  | 'cert_domain_mismatch'
-  | 'tailscale_not_running'
-  | 'tailscale_cli_missing'
-  | 'tailscale_cli_timeout'
-  | 'tailscale_cli_gui_unavailable'
-  | 'tailscale_output_too_large'
-  | 'tailscale_status_failed'
-  | 'tailscale_cert_failed'
-  | 'cert_invalid'
-  | 'cert_expired'
-  | 'cert_not_yet_valid'
-  | 'cert_untrusted'
-  | 'cert_store_failed'
-  | 'cert_daily_cap'
-  // SR-08: a stored file or its folder refused before it is read.
-  | 'stored_symlink'
-  | 'stored_not_file'
-  | 'stored_owner'
-  | 'stored_writable'
-  | 'stored_too_large'
+/**
+ * SR-11: every reason the status can carry, in one list. The type is derived from it, and COS Control's
+ * golden fixture is generated from it (Control Tests/fixtures/web-key/gen_control_golden.mts), so Control's
+ * sentences cannot drift from the server. Adding or renaming one means regenerating that fixture.
+ */
+export const SIGNER_TLS_REASONS = Object.freeze([
+  'ok',
+  'pending',
+  'tailnet_name_unknown',
+  'tailnet_https_certs_off',
+  'cert_domain_mismatch',
+  'tailscale_not_running',
+  'tailscale_cli_missing',
+  'tailscale_cli_timeout',
+  'tailscale_cli_gui_unavailable',
+  'tailscale_output_too_large',
+  'tailscale_status_failed',
+  'tailscale_cert_failed',
+  'cert_invalid',
+  'cert_expired',
+  'cert_not_yet_valid',
+  'cert_untrusted',
+  'cert_store_failed',
+  'cert_daily_cap',
+  'stored_symlink',
+  'stored_not_file',
+  'stored_owner',
+  'stored_writable',
+  'stored_too_large',
+] as const)
+
+export type SignerTlsReason = typeof SIGNER_TLS_REASONS[number]
 
 export interface SignerTlsStatus {
   /**
@@ -718,7 +725,7 @@ export class SignerTls {
       const certCalls = typeof raw.certCalls === 'number' && Number.isInteger(raw.certCalls) && raw.certCalls >= 0 ? raw.certCalls : 0
       const failures = typeof raw.failures === 'number' && Number.isInteger(raw.failures) && raw.failures >= 0 ? raw.failures : 0
       const cooldownUntil = finiteOrNull(raw.cooldownUntil)
-      const lastError = typeof raw.lastError === 'string' ? raw.lastError as SignerTlsReason : null
+      const lastError = typeof raw.lastError === 'string' && (SIGNER_TLS_REASONS as readonly string[]).includes(raw.lastError) ? raw.lastError as SignerTlsReason : null
       this.fetchState = { v: 1, day: raw.day, certCalls, lastCertAt: finiteOrNull(raw.lastCertAt), failures, cooldownUntil, lastError }
       if (failures > 0 && cooldownUntil !== null && cooldownUntil > this.now()) {
         this.failures = failures

@@ -36,6 +36,7 @@ import {
   SIGNER_TLS_CLI_ENV_KEYS,
   SIGNER_TLS_CERT_CALLS_PER_DAY,
   SIGNER_TLS_STATE_FILE,
+  SIGNER_TLS_REASONS,
   SIGNER_TLS_RECHECK_FLOOR_MS,
   signerTlsCliEnv,
   signerTlsCliRunner,
@@ -858,6 +859,26 @@ describe('SR-03: the signer\'s own status call, without peers; an oversized answ
     const m = rig()
     m.status({ code: null, signal: null, killed: false, stdout: '', stderr: '', spawnError: 'ENOENT', elapsedMs: 1 })
     expect((await m.tls.check()).reason).toBe('tailscale_cli_missing')
+  })
+})
+
+describe('SR-11: one reason list, pinned, for the server and COS Control\'s generated golden', () => {
+  it('SIGNER_TLS_REASONS is the pinned list (a change here means regenerating Control\'s golden.json), with no duplicates', () => {
+    expect([...SIGNER_TLS_REASONS]).toEqual(['ok', 'pending', 'tailnet_name_unknown', 'tailnet_https_certs_off', 'cert_domain_mismatch', 'tailscale_not_running', 'tailscale_cli_missing', 'tailscale_cli_timeout', 'tailscale_cli_gui_unavailable', 'tailscale_output_too_large', 'tailscale_status_failed', 'tailscale_cert_failed', 'cert_invalid', 'cert_expired', 'cert_not_yet_valid', 'cert_untrusted', 'cert_store_failed', 'cert_daily_cap', 'stored_symlink', 'stored_not_file', 'stored_owner', 'stored_writable', 'stored_too_large'])
+    expect(new Set(SIGNER_TLS_REASONS).size).toBe(SIGNER_TLS_REASONS.length)
+    expect(Object.isFrozen(SIGNER_TLS_REASONS)).toBe(true)
+  })
+
+  it('a saved lastError outside the list is not restored', async () => {
+    const r = rig()
+    r.cert({ code: 1, signal: null, killed: false, stdout: '', stderr: 'acme: error', elapsedMs: 900 })
+    await r.tls.check()
+    const statePath = join(r.dir, SIGNER_TLS_STATE_FILE)
+    const saved = JSON.parse(readFileSync(statePath, 'utf8'))
+    writeFileSync(statePath, JSON.stringify({ ...saved, lastError: 'made_up_reason' }), { mode: 0o600 })
+    const again = rig({ dir: r.dir })
+    again.clock.now = r.clock.now
+    expect(again.tls.status().lastError).toBeNull()
   })
 })
 
