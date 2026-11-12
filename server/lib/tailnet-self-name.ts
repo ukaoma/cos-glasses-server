@@ -1,8 +1,9 @@
 // This Mac's own Tailscale MagicDNS name, for COS Control Web's origin checks.
 //
 // WHY NOT THE TAILSCALE CLI. Under the server's LaunchAgent the `tailscale status --json` call
-// the nudger makes does not answer (server.log: "trigger=boot dropped: Tailscale did not answer
-// for 120s"), so the nudger never learns Self.DNSName and a phone at
+// the nudger makes fails: node passes its child no SHLVL, and the macOS CLI then answers "The
+// Tailscale GUI failed to start" instead of the JSON (probe 2026-11-10; server.log's "Tailscale did
+// not answer for 120s" is the event's age, not a hang). So the nudger never learns Self.DNSName and a phone at
 // http://<mac>.<tailnet>.ts.net:3141/control was refused by CORS on every write (6.99.1).
 // MagicDNS itself answers a reverse lookup of this Mac's own 100.x address at 100.100.100.100
 // in about a millisecond, with no CLI involved. The nudger's answer still wins when it has one.

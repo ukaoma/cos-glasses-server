@@ -495,8 +495,10 @@ const pairingState = new PairingState({
 // address as a paired phone. Notes only, never answers; noteRequest never throws.
 const tailscaleNudger = installTailscaleNudger({ activeMeetings: () => getActiveTranscriptionSessionCount() })
 // COS Control Web: this Mac's MagicDNS name, from the nudger when it has one and otherwise
-// from a reverse lookup at MagicDNS (the CLI does not answer under this LaunchAgent; see
-// lib/tailnet-self-name.ts). Learned at boot so the first phone sign-in is not refused.
+// from a reverse lookup at MagicDNS (the nudger's Tailscale CLI calls fail under this LaunchAgent:
+// node passes its child no SHLVL, so the macOS CLI answers "The Tailscale GUI failed to start";
+// probe 2026-11-10, see lib/tailnet-self-name.ts and lib/web-key-signer-tls.ts signerTlsCliEnv).
+// Learned at boot so the first phone sign-in is not refused.
 const tailnetSelf = installTailnetSelfName({ nudgerName: () => tailscaleNudger.currentSelfDnsName() })
 if (webControlEnabled()) void tailnetSelf.refresh()
 // Browser sessions sign this Mac's session epoch; "Sign out every browser" bumps it.
