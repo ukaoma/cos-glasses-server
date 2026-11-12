@@ -1,13 +1,13 @@
-## 7.0.30 - Control Web: Back goes the way you came, Reply stays at the bottom of a message, Meetings opens on today, and clearer copy buttons
+## 7.0.30 - Control Web: Back goes the way you came, a phone shows how you got here, a message shows who said what, Reply stays at the bottom, Meetings opens on today, and clearer copy buttons
 
-2026-11-12. 7.0.29 plus five Control Web changes from a tester's phone feedback.
+2026-11-12. 7.0.29 plus eight Control Web changes from a tester's phone feedback, one clearer sign-in error, and phone-approval changes that stay off unless switched on.
 
 - **Back goes the way you came.** Back now returns to the page you came from, not a fixed parent. Open a meeting from Speakers, and Back takes you to Speakers, not to Meetings. It is the browser's own Back, so the two always agree, and it adds nothing to the browser's history. Opened straight from a link or after a reload, Back goes one level up as before. Back names where it goes ("Speakers", "Meetings"). On screens 600 px and wider, the navigation bar's Back keeps the word "Back" and says where it goes in its name and tooltip ("Back to Speakers").
 - **Back stays in reach on a tall phone.** On a page you are reading (a session, a message, a meeting), the top bar with Back no longer slides away as you scroll down.
 - **Reply stays at the bottom of a message.** Opening a message from Messages, the Reply box now sits at the bottom of the screen while you read, and above the keyboard while you type, as the COS chat already did.
 - **Speakers: the copy buttons say they copy.** "Summary" and "Full (N KB)" now read "Copy summary" and "Copy full (N KB)". The one you tap says "Copied" for a moment, and a screen reader hears what was copied.
 - **Meetings opens on today.** The calendar opens on today, marked with a ring, even when today has no meetings. Then the list says "No meetings today." with one tap to the latest earlier day this month that has meetings (or to last month when this month has none).
-- **Settings says "your phone's camera"**, not "your iPhone Camera". COS on the web works on Android too.
+- **Settings says "your phone's camera"**, not "your iPhone Camera". The page is not only for iPhones.
 - **A message shows who said what by side.** Your words sit on the right in the COS chat's gold bubble, with "You" under it; COS's answer sits on the left beside its mark. The two cards marked YOU and COS are gone. The bubble's edge is darker in light mode, so it reads against the page (3.48 to 1; it was 1.52 to 1). A screen reader hears "You said" and "COS said". The same applies to a chat opened from the archive.
 - **A phone shows how you got here.** On a page you opened (a meeting, a message, a session), one line under the top bar names the steps that led there, for example "Today / Speakers / Naming voices / Meeting". Each earlier step is a link that goes back to it, the same way Back does; the page you are on is last and is not a link. The line never wraps: a long path drops steps from the middle and shows "…" in their place. There is no line on a pane's list, on a page opened from a link, or after a reload. Screens 600 px and wider are unchanged; they keep the navigation bar.
 - Tested in a browser (WebKit) at a tall iPhone size, the folded Duo with its side rail, and the open Duo, in light and dark. Before this build the same checks fail. Not yet tested on a real phone; Android was not tested.
@@ -25,7 +25,7 @@ Server:
 
 ### If you roll back
 
-- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, Settings says iPhone, a message shows the YOU and COS cards, and the how-you-got-here line is gone. Nothing is stored.
+- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, Settings says iPhone, a message shows the YOU and COS cards, the how-you-got-here line is gone, and an expired Claude sign-in reads "provider process exited" again. Nothing is stored.
 - Further back: as in 7.0.29 below.
 
 ## 7.0.29 - Control Web: on the folded Duo, the panes sit in a side rail at the right edge, and Back is at thumb height
