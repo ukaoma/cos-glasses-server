@@ -34,6 +34,8 @@ import {
   SignerTls,
   signerHttpsOptions,
   SIGNER_TLS_CLI_ENV_KEYS,
+  SIGNER_TLS_CERT_CALLS_PER_DAY,
+  SIGNER_TLS_STATE_FILE,
   SIGNER_TLS_RECHECK_FLOOR_MS,
   signerTlsCliEnv,
   signerTlsCliRunner,
@@ -328,7 +330,8 @@ describe('failure keeps mkcert and says exactly why', () => {
       const s = await r.tls.check()
       expect({ label, reason: s.reason, trusted: s.trusted }).toEqual({ label, reason, trusted: false })
       expect(r.tls.served()).toBeNull()
-      expect(existsSync(r.dir)).toBe(false)
+      // SR-05 saves the cert-call count beside the pair; the pair itself is never stored.
+      expect(existsSync(join(r.dir, SIGNER_TLS_KEY_FILE)) || existsSync(join(r.dir, SIGNER_TLS_CERT_FILE))).toBe(false)
     }
   })
 })
@@ -674,6 +677,64 @@ describe('the breaker: bounded, backing off, single-flight', () => {
     v.tls.statusRead()
     await v.tls.check()
     expect(v.calls).toHaveLength(1)
+  })
+
+  it('SR-05: each cert call is counted and saved before it runs (0600), and the breaker survives a restart', async () => {
+    const r = rig()
+    r.cert({ code: 1, signal: null, killed: false, stdout: '', stderr: 'acme: error', elapsedMs: 900 })
+    expect((await r.tls.check()).reason).toBe('tailscale_cert_failed')
+    const statePath = join(r.dir, SIGNER_TLS_STATE_FILE)
+    expect(statSync(statePath).mode & 0o777).toBe(0o600)
+    const saved = JSON.parse(readFileSync(statePath, 'utf8'))
+    expect(saved).toMatchObject({ v: 1, certCalls: 1, failures: 1, lastError: 'tailscale_cert_failed' })
+    expect(saved.cooldownUntil).toBe(r.clock.now + signerTlsRetryMs(1))
+    // A restart inside the cooldown: no CLI call at all, and status still says why.
+    const again = rig({ dir: r.dir })
+    again.clock.now = r.clock.now
+    expect((await again.tls.check()).reason).toBe('tailscale_cert_failed')
+    expect(again.calls).toEqual([])
+    // Past the cooldown it calls again.
+    again.clock.now += signerTlsRetryMs(1)
+    again.cert({ code: 1, signal: null, killed: false, stdout: '', stderr: 'acme: error', elapsedMs: 900 })
+    await again.tls.check()
+    expect(again.calls.map(c => c.args[0])).toEqual(['status', 'cert'])
+  })
+
+  it('SR-05: at most SIGNER_TLS_CERT_CALLS_PER_DAY cert calls per UTC day, across restarts; the next UTC day resets the count', async () => {
+    expect(SIGNER_TLS_CERT_CALLS_PER_DAY).toBe(3)
+    const r = rig()
+    const day = new Date(r.clock.now)
+    r.clock.now = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), 1, 0, 0)
+    const failing: RunResult = { code: 1, signal: null, killed: false, stdout: '', stderr: 'acme: error', elapsedMs: 900 }
+    r.cert(failing)
+    const certCalls = (rr: Rig): number => rr.calls.filter(c => c.args[0] === 'cert').length
+    for (let i = 0; i < SIGNER_TLS_CERT_CALLS_PER_DAY; i++) {
+      await r.tls.check()
+      r.clock.now += SIGNER_TLS_RETRY_MAX_MS
+    }
+    expect(certCalls(r)).toBe(SIGNER_TLS_CERT_CALLS_PER_DAY)
+    expect((await r.tls.check()).reason).toBe('cert_daily_cap')
+    expect(certCalls(r)).toBe(SIGNER_TLS_CERT_CALLS_PER_DAY)
+    // A restart the same day: still capped.
+    const again = rig({ dir: r.dir })
+    again.clock.now = r.clock.now + SIGNER_TLS_RETRY_MAX_MS
+    again.cert(failing)
+    expect((await again.tls.check()).reason).toBe('cert_daily_cap')
+    expect(certCalls(again)).toBe(0)
+    // The next UTC day: one call again.
+    again.clock.now = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + 1, 1, 0, 0) + SIGNER_TLS_RETRY_MAX_MS
+    await again.tls.check()
+    expect(certCalls(again)).toBe(1)
+  })
+
+  it('SR-05: no cert call when the count cannot be saved (the pair folder cannot be written)', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'signer-tls-nostate-'))
+    dirs.push(base)
+    const dir = join(base, 'web-key-tls')
+    writeFileSync(dir, 'not a folder', { mode: 0o644 })
+    const r = rig({ dir })
+    expect((await r.tls.check()).reason).toBe('cert_store_failed')
+    expect(r.calls.map(c => c.args[0])).toEqual(['status'])
   })
 
   it('concurrent checks share one run', async () => {

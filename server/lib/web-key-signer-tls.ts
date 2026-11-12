@@ -78,6 +78,10 @@ export const SIGNER_TLS_CERT_FILE = 'tailscale-cert.pem'
 export const SIGNER_TLS_KEY_FILE = 'tailscale-key.pem'
 export const SIGNER_TLS_KEY_MODE = 0o600
 export const SIGNER_TLS_CERT_MODE = 0o644
+/** SR-05: the breaker and the day's cert-call count, saved beside the pair (0600) so they survive a restart. */
+export const SIGNER_TLS_STATE_FILE = 'fetch-state.json'
+/** SR-05: the most `tailscale cert` calls per UTC day (Let's Encrypt allows 5 duplicate certificates a week). */
+export const SIGNER_TLS_CERT_CALLS_PER_DAY = 3
 /** SR-08: the most bytes read from either stored file (a real chain plus key is about 4 KiB). */
 export const SIGNER_TLS_STORED_MAX_BYTES = 64 * 1024
 /**
@@ -163,6 +167,7 @@ export type SignerTlsReason =
   | 'cert_not_yet_valid'
   | 'cert_untrusted'
   | 'cert_store_failed'
+  | 'cert_daily_cap'
   // SR-08: a stored file or its folder refused before it is read.
   | 'stored_symlink'
   | 'stored_not_file'
@@ -425,6 +430,20 @@ function readStoredFile(path: string, ownerUid: number | null): StoredRead {
   }
 }
 
+/** SR-05: what survives a restart. */
+interface FetchState {
+  v: 1
+  /** The UTC day `certCalls` counts (YYYY-MM-DD). */
+  day: string
+  certCalls: number
+  lastCertAt: number | null
+  failures: number
+  cooldownUntil: number | null
+  lastError: SignerTlsReason | null
+}
+const utcDay = (ms: number): string => new Date(ms).toISOString().slice(0, 10)
+const finiteOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
 export class SignerTls {
   private readonly now: () => number
   private readonly runner: SignerTlsRunner
@@ -449,6 +468,8 @@ export class SignerTls {
   /** SR-04: when a status read last started a re-check, and whether the next check may skip the cooldown. */
   private lastRecheckAt: number | null = null
   private bypassCooldown = false
+  /** SR-05: the saved breaker and day's count. */
+  private fetchState: FetchState
 
   constructor(private readonly deps: SignerTlsDeps) {
     this.now = deps.now ?? Date.now
@@ -458,6 +479,8 @@ export class SignerTls {
     this.schedule = deps.schedule ?? defaultSchedule
     this.roots = deps.roots ?? signerTlsPublicRoots()
     this.ownerUid = deps.ownerUid !== undefined ? deps.ownerUid : (typeof process.getuid === 'function' ? process.getuid() : null)
+    this.fetchState = { v: 1, day: utcDay(this.now()), certCalls: 0, lastCertAt: null, failures: 0, cooldownUntil: null, lastError: null }
+    this.loadFetchState()
     this.loadStored()
   }
 
@@ -645,20 +668,30 @@ export class SignerTls {
     if (domains.length === 0) { this.fail('tailnet_https_certs_off'); return }
     if (!domains.includes(name)) { this.fail('cert_domain_mismatch'); return }
 
+    // SR-05: at most SIGNER_TLS_CERT_CALLS_PER_DAY cert calls per UTC day. The call is counted and SAVED before
+    // it runs, so a crash during the call still counts; if the count cannot be saved, no call is made.
+    const today = utcDay(this.now())
+    if (this.fetchState.day !== today) this.fetchState = { ...this.fetchState, day: today, certCalls: 0 }
+    if (this.fetchState.certCalls >= SIGNER_TLS_CERT_CALLS_PER_DAY) { this.fail('cert_daily_cap', `${this.fetchState.certCalls} today`); return }
+    this.fetchState = { ...this.fetchState, certCalls: this.fetchState.certCalls + 1, lastCertAt: this.now() }
+    if (!this.saveFetchState()) { this.fail('cert_store_failed', 'fetch state not saved; no cert call'); return }
+
     const r = await this.runner(bin, SIGNER_TLS_CERT_ARGS(name), SIGNER_TLS_CERT_TIMEOUT_MS, cliEnv)
     if (r.spawnError || r.killed || r.signal || r.code !== 0) {
       this.fail(classifyCertFailure(r), `cert code=${r.code} killed=${r.killed} signal=${r.signal ?? ''} ${r.elapsedMs}ms ${firstLine(r.stderr)}`)
+      this.recordCertOutcome()
       return
     }
     // SR-01: the same checks as a stored pair, including the public-root chain; the refusal names why.
     const checked = checkSignerTlsPair(r.stdout, name, this.now(), this.roots)
-    if (!checked.ok) { this.fail(checked.reason); return }
+    if (!checked.ok) { this.fail(checked.reason); this.recordCertOutcome(); return }
     const fresh = checked.pair
     let storeFailed = false
     try { this.store(fresh) } catch { storeFailed = true }
     // The hot swap: the next 3144 handshake reads this pair.
     this.current = fresh
     this.succeed(storeFailed)
+    this.recordCertOutcome()
     this.log(`[signer-tls] serving a trusted certificate on 3144 until ${new Date(fresh.notAfterMs).toISOString()}${storeFailed ? ' (not saved: cert_store_failed)' : ''}`)
   }
 
@@ -668,6 +701,49 @@ export class SignerTls {
     // Key first: a crash between the two writes leaves a pair that fails to load (key mismatch) and is fetched again.
     durableAtomicWriteFileSync(join(this.deps.dir, SIGNER_TLS_KEY_FILE), pair.keyPem, { mode: SIGNER_TLS_KEY_MODE })
     durableAtomicWriteFileSync(join(this.deps.dir, SIGNER_TLS_CERT_FILE), pair.certPem, { mode: SIGNER_TLS_CERT_MODE })
+  }
+
+  /**
+   * SR-05: restore the day's cert-call count and, while it has not run out, the breaker (failures, cooldown,
+   * last error), so a restart or a crash loop cannot call `tailscale cert` sooner than the backoff allows.
+   * Read with the same hygiene as the pair (SR-08). Missing, refused or malformed: nothing restored.
+   */
+  private loadFetchState(): void {
+    try {
+      if (storedDirRefusal(this.deps.dir, this.ownerUid) !== null) return
+      const read = readStoredFile(join(this.deps.dir, SIGNER_TLS_STATE_FILE), this.ownerUid)
+      if (read.kind !== 'ok') return
+      const raw = JSON.parse(read.text) as Record<string, unknown>
+      if (!raw || raw.v !== 1 || typeof raw.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.day)) return
+      const certCalls = typeof raw.certCalls === 'number' && Number.isInteger(raw.certCalls) && raw.certCalls >= 0 ? raw.certCalls : 0
+      const failures = typeof raw.failures === 'number' && Number.isInteger(raw.failures) && raw.failures >= 0 ? raw.failures : 0
+      const cooldownUntil = finiteOrNull(raw.cooldownUntil)
+      const lastError = typeof raw.lastError === 'string' ? raw.lastError as SignerTlsReason : null
+      this.fetchState = { v: 1, day: raw.day, certCalls, lastCertAt: finiteOrNull(raw.lastCertAt), failures, cooldownUntil, lastError }
+      if (failures > 0 && cooldownUntil !== null && cooldownUntil > this.now()) {
+        this.failures = failures
+        this.cooldownUntil = cooldownUntil
+        this.lastError = lastError
+      }
+    } catch { /* nothing restored */ }
+  }
+
+  /** SR-05: save the state (0600, atomic) in the pair's folder (0700). False when it cannot be written. */
+  private saveFetchState(): boolean {
+    try {
+      mkdirSync(this.deps.dir, { recursive: true, mode: 0o700 })
+      chmodSync(this.deps.dir, 0o700)
+      durableAtomicWriteFileSync(join(this.deps.dir, SIGNER_TLS_STATE_FILE), `${JSON.stringify(this.fetchState)}\n`, { mode: 0o600 })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** SR-05: after a cert call, save how it ended (the breaker as it now stands). */
+  private recordCertOutcome(): void {
+    this.fetchState = { ...this.fetchState, failures: this.failures, cooldownUntil: this.cooldownUntil, lastError: this.lastError }
+    this.saveFetchState()
   }
 
   /** With a name: only a pair for exactly that name. Without (at construction): the *.ts.net name the leaf covers. */
