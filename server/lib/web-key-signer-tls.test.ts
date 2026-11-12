@@ -4,7 +4,7 @@
 // against a real https server on 127.0.0.1:0.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer, type Server } from 'node:https'
 import { connect, createSecureContext, rootCertificates, type PeerCertificate } from 'node:tls'
 import type { AddressInfo } from 'node:net'
@@ -29,6 +29,7 @@ import {
   SIGNER_TLS_RETRY_BASE_MS,
   SIGNER_TLS_RETRY_MAX_MS,
   SIGNER_TLS_STATUS_TIMEOUT_MS,
+  SIGNER_TLS_STORED_MAX_BYTES,
   SignerTls,
   signerHttpsOptions,
   SIGNER_TLS_CLI_ENV_KEYS,
@@ -722,6 +723,82 @@ describe('parseSignerTlsPair', () => {
     expect(p?.certPem.match(/BEGIN CERTIFICATE/g)).toHaveLength(2)
     expect(new X509Certificate(p!.certPem).fingerprint256).toBe(pairA.fingerprint)
     expect(parseSignerTlsPair(`${certStdout(pairA)}${pairB.keyPem}`, NAME, Date.now(), parseRootPems([tailCa.pem]))).toBeNull()
+  })
+})
+
+// ── SR-08 (review 2026-11-10): stored-pair hygiene ──
+describe('SR-08: a stored pair is read only from a plain, private file in a private folder, at most 64 KiB', () => {
+  /** A good stored pair (0700 folder, 0600 key, 0644 cert), like the server's own store(). */
+  function goodStore(): { base: string; dir: string } {
+    const base = mkdtempSync(join(tmpdir(), 'signer-tls-hygiene-'))
+    dirs.push(base)
+    const dir = join(base, 'web-key-tls')
+    mkdirSync(dir, { mode: 0o700 })
+    chmodSync(dir, 0o700)
+    writeFileSync(join(dir, SIGNER_TLS_KEY_FILE), pairA.keyPem, { mode: 0o600 })
+    writeFileSync(join(dir, SIGNER_TLS_CERT_FILE), `${pairA.certPem}${tailCa.pem}`, { mode: 0o644 })
+    chmodSync(join(dir, SIGNER_TLS_KEY_FILE), 0o600)
+    chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o644)
+    return { base, dir }
+  }
+
+  it('a good stored pair serves at boot, with storedRefused null', () => {
+    const { dir } = goodStore()
+    const r = rig({ dir })
+    expect(r.tls.served()?.host).toBe(NAME)
+    expect(r.tls.status()).toMatchObject({ trusted: true, storedRefused: null })
+  })
+
+  it('refuses with its own reason: a symlinked file or folder, not a regular file, another owner, group or other write, over 64 KiB', () => {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+    const cases: Array<[string, string, (s: { base: string; dir: string }) => { dir?: string; ownerUid?: number }]> = [
+      ['symlinked cert file', 'stored_symlink', ({ base, dir }) => {
+        const real = join(base, 'elsewhere.pem')
+        writeFileSync(real, `${pairA.certPem}${tailCa.pem}`, { mode: 0o644 })
+        rmSync(join(dir, SIGNER_TLS_CERT_FILE))
+        symlinkSync(real, join(dir, SIGNER_TLS_CERT_FILE))
+        return {}
+      }],
+      ['symlinked folder', 'stored_symlink', ({ base, dir }) => {
+        const link = join(base, 'linked-tls')
+        symlinkSync(dir, link)
+        return { dir: link }
+      }],
+      ['key is not a regular file', 'stored_not_file', ({ dir }) => {
+        rmSync(join(dir, SIGNER_TLS_KEY_FILE))
+        mkdirSync(join(dir, SIGNER_TLS_KEY_FILE))
+        return {}
+      }],
+      ['another owner', 'stored_owner', () => ({ ownerUid: uid + 1 })],
+      ['group- or other-writable cert', 'stored_writable', ({ dir }) => { chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o666); return {} }],
+      ['group- or other-writable folder', 'stored_writable', ({ dir }) => { chmodSync(dir, 0o777); return {} }],
+      ['cert over 64 KiB', 'stored_too_large', ({ dir }) => {
+        writeFileSync(join(dir, SIGNER_TLS_CERT_FILE), `${pairA.certPem}${tailCa.pem}${'#'.repeat(SIGNER_TLS_STORED_MAX_BYTES)}`, { mode: 0o644 })
+        return {}
+      }],
+    ]
+    for (const [label, reason, perturb] of cases) {
+      const store = goodStore()
+      const over = perturb(store)
+      const r = rig({ dir: over.dir ?? store.dir, ...(over.ownerUid !== undefined ? { ownerUid: over.ownerUid } : {}) })
+      expect({ label, served: r.tls.served() === null, ...pick(r.tls.status()) }).toEqual({ label, served: true, trusted: false, storedRefused: reason })
+    }
+    function pick(s: { trusted: boolean; storedRefused: string | null }) { return { trusted: s.trusted, storedRefused: s.storedRefused } }
+  })
+
+  it('a refused file, once fixed, is taken at the next status read with no restart; the pickup log names the reason, never the host', () => {
+    const { dir } = goodStore()
+    chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o666)
+    const r = rig({ dir })
+    expect(r.tls.status()).toMatchObject({ trusted: false, storedRefused: 'stored_writable' })
+    chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o644)
+    expect(r.tls.status()).toMatchObject({ trusted: true, storedRefused: null, host: NAME })
+    chmodSync(join(dir, SIGNER_TLS_CERT_FILE), 0o664)
+    const q = rig({ dir })
+    // Nothing loaded at boot (the cert is group-writable): the status read's pickup reads, refuses, and says why.
+    expect(q.tls.status().storedRefused).toBe('stored_writable')
+    expect(q.logs.filter(l => l === '[signer-tls] a stored certificate was not taken: stored_writable')).toHaveLength(1)
+    expect(q.logs.join('\n')).not.toContain(NAME)
   })
 })
 

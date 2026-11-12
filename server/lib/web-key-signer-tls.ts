@@ -44,7 +44,7 @@
 // see exactly the certificate they saw before.
 
 import { execFile } from 'node:child_process'
-import { mkdirSync, chmodSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, chmodSync, openSync, readSync } from 'node:fs'
 import { join } from 'node:path'
 import { X509Certificate, createPrivateKey, createPublicKey } from 'node:crypto'
 import { createSecureContext, rootCertificates, type SecureContext } from 'node:tls'
@@ -75,6 +75,8 @@ export const SIGNER_TLS_CERT_FILE = 'tailscale-cert.pem'
 export const SIGNER_TLS_KEY_FILE = 'tailscale-key.pem'
 export const SIGNER_TLS_KEY_MODE = 0o600
 export const SIGNER_TLS_CERT_MODE = 0o644
+/** SR-08: the most bytes read from either stored file (a real chain plus key is about 4 KiB). */
+export const SIGNER_TLS_STORED_MAX_BYTES = 64 * 1024
 /** Both outputs to stdout ("-"), see the header. The name is a normalised *.ts.net name, never a flag. */
 export const SIGNER_TLS_CERT_ARGS = (name: string): string[] => ['cert', '--cert-file', '-', '--key-file', '-', name]
 
@@ -149,6 +151,12 @@ export type SignerTlsReason =
   | 'cert_not_yet_valid'
   | 'cert_untrusted'
   | 'cert_store_failed'
+  // SR-08: a stored file or its folder refused before it is read.
+  | 'stored_symlink'
+  | 'stored_not_file'
+  | 'stored_owner'
+  | 'stored_writable'
+  | 'stored_too_large'
 
 export interface SignerTlsStatus {
   /**
@@ -166,6 +174,12 @@ export interface SignerTlsStatus {
   lastError: SignerTlsReason | null
   checkedAt: string | null
   nextCheckAt: string | null
+  /**
+   * SR-08: why the last read of the stored pair was refused (a `stored_*` hygiene reason, or the pair's own
+   * check: `cert_untrusted`, `cert_invalid`, `cert_expired`, `cert_not_yet_valid`), or null when the stored
+   * pair was taken, is absent, or only lasts less long than the one serving.
+   */
+  storedRefused: SignerTlsReason | null
 }
 
 export interface SignerTlsPair {
@@ -192,6 +206,8 @@ export interface SignerTlsDeps {
   schedule?: (fn: () => void, ms: number) => Timer
   /** SR-01 test seam: the public roots a pair must chain to. Default: Node's bundled roots (signerTlsPublicRoots). */
   roots?: readonly X509Certificate[]
+  /** SR-08 test seam: the owner every stored file must have. Default: this process's uid. */
+  ownerUid?: number | null
 }
 
 const defaultSchedule = (fn: () => void, ms: number): Timer => {
@@ -337,6 +353,66 @@ function firstLine(s: string): string {
   return (s.split('\n').find(l => l.trim()) ?? '').replace(/[^\x20-\x7e]/g, '').slice(0, 160)
 }
 
+type StoredRefusal = 'stored_symlink' | 'stored_not_file' | 'stored_owner' | 'stored_writable' | 'stored_too_large'
+type StoredRead = { kind: 'none' } | { kind: 'refused'; reason: StoredRefusal } | { kind: 'ok'; text: string }
+
+/** SR-08: the owner and mode rules shared by the folder and each file. */
+function ownerOrModeRefusal(uid: number, mode: number, ownerUid: number | null): StoredRefusal | null {
+  if (ownerUid !== null && uid !== ownerUid) return 'stored_owner'
+  if ((mode & 0o022) !== 0) return 'stored_writable'
+  return null
+}
+
+/**
+ * SR-08: the stored-pair folder: absent (nothing stored), refused, or fine. Not a symlink, a directory,
+ * owned by this server's user, and not writable by group or others.
+ */
+function storedDirRefusal(dir: string, ownerUid: number | null): 'none' | StoredRefusal | null {
+  const st = lstatSync(dir, { throwIfNoEntry: false })
+  if (!st) return 'none'
+  if (st.isSymbolicLink()) return 'stored_symlink'
+  if (!st.isDirectory()) return 'stored_not_file'
+  return ownerOrModeRefusal(st.uid, st.mode, ownerUid)
+}
+
+/**
+ * SR-08: read one stored file, or refuse it. Opened with O_NOFOLLOW and judged on the open descriptor
+ * (no swap between the check and the read): a regular file, owned by this server's user, not writable by
+ * group or others, at most SIGNER_TLS_STORED_MAX_BYTES (read with that cap, never the whole file).
+ */
+function readStoredFile(path: string, ownerUid: number | null): StoredRead {
+  const pre = lstatSync(path, { throwIfNoEntry: false })
+  if (!pre) return { kind: 'none' }
+  if (pre.isSymbolicLink()) return { kind: 'refused', reason: 'stored_symlink' }
+  let fd: number
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return { kind: 'none' }
+    if (code === 'ELOOP') return { kind: 'refused', reason: 'stored_symlink' }
+    throw error
+  }
+  try {
+    const st = fstatSync(fd)
+    if (!st.isFile()) return { kind: 'refused', reason: 'stored_not_file' }
+    const refusal = ownerOrModeRefusal(st.uid, st.mode, ownerUid)
+    if (refusal) return { kind: 'refused', reason: refusal }
+    if (st.size > SIGNER_TLS_STORED_MAX_BYTES) return { kind: 'refused', reason: 'stored_too_large' }
+    const buf = Buffer.alloc(SIGNER_TLS_STORED_MAX_BYTES + 1)
+    let total = 0
+    for (;;) {
+      const n = readSync(fd, buf, total, buf.length - total, total)
+      if (n <= 0) break
+      total += n
+      if (total > SIGNER_TLS_STORED_MAX_BYTES) return { kind: 'refused', reason: 'stored_too_large' }
+    }
+    return { kind: 'ok', text: buf.subarray(0, total).toString('utf8') }
+  } finally {
+    closeSync(fd)
+  }
+}
+
 export class SignerTls {
   private readonly now: () => number
   private readonly runner: SignerTlsRunner
@@ -344,7 +420,9 @@ export class SignerTls {
   private readonly log: (line: string) => void
   private readonly schedule: (fn: () => void, ms: number) => Timer
   private readonly roots: readonly X509Certificate[]
+  private readonly ownerUid: number | null
   private current: SignerTlsPair | null = null
+  private storedRefused: SignerTlsReason | null = null
   private name: string | null = null
   private lastError: SignerTlsReason | null = null
   private checkedAt: number | null = null
@@ -364,6 +442,7 @@ export class SignerTls {
     this.log = deps.log ?? (line => console.log(line))
     this.schedule = deps.schedule ?? defaultSchedule
     this.roots = deps.roots ?? signerTlsPublicRoots()
+    this.ownerUid = deps.ownerUid !== undefined ? deps.ownerUid : (typeof process.getuid === 'function' ? process.getuid() : null)
     this.loadStored()
   }
 
@@ -410,15 +489,15 @@ export class SignerTls {
       this.loadStored(this.name)
       const pair = this.current
       if (pair !== null && pair !== before) this.log(`[signer-tls] serving a stored certificate on 3144 until ${new Date(pair.notAfterMs).toISOString()}`)
-      else this.log('[signer-tls] a stored certificate was not taken: not valid for this Mac\'s tailnet name now (name, expiry or key)')
+      else this.log(`[signer-tls] a stored certificate was not taken: ${this.storedRefused ?? 'not newer than the one serving'}`)
     } catch { /* the next handshake, status read or check tries again */ }
   }
 
-  /** inode, size, mtime and ctime of both stored files; null when either is missing (any other stat error throws to the caller's catch). */
+  /** inode, size, mtime and ctime of both stored files (lstat: a link's own change); null when either is missing (any other error throws to the caller's catch). */
   private storedSignature(): string | null {
     const parts: string[] = []
     for (const file of [SIGNER_TLS_CERT_FILE, SIGNER_TLS_KEY_FILE]) {
-      const st = statSync(join(this.deps.dir, file), { bigint: true, throwIfNoEntry: false })
+      const st = lstatSync(join(this.deps.dir, file), { bigint: true, throwIfNoEntry: false })
       if (!st) return null
       parts.push(`${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`)
     }
@@ -441,6 +520,7 @@ export class SignerTls {
       lastError: this.lastError,
       checkedAt: this.checkedAt === null ? null : new Date(this.checkedAt).toISOString(),
       nextCheckAt: this.nextCheckAt === null ? null : new Date(this.nextCheckAt).toISOString(),
+      storedRefused: this.storedRefused,
     }
   }
 
@@ -555,10 +635,19 @@ export class SignerTls {
   /** With a name: only a pair for exactly that name. Without (at construction): the *.ts.net name the leaf covers. */
   private loadStored(name: string | null = null): void {
     try {
-      const certPath = join(this.deps.dir, SIGNER_TLS_CERT_FILE)
-      const keyPath = join(this.deps.dir, SIGNER_TLS_KEY_FILE)
-      if (!existsSync(certPath) || !existsSync(keyPath)) return
-      const pair = parseSignerTlsPair(`${readFileSync(certPath, 'utf8')}\n${readFileSync(keyPath, 'utf8')}`, name, this.now(), this.roots)
+      // SR-08: the folder, then each file, pass the hygiene checks before anything is read.
+      const dir = storedDirRefusal(this.deps.dir, this.ownerUid)
+      if (dir === 'none') { this.storedRefused = null; return }
+      if (dir !== null) { this.storedRefused = dir; return }
+      const cert = readStoredFile(join(this.deps.dir, SIGNER_TLS_CERT_FILE), this.ownerUid)
+      const key = readStoredFile(join(this.deps.dir, SIGNER_TLS_KEY_FILE), this.ownerUid)
+      if (cert.kind === 'none' || key.kind === 'none') { this.storedRefused = null; return }
+      if (cert.kind === 'refused') { this.storedRefused = cert.reason; return }
+      if (key.kind === 'refused') { this.storedRefused = key.reason; return }
+      const checked = checkSignerTlsPair(`${cert.text}\n${key.text}`, name, this.now(), this.roots)
+      if (!checked.ok) { this.storedRefused = checked.reason; return }
+      this.storedRefused = null
+      const pair = checked.pair
       // Never a step back: only when nothing serves, the serving pair names another host, or this one lasts longer.
       if (pair && (this.current === null || this.current.host !== pair.host || pair.notAfterMs > this.current.notAfterMs)) this.current = pair
     } catch { /* nothing stored that serves: the check fetches */ }
