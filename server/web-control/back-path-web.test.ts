@@ -130,6 +130,21 @@ describe('the label names where Back goes', () => {
     expect(APP).toContain("$('topbar-back-label').textContent = TITLES[backTo.pane] || 'Back';")
     expect(APP).toContain("railBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list'));")
   })
+  it('every Back says where it goes: the top bar\'s word, the rail\'s name, and from 600 px the navigation bar\'s name and tooltip', () => {
+    // Runs route()'s own naming lines (7.0.30 counted run: B1 and B2 failed at the open Duo, where Back is #nav-back).
+    const NAMING = cut('    // 7.0.30: Back names where it goes, the way he came or the parent (navBackTo).', "    $('section-name').textContent")
+    const el = () => { const a: Record<string, string> = {}; return { textContent: '', attrs: a, setAttribute: (k: string, v: string) => { a[k] = v } } }
+    const els: Record<string, any> = { 'topbar-back-label': el(), 'nav-back': el() }
+    const railBack = el()
+    for (const [pane, title] of [['speakers', 'Speakers'], ['meetings', 'Meetings']]) {
+      // eslint-disable-next-line no-new-func
+      new Function('$', 'navBackTo', 'TITLES', 'r', 'railBack', NAMING)((id: string) => els[id] || null, () => ({ pane }), { speakers: 'Speakers', meetings: 'Meetings' }, { pane: 'meetings' }, railBack)
+      expect(els['topbar-back-label'].textContent).toBe(title)
+      expect(railBack.attrs['aria-label']).toBe('Back to ' + title)
+      expect(els['nav-back'].attrs['aria-label']).toBe('Back to ' + title)
+      expect(els['nav-back'].attrs.title).toBe('Back to ' + title)
+    }
+  })
 })
 
 describe('Back stays in reach on a tall phone', () => {

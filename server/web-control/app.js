@@ -783,6 +783,10 @@
     var backTo = typeof navBackTo === 'function' ? navBackTo() : { pane: r.pane };
     $('topbar-back-label').textContent = TITLES[backTo.pane] || 'Back';
     if (railBack && railBack.setAttribute) railBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list'));
+    // From 600 px Back is the navigation bar's (shell.js): its word stays "Back", as on the Mac's bar, and its name and
+    // tooltip say where it goes, as the rail's do (7.0.30 counted run, items_check B1 and B2 at the open Duo).
+    var navBack = $('nav-back');
+    if (navBack && navBack.setAttribute) { navBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list')); navBack.setAttribute('title', 'Back to ' + (TITLES[backTo.pane] || 'the list')); }
     $('section-name').textContent = TITLES[r.pane] || 'Today';
     if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();

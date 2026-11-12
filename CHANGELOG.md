@@ -2,7 +2,7 @@
 
 2026-11-12. 7.0.29 plus five Control Web changes from a tester's phone feedback.
 
-- **Back goes the way you came.** Back now returns to the page you came from, not a fixed parent. Open a meeting from Speakers, and Back takes you to Speakers, not to Meetings. It is the browser's own Back, so the two always agree, and it adds nothing to the browser's history. Opened straight from a link or after a reload, Back goes one level up as before. Back names where it goes ("Speakers", "Meetings").
+- **Back goes the way you came.** Back now returns to the page you came from, not a fixed parent. Open a meeting from Speakers, and Back takes you to Speakers, not to Meetings. It is the browser's own Back, so the two always agree, and it adds nothing to the browser's history. Opened straight from a link or after a reload, Back goes one level up as before. Back names where it goes ("Speakers", "Meetings"). On screens 600 px and wider, the navigation bar's Back keeps the word "Back" and says where it goes in its name and tooltip ("Back to Speakers").
 - **Back stays in reach on a tall phone.** On a page you are reading (a session, a message, a meeting), the top bar with Back no longer slides away as you scroll down.
 - **Reply stays at the bottom of a message.** Opening a message from Messages, the Reply box now sits at the bottom of the screen while you read, and above the keyboard while you type, as the COS chat already did.
 - **Speakers: the copy buttons say they copy.** "Summary" and "Full (N KB)" now read "Copy summary" and "Copy full (N KB)". The one you tap says "Copied" for a moment, and a screen reader hears what was copied.
