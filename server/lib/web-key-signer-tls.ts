@@ -46,8 +46,8 @@
 import { execFile } from 'node:child_process'
 import { mkdirSync, chmodSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { X509Certificate } from 'node:crypto'
-import { createSecureContext, type SecureContext } from 'node:tls'
+import { X509Certificate, createPrivateKey, createPublicKey } from 'node:crypto'
+import { createSecureContext, rootCertificates, type SecureContext } from 'node:tls'
 import type { ServerOptions as HttpsServerOptions } from 'node:https'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { normalizeTailscaleDnsName } from './network-policy.js'
@@ -146,10 +146,16 @@ export type SignerTlsReason =
   | 'tailscale_cert_failed'
   | 'cert_invalid'
   | 'cert_expired'
+  | 'cert_not_yet_valid'
+  | 'cert_untrusted'
   | 'cert_store_failed'
 
 export interface SignerTlsStatus {
-  /** 3144 presents a publicly trusted, unexpired certificate for this Mac's tailnet name. */
+  /**
+   * 3144 presents a publicly trusted certificate for this Mac's tailnet name: it chains, link by link, to one
+   * of Node's bundled public roots (Mozilla's list, `tls.rootCertificates`), it is inside its validity window,
+   * and its key is the one served. No other pair is ever served by SNI (SR-01, review 2026-11-10).
+   */
   trusted: boolean
   /** `ok` when trusted; otherwise why not. */
   reason: SignerTlsReason
@@ -184,6 +190,8 @@ export interface SignerTlsDeps {
   log?: (line: string) => void
   /** Test seam for the check timer. */
   schedule?: (fn: () => void, ms: number) => Timer
+  /** SR-01 test seam: the public roots a pair must chain to. Default: Node's bundled roots (signerTlsPublicRoots). */
+  roots?: readonly X509Certificate[]
 }
 
 const defaultSchedule = (fn: () => void, ms: number): Timer => {
@@ -205,11 +213,68 @@ export function signerTlsRenewalDue(notAfterMs: number, now: number): boolean {
 
 const PEM_BLOCK = /-----BEGIN ([A-Z0-9 ]+)-----\r?\n[A-Za-z0-9+/=\r\n]+?-----END \1-----/g
 
+/** The most issuer links followed from the leaf to a bundled root. */
+export const SIGNER_TLS_MAX_CHAIN = 6
+
+/** Parse root certificates, skipping any that do not parse. */
+export function parseRootPems(pems: readonly string[]): X509Certificate[] {
+  const out: X509Certificate[] = []
+  for (const pem of pems) {
+    try { out.push(new X509Certificate(pem)) } catch { /* not a certificate: never a root */ }
+  }
+  return out
+}
+
+let bundledRoots: readonly X509Certificate[] | null = null
+/** SR-01: Node's bundled public roots (Mozilla's list, `tls.rootCertificates`), parsed once. */
+export function signerTlsPublicRoots(): readonly X509Certificate[] {
+  if (!bundledRoots) bundledRoots = Object.freeze(parseRootPems(rootCertificates))
+  return bundledRoots
+}
+
+function validAt(cert: X509Certificate, now: number): boolean {
+  const from = Date.parse(cert.validFrom)
+  const to = Date.parse(cert.validTo)
+  return Number.isFinite(from) && Number.isFinite(to) && from <= now && now < to
+}
+
+function issuedBy(child: X509Certificate, issuer: X509Certificate): boolean {
+  try { return child.checkIssued(issuer) && child.verify(issuer.publicKey) } catch { return false }
+}
+
 /**
- * Validate a cert chain plus key for `name` (or, with name null, for the *.ts.net name the leaf
- * covers). Returns the pair with its TLS context, or null. Never throws.
+ * SR-01: whether `chain[0]` chains to one of `roots`, link by link. Each link is issued by the next
+ * (`checkIssued`: names, key identifiers, key usage) and its signature verifies with that issuer's key;
+ * every certificate on the path below the root is inside its validity window at `now`; every issuer below
+ * the root is a CA. The order the chain arrives in is not trusted: each step looks for the issuer among
+ * the certificates not yet used. A root's own validity is not checked (a trust anchor, as in browsers).
  */
-export function parseSignerTlsPair(text: string, name: string | null, now: number): SignerTlsPair | null {
+export function chainsToRoot(chain: readonly X509Certificate[], roots: readonly X509Certificate[], now: number): boolean {
+  if (chain.length === 0) return false
+  let cur = chain[0]
+  const unused = chain.slice(1)
+  for (let step = 0; step <= SIGNER_TLS_MAX_CHAIN; step++) {
+    if (!validAt(cur, now)) return false
+    if (roots.some(root => issuedBy(cur, root))) return true
+    const next = unused.findIndex(c => c.ca && issuedBy(cur, c))
+    if (next < 0) return false
+    cur = unused.splice(next, 1)[0]
+  }
+  return false
+}
+
+export type SignerTlsPairRefusal = 'cert_invalid' | 'cert_expired' | 'cert_not_yet_valid' | 'cert_untrusted'
+export type SignerTlsPairCheck = { ok: true; pair: SignerTlsPair } | { ok: false; reason: SignerTlsPairRefusal }
+
+/**
+ * Validate a cert chain plus key for `name` (or, with name null, for the *.ts.net name the leaf covers),
+ * the same way for every source: the fetch, the stored pair at boot, at each check and in the pickup.
+ * Refused with a reason: no single key or no certificate, the leaf does not name the host, or the key is
+ * not the leaf's (`cert_invalid`); past notAfter (`cert_expired`); before notBefore (`cert_not_yet_valid`);
+ * not chaining to `roots`, Node's bundled public roots by default (`cert_untrusted`). Never throws.
+ */
+export function checkSignerTlsPair(text: string, name: string | null, now: number, roots: readonly X509Certificate[] = signerTlsPublicRoots()): SignerTlsPairCheck {
+  const refuse = (reason: SignerTlsPairRefusal): SignerTlsPairCheck => ({ ok: false, reason })
   try {
     const certs: string[] = []
     const keys: string[] = []
@@ -217,21 +282,36 @@ export function parseSignerTlsPair(text: string, name: string | null, now: numbe
       if (m[1] === 'CERTIFICATE') certs.push(m[0])
       else if (/(^| )PRIVATE KEY$/.test(m[1])) keys.push(m[0])
     }
-    if (certs.length === 0 || keys.length !== 1) return null
+    if (certs.length === 0 || keys.length !== 1) return refuse('cert_invalid')
     const leaf = new X509Certificate(certs[0])
     const host = name ?? leafTailnetName(leaf)
-    if (!host || normalizeTailscaleDnsName(host) !== host) return null
-    if (leaf.checkHost(host, { subject: 'never' })?.toLowerCase() !== host) return null
+    if (!host || normalizeTailscaleDnsName(host) !== host) return refuse('cert_invalid')
+    if (leaf.checkHost(host, { subject: 'never' })?.toLowerCase() !== host) return refuse('cert_invalid')
     const notAfterMs = Date.parse(leaf.validTo)
-    if (!Number.isFinite(notAfterMs) || notAfterMs <= now) return null
+    if (!Number.isFinite(notAfterMs) || notAfterMs <= now) return refuse('cert_expired')
+    // SR-01: never before the leaf's notBefore.
+    const notBeforeMs = Date.parse(leaf.validFrom)
+    if (!Number.isFinite(notBeforeMs) || notBeforeMs > now) return refuse('cert_not_yet_valid')
+    // SR-01: the key is the leaf's. createSecureContext alone does not refuse an EC certificate with an RSA
+    // key (probe 2026-11-11 on Node 24.1: no throw), so compare the public keys' SPKI bytes.
+    const spki = createPublicKey(createPrivateKey(keys[0])).export({ type: 'spki', format: 'der' })
+    if (!spki.equals(leaf.publicKey.export({ type: 'spki', format: 'der' }))) return refuse('cert_invalid')
+    // SR-01: publicly trusted: the leaf chains, link by link, to one of the roots.
+    if (!chainsToRoot(certs.map(c => new X509Certificate(c)), roots, now)) return refuse('cert_untrusted')
     const certPem = `${certs.join('\n')}\n`
     const keyPem = `${keys[0]}\n`
     // Throws when the key does not belong to the leaf: a torn or swapped pair never serves.
     const context = createSecureContext({ cert: certPem, key: keyPem })
-    return { host, certPem, keyPem, notAfterMs, context }
+    return { ok: true, pair: { host, certPem, keyPem, notAfterMs, context } }
   } catch {
-    return null
+    return refuse('cert_invalid')
   }
+}
+
+/** checkSignerTlsPair without the reason: the pair, or null. */
+export function parseSignerTlsPair(text: string, name: string | null, now: number, roots?: readonly X509Certificate[]): SignerTlsPair | null {
+  const checked = checkSignerTlsPair(text, name, now, roots)
+  return checked.ok ? checked.pair : null
 }
 
 function leafTailnetName(leaf: X509Certificate): string | null {
@@ -263,6 +343,7 @@ export class SignerTls {
   private readonly resolveBin: () => string | null
   private readonly log: (line: string) => void
   private readonly schedule: (fn: () => void, ms: number) => Timer
+  private readonly roots: readonly X509Certificate[]
   private current: SignerTlsPair | null = null
   private name: string | null = null
   private lastError: SignerTlsReason | null = null
@@ -282,6 +363,7 @@ export class SignerTls {
     this.resolveBin = deps.resolveBin ?? (() => resolveTailscaleBin())
     this.log = deps.log ?? (line => console.log(line))
     this.schedule = deps.schedule ?? defaultSchedule
+    this.roots = deps.roots ?? signerTlsPublicRoots()
     this.loadStored()
   }
 
@@ -448,8 +530,10 @@ export class SignerTls {
       this.fail(classifyCertFailure(r), `cert code=${r.code} killed=${r.killed} signal=${r.signal ?? ''} ${r.elapsedMs}ms ${firstLine(r.stderr)}`)
       return
     }
-    const fresh = parseSignerTlsPair(r.stdout, name, this.now())
-    if (!fresh) { this.fail('cert_invalid'); return }
+    // SR-01: the same checks as a stored pair, including the public-root chain; the refusal names why.
+    const checked = checkSignerTlsPair(r.stdout, name, this.now(), this.roots)
+    if (!checked.ok) { this.fail(checked.reason); return }
+    const fresh = checked.pair
     let storeFailed = false
     try { this.store(fresh) } catch { storeFailed = true }
     // The hot swap: the next 3144 handshake reads this pair.
@@ -472,7 +556,7 @@ export class SignerTls {
       const certPath = join(this.deps.dir, SIGNER_TLS_CERT_FILE)
       const keyPath = join(this.deps.dir, SIGNER_TLS_KEY_FILE)
       if (!existsSync(certPath) || !existsSync(keyPath)) return
-      const pair = parseSignerTlsPair(`${readFileSync(certPath, 'utf8')}\n${readFileSync(keyPath, 'utf8')}`, name, this.now())
+      const pair = parseSignerTlsPair(`${readFileSync(certPath, 'utf8')}\n${readFileSync(keyPath, 'utf8')}`, name, this.now(), this.roots)
       // Never a step back: only when nothing serves, the serving pair names another host, or this one lasts longer.
       if (pair && (this.current === null || this.current.host !== pair.host || pair.notAfterMs > this.current.notAfterMs)) this.current = pair
     } catch { /* nothing stored that serves: the check fetches */ }

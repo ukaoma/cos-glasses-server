@@ -6,14 +6,17 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpsServer, type Server } from 'node:https'
-import { connect, type PeerCertificate } from 'node:tls'
+import { connect, createSecureContext, rootCertificates, type PeerCertificate } from 'node:tls'
 import type { AddressInfo } from 'node:net'
 import { X509Certificate } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import express from 'express'
 import {
+  chainsToRoot,
+  checkSignerTlsPair,
   createSignerTlsForBoot,
+  parseRootPems,
   parseSignerTlsPair,
   SIGNER_TLS_CERT_ARGS,
   SIGNER_TLS_CERT_FILE,
@@ -31,6 +34,7 @@ import {
   SIGNER_TLS_CLI_ENV_KEYS,
   signerTlsCliEnv,
   signerTlsCliRunner,
+  signerTlsPublicRoots,
   signerTlsRenewalDue,
   signerTlsRetryMs,
   type SignerTlsDeps,
@@ -59,11 +63,26 @@ let pairB: Leaf
 let pairShort: Leaf
 let otherHost: Leaf
 let mkcert: Leaf
+let mkcertTs: Leaf
+let subRoot: Ca
+let inter: Ca
+let notCa: Ca
+let leafViaInter: Leaf
+let leafViaNotCa: Leaf
+let rsaKey: string
 
 function ossl(args: string[]): void { execFileSync(OPENSSL, args, { cwd: pki, stdio: ['ignore', 'pipe', 'pipe'] }) }
 function mintCa(tag: string): Ca {
   ossl(['req', '-x509', '-sha256', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes', '-keyout', `${tag}.key`, '-out', `${tag}.pem`, '-days', '3',
     '-subj', `/CN=Throwaway ${tag}`, '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign'])
+  return { pem: readFileSync(join(pki, `${tag}.pem`), 'utf8'), certPath: join(pki, `${tag}.pem`), keyPath: join(pki, `${tag}.key`) }
+}
+/** An intermediate below `parent`: a CA (keyCertSign) or, with isCa false, a plain certificate. */
+function mintSubCa(parent: Ca, tag: string, isCa: boolean, days = 30): Ca {
+  ossl(['req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes', '-keyout', `${tag}.key`, '-out', `${tag}.csr`, '-subj', `/CN=Throwaway ${tag}`])
+  writeFileSync(join(pki, `${tag}.ext`), isCa ? 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\n' : 'basicConstraints=CA:FALSE\n')
+  const serial = `0x${Buffer.from(tag).toString('hex').slice(0, 16)}${Math.floor(Math.random() * 1e6).toString(16)}`
+  ossl(['x509', '-req', '-sha256', '-in', `${tag}.csr`, '-CA', parent.certPath, '-CAkey', parent.keyPath, '-set_serial', serial, '-days', String(days), '-extfile', `${tag}.ext`, '-out', `${tag}.pem`])
   return { pem: readFileSync(join(pki, `${tag}.pem`), 'utf8'), certPath: join(pki, `${tag}.pem`), keyPath: join(pki, `${tag}.key`) }
 }
 function mintLeaf(ca: Ca, tag: string, sans: string[], days = 90): Leaf {
@@ -89,6 +108,15 @@ beforeAll(() => {
   pairShort = mintLeaf(tailCa, 'pair-short', [`DNS:${NAME}`], 45)
   otherHost = mintLeaf(tailCa, 'other', ['DNS:other-mac.tail38457f.ts.net'])
   mkcert = mintLeaf(mkcertCa, 'mkcert', ['DNS:api.gotcos.com', 'DNS:localhost', 'IP:127.0.0.1'], 2)
+  // SR-01: a pair for the RIGHT name from a CA that is not a root the signer trusts (an mkcert-style pair).
+  mkcertTs = mintLeaf(mkcertCa, 'mkcert-ts', [`DNS:${NAME}`], 800)
+  subRoot = mintCa('subroot')
+  inter = mintSubCa(subRoot, 'inter', true, 30)
+  notCa = mintSubCa(subRoot, 'notca', false, 30)
+  leafViaInter = mintLeaf(inter, 'leaf-inter', [`DNS:${NAME}`], 90)
+  leafViaNotCa = mintLeaf(notCa, 'leaf-notca', [`DNS:${NAME}`], 90)
+  ossl(['genrsa', '-out', 'rsa.key', '2048'])
+  rsaKey = readFileSync(join(pki, 'rsa.key'), 'utf8')
   expect(readFileSync(join(pki, 'pair-a.key'), 'utf8')).toContain('BEGIN EC PRIVATE KEY')
 })
 afterAll(() => { rmSync(pki, { recursive: true, force: true }) })
@@ -129,6 +157,8 @@ function rig(over: Partial<SignerTlsDeps> & { dir?: string; name?: string | null
     now: () => clock.now,
     log: line => logs.push(line),
     schedule: (_fn, ms) => { scheduled.push(ms); return { cancel: () => {} } },
+    // SR-01: the throwaway Tailscale CA stands in for Node's bundled public roots.
+    roots: parseRootPems([tailCa.pem]),
     runner: async (bin, args, timeoutMs, env) => {
       calls.push({ bin, args, timeoutMs, env })
       const a = args[0] === 'status' ? statusAnswer : certAnswer
@@ -281,18 +311,19 @@ describe('failure keeps mkcert and says exactly why', () => {
     expect((await garbled.tls.check()).reason).toBe('tailscale_status_failed')
   })
 
-  it('unusable output never serves and never stores: another host, a key that is not the leaf\'s, an expired leaf, garbage', async () => {
-    for (const [label, stdout, advance] of [
-      ['other host', certStdout(otherHost), 0],
-      ['wrong key', `${pairA.certPem}${tailCa.pem}${pairB.keyPem}`, 0],
-      ['expired', certStdout(pairA), pairA.notAfterMs + 1],
-      ['garbage', 'Wrote public cert to -\n', 0],
+  it('unusable output never serves and never stores: another host, a key that is not the leaf\'s, an expired leaf, garbage, a pair not publicly trusted', async () => {
+    for (const [label, stdout, advance, reason] of [
+      ['other host', certStdout(otherHost), 0, 'cert_invalid'],
+      ['wrong key', `${pairA.certPem}${tailCa.pem}${pairB.keyPem}`, 0, 'cert_invalid'],
+      ['expired', certStdout(pairA), pairA.notAfterMs + 1, 'cert_expired'],
+      ['garbage', 'Wrote public cert to -\n', 0, 'cert_invalid'],
+      ['not publicly trusted (SR-01)', `${mkcertTs.certPem}${mkcertCa.pem}${mkcertTs.keyPem}`, 0, 'cert_untrusted'],
     ] as const) {
       const r = rig()
       if (advance) r.clock.now = advance
       r.cert(ok(stdout))
       const s = await r.tls.check()
-      expect({ label, reason: s.reason, trusted: s.trusted }).toEqual({ label, reason: 'cert_invalid', trusted: false })
+      expect({ label, reason: s.reason, trusted: s.trusted }).toEqual({ label, reason, trusted: false })
       expect(r.tls.served()).toBeNull()
       expect(existsSync(r.dir)).toBe(false)
     }
@@ -497,12 +528,13 @@ describe('the prompt pickup (7.0.20): a stored pair serves without waiting for t
     expect(r.calls).toHaveLength(1)
   })
 
-  it('the same checks as boot and the check (parseSignerTlsPair): a wrong-name, an expired or a torn pair dropped in is never served, by status read or handshake', async () => {
+  it('the same checks as boot and the check (parseSignerTlsPair): a pair not publicly trusted, a wrong-name, an expired or a torn pair dropped in is never served, by status read or handshake', async () => {
     const r = rig()
     r.status(cliTimeout)
     await r.tls.check()
     const port = await serve(r.tls)
     const drops: Array<[string, () => void]> = [
+      ['not publicly trusted (SR-01)', () => storePair(r.dir, mkcertTs)],
       ['wrong name', () => storePair(r.dir, otherHost)],
       ['expired', () => { r.clock.now = pairShort.notAfterMs + 1; storePair(r.dir, pairShort) }],
       ['torn (cert of one, key of another)', () => { storePair(r.dir, pairA); writeFileSync(join(r.dir, SIGNER_TLS_KEY_FILE), pairB.keyPem, { mode: 0o600 }) }],
@@ -672,11 +704,171 @@ describe('the CLI env (7.0.20): SHLVL=1 in a minimal env, on the signer\'s Tails
 
 describe('parseSignerTlsPair', () => {
   it('takes the chain in order plus one key, whatever text surrounds them', () => {
-    const p = parseSignerTlsPair(`warning: something\n${certStdout(pairA)}\ntrailing`, NAME, Date.now())
+    const p = parseSignerTlsPair(`warning: something\n${certStdout(pairA)}\ntrailing`, NAME, Date.now(), parseRootPems([tailCa.pem]))
     expect(p?.host).toBe(NAME)
     expect(p?.certPem.match(/BEGIN CERTIFICATE/g)).toHaveLength(2)
     expect(new X509Certificate(p!.certPem).fingerprint256).toBe(pairA.fingerprint)
-    expect(parseSignerTlsPair(`${certStdout(pairA)}${pairB.keyPem}`, NAME, Date.now())).toBeNull()
+    expect(parseSignerTlsPair(`${certStdout(pairA)}${pairB.keyPem}`, NAME, Date.now(), parseRootPems([tailCa.pem]))).toBeNull()
+  })
+})
+
+// ── SR-01 (review 2026-11-10): `trusted` means publicly trusted ──
+// A public chain only: valid-isrgrootx1.letsencrypt.org as served on 2026-11-11 (leaf, YR1, Root YR cross-signed
+// by ISRG Root X1). Certificates only, no key; tests pick a `now` inside its window, so the wall clock never matters.
+const LE_PUBLIC_CHAIN = `-----BEGIN CERTIFICATE-----
+MIIFGzCCBAOgAwIBAgISBjxMtWq8as8b6hXlVHpzSHzSMA0GCSqGSIb3DQEBCwUA
+MDMxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQD
+EwNZUjEwHhcNMjYxMTA0MTczODMzWhcNMjcwMjAyMTczODMyWjArMSkwJwYDVQQD
+EyB2YWxpZC1pc3Jncm9vdHgxLmxldHNlbmNyeXB0Lm9yZzCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBALP2MrRe5NGz62pFl/kTjPpsdoznNTlfFc9k8MpB
+p5CL69U/GYpVaVxuI+WMyAwJvrJy6Ap0SQF+juLMvEiHI3BIuPjiy/7/Lz6MqCSO
+oZvBW75XTuPs2MAvz+nl+PQGCfhobJp90rHIjYrchJbuKhVOmbkm7z/On5BWthxs
+Wmi0wsxSIasGdNXWFde8PT3l8hShd6FR2T9v/EWSEPKXToSMIK4o6mhOdggNtnjJ
+B9EqHoNqfDgCD6yP7/dgV+F/ksKQD7e8hjRax4/f0lIHGfzdWhlqZYV1Qge3t4Gb
+JQnquV60irlcME/pftDXF8aSsrjZ8UjICYLKzm6zCV7EeNcCAwEAAaOCAi8wggIr
+MA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8E
+AjAAMB0GA1UdDgQWBBRVnoYeG4xMbSGGXpIGbepGMhxlBjAfBgNVHSMEGDAWgBQf
+LzW+RhSCzUCxrnksVXj699Ro+zAzBggrBgEFBQcBAQQnMCUwIwYIKwYBBQUHMAKG
+F2h0dHA6Ly95cjEuaS5sZW5jci5vcmcvMCsGA1UdEQQkMCKCIHZhbGlkLWlzcmdy
+b290eDEubGV0c2VuY3J5cHQub3JnMBMGA1UdIAQMMAowCAYGZ4EMAQIBMC4GA1Ud
+HwQnMCUwI6AhoB+GHWh0dHA6Ly95cjEuYy5sZW5jci5vcmcvODMuY3JsMIIBDQYK
+KwYBBAHWeQIEAgSB/gSB+wD5AH8AjspHC6zeavOiBrCkeoS3Rv4fxr+VPiXmm07k
+AkjzxugAAAGhp9mxEwAIAAAFADhc3j4EAwBIMEYCIQD8VGbXQXy3MKURPe8dsWul
+XgTrWcDXzWsZiZuaF8hzAgIhAJveoFt62liq2yWHxw1X9d0/Y9Yk94CfUoW51JL4
+CxgsAHYAYEyar3p/d18B1Ab8kg3ImesLHH34yVIb+voXdzuXi8kAAAGhp9mxlgAA
+BAMARzBFAiB8l3IIWcLrpwGyto80cb+5zGnfe2fcMyuqOsyKqanVxwIhAKWGDRVs
+eYy53nUN5wgxAJ9cgotwGHGMwzG43K+IiOW5MA0GCSqGSIb3DQEBCwUAA4IBAQAx
+n3xFlkvAxCJ6InS+PT6JHa6z8fQ/S3WtUfTMv8sv3O1B3aYdRh3CCvnrKgDTnvHi
+GNguCdJNTGoDlw5gXpPHkJKKC6chDWkbbuFScPujJvs4/LqL/ynEPKuv6BFmLiQ7
+/qGOujAl5gLnoPL7KP1+RgUXMh50hORLTCwzZSS1XM7OUiMHfyQVHSNVsw00bNoW
+4k/IzBtXBHYhFJjKFWcbkrKtQ9dK6tFhWqChY42CLjHUl84nhiLfSW/pWHJ66+A7
+baBPjC/xdwfnJ3j0chPBasYEvFeqHYlSQs4qp4RrmOSYzCgHOgVoWJZHnBhogcwI
+BIHCS58W6diSgAwVLnRE
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIE2zCCAsOgAwIBAgIRAKICU/FfJpHAXcHOE7m8yk4wDQYJKoZIhvcNAQELBQAw
+LjELMAkGA1UEBhMCVVMxDTALBgNVBAoTBElTUkcxEDAOBgNVBAMTB1Jvb3QgWVIw
+HhcNMjUwOTAzMDAwMDAwWhcNMjgwOTAyMjM1OTU5WjAzMQswCQYDVQQGEwJVUzEW
+MBQGA1UEChMNTGV0J3MgRW5jcnlwdDEMMAoGA1UEAxMDWVIxMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoVi8X2xCYgMXvJxNPKp/oF13UMgmPABB07VC
+LNDtoXmt9luEZNJSBV10VyT1Pz6LD8Zq1d2gc43WNl1AdRrj4sEnazbOiz0nPpmG
+Bp2hui49oZtDIY6wdKeZAi5BbNU20CH6RSBBMLSQ9cXrH8dxdv4PAJ45ssGML68U
+SE3BsjC2a6cAN9L5CgXVIQi5tfNiTPoFZZ3S0OlXqLmmtdV95udWAb5b6e/F49Di
+CsH0Y00Ag72BVIb1hzynmKe+X0mERBTtsb3BwmpV9ipeBjMLoR/D9cHxHQCWoi5l
+TmXwY015J5rGelz1nZjJuxc2kioaX29XJBnhMkP531rSdG5uMwIDAQABo4HuMIHr
+MA4GA1UdDwEB/wQEAwIBhjATBgNVHSUEDDAKBggrBgEFBQcDATASBgNVHRMBAf8E
+CDAGAQH/AgEAMB0GA1UdDgQWBBQfLzW+RhSCzUCxrnksVXj699Ro+zAfBgNVHSME
+GDAWgBTe51tg0CJtQCh9Pw0B/qS1UrRRlDAyBggrBgEFBQcBAQQmMCQwIgYIKwYB
+BQUHMAKGFmh0dHA6Ly95ci5pLmxlbmNyLm9yZy8wEwYDVR0gBAwwCjAIBgZngQwB
+AgEwJwYDVR0fBCAwHjAcoBqgGIYWaHR0cDovL3lyLmMubGVuY3Iub3JnLzANBgkq
+hkiG9w0BAQsFAAOCAgEA0+zvMq3kHig1ddTmmm+RibTr9/RpX7k4buanMMRqbV/y
+IvP82zAHN3mvaw+cASuVsdpd0ikjhr4hnhJQLQOzOp2ccKrsdGOAgo0vddeISFAq
+EWEV4lmUM3vFF796up+bSgmJ1u6RupDCMxDgF8M3eLvGuj6L0lu3zkQ0KuQLnKxL
+tB0oQqn1Idg5CuuGpMvQzk29Pa3D/qHurc0EIM9SxukQuJqq63lxsYyRQFU8yMBO
+hq1w5LbfaWNRrz1uklOfI/pYkAb2E2MTZrAMQkBIE2S8Jt1F8gRc96o/xOsrgvSk
+a84AisX6xq1lz1Z7jGvrnXc4TMcjxZTjiTaihcYI1JIXZiLtEMSCa5l3cu8YWd6z
+dLRQlqRdclVjuQfNHawRJ6GWlkK0QJosivTKwdBw3KxEtzGo8yMHERbsy57gP1UX
+HOMcmZYQC0gtyR3SxfenIM/MxC3Ia2Ypab/kQ/CTnlIn2KQ5JUC6NYrGCbhFN9bp
+5lKJStEwCUnLpntcrXk5XVDCNv/5RyWpRThkGOV7GetKkQ0qAY8hCzWK6oqnAhDZ
+cjlYVdWfqOw3DIOX6EDNBgAqHarRVxyF9QZdOaXSyPJ0ueD2BYJEBgaCGQ8rAaU/
+Qc123V5LTXDZW4CcsPBDyhy4v+c8hClAyw/IkJlfBqxB9D+/wvIMHgECZ4ptP6o=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+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
+-----END CERTIFICATE-----`
+const pemCerts = (text: string): X509Certificate[] => (text.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []).map(p => new X509Certificate(p))
+
+describe('SR-01: trusted means publicly trusted (chain to Node\'s bundled roots, notBefore, the key is the leaf\'s)', () => {
+  it('Node\'s bundled roots are the default; a pair for the right name from a CA outside them is refused as cert_untrusted', () => {
+    expect(signerTlsPublicRoots().length).toBe(rootCertificates.length)
+    expect(checkSignerTlsPair(certStdout(pairA), NAME, Date.now())).toEqual({ ok: false, reason: 'cert_untrusted' })
+    expect(checkSignerTlsPair(`${mkcertTs.certPem}${mkcertCa.pem}${mkcertTs.keyPem}`, NAME, Date.now(), parseRootPems([tailCa.pem]))).toEqual({ ok: false, reason: 'cert_untrusted' })
+    expect(checkSignerTlsPair(certStdout(pairA), NAME, Date.now(), parseRootPems([tailCa.pem])).ok).toBe(true)
+  })
+
+  it('a real Let\'s Encrypt chain verifies link by link to the bundled ISRG Root X1, in any order; not without its cross-signed root, no roots, or past the leaf\'s notAfter', () => {
+    const chain = pemCerts(LE_PUBLIC_CHAIN)
+    expect(chain).toHaveLength(3)
+    const at = Date.parse(chain[0].validFrom) + 86_400_000
+    expect(chainsToRoot(chain, signerTlsPublicRoots(), at)).toBe(true)
+    expect(chainsToRoot([chain[0], chain[2], chain[1]], signerTlsPublicRoots(), at)).toBe(true)
+    expect(chainsToRoot(chain.slice(0, 2), signerTlsPublicRoots(), at)).toBe(false)
+    expect(chainsToRoot(chain, [], at)).toBe(false)
+    expect(chainsToRoot(chain, signerTlsPublicRoots(), Date.parse(chain[0].validTo) + 1)).toBe(false)
+  })
+
+  it('an intermediate must be present, a CA, and inside its own validity window', () => {
+    const roots = parseRootPems([subRoot.pem])
+    const at = Date.now()
+    const leafI = new X509Certificate(leafViaInter.certPem)
+    const interX = new X509Certificate(inter.pem)
+    expect(chainsToRoot([leafI, interX], roots, at)).toBe(true)
+    expect(chainsToRoot([leafI], roots, at)).toBe(false)
+    expect(chainsToRoot([new X509Certificate(leafViaNotCa.certPem), new X509Certificate(notCa.pem)], roots, at)).toBe(false)
+    expect(chainsToRoot([leafI, interX], roots, Date.parse(interX.validTo) + 1)).toBe(false)
+    expect(checkSignerTlsPair(`${leafViaInter.certPem}${inter.pem}${leafViaInter.keyPem}`, NAME, at, roots).ok).toBe(true)
+    expect(checkSignerTlsPair(`${leafViaInter.certPem}${leafViaInter.keyPem}`, NAME, at, roots)).toEqual({ ok: false, reason: 'cert_untrusted' })
+  })
+
+  it('refuses a leaf before its notBefore (cert_not_yet_valid), and takes it from that moment on', () => {
+    const roots = parseRootPems([tailCa.pem])
+    const from = Date.parse(new X509Certificate(pairA.certPem).validFrom)
+    expect(checkSignerTlsPair(certStdout(pairA), NAME, from - 1, roots)).toEqual({ ok: false, reason: 'cert_not_yet_valid' })
+    expect(checkSignerTlsPair(certStdout(pairA), NAME, from, roots).ok).toBe(true)
+  })
+
+  it('refuses a key that is not the leaf\'s, including an RSA key with an EC certificate, which createSecureContext alone accepts', () => {
+    const roots = parseRootPems([tailCa.pem])
+    // Why the SPKI comparison exists: this mismatch does not throw (probe 2026-11-11, Node 24.1).
+    expect(() => createSecureContext({ cert: pairA.certPem, key: rsaKey })).not.toThrow()
+    expect(checkSignerTlsPair(`${pairA.certPem}${tailCa.pem}${rsaKey}`, NAME, Date.now(), roots)).toEqual({ ok: false, reason: 'cert_invalid' })
+    expect(checkSignerTlsPair(`${pairA.certPem}${tailCa.pem}${pairB.keyPem}`, NAME, Date.now(), roots)).toEqual({ ok: false, reason: 'cert_invalid' })
+  })
+
+  it('an untrusted stored pair never serves, never ends the check and never blocks the fetch', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'signer-tls-untrusted-'))
+    dirs.push(base)
+    const dir = join(base, 'web-key-tls')
+    mkdirSync(dir, { mode: 0o700 })
+    writeFileSync(join(dir, SIGNER_TLS_KEY_FILE), mkcertTs.keyPem, { mode: 0o600 })
+    writeFileSync(join(dir, SIGNER_TLS_CERT_FILE), `${mkcertTs.certPem}${mkcertCa.pem}`, { mode: 0o644 })
+    const r = rig({ dir })
+    expect(r.tls.served()).toBeNull()
+    expect(r.tls.status().trusted).toBe(false)
+    const s = await r.tls.check()
+    expect(r.calls.map(c => c.args[0])).toEqual(['status', 'cert'])
+    expect(s).toMatchObject({ trusted: true, reason: 'ok', host: NAME, notAfter: new Date(pairA.notAfterMs).toISOString() })
   })
 })
 
