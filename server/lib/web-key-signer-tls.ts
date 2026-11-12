@@ -381,6 +381,8 @@ export class SignerTls {
 
   private sniMatches(pair: SignerTlsPair | null, servername: string): boolean {
     return pair !== null && typeof servername === 'string' && servername.toLowerCase() === pair.host && this.now() < pair.notAfterMs
+      // SR-09: and only for this Mac's current name once it is known (after a rename, never the old name's pair).
+      && (this.name === null || this.name === pair.host)
   }
 
   /** The pair being served, for tests and diagnostics. */

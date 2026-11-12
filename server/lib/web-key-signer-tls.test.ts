@@ -361,6 +361,19 @@ describe('renewal', () => {
     expect(readFileSync(join(r.dir, SIGNER_TLS_KEY_FILE), 'utf8')).toBe(`${pairB.keyPem.trim()}\n`)
   })
 
+  it('SR-09: after this Mac is renamed, the old name\'s pair is no longer served by SNI', async () => {
+    let current: string = NAME
+    const r = rig({ selfDnsName: async () => current })
+    await r.tls.check()
+    const port = await serve(r.tls)
+    expect(fp((await handshake(port, { servername: NAME, ca: [tailCa.pem] })).peer)).toBe(pairA.fingerprint)
+    current = 'renamed-mac.example.ts.net'
+    r.status(ok(statusJson({ CertDomains: [NAME] })))
+    expect((await r.tls.check()).reason).toBe('cert_domain_mismatch')
+    expect(fp((await handshake(port, { servername: NAME })).peer)).toBe(mkcert.fingerprint)
+    expect(r.tls.status().trusted).toBe(false)
+  })
+
   it('a pair past notAfter is never served, even before the next check replaces it', async () => {
     const r = rig()
     await r.tls.check()
