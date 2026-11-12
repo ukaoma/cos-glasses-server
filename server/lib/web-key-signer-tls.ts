@@ -14,7 +14,7 @@
 //     writes go to $HOME/Library/Containers/<app>/Data", read from the 1.102.2 binary), so a path
 //     under the data dir would not receive the files. The server parses the PEM blocks and writes the
 //     pair itself, atomically, into <data dir>/web-key-tls/ (dir 0700, key 0600, cert 0644).
-//   - Asks `tailscale status --json` first (read only, bounded). Empty CertDomains means HTTPS
+//   - Asks `tailscale status --json --peers=false` first (read only, bounded; SR-03). Empty CertDomains means HTTPS
 //     Certificates is off for the tailnet: no cert call is made, and the status says so
 //     (`tailnet_https_certs_off`). A name missing from CertDomains: `cert_domain_mismatch`.
 //   - Serves the pair on 3144 by SNI: a handshake naming exactly the certificate's host gets it; any
@@ -54,7 +54,6 @@ import { normalizeTailscaleDnsName } from './network-policy.js'
 import {
   parseTailscaleStatus,
   resolveTailscaleBin,
-  STATUS_ARGS,
   type RunResult,
 } from './tailscale-nudge.js'
 
@@ -77,6 +76,14 @@ export const SIGNER_TLS_KEY_MODE = 0o600
 export const SIGNER_TLS_CERT_MODE = 0o644
 /** SR-08: the most bytes read from either stored file (a real chain plus key is about 4 KiB). */
 export const SIGNER_TLS_STORED_MAX_BYTES = 64 * 1024
+/**
+ * SR-03: the signer's own status call, without peers. CertDomains, BackendState and Self are top-level and
+ * stay in the answer (checked 2026-11-11 on Tailscale 1.102 for macOS: 0 peers, CertDomains present), so a
+ * tailnet with hundreds of devices cannot push the answer past the 1 MiB output cap.
+ */
+export const SIGNER_TLS_STATUS_ARGS: readonly string[] = Object.freeze(['status', '--json', '--peers=false'])
+/** Node's error code when a child's output passes maxBuffer (SR-03): never "Tailscale is not installed". */
+const MAXBUFFER = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
 /** Both outputs to stdout ("-"), see the header. The name is a normalised *.ts.net name, never a flag. */
 export const SIGNER_TLS_CERT_ARGS = (name: string): string[] => ['cert', '--cert-file', '-', '--key-file', '-', name]
 
@@ -144,6 +151,7 @@ export type SignerTlsReason =
   | 'tailscale_cli_missing'
   | 'tailscale_cli_timeout'
   | 'tailscale_cli_gui_unavailable'
+  | 'tailscale_output_too_large'
   | 'tailscale_status_failed'
   | 'tailscale_cert_failed'
   | 'cert_invalid'
@@ -341,7 +349,7 @@ function leafTailnetName(leaf: X509Certificate): string | null {
 }
 
 function classifyCertFailure(r: RunResult): SignerTlsReason {
-  if (r.spawnError) return 'tailscale_cli_missing'
+  if (r.spawnError) return r.spawnError === MAXBUFFER ? 'tailscale_output_too_large' : 'tailscale_cli_missing'
   if (r.killed || r.signal) return 'tailscale_cli_timeout'
   const text = `${r.stderr}\n${r.stdout.includes('PRIVATE KEY') ? '' : r.stdout}`
   if (/does not support getting TLS certs|HTTPS cert(ificate)?s? (support )?(is |are )?not enabled|not enabled\/configured/i.test(text)) return 'tailnet_https_certs_off'
@@ -593,8 +601,8 @@ export class SignerTls {
     // The minimal env with SHLVL=1 for both calls (signerTlsCliEnv): never this process's env.
     const cliEnv = signerTlsCliEnv()
 
-    const st = await this.runner(bin, STATUS_ARGS, SIGNER_TLS_STATUS_TIMEOUT_MS, cliEnv)
-    if (st.spawnError) { this.fail('tailscale_cli_missing', `spawn ${st.spawnError}`); return }
+    const st = await this.runner(bin, SIGNER_TLS_STATUS_ARGS, SIGNER_TLS_STATUS_TIMEOUT_MS, cliEnv)
+    if (st.spawnError) { this.fail(st.spawnError === MAXBUFFER ? 'tailscale_output_too_large' : 'tailscale_cli_missing', `spawn ${st.spawnError}`); return }
     if (st.killed || st.signal) { this.fail('tailscale_cli_timeout', `status killed=${st.killed} signal=${st.signal ?? ''} ${st.elapsedMs}ms`); return }
     const parsed = st.code === 0 ? parseTailscaleStatus(st.stdout, this.now()) : null
     if (!parsed) {

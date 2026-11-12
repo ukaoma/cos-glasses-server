@@ -28,6 +28,7 @@ import {
   SIGNER_TLS_RENEW_BEFORE_MS,
   SIGNER_TLS_RETRY_BASE_MS,
   SIGNER_TLS_RETRY_MAX_MS,
+  SIGNER_TLS_STATUS_ARGS,
   SIGNER_TLS_STATUS_TIMEOUT_MS,
   SIGNER_TLS_STORED_MAX_BYTES,
   SignerTls,
@@ -40,7 +41,7 @@ import {
   signerTlsRetryMs,
   type SignerTlsDeps,
 } from './web-key-signer-tls.js'
-import { execFileRunner, STATUS_ARGS, type RunResult } from './tailscale-nudge.js'
+import { execFileRunner, type RunResult } from './tailscale-nudge.js'
 import { WebKeyAuthority } from './web-key-authority.js'
 import { WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from './web-key-registry.js'
 import { createWebKeyRouter } from '../routes/web-key.js'
@@ -215,7 +216,7 @@ describe('success: fetched, stored, and served for exactly the tailnet name', ()
   it('status then cert (both to stdout), bounded; trusted; stored 0600/0644 in a 0700 dir; the key never reaches a log', async () => {
     const r = rig()
     const s = await r.tls.check()
-    expect(r.calls.map(c => c.args)).toEqual([STATUS_ARGS, SIGNER_TLS_CERT_ARGS(NAME)])
+    expect(r.calls.map(c => c.args)).toEqual([SIGNER_TLS_STATUS_ARGS, SIGNER_TLS_CERT_ARGS(NAME)])
     expect(SIGNER_TLS_CERT_ARGS(NAME)).toEqual(['cert', '--cert-file', '-', '--key-file', '-', NAME])
     expect(r.calls.map(c => c.timeoutMs)).toEqual([SIGNER_TLS_STATUS_TIMEOUT_MS, SIGNER_TLS_CERT_TIMEOUT_MS])
     expect(r.calls.every(c => c.bin === BIN)).toBe(true)
@@ -713,6 +714,36 @@ describe('the CLI env (7.0.20): SHLVL=1 in a minimal env, on the signer\'s Tails
     expect(await withoutShlvl.check()).toMatchObject({ trusted: false, reason: 'tailscale_cli_gui_unavailable', lastError: 'tailscale_cli_gui_unavailable' })
     expect(existsSync(join(base, 'a'))).toBe(false)
     expect(existsSync(join(base, 'b'))).toBe(false)
+  })
+})
+
+describe('SR-03: the signer\'s own status call, without peers; an oversized answer has its own reason', () => {
+  it('asks status --json --peers=false (the child receives the flag); CertDomains is still read from that answer', async () => {
+    expect(SIGNER_TLS_STATUS_ARGS).toEqual(['status', '--json', '--peers=false'])
+    expect(/\s/.test(process.execPath)).toBe(false)
+    const base = mkdtempSync(join(tmpdir(), 'signer-tls-peers-'))
+    dirs.push(base)
+    const bin = join(base, 'Tailscale')
+    // The fake answers JSON only when it was asked without peers, and that JSON has no Peer map.
+    writeFileSync(bin, `#!${process.execPath}\nconst a = process.argv.slice(2)\nprocess.stdout.write(a[0] === 'status' && a.includes('--peers=false') ? ${JSON.stringify(JSON.stringify({ BackendState: 'Running', Self: { DNSName: `${NAME}.` }, CertDomains: [] }))} : 'unexpected arguments\\n')\n`, { mode: 0o755 })
+    const tls = new SignerTls({ dir: join(base, 'tls'), selfDnsName: async () => NAME, resolveBin: () => bin, log: () => {}, schedule: () => ({ cancel: () => {} }) })
+    expect((await tls.check()).reason).toBe('tailnet_https_certs_off')
+  })
+
+  it('a status or cert answer past the 1 MiB cap is tailscale_output_too_large, never tailscale_cli_missing', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'signer-tls-maxbuf-'))
+    dirs.push(base)
+    const bin = join(base, 'Tailscale')
+    writeFileSync(bin, `#!${process.execPath}\nprocess.stdout.write('x'.repeat(2 * 1024 * 1024))\n`, { mode: 0o755 })
+    const tls = new SignerTls({ dir: join(base, 'tls'), selfDnsName: async () => NAME, resolveBin: () => bin, log: () => {}, schedule: () => ({ cancel: () => {} }) })
+    expect(await tls.check()).toMatchObject({ trusted: false, reason: 'tailscale_output_too_large' })
+    // The cert call the same way (a fake runner: status fine, cert overflows).
+    const r = rig()
+    r.cert({ code: null, signal: 'SIGKILL', killed: true, stdout: '', stderr: '', spawnError: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', elapsedMs: 40 })
+    expect((await r.tls.check()).reason).toBe('tailscale_output_too_large')
+    const m = rig()
+    m.status({ code: null, signal: null, killed: false, stdout: '', stderr: '', spawnError: 'ENOENT', elapsedMs: 1 })
+    expect((await m.tls.check()).reason).toBe('tailscale_cli_missing')
   })
 })
 
