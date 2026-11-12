@@ -1011,7 +1011,8 @@ app.use('/api', createWebKeyRouter({
   refreshSelfDnsName: () => tailnetSelf.refreshIfMissing(),
   expectedOrigin: () => webKeyAuthority.deps.expectedOrigin(),
   integrityStatus: () => ({ ...(webControlIntegrity?.status() ?? { enabled: false }), signer: webKeySignerIntegrity?.status() ?? null }),
-  signerTls: () => webKeySignerTls?.status() ?? null,
+  // SR-04: an authenticated status read may start one bounded re-check (lib/web-key-signer-tls.ts statusRead).
+  signerTls: () => webKeySignerTls?.statusRead() ?? null,
   // Phase 3: the phone's key steps and the handoff claim answer only on the 3144 signer listener.
   isSignerRequest: req => req.socket?.localPort === WEB_KEY_SIGNER_PORT,
   handoffs: webKeySignHandoffs,

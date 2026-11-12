@@ -66,6 +66,10 @@ export const SIGNER_TLS_CHECK_INTERVAL_MS = DAY_MS
 export const SIGNER_TLS_RETRY_BASE_MS = 60_000
 /** The longest cooldown between failed checks. */
 export const SIGNER_TLS_RETRY_MAX_MS = 60 * 60_000
+/** SR-04: the least time between two re-checks started by status reads. */
+export const SIGNER_TLS_RECHECK_FLOOR_MS = 15_000
+/** SR-04: the failures a user fixes outside this server, which a status read may re-check at once. */
+const RECHECK_ON_READ: ReadonlySet<string> = new Set(['tailnet_https_certs_off', 'tailnet_name_unknown'])
 export const SIGNER_TLS_STATUS_TIMEOUT_MS = 5_000
 /** ACME issuance through tailscaled can take tens of seconds. */
 export const SIGNER_TLS_CERT_TIMEOUT_MS = 90_000
@@ -442,6 +446,9 @@ export class SignerTls {
   private stopped = false
   /** The stored files' `stat` signature the prompt pickup last read (null: never read). */
   private pickupSeen: string | null = null
+  /** SR-04: when a status read last started a re-check, and whether the next check may skip the cooldown. */
+  private lastRecheckAt: number | null = null
+  private bypassCooldown = false
 
   constructor(private readonly deps: SignerTlsDeps) {
     this.now = deps.now ?? Date.now
@@ -532,6 +539,26 @@ export class SignerTls {
     }
   }
 
+  /**
+   * SR-04: what the authenticated status route calls (index.ts). When the last check failed only because
+   * HTTPS Certificates was off for the tailnet or the tailnet name was unknown, both fixed by the user outside
+   * this server, start one check now instead of waiting out the backoff (up to SIGNER_TLS_RETRY_MAX_MS): at
+   * most once per SIGNER_TLS_RECHECK_FLOOR_MS, never while a check runs, never after stop(). It does not wait
+   * for that check; the next read shows its result. Any other failure keeps the breaker as it is.
+   */
+  statusRead(): SignerTlsStatus {
+    try {
+      const at = this.now()
+      if (!this.stopped && this.inflight === null && this.lastError !== null && RECHECK_ON_READ.has(this.lastError)
+        && (this.lastRecheckAt === null || at - this.lastRecheckAt >= SIGNER_TLS_RECHECK_FLOOR_MS)) {
+        this.lastRecheckAt = at
+        this.bypassCooldown = true
+        void this.check()
+      }
+    } catch { /* the timer checks again */ }
+    return this.status()
+  }
+
   /** The boot check, then one every interval (or after the cooldown while failing). */
   start(): void {
     this.stopped = false
@@ -584,6 +611,9 @@ export class SignerTls {
   }
 
   private async runCheck(): Promise<void> {
+    // SR-04: a re-check a status read started may skip the cooldown, once.
+    const bypass = this.bypassCooldown
+    this.bypassCooldown = false
     let name: string | null = null
     try { name = normalizeTailscaleDnsName(await this.deps.selfDnsName()) } catch { name = null }
     if (!name) { this.fail('tailnet_name_unknown'); return }
@@ -595,7 +625,7 @@ export class SignerTls {
     const pair = this.current
     if (pair && pair.host === name && !signerTlsRenewalDue(pair.notAfterMs, at)) { this.succeed(false); return }
     // The breaker: no CLI call inside the cooldown after a failure.
-    if (this.cooldownUntil !== null && at < this.cooldownUntil) return
+    if (this.cooldownUntil !== null && at < this.cooldownUntil && !bypass) return
     const bin = this.resolveBin()
     if (!bin) { this.fail('tailscale_cli_missing'); return }
     // The minimal env with SHLVL=1 for both calls (signerTlsCliEnv): never this process's env.

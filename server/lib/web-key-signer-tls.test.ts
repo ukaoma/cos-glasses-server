@@ -34,6 +34,7 @@ import {
   SignerTls,
   signerHttpsOptions,
   SIGNER_TLS_CLI_ENV_KEYS,
+  SIGNER_TLS_RECHECK_FLOOR_MS,
   signerTlsCliEnv,
   signerTlsCliRunner,
   signerTlsPublicRoots,
@@ -468,8 +469,8 @@ async function statusOverRoute(tls: SignerTls): Promise<Record<string, unknown>>
   const registry = new WebKeyRegistry(join(base, 'web-keys.json'), join(base, 'a.jsonl'))
   const authority = new WebKeyAuthority({ registry, nonces: new WebKeyNonces(join(base, 'n.json')), packets: new WebKeyPackets(), integrity: () => INTEGRITY_OK, selfDnsName: () => NAME, expectedOrigin: () => ORIGIN, enabled: () => true })
   const app = express()
-  // The same wiring as index.ts: `signerTls: () => webKeySignerTls?.status() ?? null`.
-  app.use('/api', createWebKeyRouter({ authority, enrollments: new WebKeyEnrollments(registry, { deviceAllowed: () => true }), isWebRequest: () => false, apiToken: () => 'tok', selfDnsName: () => NAME, expectedOrigin: () => ORIGIN, signerTls: () => tls.status() }))
+  // The same wiring as index.ts: `signerTls: () => webKeySignerTls?.statusRead() ?? null`.
+  app.use('/api', createWebKeyRouter({ authority, enrollments: new WebKeyEnrollments(registry, { deviceAllowed: () => true }), isWebRequest: () => false, apiToken: () => 'tok', selfDnsName: () => NAME, expectedOrigin: () => ORIGIN, signerTls: () => tls.statusRead() }))
   const server = await new Promise<import('node:http').Server>(res => { const s = app.listen(0, '127.0.0.1', () => res(s)) })
   try {
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/web-key/status`
@@ -621,6 +622,58 @@ describe('the breaker: bounded, backing off, single-flight', () => {
     r.clock.now += signerTlsRetryMs(2)
     expect((await r.tls.check()).trusted).toBe(true)
     expect(r.scheduled.at(-1)).toBe(SIGNER_TLS_CHECK_INTERVAL_MS)
+  })
+
+  it('SR-04: once HTTPS Certificates is turned on, the next authenticated status read re-checks at once, not after the backoff', async () => {
+    const r = rig()
+    r.status(ok(statusJson({ CertDomains: null })))
+    expect((await r.tls.check()).reason).toBe('tailnet_https_certs_off')
+    await r.tls.check()
+    expect(r.calls).toHaveLength(1)
+    r.status(ok(statusJson()))
+    expect((await statusOverRoute(r.tls)).trusted).toBe(false)
+    expect((await r.tls.check()).trusted).toBe(true)
+    expect(r.calls.map(c => c.args[0])).toEqual(['status', 'status', 'cert'])
+    expect((await statusOverRoute(r.tls))).toMatchObject({ trusted: true, reason: 'ok', lastError: null })
+  })
+
+  it('SR-04: at most one status-read re-check per floor, only for certs off or an unknown name, never from status() itself', async () => {
+    const r = rig()
+    r.status(ok(statusJson({ CertDomains: null })))
+    await r.tls.check()
+    r.tls.statusRead()
+    await r.tls.check()
+    expect(r.calls).toHaveLength(2)
+    r.tls.statusRead()
+    r.tls.status()
+    await r.tls.check()
+    expect(r.calls).toHaveLength(2)
+    r.clock.now += SIGNER_TLS_RECHECK_FLOOR_MS
+    r.tls.statusRead()
+    await r.tls.check()
+    expect(r.calls).toHaveLength(3)
+    // Another failure keeps the breaker: no re-check from a status read.
+    const t = rig()
+    t.status({ code: null, signal: 'SIGKILL', killed: true, stdout: '', stderr: '', elapsedMs: SIGNER_TLS_STATUS_TIMEOUT_MS })
+    await t.tls.check()
+    t.clock.now += SIGNER_TLS_RECHECK_FLOOR_MS
+    t.tls.statusRead()
+    await t.tls.check()
+    expect(t.calls).toHaveLength(1)
+    // An unknown name is re-checked too, and the read stops after stop().
+    let name: string | null = null
+    const u = rig({ selfDnsName: async () => name })
+    expect((await u.tls.check()).reason).toBe('tailnet_name_unknown')
+    name = NAME
+    u.tls.statusRead()
+    expect((await u.tls.check()).trusted).toBe(true)
+    const v = rig()
+    v.status(ok(statusJson({ CertDomains: null })))
+    await v.tls.check()
+    v.tls.stop()
+    v.tls.statusRead()
+    await v.tls.check()
+    expect(v.calls).toHaveLength(1)
   })
 
   it('concurrent checks share one run', async () => {
@@ -1011,7 +1064,8 @@ describe('index.ts wiring (source)', () => {
     expect(index.indexOf('webKeySignerTls?.start()')).toBeGreaterThan(index.indexOf('listenRequiredServers(listeners).then(() => {'))
     expect(count('webKeySignerTls?.stop()')).toBe(1)
     expect(index.indexOf('webKeySignerTls?.stop()')).toBeGreaterThan(index.indexOf('async function gracefulShutdown(): Promise<void> {'))
-    expect(count('signerTls: () => webKeySignerTls?.status() ?? null,')).toBe(1)
+    expect(count('signerTls: () => webKeySignerTls?.statusRead() ?? null,')).toBe(1)
+    expect(count('webKeySignerTls?.status()')).toBe(0)
     expect(count('webKeySignerTls = ')).toBe(1)
   })
 })
