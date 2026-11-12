@@ -263,7 +263,8 @@
     }
     crumbs.innerHTML = parts.join('');
     $('nav-back').disabled = onToday;
-    // The phone top bar (below 600 px, the same width test) names the detail too, so a reader says where it is.
+    // Below 600 px the section name gets the detail too. On a reader that label is hidden (the section button gives way
+    // to Back, which names where it goes), so this shows only on a list that has a detail.
     var label = $('section-name');
     if (label && detail && railHidden()) label.textContent = detail;
   }

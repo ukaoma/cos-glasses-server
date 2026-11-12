@@ -573,6 +573,55 @@
     var hash = '#/' + [pane].concat(args || []).map(encodeURIComponent).join('/');
     if (location.hash === hash) route(); else location.hash = hash;
   }
+  // ── Back by path (7.0.30, item 1: Anand on the 11-12 HC call, Miles's pick) ──
+  // Back goes where the person came from. Each address this page makes is marked in its own history entry
+  // (history.state.cosNav): this page load's id, the entry's position, and the address it came from. Back is then the
+  // browser's own Back (history.back), so the system Back and ours agree and Back adds no entry. With no mark (a deep
+  // link, a reload, the first page, or an entry an overlay took over), Back keeps the parent chain it always had, and it
+  // REPLACES the entry rather than adding one, so the two can never bounce between each other. The image viewer and
+  // Today's sheet push entries of their own (cosImageViewer, cosTodayOverlay): those are never marked, never stepped into,
+  // and an address made while one of them still sat behind gets no mark, because the entry behind it is not an address
+  // (its position is not the last address's position plus one).
+  var NAV = { doc: Math.random().toString(36).slice(2, 10), last: null, replace: null };
+  function navState() { try { return history.state; } catch (_e) { return null; } }
+  function navOverlay(st) { return !!(st && (st.cosImageViewer || st.cosTodayOverlay)); }
+  function navStamp() {
+    if (typeof history === 'undefined' || !history || typeof location === 'undefined') return;   // a page without them: the parent chain
+    var hash = location.hash || '', st = navState(), pos;
+    if (navOverlay(st)) { NAV.last = null; NAV.replace = null; return; }
+    if (st && st.cosNav && st.cosNav.doc === NAV.doc) { NAV.last = { hash: hash, pos: st.cosNav.pos, back: st.cosNav.back }; NAV.replace = null; return; }
+    if (st && st.cosNav) {
+      // Marked by an earlier load of this page (a reload): what lies behind it belongs to that load, so no path.
+      pos = st.cosNav.pos;
+    } else if (st) { NAV.last = null; NAV.replace = null; return; }   // someone else's state: leave it alone
+    else pos = NAV.replace ? NAV.replace.pos : history.length - 1;
+    var back = null;
+    if (!st && !NAV.replace && NAV.last && typeof NAV.last.pos === 'number' && pos === NAV.last.pos + 1) back = NAV.last.hash;
+    NAV.replace = null;
+    try { history.replaceState(Object.assign({}, st || {}, { cosNav: { doc: NAV.doc, pos: pos, back: back } }), ''); } catch (_e) { /* no history API: the parent chain */ }
+    NAV.last = { hash: hash, pos: pos, back: back };
+  }
+  // Where Back goes from here: { pane, path } (path true: the way he came; false: the parent chain).
+  function navBackTo() {
+    var st = navState();
+    // navStamp has run on this entry (every landing routes), so its mark is this load's: an earlier load's was re-marked
+    // with no path there.
+    if (!navOverlay(st) && st && st.cosNav && st.cosNav.back) {
+      var p = String(st.cosNav.back).replace(/^#\/?/, '').split('/')[0];
+      return { pane: ROOT_PANES.indexOf(p) >= 0 ? p : 'today', path: true };
+    }
+    var r = parseRoute(), up = PANES[r.pane] && PANES[r.pane].up ? PANES[r.pane].up(r.args) : null;
+    return { pane: up || (r.args.length && !isTabRoute(r.args)) ? r.pane : 'today', path: false };
+  }
+  // The parent chain, replacing this entry (never adding one).
+  function goReplace(pane, args) {
+    var hash = '#/' + [pane].concat(args || []).map(encodeURIComponent).join('/');
+    if (location.hash === hash) { route(); return; }
+    var st = navState();
+    NAV.replace = { pos: st && st.cosNav && typeof st.cosNav.pos === 'number' ? st.cosNav.pos : history.length - 1 };
+    try { location.replace(location.pathname + location.search + hash); } catch (_e) { NAV.replace = null; location.hash = hash; }
+  }
+  // ── end back by path
   // 7.0.2 (A8): a phone is under 600 px wide, or a short touch screen at any width (the unfolded Duo is 951x539 in
   // Comet): height is its scarce axis, so it gets the phone Ask sheet and the 44 px tap floor (app.css), as folded does.
   var SHORT_TOUCH_MQ = '(pointer: coarse) and (max-height: 720px)';
@@ -639,6 +688,7 @@
     return !!(e.metaKey || e.ctrlKey || keyboardFirst());
   }
   function route(forceChanged) {
+    if (typeof navStamp === 'function') navStamp();
     var r = parseRoute();
     var changedPane = forceChanged === true || r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
     if (state.pane !== r.pane && PANES[state.pane] && PANES[state.pane].leave) { try { PANES[state.pane].leave(); } catch (err) { console.error(err); } }
@@ -664,7 +714,10 @@
     var railBack = $('rail-back');
     if (railBack) railBack.hidden = !reading;
     $('section-btn').classList.toggle('hidden', reading);
-    $('topbar-back-label').textContent = TITLES[r.pane] || 'Back';
+    // 7.0.30: Back names where it goes, the way he came or the parent (navBackTo).
+    var backTo = typeof navBackTo === 'function' ? navBackTo() : { pane: r.pane };
+    $('topbar-back-label').textContent = TITLES[backTo.pane] || 'Back';
+    if (railBack && railBack.setAttribute) railBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list'));
     $('section-name').textContent = TITLES[r.pane] || 'Today';
     closeMenu();
     if (changedPane) window.scrollTo(0, 0);
@@ -701,26 +754,30 @@
     runHooks(routeHooks, r);
   }
   function runHooks(list, arg) { list.forEach(function (fn) { try { fn(arg); } catch (err) { console.error(err); } }); }
-  // Back unwinds one step, the way Control's Back does: a pane module may name the step above a
-  // nested reader (an archive chat goes back to its day, not to the list).
+  // Back (7.0.30): the way he came, when this page made the entry behind (navBackTo). Otherwise one step up, the way
+  // Control's Back does: a pane module may name the step above a nested reader (an archive chat goes back to its day,
+  // not to the list), replacing this entry.
   function goBack() {
+    if (typeof navBackTo === 'function' && navBackTo().path) { history.back(); return; }
     var r = parseRoute();
     var up = PANES[r.pane] && PANES[r.pane].up ? PANES[r.pane].up(r.args) : null;
-    if (up) go(r.pane, up);
-    else if (r.args.length && !isTabRoute(r.args)) go(r.pane);
-    else go('today');
+    var step = typeof goReplace === 'function' ? goReplace : go;
+    if (up) step(r.pane, up);
+    else if (r.args.length && !isTabRoute(r.args)) step(r.pane);
+    else step('today');
   }
   // '#/<pane>/t/<tab>' is the pane's list on one of its tabs, not a reader: the phone keeps the section switcher and Back
   // leaves the pane. Memories keeps its tab in the address this way, so a reload or a new browser lands on the same tab.
   function isTabRoute(args) { return args.length === 2 && args[0] === 't'; }
-  // On the closed Duo every vertical pixel counts: the top bar slides away while you scroll
-  // down and comes back the moment you scroll up.
+  // On a phone every vertical pixel counts: the top bar slides away while you scroll down a list and comes back the
+  // moment you scroll up. 7.0.30 (item 1): never on a reader, where the top bar holds Back, so Back stays in reach on a
+  // tall phone however far down he reads.
   var lastY = 0;
   function onScroll() {
     var y = Math.max(0, window.scrollY || 0);
-    var bar = $('topbar');
+    var bar = $('topbar'), back = $('topbar-back'), onReader = !!(back && !back.classList.contains('hidden'));
     bar.classList.toggle('scrolled', y > 8);
-    if (y < 60 || y < lastY - 4) bar.classList.remove('tucked');
+    if (y < 60 || y < lastY - 4 || onReader) bar.classList.remove('tucked');
     else if (y > lastY + 4 && isPhone()) bar.classList.add('tucked');
     lastY = y;
   }
@@ -760,7 +817,7 @@
     // 7.0.23 regression (lapse_check, 08:2x): a frame class left on keeps html and body at one screen with overflow
     // hidden, so the gate could not scroll and Connect sat below a keyboard-height screen. The gate is a normal page;
     // showShell's route() puts the frame back (sxFrameSync) when the shell returns.
-    document.documentElement.classList.remove('sx-frame', 'mx-frame');
+    document.documentElement.classList.remove('sx-frame');
     // A later 401 from a pane still polling (W.api passes no message) must not blank what the gate already says:
     // the reason it opened, or "That code did not match" while the person retypes.
     if (!message && alreadyOpen) return;

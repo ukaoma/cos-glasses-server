@@ -69,16 +69,16 @@ describe('the sign-in gate is a normal page: no frame while it shows (7.0.23 reg
     expect(h.k.sync()).toBe(false)
     expect(h.de.classList.contains('sx-frame')).toBe(false)
   })
-  it('showAuth takes both frame classes off as it shows the gate (run on its own text)', () => {
+  it('showAuth takes the frame class off as it shows the gate (run on its own text; 7.0.30: mx-frame is gone, nothing ever set it)', () => {
     const SRC = slice(APP, '  function showAuth(message) {', '  function signedInOnce() {')
     const de: any = { classList: new FakeClass() }
-    de.classList.add('sx-frame'); de.classList.add('mx-frame'); de.classList.add('kb-up')
+    de.classList.add('sx-frame'); de.classList.add('kb-up')
     const els: Record<string, any> = {}
     const $ = (id: string) => (els[id] ??= { classList: new FakeClass() })
     // eslint-disable-next-line no-new-func
     new Function('deps', `with (deps) {\n${SRC}\nshowAuth('Signed out');\n}`)({ $, document: { documentElement: de }, readerImagesStop: () => {}, setStatus: () => {}, CONN: {} })
     expect(de.classList.contains('sx-frame')).toBe(false)
-    expect(de.classList.contains('mx-frame')).toBe(false)
+    expect(APP).not.toContain('mx-frame')
     expect(de.classList.contains('kb-up'), 'the keyboard kit owns kb-up').toBe(true)
     expect(els['app-shell'].classList.contains('hidden')).toBe(true)
   })

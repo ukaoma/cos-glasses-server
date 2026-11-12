@@ -206,8 +206,9 @@ select.field {
 
 /* No bottom bar, on purpose. On a phone the browser owns the bottom edge (Safari's floating
    address pill, Comet's and Chrome's own bars), and iOS 26 WebKit stops drawing the page under
-   its bar while any fixed element sits within ~60px of it. Navigation lives in the top bar
-   (folded screen) or the left rail (unfolded screen and up). */
+   its bar while any fixed element sits within ~60px of it. Navigation lives in the top bar (phones),
+   the side rail at the right edge (a short screen under 600 px: the folded Duo, html.short-screen),
+   or the left rail (600 px and up). */
 .badge-dot { position: absolute; width: 7px; height: 7px; border-radius: 50%; background: var(--hot); }
 
 .rail { display: none; }
@@ -702,8 +703,9 @@ html { touch-action: manipulation; }
   html.short-screen .rail-back:active { background: var(--rail-border); }
   /* The focus ring sits inside the button: the rail clips anything past its edge. */
   html.short-screen .rail :focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 12px; }
-  /* One way to switch panes on a screen: the rail. The top bar keeps the pane's name, without the caret and its menu
-     (app.js makes the button inert), and its Back moves to the rail. */
+  /* One way to switch panes on a screen: the rail. On a list the top bar keeps the pane's name, without the caret and
+     its menu (app.js makes the button inert); on a reader its Back moves to the rail and the left of the top bar is
+     empty. */
   html.short-screen .section-btn .caret, html.short-screen #topbar-back { display: none !important; }
   html.short-screen .section-btn { cursor: default; }
 }
