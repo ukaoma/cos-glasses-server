@@ -156,18 +156,17 @@ describe('routes: handoff create and claim, signer-only key steps', () => {
     expect(await (await post('/api/web-key/handoff', { ...BODY, packetSha256: pk.packetSha256 })).json()).toEqual({ ok: false, error: 'packet_session_mismatch' })
     expect(await (await post('/api/web-key/handoff', { ...BODY, packetSha256: 'b'.repeat(64) })).json()).toEqual({ ok: false, error: 'packet_unknown' })
   })
-  it('packet list is authenticated, receiver-filtered and refuses disabled push-main', async () => {
+  it('packet list is authenticated and receiver-filtered; push-main has no packet at all (2026-11-12)', async () => {
     await start()
     const fields = { action: 'publish', artifact: '@gotcos/glasses-server', version: '7.0.6', digest: 'sha256:' + 'a'.repeat(64), channel: 'npm-latest' }
     const ours = authority.packets.create(fields, { provider: 'claude', sessionId: SID })
     authority.packets.create(fields, { provider: 'codex', sessionId: SID })
-    const disabled = authority.packets.create({ ...fields, action: 'push-main', channel: 'git-main' }, { provider: 'claude', sessionId: SID })
-    if (!ours.ok || !disabled.ok) throw new Error('packet setup')
+    expect(authority.packets.create({ ...fields, action: 'push-main', channel: 'git-main' }, { provider: 'claude', sessionId: SID })).toEqual({ ok: false, reason: 'action_not_allowed' })
+    if (!ours.ok) throw new Error('packet setup')
     const url = '/api/web-key/packets?provider=claude&sessionId=' + encodeURIComponent(SID)
     expect((await fetch(base + url)).status).toBe(401)
     const listed = await (await fetch(base + url, { headers: { 'x-test-web': '1' } })).json() as any
     expect(listed.packets).toEqual([{ packet: ours.packet, packetSha256: ours.packetSha256 }])
-    expect(await (await post('/api/web-key/handoff', { ...BODY, packetSha256: disabled.packetSha256 })).json()).toEqual({ ok: false, error: 'approve_action_not_enabled' })
     clock += 1800001
     expect(await (await post('/api/web-key/handoff', { ...BODY, packetSha256: ours.packetSha256 })).json()).toEqual({ ok: false, error: 'packet_unknown' })
   })

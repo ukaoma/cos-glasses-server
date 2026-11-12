@@ -240,7 +240,7 @@ describe('accept: every reject path', () => {
 })
 
 describe('approve scope: an exact open packet', () => {
-  const CHANNEL: Record<string, string> = { install: 'mac-local', publish: 'npm-next', 'push-main': 'git-main' }
+  const CHANNEL: Record<string, string> = { install: 'mac-local', publish: 'npm-next' }
   function packet(action = 'install', channel?: string, creator?: { provider: string; sessionId: string }) {
     const made = packets.create({ action, artifact: '@gotcos/glasses-server', version: '6.99.31', digest: `sha512:${'a'.repeat(128)}`, channel: channel ?? CHANNEL[action] }, creator ?? { provider: 'claude', sessionId: SID })
     if (!made.ok) throw new Error(made.reason)
@@ -270,9 +270,9 @@ describe('approve scope: an exact open packet', () => {
     const codexPacket = packet('install', undefined, { provider: 'codex', sessionId: SID })
     expect(authority.accept(candidate(good({ scope: scopeOf(codexPacket) })), ctx())).toEqual({ ok: false, reason: 'packet_session_mismatch' })
   })
-  it('scoped publish is enabled; push-main is still refused', () => {
+  it('scoped publish is enabled; push-main has no packet at all (Miles, 2026-11-12 11:11: it stays typed at the desk)', () => {
     expect(authority.accept(candidate(good({ scope: scopeOf(packet('publish')) })), ctx()).ok).toBe(true)
-    expect(authority.accept(candidate(good({ scope: scopeOf(packet('push-main')) })), ctx())).toEqual({ ok: false, reason: 'approve_action_not_enabled' })
+    expect(packets.create({ action: 'push-main', artifact: '@gotcos/glasses-server', version: '6.99.31', digest: `sha512:${'a'.repeat(128)}`, channel: 'git-main' }, { provider: 'claude', sessionId: SID })).toEqual({ ok: false, reason: 'action_not_allowed' })
   })
   it.each(['npm-next', 'npm-latest', 'control-appcast', 'hub-alias', 'gotcos-site', 'control-downloads', 'release-docs'])('publish %s is exact, user-verified and one-shot', channel => {
     const artifacts: Record<string, string> = { 'gotcos-site': 'gotcos-site-manifest', 'control-downloads': 'cos-control-downloads-manifest', 'release-docs': 'cos-release-docs-manifest' }
@@ -355,7 +355,8 @@ describe('stored proof cannot bypass current approval boundaries', () => {
     [{ iat: NOW_S - 1000, exp: NOW_S - 1 }, 'lifetime_invalid'],
     [{ iat: NOW_S - 700, exp: NOW_S - 1 }, 'signature_expired'],
     [{ iat: NOW_S + 61, exp: NOW_S + 600 }, 'iat_in_future'],
-    [{ scope: { kind: 'approve', action: 'push-main', artifact: 'cos-server', version: '7.0.6', digest: 'sha256:' + 'a'.repeat(64), channel: 'git-main', packetSha256: 'b'.repeat(64) } }, 'approve_action_not_enabled'],
+    // 2026-11-12 (Miles 11:11): push-main is not expressible, so a stored proof naming it fails at the scope grammar.
+    [{ scope: { kind: 'approve', action: 'push-main', artifact: 'cos-server', version: '7.0.6', digest: 'sha256:' + 'a'.repeat(64), channel: 'git-main', packetSha256: 'b'.repeat(64) } }, 'scope_not_allowed'],
   ] as Array<[Partial<WebTurnEnvelope>, string]>)('a genuine signature with invalid boundary %j refuses', (over, reason) => {
     const env = good(over)
     expect(authority.review(proofFor(env), REC).reason).toBe(reason)
@@ -585,6 +586,7 @@ describe('B4 scope grammar: strict patterns and the action-to-channel table', ()
     for (const item of ['install', 'publish', 'push-main', 'push-branch', 'hub-file', 'sending-messages', 'deleting-data', 'credentials', 'moving-money']) expect(list).toContain(item)
     const approve = notAuthorizedFor(parseWebTurnScope(base)!)
     expect(approve).toContain('publish')
+    expect(approve).toContain('push-main') // never signable by phone, still named as not authorized
     expect(approve).not.toContain('install')
   })
   it('packets: session only from the request context, strict fields at creation', () => {

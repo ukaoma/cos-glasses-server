@@ -35,7 +35,7 @@ import {
 
 export const WEB_ENVELOPE_HEADER = 'x-cos-web-envelope'
 export const WEB_SIGNATURE_HEADER = 'x-cos-web-sig'
-/** Exact scoped install/publish only. Push-main remains refused (`approve_action_not_enabled`). */
+/** Exact scoped install/publish only. Push-main is not expressible at all (APPROVE_ACTIONS, Miles 2026-11-12). */
 export const WEB_KEY_ENABLED_APPROVE_ACTIONS: ReadonlySet<string> = new Set(['install', 'publish'])
 
 /** The served-asset integrity state the authority reads (review W1). Null: integrity is not running. */

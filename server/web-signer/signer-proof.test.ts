@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { canonicalJson } from '../../shared/web-turn-envelope.js'
+import { APPROVE_ACTION_CHANNELS, canonicalJson, PUBLISH_MANIFEST_ARTIFACTS } from '../../shared/web-turn-envelope.js'
 import { fingerprintOfSpki, kidOfSpki, parseEnvelopeHeader } from '../lib/web-key-envelope.js'
 import { sasOf, WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from '../lib/web-key-registry.js'
 import { coseP256ToSpki, parsePasskeyHeader, turnPasskeyChallenge } from '../lib/web-key-passkey.js'
@@ -259,5 +259,29 @@ describe('the signer checks the full packet preimage before signing', () => {
       { ...h, scope: { ...h.scope, action: 'push-main', channel: 'git-main' } },
     ]) await expect(P.validateHandoffPacket(changed, NOW)).rejects.toBeTruthy()
     await expect(P.validateHandoffPacket(h, packet.exp + 1)).rejects.toHaveProperty('reason', 'packet_expired')
+  })
+  // 2026-11-12: the phone's page keeps its OWN copy of the action-to-channel table. These pin it to the envelope's
+  // APPROVE_ACTION_CHANNELS by execution, both ways: every envelope channel signs here, and nothing else does.
+  const consistent = (over: Record<string, unknown>) => {
+    const p = { ...packet, ...over }
+    const sha = createHash('sha256').update(canonicalJson(p), 'utf8').digest('hex')
+    return { ...h, packet: p, scope: { kind: 'approve', action: p.action, artifact: p.artifact, version: p.version, digest: p.digest, channel: p.channel, packetSha256: sha } }
+  }
+  const envelopePairs = Object.entries(APPROVE_ACTION_CHANNELS).flatMap(([action, channels]) => channels.map(channel => [action, channel] as [string, string]))
+  it.each(envelopePairs)('the page signs every envelope pair: %s on %s', async (action, channel) => {
+    const c = consistent({ action, channel, artifact: PUBLISH_MANIFEST_ARTIFACTS[channel] ?? '@gotcos/glasses-server' })
+    expect(await P.validateHandoffPacket(c, NOW)).toEqual(c.packet)
+  })
+  it('the page signs NOTHING outside the envelope table: its own copy has exactly the envelope\'s pairs', async () => {
+    // The page's table, read from its source, must equal the envelope's: an extra pair on the page is a channel a phone
+    // could sign that the server's table does not list (Miles, 2026-11-12: a second copy nobody knew about drifts).
+    const src = readFileSync(fileURLToPath(new URL('./signer-proof.js', import.meta.url)), 'utf8')
+    const literal = /var channels = (\{[^\n]*\})/.exec(src)?.[1]
+    expect(literal, 'the page keeps one channels literal').toBeTruthy()
+    const pageTable = JSON.parse(literal!.replace(/'/g, '"').replace(/([{,]\s*)([a-z][\w-]*)\s*:/g, '$1"$2":'))
+    expect(pageTable).toEqual(Object.fromEntries(Object.entries(APPROVE_ACTION_CHANNELS).map(([k, v]) => [k, [...v]])))
+  })
+  it('push-main on git-main is refused by the page (scope_not_allowed)', async () => {
+    await expect(P.validateHandoffPacket(consistent({ action: 'push-main', channel: 'git-main' }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')
   })
 })

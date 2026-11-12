@@ -779,7 +779,7 @@ export class WebKeyPackets {
    * session that created its packet.
    */
   create(input: Record<string, unknown>, creator: { provider: unknown; sessionId: unknown } | null): { ok: true; packet: WebApprovalPacket; packetSha256: string } | { ok: false; reason: 'action_not_allowed' | 'invalid_packet' | 'packet_cap_reached' | 'session_from_context_only' | 'creator_unknown' } {
-    // The closed action list: install, publish, push-main. Every never-list action is refused here.
+    // The closed action list: install and publish (push-main is never signable by phone, 2026-11-12). Every never-list action is refused here.
     if (typeof input.action !== 'string' || !APPROVE_ACTIONS.has(input.action)) return { ok: false, reason: 'action_not_allowed' }
     if ('provider' in input || 'sessionId' in input) return { ok: false, reason: 'session_from_context_only' }
     // Strict patterns plus the action-to-channel table (shared/web-turn-envelope.ts).

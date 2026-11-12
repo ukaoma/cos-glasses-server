@@ -84,8 +84,9 @@ bumps the epoch.
 - `WEB_ANCHOR_MATURITY_MS = 86_400_000` (24 h). An anchor younger than that vouches nothing
   (`anchor_too_new`).
 - `setAt` is file-backed, so a same-user process can backdate it. The 24 h rule binds the server's
-  own route; **the verifier's committed pin is the real check.** The verifier must refuse when the
-  pin file is missing, uncommitted, or its `spkiSha256` differs from `anchor.spkiSha256` in the answer.
+  own route, and the verifier refuses when the pin file is missing, uncommitted, or its `spkiSha256`
+  differs from `anchor.spkiSha256` in the answer. Accepted limit (Miles, 2026-11-12): a process running
+  as the owner on this Mac can forge the whole chain, pin included.
 
 ## 3. Enrollment (anchor-signed approval)
 
@@ -176,7 +177,7 @@ footer as received (CRLF to LF only) and needs no trimming rule of its own.
 
 | Field | Pattern |
 | --- | --- |
-| action | `install` \| `publish` \| `push-main` |
+| action | `install` \| `publish` |
 | artifact | `^[a-z0-9@][a-z0-9@._/-]{0,127}$` |
 | version | `^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,6}(-[0-9A-Za-z.-]{1,32})?$` |
 | digest | `^sha256:[0-9a-f]{64}$` or `^sha512:[0-9a-f]{128}$` or `^sha512-[A-Za-z0-9+/]{86}==$` (npm SRI) |
@@ -187,9 +188,14 @@ footer as received (CRLF to LF only) and needs no trimming rule of its own.
 | --- | --- |
 | install | `mac-local` |
 | publish | `npm-next`, `npm-latest`, `control-appcast`, `hub-alias`, `gotcos-site`, `control-downloads`, `release-docs` |
-| push-main | `git-main` |
 
-In this candidate `install` and `publish` are accepted only through exact scoped proof (`WEB_KEY_ENABLED_APPROVE_ACTIONS`). `push-main` remains refused with `approve_action_not_enabled`. A message scope never authorizes either action.
+**Pushing main is never signable by phone** (Miles, typed 2026-11-12 11:11: "allow for all action but the push to
+main. That way we can resolve when at the desk"). It stays typed at the desk. The `push-main` action and its `git-main`
+channel are not expressible: a scope naming them is refused at the grammar (`scope_not_allowed`), and the packet route
+refuses to create one (`action_not_allowed`). Pushing a feature branch and adding a versioned Hub file have no
+`approve` form. `install` and `publish` are accepted only through exact scoped proof (`WEB_KEY_ENABLED_APPROVE_ACTIONS`).
+A message scope never authorizes either action. The phone's signer page keeps its own copy of this table
+(`server/web-signer/signer-proof.js`); a test fails if the two differ.
 
 ### Handoff from Control Web (3143) to the signer (3144), Phase 3
 
@@ -324,8 +330,8 @@ mirror) and refuses on difference; `approval.epoch` and `envelope.epoch` must eq
 `credentials`, `payment-details`, `moving-money`, `deleting-data`, `sending-messages`,
 `security-or-permission-settings`, `harness-permission-prompts`, `authority-rule-changes`.
 For `message` scope it also includes `install`, `publish`, `push-main`, `push-branch`, `hub-file`.
-For `approve` scope it also includes every action other than the signed one, and
-`other-artifact-version-digest-or-channel`.
+For `approve` scope it also includes every action other than the signed one (`push-main` always, though it is not
+signable), and `other-artifact-version-digest-or-channel`.
 
 **Attachments:** until `shared/turn-files-block.ts` exists, the verifier refuses any non-empty
 `envelope.attachments`.

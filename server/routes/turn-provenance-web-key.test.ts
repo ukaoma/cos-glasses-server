@@ -280,6 +280,15 @@ describe.skipIf(!LAN)('flag on: a turn signed by the enrolled phone key', () => 
     expect(typeof v.body.wordsSha256).toBe('string')
   })
 
+  // Miles, 2026-11-12 11:11: a phone approval may sign everything the build allows except pushing main.
+  it('the packet route refuses push-main on git-main (400 action_not_allowed): it stays typed at the desk', async () => {
+    process.env.COS_WEB_KEY_AUTHORITY = '1'
+    const s = stack(), r = await rig(s)
+    const made = await call(r.loop, 'POST', '/api/web-key/packets', { action: 'push-main', artifact: 'cos-glasses-server', version: '7.0.6', digest: 'sha256:' + 'a'.repeat(64), channel: 'git-main' }, { ...tokenHeaders, 'x-cos-provider': 'claude', 'x-cos-session-id': SID })
+    expect(made.status, made.text).toBe(400)
+    expect(made.text).toContain('action_not_allowed')
+  })
+
   it.each(['npm-next', 'npm-latest', 'control-appcast', 'hub-alias', 'gotcos-site', 'control-downloads', 'release-docs'])('the production turn route delivers exact scoped publish on %s', async channel => {
     process.env.COS_WEB_KEY_AUTHORITY = '1'
     const s = stack(), live = await liveSession(), r = await rig(s, { deliverLiveTurn: live.deliverLiveTurn })

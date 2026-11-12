@@ -37,8 +37,15 @@ export const WEB_TURN_MAX_LIFETIME_S = 15 * 60
 /** How far in the future `iat` may sit (clock skew between the phone and this Mac), in seconds. */
 export const WEB_TURN_IAT_SKEW_S = 60
 
-/** The only actions an `approve` scope can name. Anything else, including every never-list item, is unexpressible. */
-export const APPROVE_ACTIONS: ReadonlySet<string> = new Set(['install', 'publish', 'push-main'])
+/**
+ * The only actions an `approve` scope can name. Anything else, including every never-list item, is unexpressible.
+ * Miles, 2026-11-12 11:11: a phone approval may sign everything the build allows except pushing main, which stays
+ * typed at the desk ("Keep allow for all action but the push to main. That way we can resolve when at the desk").
+ */
+export const APPROVE_ACTIONS: ReadonlySet<string> = new Set(['install', 'publish'])
+
+/** Actions a phone can never sign. Not expressible, and still named in every `notAuthorized` list. */
+export const APPROVE_ACTIONS_REMOVED: readonly string[] = Object.freeze(['push-main'])
 
 /** What a `message` scope means: conversation only (review B4). */
 export const MESSAGE_SCOPE_MEANING = 'conversation'
@@ -55,10 +62,9 @@ export const MESSAGE_SCOPE_NOT_AUTHORIZED: readonly string[] = Object.freeze([
 ])
 
 /** The channels each approve action may name. Nothing else is signable (review B4). */
-export const APPROVE_ACTION_CHANNELS: Readonly<Record<'install' | 'publish' | 'push-main', readonly string[]>> = Object.freeze({
+export const APPROVE_ACTION_CHANNELS: Readonly<Record<'install' | 'publish', readonly string[]>> = Object.freeze({
   install: Object.freeze(['mac-local']),
   publish: Object.freeze(['npm-next', 'npm-latest', 'control-appcast', 'hub-alias', 'gotcos-site', 'control-downloads', 'release-docs']),
-  'push-main': Object.freeze(['git-main']),
 })
 
 export const APPROVE_ARTIFACT_RE = /^[a-z0-9@][a-z0-9@._/-]{0,127}$/
@@ -88,13 +94,13 @@ export function approveFieldsValid(action: unknown, artifact: unknown, version: 
 /** The verifier's `notAuthorized` list for a scope: the never-list plus what this scope does not cover. */
 export function notAuthorizedFor(scope: WebTurnScope): string[] {
   if (scope.kind === 'message') return [...WEB_KEY_NEVER_AUTHORIZED, ...MESSAGE_SCOPE_NOT_AUTHORIZED]
-  const others = [...APPROVE_ACTIONS].filter(a => a !== scope.action)
+  const others = [...APPROVE_ACTIONS, ...APPROVE_ACTIONS_REMOVED].filter(a => a !== scope.action)
   return [...WEB_KEY_NEVER_AUTHORIZED, ...others, 'push-branch', 'hub-file', 'other-artifact-version-digest-or-channel']
 }
 
 export type WebTurnScope =
   | { kind: 'message' }
-  | { kind: 'approve'; action: 'install' | 'publish' | 'push-main'; artifact: string; version: string; digest: string; channel: string; packetSha256: string }
+  | { kind: 'approve'; action: 'install' | 'publish'; artifact: string; version: string; digest: string; channel: string; packetSha256: string }
 
 export interface WebTurnAttachment { id: string; sha256: string; bytes: number; name: string }
 
@@ -194,7 +200,7 @@ export function parseWebTurnScope(v: unknown): WebTurnScope | null {
     // The closed action list, the strict field patterns and the channel table (approveFieldsValid).
     if (!approveFieldsValid(v.action, v.artifact, v.version, v.digest, v.channel)) return null
     if (typeof v.packetSha256 !== 'string' || !HEX64.test(v.packetSha256)) return null
-    return { kind: 'approve', action: v.action as 'install' | 'publish' | 'push-main', artifact: v.artifact as string, version: v.version as string, digest: v.digest as string, channel: v.channel as string, packetSha256: v.packetSha256 }
+    return { kind: 'approve', action: v.action as 'install' | 'publish', artifact: v.artifact as string, version: v.version as string, digest: v.digest as string, channel: v.channel as string, packetSha256: v.packetSha256 }
   }
   return null
 }
@@ -249,7 +255,7 @@ export function parseWebTurnEnvelope(v: unknown): { ok: true; envelope: WebTurnE
 export interface WebApprovalPacket {
   v: typeof WEB_APPROVAL_PACKET_VERSION
   packetId: string
-  action: 'install' | 'publish' | 'push-main'
+  action: 'install' | 'publish'
   artifact: string
   version: string
   digest: string
