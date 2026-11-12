@@ -73,6 +73,9 @@
   var STEPS = [1000, 2000, 4000, 8000], SETTLED_MS = 30000, KEY = 'cos_web_restyle', RELOADS_KEY = 'cos_web_restyle_reloads';
   var RELOAD_MAX = 2, RELOAD_WINDOW_MS = 5 * 60000;
   var R = { scripts: [], sheets: 0, tries: 0, t0: 0, timer: null, done: false, last: null };
+  // Every real browser has these; a harness that runs this file without them gets no restyle check, not a throw that
+  // would stop the theme and the loader above from being tested.
+  if (typeof window.addEventListener !== 'function' || typeof document.querySelectorAll !== 'function' || typeof document.addEventListener !== 'function') return;
   function missing() {
     return [].filter.call(document.querySelectorAll('link[rel="stylesheet"]'), function (l) {
       // A sheet that failed to load throws on read in WebKit (SecurityError); count it as missing.

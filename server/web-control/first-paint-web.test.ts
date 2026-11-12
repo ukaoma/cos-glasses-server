@@ -47,7 +47,9 @@ describe('theme.js: the theme first, then the gate that lets the first paint sho
 describe('index.html: the first paint is inline, asks for nothing, and reads with JavaScript off', () => {
   const block = slice(HTML, '<div id="first-paint"', '</div>')
   it('the mark from the page’s own sprite, hidden from screen readers, before the sign-in card and the app', () => {
-    expect(block).toBe('<div id="first-paint" class="first-paint" aria-hidden="true"><svg class="mark"><use href="#i-mark"/></svg>')
+    // 7.0.28: width and height on the mark, so it is never drawn at the browser default size (300 by 150) when the
+    // stylesheets have not arrived (Miles 19:28, the unstyled sign-in page).
+    expect(block).toBe('<div id="first-paint" class="first-paint" aria-hidden="true"><svg class="mark" width="44" height="44"><use href="#i-mark"/></svg>')
     expect(HTML.indexOf('<symbol id="i-mark"')).toBeLessThan(HTML.indexOf('id="first-paint"'))
     expect(HTML.indexOf('id="first-paint"')).toBeLessThan(HTML.indexOf('id="auth-gate"'))
     expect(HTML.indexOf('id="first-paint"')).toBeLessThan(HTML.indexOf('id="app-shell"'))
