@@ -1,16 +1,37 @@
-## 7.0.28 - Control Web: the sign-in screen is styled even before the page can reach your Mac, and the page fixes itself when it can; page errors are reported
+## 7.0.28 - Control Web: the sign-in screen is styled even before the page can reach your Mac, and the page fixes itself when it can; page errors are reported; phone approvals get a trusted certificate (off by default)
 
-2026-11-11. 7.0.27 plus two Control Web changes.
+2026-11-11. 7.0.27 plus two Control Web changes, and server code for phone approvals that stays off unless you turn it on.
 
 - **No more unstyled "Connect this browser" page.** Opening the web app before your phone could reach your Mac (Tailscale still connecting, or the Mac waking) could draw the page without its stylesheets: a plain black or white page with default text and buttons, and the COS mark drawn large twice. It stayed that way, because nothing asked for the stylesheets again. Now the sign-in and "not answering" screens carry their own styling inside the page, so they look right from the first moment. While a stylesheet or script is missing, the page checks after 1, 2, 4 and 8 seconds, then every 30 seconds, and as soon as your Mac answers it loads what was missing, reloading itself if a script was missing (never more than twice in 5 minutes). The "not answering" screen also checks again after 1, 2, 4 and 8 seconds before settling on every 30 seconds.
 - **Page errors are reported.** A script error or an unhandled failure in Control Web now sends one short, numbers-only report to your Mac (what kind, the file, the line), at most 10 per page load. It never includes what you typed, a message or any text from the page. A page that had to bring back its styling reports that too, the same way.
 - Tested in a browser with the page's files really blocked and then unblocked, at the open and folded phone sizes, in light and dark: 7.0.27 shows the unstyled page and stays broken, and this build shows the styled screen and recovers within seconds. The Sessions list, the reader and the reply box are unchanged.
 
-**Default-on for every install:** yes, both changes; there is no switch.
+**Phone approvals: the phone's signer page gets a publicly trusted certificate (off by default).** Every change sits behind the two phone-approval switches, `COS_WEB_KEY_AUTHORITY` and `COS_WEB_KEY_ANCHOR_BOOTSTRAP`, both off by default.
+
+- **Both switches off (every install by default): nothing changes.** No Tailscale call, no new file, no new listener, no new status field. 3141 and 3143 serve exactly what they served before.
+- **Only `COS_WEB_KEY_ANCHOR_BOOTSTRAP` on (the Mac-key setup):** if this Mac's tailnet name was missed at startup, the authenticated `/api/web-key/status` read looks it up again. That is one DNS lookup through Tailscale, at most once per 30 seconds, waiting at most 2 seconds. Before, it answered `origin: null` until a restart.
+- **With `COS_WEB_KEY_AUTHORITY` on:**
+  - **The certificate.** The signer page on 3144 gets a certificate for this Mac's own tailnet name from Tailscale's HTTPS Certificates (Let's Encrypt). The server fetches it, keeps it in `web-key-tls/` in its data folder (key 0600, folder 0700), and shows it only to a connection that names exactly that host. It renews when fewer than 30 days remain. Any other name, no name, or an IP keeps the existing local certificate. 3143 never changes.
+  - **What `trusted` means.** `signerTls.trusted` means **publicly trusted**. The certificate chains, link by link, to one of Node's bundled public root certificates. It is inside its validity window, notBefore included. Its key matches the certificate (the public keys are compared, because a mismatched key type is not otherwise caught). A pair that fails any of these is never served and never stops the server from fetching the real one. Each refusal is named: `cert_untrusted`, `cert_not_yet_valid`, `cert_invalid`, `cert_expired`.
+  - **The fetch works on macOS.** Every Tailscale command the server ran used to answer "The Tailscale GUI failed to start", because a process started by the server's LaunchAgent has no SHLVL. The certificate commands now run with a small fixed env: HOME, PATH, TMPDIR, USER and LANG when set, plus SHLVL=1. They never see the server's own env. If that answer ever comes back, the status says `tailscale_cli_gui_unavailable`. The status call asks without peers, so a large tailnet cannot overflow it; an overflow says `tailscale_output_too_large`.
+  - **Bounded against Let's Encrypt's limit.** At most 3 `tailscale cert` calls per day. Each call is counted on disk before it runs. The backoff survives a restart, so a crash loop cannot spend the 5-per-week limit. Over the cap the status says `cert_daily_cap`.
+  - **Turning on HTTPS Certificates is picked up within seconds.** An authenticated status read re-checks at once (at most every 15 s) when the last check said HTTPS Certificates was off or the name was unknown. It no longer waits out a backoff of up to an hour.
+  - **A certificate put in that folder by hand** serves at the next connection or status read, with no restart. It passes exactly the same checks. The folder and both files must be plain, private and owned by this user, each at most 64 KiB. A file that breaks a rule is refused, and the status names why in `signerTls.storedRefused`.
+  - **After a tailnet rename,** 3144 no longer answers the old name with the old certificate.
+  - **`/api/web-key/status` reports `signerTls`:** trusted, reason, host, expiry, the last error, the last and next check, and `storedRefused`.
+- **Needs before it can work:** Tailscale HTTPS Certificates turned on for the tailnet, in the Tailscale admin console. The Mac's name then appears in public certificate logs. Real issuance is limited to 5 per week for the same name.
+- **Not changed:** Tailscale's link check (tailscale-nudge) has the same SHLVL gap and is left as it is. Fixing it changes behaviour for everyone and needs Miles's go.
+- **Not yet tested on a real device:** a real `tailscale cert`, iPhone Safari against the Let's Encrypt certificate, and COS Control's signer check against it.
+
+**Default-on for every install:** the two Control Web changes, yes, with no switch. The phone-approval code, no: both of its switches are off by default.
 
 ### If you roll back
 
-- To 7.0.27: an open that cannot reach your Mac can show the unstyled page again until you close and reopen it, and page errors are no longer reported. Nothing is stored by this release.
+- To 7.0.27: an open that cannot reach your Mac can show the unstyled page again until you close and reopen it, and page errors are no longer reported. With the phone-approval switches off, nothing else changes and nothing is stored.
+- Phone approvals, if you had turned them on:
+  - **Both switches off:** nothing to undo.
+  - **Bootstrap on:** a startup miss of the tailnet name sticks until a restart again.
+  - **Authority on:** 3144 goes back to the local certificate, so iPhone Safari refuses the signer page. `web-key-tls/` (the pair and `fetch-state.json`) stays on disk, unread.
 - To 7.0.18: as in 7.0.27 below.
 
 ## 7.0.27 - Control Web: the Sessions list fits its column at every width
