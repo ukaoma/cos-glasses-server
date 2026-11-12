@@ -300,20 +300,24 @@ describe('F23: a cold open with the Mac unreachable (Q1 M1, M2, S2)', () => {
     const els: Record<string, { classList: ReturnType<typeof cls>; textContent?: string }> = { 'auth-offline': { classList: cls() }, 'auth-form': { classList: cls() }, 'auth-error': { classList: cls() },
       'auth-title': { classList: cls(), textContent: 'Connect this browser' }, 'auth-intro': { classList: cls() }, 'auth-offline-text': { classList: cls(), textContent: '' } }
     els['auth-form']!.classList.set.delete('hidden'); els['auth-intro']!.classList.set.delete('hidden')
-    const timers: Array<() => void> = [], listeners: Record<string, () => void> = {}
+    const timers: Array<() => void> = [], delays: number[] = [], listeners: Record<string, () => void> = {}
     let n = 0
+    const ref: { fns?: any } = {}
     const document = { hidden: !!opts.hidden, addEventListener: (t: string, fn: () => void) => { listeners[t] = fn } }
     const deps = {
       location: { search: '', pathname: '/control', hash: '' }, history: { replaceState: () => {} }, URLSearchParams, document,
       api: () => { calls.push('status'); const a = answers[Math.min(n++, answers.length - 1)]!; return a instanceof Error ? Promise.reject(a) : Promise.resolve(a) },
-      showShell: () => calls.push('shell'), showAuth: (m?: string) => calls.push('auth:' + (m ?? '')),
+      // The real showShell and showAuth turn the not-answering card off first (authOffline(false)); the fakes do too, or a
+      // reset hidden there would never be seen (7.0.28: it restarted the quick checks on every failure).
+      showShell: () => { calls.push('shell'); ref.fns?.authOffline(false) }, showAuth: (m?: string) => { calls.push('auth:' + (m ?? '')); ref.fns?.authOffline(false) },
       $: (id: string) => els[id] ?? null, setStatus: () => {}, UNREACHABLE_COPY: 'Could not reach COS on your Mac.',
-      setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {},
+      setTimeout: (fn: () => void, ms: number) => { timers.push(fn); delays.push(ms); return timers.length }, clearTimeout: () => {},
       signinKnown: () => (opts.known ? { ends: 1, cap: 1 } : null), signinLapsedCopy: () => 'LAPSED',
     }
     // eslint-disable-next-line no-new-func
-    const fns = new Function('deps', `with (deps) {\n${boot}\nreturn { boot };\n}`)(deps)
-    return { fns, calls, els, timers, document, listeners }
+    const fns = new Function('deps', `with (deps) {\n${boot}\nreturn { boot, authOffline };\n}`)(deps)
+    ref.fns = fns
+    return { fns, calls, els, timers, delays, document, listeners }
   }
   const down = () => fail(undefined, 'Could not reach COS on your Mac.')
   it('shows the not-answering card naming both causes, and hides the sign-in form', async () => {
@@ -323,7 +327,7 @@ describe('F23: a cold open with the Mac unreachable (Q1 M1, M2, S2)', () => {
     expect(h.els['auth-offline']!.classList.set.has('hidden')).toBe(false)
     expect(h.els['auth-form']!.classList.set.has('hidden')).toBe(true)
     expect(h.els['auth-title']!.textContent).toBe('COS on your Mac is not answering')
-    expect(h.els['auth-offline-text']!.textContent).toBe('Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again every 30 seconds.')
+    expect(h.els['auth-offline-text']!.textContent).toBe('Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again in a few seconds, then every 30 seconds.')
   })
   it('it really checks again every 30 s while visible, and signs in when the Mac answers (Q1 M2)', async () => {
     const h = bootWith([down(), down(), { authenticated: true }])
@@ -333,6 +337,29 @@ describe('F23: a cold open with the Mac unreachable (Q1 M1, M2, S2)', () => {
     expect(h.calls.filter(c => c === 'status')).toHaveLength(2)
     h.timers[1]!(); await flush()
     expect(h.calls).toContain('shell')
+  })
+  // 7.0.28 (Miles 19:28, the unstyled page): a phone that opened the page before its tunnel was up usually reaches the
+  // Mac within seconds, so the first checks come after 1, 2, 4 and 8 s, then every 30 s; and the steps start over
+  // once the Mac has answered.
+  it('checks again after 1, 2, 4 and 8 s, then every 30 s (7.0.28)', async () => {
+    const h = bootWith([down(), down(), down(), down(), down(), down(), down()])
+    h.fns.boot(); await flush()
+    for (let i = 0; i < 6; i++) { h.timers[i]!(); await flush() }
+    expect(h.delays.slice(0, 7)).toEqual([1000, 2000, 4000, 8000, 30000, 30000, 30000])
+  })
+  it('the steps start over after the Mac answered (7.0.28)', async () => {
+    const h = bootWith([down(), down(), { authenticated: true }])
+    h.fns.boot(); await flush()
+    h.timers[0]!(); await flush()
+    h.timers[1]!(); await flush()
+    expect(h.calls).toContain('shell')
+    expect(h.delays.slice(0, 2)).toEqual([1000, 2000])
+    // The Mac answers (the sign-in card), then stops answering again: the quick steps start over.
+    const h2 = bootWith([down(), { authenticated: false, mode: 'none' }, down()])
+    h2.fns.boot(); await flush()
+    h2.timers[0]!(); await flush()
+    h2.fns.boot(); await flush()
+    expect(h2.delays).toEqual([1000, 1000])
   })
   it('hidden, it does not check; coming back checks at once', async () => {
     const h = bootWith([down(), { authenticated: true }])

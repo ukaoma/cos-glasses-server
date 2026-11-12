@@ -40,10 +40,16 @@
     list = Array.isArray(list) ? list.filter(function (u) { return typeof u === 'string' && u.indexOf('/control/') === 0; }) : [];
     var left = list.length;
     if (!left) { settle(); return; }
+    // 7.0.28: after a reload that the restyle check below made because a script had failed, ask for every script with a
+    // fresh query, so none comes from the browser's memory of the failed request (WebKit kept the failure across the
+    // reload). Read once.
+    var bust = '';
+    try { bust = sessionStorage.getItem('cos_web_bust') || ''; sessionStorage.removeItem('cos_web_bust'); } catch (_e) { bust = ''; }
     list.forEach(function (src) {
       var el = document.createElement('script');
-      el.src = src; el.async = false;
-      el.onload = el.onerror = function () { if (--left === 0) settle(); };
+      el.src = /^\d{1,15}$/.test(bust) ? src + (src.indexOf('?') >= 0 ? '&' : '?') + 'r=' + bust : src; el.async = false;
+      el.onload = function () { if (--left === 0) settle(); };
+      el.onerror = function () { if (window.CosRestyle) window.CosRestyle.scriptFailed(src); if (--left === 0) settle(); };
       document.body.appendChild(el);
     });
   }
@@ -53,4 +59,81 @@
     setTimeout(go, 50);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', afterFrame); else afterFrame();
+})();
+
+/* 7.0.28 (Miles 19:28, "Connect this browser" with no styling): the page's own files must not stay missing. When the
+   phone opens the page before it can reach the Mac (the tunnel still coming up, or the page drawn from the browser's
+   copy), the HTML draws but a stylesheet or a script can fail, and nothing asked for it again. index.html's inline
+   critical CSS keeps the sign-in card right meanwhile; this brings the rest back. While anything failed, it asks the
+   Mac for the failed file after 1, 2, 4 and 8 s, then every 30 s, only while the page is in front. When the Mac
+   answers: a failed script reloads the page (app.js cannot be re-run in place); failed stylesheets are asked for again
+   in place. A file that keeps failing never loops: at most 2 reloads in 5 minutes. What happened is kept for app.js's numbers-only 'restyle' row (window.CosRestyle.last, and sessionStorage
+   across the reload). */
+(function () {
+  var STEPS = [1000, 2000, 4000, 8000], SETTLED_MS = 30000, KEY = 'cos_web_restyle', RELOADS_KEY = 'cos_web_restyle_reloads';
+  var RELOAD_MAX = 2, RELOAD_WINDOW_MS = 5 * 60000;
+  var R = { scripts: [], sheets: 0, tries: 0, t0: 0, timer: null, done: false, last: null };
+  function missing() {
+    return [].filter.call(document.querySelectorAll('link[rel="stylesheet"]'), function (l) {
+      // A sheet that failed to load throws on read in WebKit (SecurityError); count it as missing.
+      try { return !l.sheet || !l.sheet.cssRules || l.sheet.cssRules.length === 0; } catch (_e) { return true; }
+    });
+  }
+  function bust(href) { return href + (href.indexOf('?') >= 0 ? '&' : '?') + 'r=' + Date.now(); }
+  function record(how) {
+    R.last = { how: how, sheets: R.sheets, scripts: R.scripts.length, tries: R.tries, ms: R.t0 ? Date.now() - R.t0 : 0 };
+    try { window.dispatchEvent(new CustomEvent('cos-restyle', { detail: R.last })); } catch (_e) {}
+  }
+  function recover() {
+    if (R.scripts.length) {
+      // At most 2 reloads in 5 minutes: a file that keeps failing must never become a reload loop.
+      var recent = [];
+      try { recent = JSON.parse(sessionStorage.getItem(RELOADS_KEY) || '[]').filter(function (t) { return Date.now() - t < RELOAD_WINDOW_MS; }); } catch (_e) { recent = []; }
+      if (recent.length >= RELOAD_MAX) { R.done = true; record('gave-up'); return; }
+      try { recent.push(Date.now()); sessionStorage.setItem(RELOADS_KEY, JSON.stringify(recent)); } catch (_e) {}
+      record('reload');
+      try { sessionStorage.setItem(KEY, JSON.stringify(R.last)); sessionStorage.setItem('cos_web_bust', String(Date.now())); } catch (_e) {}
+      location.reload();
+      return;
+    }
+    var gone = missing();
+    gone.forEach(function (old) {
+      var el = document.createElement('link');
+      el.rel = 'stylesheet'; el.href = bust(old.getAttribute('href') || old.href);
+      el.onload = function () { if (old.parentNode) old.parentNode.removeChild(old); };
+      old.parentNode.insertBefore(el, old.nextSibling);
+    });
+    R.done = true; record('sheets');
+  }
+  function schedule() {
+    if (R.timer || R.done || document.hidden) return;
+    var ms = R.tries < STEPS.length ? STEPS[R.tries] : SETTLED_MS;
+    R.timer = setTimeout(check, ms);
+  }
+  function check() {
+    R.timer = null;
+    if (R.done || document.hidden) return;
+    R.tries++;
+    // Ask for the file that failed (a script first): it answering is what matters, and a file that is not there (404)
+    // never counts as the Mac being back.
+    var gone = missing(), url = R.scripts[0] || (gone[0] && (gone[0].getAttribute('href') || gone[0].href)) || '/control/app.css';
+    var probe = window.fetch ? window.fetch(bust(url), { cache: 'no-store', credentials: 'same-origin' }) : Promise.reject(new Error('no fetch'));
+    probe.then(function (r) { if (r && r.ok) recover(); else schedule(); }, function () { schedule(); });
+  }
+  function start() {
+    if (R.done || R.t0) return;
+    R.sheets = missing().length;
+    if (!R.sheets && !R.scripts.length) return;
+    R.t0 = Date.now();
+    schedule();
+  }
+  window.CosRestyle = {
+    scriptFailed: function (src) { if (R.scripts.indexOf(src) < 0) R.scripts.push(src); if (R.t0) schedule(); else start(); },
+    get last() { return R.last; },
+    // After a reload that this caused: what the page that reloaded had seen, read once.
+    takeSaved: function () { try { var v = sessionStorage.getItem(KEY); sessionStorage.removeItem(KEY); return v ? JSON.parse(v) : null; } catch (_e) { return null; } }
+  };
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && R.t0 && !R.done && !R.timer) check(); });
+  // Every <link> in the head has finished (loaded or failed) by the time the page's load event fires.
+  if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
 })();

@@ -7507,6 +7507,17 @@
     } catch (_e) { return false; }
   }
 
+  // 7.0.28: when theme.js had to bring back a stylesheet or a script (the page opened before it could reach the Mac), one
+  // numbers-only row says so: how ('sheets', 'reload' or 'gave-up'), how many sheets and scripts had failed, how many
+  // checks it took and how long. A reload's report comes back from sessionStorage once.
+  (function restyleRow() {
+    var R = window.CosRestyle;
+    if (!R) return;
+    var row = function (d) { if (d && typeof d === 'object') layoutCrumb('restyle', { how: String(d.how || '').slice(0, 24), sheets: +d.sheets || 0, scripts: +d.scripts || 0, tries: +d.tries || 0, ms: +d.ms || 0 }); };
+    row(R.takeSaved && R.takeSaved());
+    window.addEventListener('cos-restyle', function (e) { row(e && e.detail); });
+  })();
+
   // ── the shared kit for pane modules (panes/*.js) ───────
   window.COSWeb = {
     $: $, esc: esc, md: md, plain: plain, structureLensAnswer: structureLensAnswer, tableFit: tableFit, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
@@ -7822,20 +7833,27 @@
     return api('/api/web-session/status').then(function (st) { return bootAnswer(st); }, function (err) { return bootFail(err); });
   }
   function bootAnswer(st) {
+    AUTH_RETRY.n = 0;   // the Mac answered: a later not-answering card starts its quick checks again
     if (st && st.authenticated) return showShell(st);
     // Q1 S2: a browser that was signed in before learns why it is not now (the 30 days, no use in its last 2 days, a sign-out).
     showAuth(typeof signinKnown === 'function' && signinKnown() ? signinLapsedCopy() : undefined);
   }
   function bootFail(err) {
     // F23: a Mac that did not answer is not a sign-in problem. Say so, offer Try again, keep the form out of the way.
-    if (err && err.status) showAuth(err.message); else { showAuth(); authOffline(true); }
+    // showAuth turns the card off first (authOffline(false)); that must not restart the 1, 2, 4, 8 s steps, so only a Mac
+    // that answered (bootAnswer, or an error with a status here) resets them.
+    if (err && err.status) { AUTH_RETRY.n = 0; showAuth(err.message); } else { showAuth(); authOffline(true); }
   }
-  // Q1 M2: the not-answering card checks again every 30 s while the page is in front, and stops while it is hidden.
-  var AUTH_RETRY = { timer: null, ms: 30000 };
+  // Q1 M2: the not-answering card checks again while the page is in front, and stops while it is hidden. 7.0.28 (Miles
+  // 19:28): the first checks come after 1, 2, 4 and 8 s, because a phone that opened the page before its tunnel was up
+  // usually reaches the Mac within seconds; then every 30 s. The steps start over once the Mac has answered.
+  var AUTH_RETRY = { timer: null, ms: 30000, steps: [1000, 2000, 4000, 8000], n: 0 };
   function authRetrySchedule(on) {
     if (AUTH_RETRY.timer) { clearTimeout(AUTH_RETRY.timer); AUTH_RETRY.timer = null; }
     if (!on || document.hidden) return;
-    AUTH_RETRY.timer = setTimeout(function () { AUTH_RETRY.timer = null; if (!document.hidden) bootStatus(); }, AUTH_RETRY.ms);
+    var ms = AUTH_RETRY.n < AUTH_RETRY.steps.length ? AUTH_RETRY.steps[AUTH_RETRY.n] : AUTH_RETRY.ms;
+    AUTH_RETRY.n++;
+    AUTH_RETRY.timer = setTimeout(function () { AUTH_RETRY.timer = null; if (!document.hidden) bootStatus(); }, ms);
   }
   document.addEventListener('visibilitychange', function () {
     var box = $('auth-offline');
@@ -7853,8 +7871,8 @@
     if (title) title.textContent = on ? (offline ? 'This device is offline' : 'COS on your Mac is not answering') : 'Connect this browser';
     if (intro) intro.classList.toggle('hidden', !!on);
     var text = $('auth-offline-text');
-    if (text && on) text.textContent = offline ? 'Connect to the internet and Tailscale. This page checks again every 30 seconds.'
-      : 'Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again every 30 seconds.';
+    if (text && on) text.textContent = offline ? 'Connect to the internet and Tailscale. This page checks again in a few seconds, then every 30 seconds.'
+      : 'Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again in a few seconds, then every 30 seconds.';
     authRetrySchedule(!!on);
     if (on) { var err = $('auth-error'); if (err) { setStatus(err, '', true); err.classList.add('hidden'); } }
   }

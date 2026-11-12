@@ -13,6 +13,42 @@
   <link rel="icon" href="/control/mark.svg" type="image/svg+xml">
   <!-- iOS "Add to Home Screen" ignores SVG icons: without this, a saved Control Web shortcut is a grey letter. -->
   <link rel="apple-touch-icon" href="/control/apple-touch-icon.png">
+  <!-- 7.0.28: the sign-in card and the first paint must look right before, or without, the 10 stylesheets below
+       (Miles 19:28: "Connect this browser" with no styling, the mark twice at full size, when the phone opened the page
+       before it could reach the Mac). These rules are copies of app.css, word for word (a test compares them), so the
+       stylesheets that follow change nothing when they arrive; only the tokens it needs, and the dark set also follows
+       the system when theme.js has not run. theme.js retries a stylesheet that failed. -->
+  <style id="critical-css">
+    :root { --page: #f5f0e6; --ink: #1f1712; --sub: #66635e; --panel: #ffffff; --panel-border: #e3d9c6; --accent: #89662d; --on-accent: #ffffff; --btn-bg: #ffffff; --btn-border: #a08a66; --grey: #5c5a55; --display: 'Fraunces', 'Iowan Old Style', Georgia, serif; --body: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; --gutter: 16px; --radius: 12px; --safe-top: env(safe-area-inset-top, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px); }
+    :root[data-theme='dark'] { --page: #17120e; --ink: #efe7dc; --sub: #b3a796; --panel: #221b15; --panel-border: #3a2f25; --accent: #d9b06a; --on-accent: #17120e; --btn-bg: #221b15; --btn-border: #7a6650; --grey: #a39887; }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --page: #17120e; --ink: #efe7dc; --sub: #b3a796; --panel: #221b15; --panel-border: #3a2f25; --accent: #d9b06a; --on-accent: #17120e; --btn-bg: #221b15; --btn-border: #7a6650; --grey: #a39887; } }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--page); }
+    body { margin: 0; min-height: 100dvh; background: var(--page); color: var(--ink); font: 400 16px/1.45 var(--body); -webkit-font-smoothing: antialiased; -webkit-tap-highlight-color: transparent; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; background: none; border: 0; padding: 0; text-align: inherit; }
+    .hidden { display: none !important; }
+    .mark { width: 28px; height: 28px; color: var(--ink); flex: none; }
+    .first-paint { display: none; }
+    html.fp-wait .first-paint { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; background: var(--page); color: var(--ink); pointer-events: none; animation: fp-failsafe 1ms linear 25s forwards; }
+    .first-paint .mark { width: 44px; height: 44px; }
+    @keyframes fp-failsafe { to { visibility: hidden; } }
+    .noscript-note { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px var(--gutter); font-size: 17px; color: var(--ink); text-align: center; }
+    .auth-gate { min-height: 100dvh; display: grid; place-items: center; padding: calc(var(--safe-top) + 24px) var(--gutter) calc(var(--safe-bottom) + 24px); }
+    .auth-card { width: 100%; max-width: 420px; }
+    .auth-card .mark { width: 44px; height: 44px; margin-bottom: 22px; }
+    .auth-card h1 { font: 500 40px/1.05 var(--display); margin: 0 0 10px; letter-spacing: -0.01em; }
+    .auth-card p { color: var(--sub); margin: 0 0 24px; }
+    .auth-card label { display: block; font-weight: 600; font-size: 15px; margin-bottom: 8px; }
+    .auth-card .btn { margin-top: 12px; }
+    .auth-foot { font-size: 14px; color: var(--sub); margin-top: 18px; }
+    .auth-offline p { color: var(--sub); }
+    .field { width: 100%; min-height: 48px; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--panel-border); background: var(--panel); font-size: 16px; /* 16px keeps iOS Safari from zooming on focus */ }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px; border-radius: var(--radius); border: 1px solid var(--btn-border); background: var(--btn-bg); font-weight: 600; font-size: 15px; white-space: nowrap; transition: transform 120ms ease; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .btn.block { width: 100%; }
+    .link-btn { color: var(--accent); font-weight: 600; font-size: 15px; min-height: 44px; display: inline-flex; align-items: center; }
+  </style>
   <link rel="stylesheet" href="/control/app.css">
   <link rel="stylesheet" href="/control/control.css">
   <link rel="stylesheet" href="/control/panes/speakers.css">
@@ -64,16 +100,16 @@
   <!-- 7.0.19: the first paint. Shows at once, before any script or answer from the Mac: the mark on the page's own
        background, true whichever comes next (the sign-in card or the app). Out of the layout (fixed), so nothing moves
        when it goes. app.js removes it; a CSS failsafe hides it after 25 s if the scripts never run. -->
-  <div id="first-paint" class="first-paint" aria-hidden="true"><svg class="mark"><use href="#i-mark"/></svg></div>
+  <div id="first-paint" class="first-paint" aria-hidden="true"><svg class="mark" width="44" height="44"><use href="#i-mark"/></svg></div>
   <noscript><p class="noscript-note">COS Control Web needs JavaScript. Turn it on for this site, then reload.</p></noscript>
 
   <main id="auth-gate" class="auth-gate hidden" aria-labelledby="auth-title">
     <div class="auth-card">
-      <svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg>
+      <svg class="mark" width="44" height="44" aria-hidden="true"><use href="#i-mark"/></svg>
       <h1 id="auth-title">Connect this browser</h1>
       <p id="auth-intro">COS runs on your Mac. Sign in once. You stay signed in while you use COS here, for up to 30 days.</p>
       <div id="auth-offline" class="auth-offline hidden" role="status">
-        <p id="auth-offline-text">Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again every 30 seconds.</p>
+        <p id="auth-offline-text">Your Mac may be asleep, or this device may be offline or off Tailscale. This page checks again in a few seconds, then every 30 seconds.</p>
         <button type="button" class="btn primary block" id="auth-retry">Try again</button>
       </div>
       <form id="auth-form">
@@ -98,7 +134,7 @@
 
   <div id="app-shell" class="app-shell hidden">
     <nav class="rail" aria-label="Sections">
-      <div class="rail-head"><svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg><span class="rail-brand">Control</span></div>
+      <div class="rail-head"><svg class="mark" width="28" height="28" aria-hidden="true"><use href="#i-mark"/></svg><span class="rail-brand">Control</span></div>
       <button type="button" class="rail-btn rail-today" data-pane="today" aria-label="Today"><svg class="icon"><use href="#i-today"/></svg><span class="rail-text"><span class="rail-label">Today</span><span class="rail-story" data-story="today"></span></span><span class="badge-dot hidden" data-badge="today"></span></button>
       <div class="rail-sep"></div>
       <button type="button" class="rail-btn" data-pane="messages" aria-label="Messages"><svg class="icon"><use href="#i-messages"/></svg><span class="rail-text"><span class="rail-label">Messages</span><span class="rail-story" data-story="messages"></span></span><span class="badge-dot hidden" data-badge="messages"></span></button>
@@ -127,7 +163,7 @@
         <div class="topbar-left">
           <button type="button" id="topbar-back" class="topbar-back hidden"><svg class="icon"><use href="#i-back"/></svg><span id="topbar-back-label">Back</span></button>
           <button type="button" id="section-btn" class="section-btn" aria-haspopup="dialog" aria-controls="section-menu">
-            <svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg><span id="section-name">Today</span><span class="caret" aria-hidden="true"></span>
+            <svg class="mark" width="28" height="28" aria-hidden="true"><use href="#i-mark"/></svg><span id="section-name">Today</span><span class="caret" aria-hidden="true"></span>
           </button>
         </div>
         <button type="button" class="icon-btn" data-open-ask aria-label="Ask COS or find a session"><svg class="icon"><use href="#i-ask"/></svg></button>
