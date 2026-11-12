@@ -17,6 +17,7 @@ Server:
 - **A sign-in that ran out says so.** When Claude Code reports "Failed to authenticate: OAuth session expired and could not be refreshed", COS now names it as a sign-in problem, not "provider process exited".
 - **Phone approvals, off by default, unchanged for everyone until switched on:**
   - A phone can sign every action this build supports except pushing main, which stays typed at the desk (Miles, 2026-11-12 11:11).
+  - The phone names what each approval includes, from one fixed line per channel (for example, the push that a publish makes).
   - The phone-approval signer refuses a stored key or folder that other users can read (stored_readable). It runs only when the phone-approval switch is on.
   - The web-key mutation gate's two dead targets now match. The script ships in the npm pack, so pack bytes change; server behaviour does not.
 
