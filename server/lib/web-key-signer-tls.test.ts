@@ -76,11 +76,13 @@ let notCa: Ca
 let leafViaInter: Leaf
 let leafViaNotCa: Leaf
 let rsaKey: string
+let forgedCa: Ca
+let forgedLeaf: Leaf
 
 function ossl(args: string[]): void { execFileSync(OPENSSL, args, { cwd: pki, stdio: ['ignore', 'pipe', 'pipe'] }) }
-function mintCa(tag: string): Ca {
+function mintCa(tag: string, cn = `Throwaway ${tag}`): Ca {
   ossl(['req', '-x509', '-sha256', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes', '-keyout', `${tag}.key`, '-out', `${tag}.pem`, '-days', '3',
-    '-subj', `/CN=Throwaway ${tag}`, '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign'])
+    '-subj', `/CN=${cn}`, '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign'])
   return { pem: readFileSync(join(pki, `${tag}.pem`), 'utf8'), certPath: join(pki, `${tag}.pem`), keyPath: join(pki, `${tag}.key`) }
 }
 /** An intermediate below `parent`: a CA (keyCertSign) or, with isCa false, a plain certificate. */
@@ -121,6 +123,9 @@ beforeAll(() => {
   notCa = mintSubCa(subRoot, 'notca', false, 30)
   leafViaInter = mintLeaf(inter, 'leaf-inter', [`DNS:${NAME}`], 90)
   leafViaNotCa = mintLeaf(notCa, 'leaf-notca', [`DNS:${NAME}`], 90)
+  // R6: a CA with the SAME name as the trusted throwaway root but another key, and a leaf it signs.
+  forgedCa = mintCa('forged-tailca', 'Throwaway tailca')
+  forgedLeaf = mintLeaf(forgedCa, 'forged-leaf', [`DNS:${NAME}`], 90)
   ossl(['genrsa', '-out', 'rsa.key', '2048'])
   rsaKey = readFileSync(join(pki, 'rsa.key'), 'utf8')
   expect(readFileSync(join(pki, 'pair-a.key'), 'utf8')).toContain('BEGIN EC PRIVATE KEY')
@@ -738,6 +743,42 @@ describe('the breaker: bounded, backing off, single-flight', () => {
     expect(r.calls.map(c => c.args[0])).toEqual(['status'])
   })
 
+  it('SR-04: the status read ITSELF starts the re-check (no other check is called), for certs off and for an unknown name, once per floor', async () => {
+    // Wait for the fake runner without calling check(): only work statusRead() started can add a call.
+    const settle = async (): Promise<void> => { for (let i = 0; i < 50; i++) await new Promise(res => setImmediate(res)) }
+    const off = rig()
+    off.status(ok(statusJson({ CertDomains: null })))
+    expect((await off.tls.check()).reason).toBe('tailnet_https_certs_off')
+    expect(off.calls).toHaveLength(1)
+    off.status(ok(statusJson()))
+    off.tls.statusRead()
+    await settle()
+    expect(off.calls.map(c => c.args[0])).toEqual(['status', 'status', 'cert'])
+    expect(off.tls.status().trusted).toBe(true)
+    let name: string | null = null
+    const unknown = rig({ selfDnsName: async () => name })
+    expect((await unknown.tls.check()).reason).toBe('tailnet_name_unknown')
+    expect(unknown.calls).toHaveLength(0)
+    name = NAME
+    unknown.tls.statusRead()
+    await settle()
+    expect(unknown.calls.map(c => c.args[0])).toEqual(['status', 'cert'])
+    // Within the floor a read starts nothing; after it, one more.
+    const floor = rig()
+    floor.status(ok(statusJson({ CertDomains: null })))
+    await floor.tls.check()
+    floor.tls.statusRead()
+    await settle()
+    expect(floor.calls).toHaveLength(2)
+    floor.tls.statusRead()
+    await settle()
+    expect(floor.calls).toHaveLength(2)
+    floor.clock.now += SIGNER_TLS_RECHECK_FLOOR_MS
+    floor.tls.statusRead()
+    await settle()
+    expect(floor.calls).toHaveLength(3)
+  })
+
   it('concurrent checks share one run', async () => {
     const r = rig()
     let release: (v: RunResult) => void = () => {}
@@ -1095,6 +1136,18 @@ describe('SR-01: trusted means publicly trusted (chain to Node\'s bundled roots,
     expect(chainsToRoot([leafI, interX], roots, Date.parse(interX.validTo) + 1)).toBe(false)
     expect(checkSignerTlsPair(`${leafViaInter.certPem}${inter.pem}${leafViaInter.keyPem}`, NAME, at, roots).ok).toBe(true)
     expect(checkSignerTlsPair(`${leafViaInter.certPem}${leafViaInter.keyPem}`, NAME, at, roots)).toEqual({ ok: false, reason: 'cert_untrusted' })
+  })
+
+  it('a link must VERIFY, not only match by name: a leaf signed by a forged CA carrying the trusted root\'s name is cert_untrusted', () => {
+    const roots = parseRootPems([tailCa.pem])
+    const leaf = new X509Certificate(forgedLeaf.certPem)
+    const root = new X509Certificate(tailCa.pem)
+    // The premise, so this test cannot pass for a different reason: the names match, the signature does not.
+    expect(leaf.checkIssued(root)).toBe(true)
+    expect(leaf.verify(root.publicKey)).toBe(false)
+    expect(chainsToRoot([leaf], roots, Date.now())).toBe(false)
+    expect(checkSignerTlsPair(`${forgedLeaf.certPem}${forgedLeaf.keyPem}`, NAME, Date.now(), roots)).toEqual({ ok: false, reason: 'cert_untrusted' })
+    expect(checkSignerTlsPair(`${forgedLeaf.certPem}${forgedCa.pem}${forgedLeaf.keyPem}`, NAME, Date.now(), roots)).toEqual({ ok: false, reason: 'cert_untrusted' })
   })
 
   it('refuses a leaf before its notBefore (cert_not_yet_valid), and takes it from that moment on', () => {
