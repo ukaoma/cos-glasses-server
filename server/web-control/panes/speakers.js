@@ -2363,8 +2363,11 @@
     var acts = '';
     if (rv && rv.recordId) acts += '<button type="button" class="cx-btn quiet" data-sp="open-meeting" title="Open this meeting’s transcript, summary and files">' + icon('meetings') + 'Open meeting</button>';
     if (R.content && R.content.clipboardSummary) {
-      acts += '<button type="button" class="cx-btn quiet" data-sp="copy-summary" title="Copy the meeting without the transcript">Summary</button>' +
-        '<button type="button" class="cx-btn quiet" data-sp="copy-full" title="Copy the meeting including the full transcript">Full (' + Math.max(1, Math.floor(R.content.fullChars / 1024)) + ' KB)</button>';
+      // 7.0.30 item 3 (Anand: Summary and Full did not say they copy): the buttons say Copy, and the one tapped says
+      // Copied for COPIED_MS (spCopied), while a status line the screen reader hears says what was copied.
+      var cp = R.copied && Date.now() - R.copied.at < COPIED_MS ? R.copied.which : '';
+      acts += '<button type="button" class="cx-btn quiet" id="sp-copy-summary" data-sp="copy-summary" title="Copy the meeting without the transcript">' + (cp === 'summary' ? 'Copied' : 'Copy summary') + '</button>' +
+        '<button type="button" class="cx-btn quiet" id="sp-copy-full" data-sp="copy-full" title="Copy the meeting including the full transcript">' + (cp === 'full' ? 'Copied' : 'Copy full (' + Math.max(1, Math.floor(R.content.fullChars / 1024)) + ' KB)') + '</button>';
     }
     var next = S.meetings ? nextUnnamed(R.sid) : null;
     acts += '<button type="button" class="cx-btn quiet" data-sp="next-unnamed"' + (next ? '' : ' disabled') + ' title="' +
@@ -2424,6 +2427,27 @@
 
   // ── render dispatch ────────────────────────────────────
   var expiryTimer = null;
+  // 7.0.30 item 3: a copy confirms on its own button, then the button goes back to Copy; the words go to a status region
+  // that lives outside the rebuilt pane, so a screen reader hears them (a region made in the same rebuild may not be).
+  var COPIED_MS = 2500;
+  function spAnnounce(text) {
+    var live = document.getElementById('sp-copy-live');
+    if (!live) {
+      live = document.createElement('div');
+      live.id = 'sp-copy-live'; live.className = 'sr-only';
+      live.setAttribute('role', 'status'); live.setAttribute('aria-live', 'polite');
+      document.body.appendChild(live);
+    }
+    live.textContent = '';
+    setTimeout(function () { live.textContent = text; }, 30);
+  }
+  function spCopied(R, which, words) {
+    var at = Date.now();
+    R.copied = { which: which, at: at };
+    render();
+    spAnnounce(words);
+    setTimeout(function () { if (R.copied && R.copied.at === at) { R.copied = null; render(); } }, COPIED_MS);
+  }
   function render() {
     if (W.parseRoute().pane !== 'speakers') return;
     var rt = route();
@@ -2641,7 +2665,8 @@
         if (!text) { R.copyNote = 'Nothing to copy'; render(); return; }
         W.copyText(text).then(function () {
           var kb = Math.max(1, Math.floor((full ? c.fullChars : c.summaryChars) / 1024));
-          R.copyNote = full ? 'Copied full meeting (' + kb + ' KB)' : 'Copied summary (' + kb + ' KB)'; render();
+          R.copyNote = full ? 'Copied full meeting (' + kb + ' KB)' : 'Copied summary (' + kb + ' KB)';
+          spCopied(R, full ? 'full' : 'summary', R.copyNote);
         }, function (err) { W.toast(err.message); });
         return;
       }
