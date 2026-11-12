@@ -9,13 +9,14 @@
 - **Meetings opens on today.** The calendar opens on today, marked with a ring, even when today has no meetings. Then the list says "No meetings today." with one tap to the latest day that has meetings (or to last month when this month has none).
 - **Settings says "your phone's camera"**, not "your iPhone Camera". COS on the web works on Android too.
 - **A message shows who said what by side.** Your words sit on the right in the COS chat's gold bubble, with "You" under it; COS's answer sits on the left beside its mark. The two cards marked YOU and COS are gone. The bubble's edge is darker in light mode, so it reads against the page (3.48 to 1; it was 1.52 to 1). A screen reader hears "You said" and "COS said". The same applies to a chat opened from the archive.
+- **A phone shows how you got here.** On a page you opened (a meeting, a message, a session), one line under the top bar names the steps that led there, for example "Today / Speakers / Naming voices / Meeting". Each earlier step is a link that goes back to it, the same way Back does; the page you are on is last and is not a link. The line never wraps: a long path drops steps from the middle and shows "…" in their place. There is no line on a pane's list, on a page opened from a link, or after a reload. Screens 600 px and wider are unchanged; they keep the navigation bar.
 - Tested in a browser (WebKit) at a tall iPhone size, the folded Duo with its side rail, and the open Duo, in light and dark. Before this build the same checks fail. Not yet tested on a real phone; Android was not tested.
 
-**Default-on for every install:** yes, all seven, with no switch, at every screen size.
+**Default-on for every install:** yes, all eight, with no switch, at every screen size (the how-you-got-here line below 600 px only).
 
 ### If you roll back
 
-- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, Settings says iPhone, and a message shows the YOU and COS cards. Nothing is stored.
+- To 7.0.29: Back goes to a fixed parent again, the top bar tucks away on a reader, the message reader's Reply is at the end of the page, the copy buttons say Summary and Full, Meetings opens on today only when today has meetings, Settings says iPhone, a message shows the YOU and COS cards, and the how-you-got-here line is gone. Nothing is stored.
 - Further back: as in 7.0.29 below.
 
 ## 7.0.29 - Control Web: on the folded Duo, the panes sit in a side rail at the right edge, and Back is at thumb height

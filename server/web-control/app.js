@@ -589,7 +589,7 @@
     if (typeof history === 'undefined' || !history || typeof location === 'undefined') return;   // a page without them: the parent chain
     var hash = location.hash || '', st = navState(), pos;
     if (navOverlay(st)) { NAV.last = null; NAV.replace = null; return; }
-    if (st && st.cosNav && st.cosNav.doc === NAV.doc) { NAV.last = { hash: hash, pos: st.cosNav.pos, back: st.cosNav.back }; NAV.replace = null; return; }
+    if (st && st.cosNav && st.cosNav.doc === NAV.doc) { NAV.last = { hash: hash, pos: st.cosNav.pos, back: st.cosNav.back, trail: st.cosNav.trail || null, label: st.cosNav.label || '' }; NAV.replace = null; return; }
     if (st && st.cosNav) {
       // Marked by an earlier load of this page (a reload): what lies behind it belongs to that load, so no path.
       pos = st.cosNav.pos;
@@ -598,8 +598,73 @@
     var back = null;
     if (!st && !NAV.replace && NAV.last && typeof NAV.last.pos === 'number' && pos === NAV.last.pos + 1) back = NAV.last.hash;
     NAV.replace = null;
-    try { history.replaceState(Object.assign({}, st || {}, { cosNav: { doc: NAV.doc, pos: pos, back: back } }), ''); } catch (_e) { /* no history API: the parent chain */ }
-    NAV.last = { hash: hash, pos: pos, back: back };
+    // 7.0.30, Miles's pick B: the steps before this one ride in the same mark, the last of them being where Back goes.
+    var trail = back ? (NAV.last.trail || []).concat([{ h: NAV.last.hash, t: NAV.last.label || '' }]).slice(-NAV_TRAIL_MAX) : null;
+    var mark = { doc: NAV.doc, pos: pos, back: back };
+    if (trail) mark.trail = trail;
+    try { history.replaceState(Object.assign({}, st || {}, { cosNav: mark }), ''); } catch (_e) { /* no history API: the parent chain */ }
+    NAV.last = { hash: hash, pos: pos, back: back, trail: trail, label: '' };
+  }
+  var NAV_TRAIL_MAX = 12;
+  // The page's own name, kept in its mark, so the next page's trail can name it. setCrumb calls this.
+  function navLabel(text) {
+    var st = navState();
+    if (navOverlay(st) || !st || !st.cosNav || st.cosNav.doc !== NAV.doc || (st.cosNav.label || '') === text) return;
+    try { history.replaceState(Object.assign({}, st, { cosNav: Object.assign({}, st.cosNav, { label: text }) }), ''); } catch (_e) { return; }
+    if (NAV.last && NAV.last.pos === st.cosNav.pos) NAV.last.label = text;
+  }
+  // The way he came, oldest first, from this entry's mark: [{ label, hash, back }], back being how many steps back that
+  // one is. Null when Back has no path (a deep link, a reload, the first page, an overlay).
+  function navTrail() {
+    var st = navState();
+    if (navOverlay(st) || !st || !st.cosNav || !st.cosNav.back || !st.cosNav.trail || !st.cosNav.trail.length) return null;
+    var t = st.cosNav.trail;
+    return t.map(function (s, i) { return { label: trailName(s.h, s.t), hash: s.h, back: t.length - i }; });
+  }
+  // A step is named by what kind of page it is, not its title (the title is the heading under the row): "Meeting",
+  // "Session", "Naming voices". A list is its pane. A message, a day and a chat keep their own short name.
+  function trailName(hash, crumb) {
+    var a = String(hash || '').replace(/^#\/?/, '').split('/').filter(function (x) { return x !== ''; }), p = ROOT_PANES.indexOf(a[0]) >= 0 ? a[0] : 'today';
+    if (a.length < 2 || isTabRoute(a.slice(1))) return TITLES[p] || 'Today';
+    if (p === 'meetings') return 'Meeting';
+    if (p === 'sessions') return 'Session';
+    if (p === 'speakers' && a[1] === 'review') return 'Naming voices';
+    return crumb || TITLES[p] || 'Today';
+  }
+  // One line that never wraps. When it is too wide, steps leave from the middle (the one after the first, then the next),
+  // never the first, the one before this page, or this page; "…" stands where they were. widths: each step's, then this
+  // page's; more: the width "…" adds. Returns the indexes to leave out.
+  function trailCut(widths, more, avail) {
+    var n = widths.length - 1, total = widths.reduce(function (a, b) { return a + b; }, 0), cut = [];
+    if (total <= avail) return cut;
+    total += more;
+    for (var i = 1; i < n - 1 && total > avail; i++) { cut.push(i); total -= widths[i]; }
+    return cut;
+  }
+  // The row under the top bar, on a phone (below 600 px; wider screens have the navigation bar's crumbs). Only on a page
+  // you opened (a reader, a meeting, a session), and only when there is a path.
+  function paintTrail(r) {
+    var el = typeof document !== 'undefined' && document.getElementById('nav-trail');
+    if (!el) return;
+    r = r || parseRoute();
+    var steps = r.args.length && !isTabRoute(r.args) ? navTrail() : null;
+    if (!steps) { el.hidden = true; el.innerHTML = ''; return; }
+    var here = trailName(location.hash, crumbDetail);
+    el.innerHTML = '<ol>' + steps.map(function (s, i) {
+      return '<li class="trail-step"><a href="' + esc(s.hash) + '" data-trail-back="' + s.back + '">' + esc(s.label) + '</a></li>' +
+        (i === 0 ? '<li class="trail-more" aria-hidden="true" hidden>…</li>' : '');
+    }).join('') + '<li class="trail-here" aria-current="page"><span>' + esc(here) + '</span></li></ol>';
+    el.hidden = false;
+    var items = Array.prototype.slice.call(el.querySelectorAll('.trail-step,.trail-here')), more = el.querySelector('.trail-more');
+    if (!more || !el.clientWidth) return;
+    el.classList.add('trail-fit');   // each step at its full width, to measure
+    more.hidden = false;
+    var moreW = more.offsetWidth, widths = items.map(function (li) { return li.offsetWidth; });
+    more.hidden = true;
+    el.classList.remove('trail-fit');
+    var cut = trailCut(widths, moreW, el.clientWidth);
+    cut.forEach(function (i) { items[i].classList.add('trail-cut'); });
+    more.hidden = !cut.length;
   }
   // Where Back goes from here: { pane, path } (path true: the way he came; false: the parent chain).
   function navBackTo() {
@@ -719,6 +784,7 @@
     $('topbar-back-label').textContent = TITLES[backTo.pane] || 'Back';
     if (railBack && railBack.setAttribute) railBack.setAttribute('aria-label', 'Back to ' + (TITLES[backTo.pane] || 'the list'));
     $('section-name').textContent = TITLES[r.pane] || 'Today';
+    if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();
     if (changedPane) window.scrollTo(0, 0);
     $('topbar').classList.remove('tucked');
@@ -7423,11 +7489,13 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#rail-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#auth-retry,#device-code-btn');
+    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],[data-trail-back],#topbar-back,#rail-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#auth-retry,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
     if (t.id === 'rail-back') return goBack();
+    // 7.0.30 (pick B): a trail step is the browser's own Back, that many steps.
+    if (t.hasAttribute('data-trail-back')) { e.preventDefault(); history.go(-Number(t.getAttribute('data-trail-back'))); return; }
     if (t.id === 'section-btn') return openMenu();
     if (t.id === 'auth-retry') { t.disabled = true; t.textContent = 'Checking'; bootStatus().then(function () { t.disabled = false; t.textContent = 'Try again'; }); return; }
     if (t.id === 'auth-switch') {
@@ -7853,7 +7921,7 @@
     onShell: function (fn) { shellHooks.push(fn); },
     // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it
     // once a detail has loaded; route() clears it on every navigation.
-    setCrumb: function (text) { crumbDetail = String(text || ''); runHooks(routeHooks, parseRoute()); },
+    setCrumb: function (text) { crumbDetail = String(text || ''); navLabel(crumbDetail); paintTrail(); runHooks(routeHooks, parseRoute()); },
     crumb: function () { return crumbDetail; },
     // Panes that read with their own fetch call this on a 401 so the sign-in screen shows.
     showAuth: function (message) { showAuth(message); },

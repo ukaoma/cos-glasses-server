@@ -13,6 +13,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const cut = (a: string, b: string) => { const i = APP.indexOf(a), j = APP.indexOf(b, i); expect(i, a).toBeGreaterThan(-1); expect(j, b).toBeGreaterThan(i); return APP.slice(i, j) }
 const SRC = [
+  cut('  function esc(s) {', '  // Agent turns and task text'),
   cut('  var ROOT_PANES = [', '\n'),
   cut('  var TITLES = {', '\n'),
   cut('  function parseRoute() {', '  // 7.0.2 (A8)'),
@@ -21,7 +22,7 @@ const SRC = [
 ].join('\n')
 
 type Entry = { hash: string; state: any }
-function browser(start: string, o: { panes?: Record<string, any> } = {}) {
+function browser(start: string, o: { panes?: Record<string, any>; document?: any } = {}) {
   const entries: Entry[] = [{ hash: start, state: null }]
   let i = 0
   const routes: string[] = []
@@ -31,6 +32,7 @@ function browser(start: string, o: { panes?: Record<string, any> } = {}) {
     pushState(st: any) { entries.splice(i + 1); entries.push({ hash: entries[i]!.hash, state: st }); i++ },
     replaceState(st: any) { entries[i]!.state = st },
     back() { if (i === 0) return; const was = entries[i]!.hash; i--; if (entries[i]!.hash !== was) k.route() },
+    go(n: number) { const to = Math.max(0, Math.min(entries.length - 1, i + n)); if (to === i) return; const was = entries[i]!.hash; i = to; if (entries[i]!.hash !== was) k.route() },
   }
   const location: any = {
     pathname: '/control/', search: '',
@@ -38,11 +40,11 @@ function browser(start: string, o: { panes?: Record<string, any> } = {}) {
     set hash(h: string) { if (h === entries[i]!.hash) return; entries.splice(i + 1); entries.push({ hash: h, state: null }); i++; k.route() },
     replace(url: string) { const h = url.slice(url.indexOf('#')); const was = entries[i]!.hash; entries[i] = { hash: h, state: null }; if (h !== was) k.route() },
   }
-  const deps: any = { history, location, PANES: o.panes || {} }
+  const deps: any = { history, location, PANES: o.panes || {}, crumbDetail: '', document: o.document }
   // eslint-disable-next-line no-new-func
-  const k: any = new Function('deps', `with (deps) {\n${SRC}\nfunction route() { navStamp(); deps.routes.push(location.hash) }\nreturn { route, go, goBack, navBackTo, navStamp, NAV, TITLES };\n}`)(Object.assign(deps, { routes }))
+  const k: any = new Function('deps', `with (deps) {\n${SRC}\nfunction route() { navStamp(); deps.routes.push(location.hash) }\nreturn { route, go, goBack, navBackTo, navStamp, NAV, TITLES, navLabel, navTrail, trailName, trailCut, paintTrail };\n}`)(Object.assign(deps, { routes }))
   k.route()   // the first page
-  return { k, entries, get i() { return i }, history, location, routes, link: (h: string) => { location.hash = h } }
+  return { k, deps, entries, get i() { return i }, history, location, routes, link: (h: string) => { location.hash = h }, name: (t: string) => { deps.crumbDetail = t; k.navLabel(t) } }
 }
 
 describe('Back goes the way he came', () => {
@@ -147,5 +149,72 @@ describe('Back stays in reach on a tall phone', () => {
   it('on a reader it never tucks, so Back is always there', () => {
     const b = bar(true); b.scroll(100); b.scroll(400); b.scroll(900)
     expect(b.tucked()).toBe(false)
+  })
+})
+
+// 7.0.30, Miles's pick B: the trail row reads the same marks as Back. Each step is the browser's own Back by that many
+// steps; the last step is always where Back goes. The browser check is W1_evidence/7030/items_check.cjs (T1 to T4).
+describe('the trail row: how he got here, from Back\'s own marks', () => {
+  const fakeDoc = () => { const el: any = { hidden: true, innerHTML: '', clientWidth: 0, querySelectorAll: () => [], querySelector: () => null, classList: { add() {}, remove() {} } }; return { el, doc: { getElementById: (id: string) => (id === 'nav-trail' ? el : null) } } }
+  it('Anand\'s case: Today, Speakers, a review, Open meeting reads "Today / Speakers / Naming voices / Meeting"', () => {
+    const f = fakeDoc(), b = browser('#/today', { document: f.doc })
+    b.link('#/speakers'); b.link('#/speakers/review/m1'); b.name('Pricing review with Gina')
+    b.link('#/meetings/quilt/2026-11/m1.md'); b.name('Pricing review with Gina')
+    const t = b.k.navTrail()
+    expect(t.map((s: any) => s.label)).toEqual(['Today', 'Speakers', 'Naming voices'])
+    expect(t.map((s: any) => s.back)).toEqual([3, 2, 1])
+    expect(t[t.length - 1].hash, 'the last step is where Back goes').toBe(b.entries[b.i]!.state.cosNav.back)
+    b.k.paintTrail()
+    expect(f.el.hidden).toBe(false)
+    const steps = [...f.el.innerHTML.matchAll(/<a href="([^"]+)" data-trail-back="(\d+)">([^<]+)<\/a>/g)].map(m => [m[1], m[2], m[3]])
+    expect(steps).toEqual([['#/today', '3', 'Today'], ['#/speakers', '2', 'Speakers'], ['#/speakers/review/m1', '1', 'Naming voices']])
+    expect(f.el.innerHTML).toMatch(/<li class="trail-here" aria-current="page"><span>Meeting<\/span><\/li><\/ol>$/)
+  })
+  it('a step goes back that many entries in the browser\'s own history, so it lands where Back would and adds no entry', () => {
+    const b = browser('#/today')
+    b.link('#/speakers'); b.link('#/speakers/review/m1'); b.link('#/meetings/quilt/2026-11/m1.md')
+    const len = b.entries.length
+    b.history.go(-2)
+    expect(b.location.hash).toBe('#/speakers')
+    expect(b.entries.length).toBe(len)
+    expect(b.k.navTrail().map((s: any) => s.label), 'that page keeps its own trail').toEqual(['Today'])
+  })
+  it('no row with no path: a deep link, a reload, a pane\'s list, or an overlay', () => {
+    const f = fakeDoc(), deep = browser('#/meetings/quilt/2026-11/m1.md', { document: f.doc })
+    expect(deep.k.navTrail()).toBeNull()
+    deep.k.paintTrail(); expect(f.el.hidden).toBe(true)
+    const g = fakeDoc(), list = browser('#/today', { document: g.doc })
+    list.link('#/messages')
+    expect(list.k.navTrail(), 'a list has a path').not.toBeNull()
+    list.k.paintTrail(); expect(g.el.hidden, 'but no row on a pane\'s list').toBe(true)
+    const r = browser('#/speakers')
+    r.link('#/meetings/quilt/2026-11/m1.md')
+    r.entries[r.i]!.state = { cosNav: { doc: 'an-earlier-load', pos: 1, back: '#/speakers', trail: [{ h: '#/speakers', t: '' }] } }
+    r.k.NAV.last = null; r.k.route()
+    expect(r.k.navTrail(), 'a reload').toBeNull()
+    const o = browser('#/today')
+    o.link('#/sessions/claude/abc')
+    expect(o.k.navTrail()).not.toBeNull()
+    o.history.pushState(Object.assign({}, o.history.state, { cosImageViewer: 1 }))   // as reader-media.js opens the viewer: the mark comes along
+    expect(o.k.navTrail(), 'the image viewer\'s entry').toBeNull()
+  })
+  it('a message keeps its own name; the stored trail stops at 12 steps', () => {
+    const b = browser('#/messages')
+    b.link('#/messages/m/k1'); b.name('Message #412')
+    b.link('#/sessions/claude/abc')
+    expect(b.k.navTrail().map((s: any) => s.label)).toEqual(['Messages', 'Message #412'])
+    for (let n = 0; n < 20; n++) b.link('#/messages/m/k' + n)
+    expect(b.entries[b.i]!.state.cosNav.trail.length).toBe(12)
+  })
+})
+
+describe('the trail shortens from the middle, never wrapping', () => {
+  it('fits: nothing leaves', () => { const b = browser('#/today'); expect(b.k.trailCut([50, 80, 90, 60], 20, 300)).toEqual([]) })
+  it('too wide: the step after the first leaves, then the next; the first, the one before this page, and this page stay', () => {
+    const b = browser('#/today')
+    // steps 0..4, then this page (5); "…" adds 20
+    expect(b.k.trailCut([60, 70, 80, 90, 100, 60], 20, 420)).toEqual([1])
+    expect(b.k.trailCut([60, 70, 80, 90, 100, 60], 20, 330)).toEqual([1, 2])
+    expect(b.k.trailCut([60, 70, 80, 90, 100, 60], 20, 100)).toEqual([1, 2, 3])
   })
 })

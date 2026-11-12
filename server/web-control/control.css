@@ -278,6 +278,23 @@
 .cx-turn.match .cx-said-text { border-radius: 10px; }
 @media (max-width: 599px) { .cx-find { top: calc(var(--topbar-h) + var(--safe-top)); } .cx-thumb { width: 132px; height: 92px; } }
 
+/* 7.0.30, Miles's pick B (how you got here): one plain row of text links under the top bar, on a phone only (from 600 px
+   the navigation bar has its crumbs). No box, border or label. It never wraps: steps leave from the middle (app.js
+   trailCut) and a long name ends in an ellipsis. A left-out step stays for a screen reader. */
+.trail { display: none; }
+@media (max-width: 599px) {
+  .trail:not([hidden]) { display: block; margin: 0 0 2px; }
+  .trail ol { display: flex; align-items: center; list-style: none; margin: 0; padding: 0; overflow: hidden; white-space: nowrap; font-size: 13.5px; color: var(--sub); }
+  .trail li { display: flex; align-items: center; min-width: 0; flex: 0 1 auto; }
+  .trail li + li::before { content: '/'; content: '/' / ''; flex: none; padding: 0 6px; color: var(--tertiary); }
+  .trail a, .trail-here span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 32px; }
+  .trail a { color: var(--accent); }
+  .trail-here span { color: var(--ink); font-weight: 600; }
+  .trail .trail-more[hidden] { display: none; }
+  .trail.trail-fit li { flex-shrink: 0; }
+  .trail .trail-cut { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+}
+
 /* ── Dictation and Dictionary ─────────────────────────── */
 .cx-pair { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .cx-pair .heard { color: var(--sub); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--sub) 60%, transparent); }
