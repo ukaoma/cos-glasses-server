@@ -2951,12 +2951,25 @@
   // Earlier this month as compact rows, folded shut with a count. Days are counted back from today (2 to 6 days ago is
   // Earlier this week, 7 to 13 Last week, 14 to 30 Earlier this month), so no group is empty only because of the
   // calendar.
-  var SX_GROUPS = [['needs', 'Needs you', 'state'], ['working', 'Working now', 'state'], ['pinned', 'Pinned', ''], ['today', 'Today', ''],
+  var SX_GROUPS = [['needs', 'Needs you', 'state'], ['working', 'Working now', 'state'], ['pinned', 'Pinned', 'pinned'], ['today', 'Today', ''],
     ['yesterday', 'Yesterday', ''], ['week', 'Earlier this week', ''], ['lastweek', 'Last week', 'compact'], ['month', 'Earlier this month', 'compact']];
   var SX_DAY_MS = 86400000, SX_REST_MS = 2000, SX_EMPTY_HOLD_MS = 5000;
   // place: each row's group as last drawn at rest; seen: when Needs you and Working now last had rows; open: unfolded
   // compact groups; older: /older's short rows (olderOk false: an older server, 404).
   var SXL = { place: null, down: false, touchAt: 0, scrollAt: 0, timer: 0, seen: {}, open: {}, older: [], olderN: null, olderOk: null, olderNext: null, olderAt: 0, olderBusy: false };
+  // 7.0.29 ADD 1 (Miles 23:53: thirteen pinned rows sat between Working now and Today): Pinned folds like a folder, with
+  // its count, and this browser remembers the choice (localStorage). Open by default, so no list changes until he folds
+  // it. Placement is unchanged: sxGroupFor tests state before pin, so a pinned session that is running is drawn in
+  // Working now, one that waits or failed in Needs you, folded or not, and it goes back under Pinned when idle.
+  var SX_PIN_FOLD_KEY = 'cos_sx_pinned_folded';
+  function sxPinnedOpen() {
+    if (typeof SXL.pinOpen !== 'boolean') { var v = null; try { v = typeof localStorage === 'object' && localStorage ? localStorage.getItem(SX_PIN_FOLD_KEY) : null; } catch (_e) { v = null; } SXL.pinOpen = v !== '1'; }
+    return SXL.pinOpen;
+  }
+  function sxPinnedSet(open) {
+    SXL.pinOpen = !!open;
+    try { if (typeof localStorage === 'object' && localStorage) { if (open) localStorage.removeItem(SX_PIN_FOLD_KEY); else localStorage.setItem(SX_PIN_FOLD_KEY, '1'); } } catch (_e) { /* storage off: this visit only */ }
+  }
   function sxRowKey(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider + '|' + String(k.id).toLowerCase(); }
   function sxDayStart(t) { var d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); }
   function sxSortTime(s) { return SX.clock === 'opened' ? (sxTime(s.created) || sxTime(s.modified)) : sxTime(s.modified); }
@@ -3061,6 +3074,13 @@
         return;
       }
       if (!n) return;
+      if (g[2] === 'pinned') {
+        var popen = sxPinnedOpen();
+        html += '<section class="sx-g" data-g="pinned"><button type="button" class="sx-gh" data-sx="fold" data-g="pinned" aria-expanded="' + popen + '">' +
+          '<span class="fold"><span class="chev" aria-hidden="true"></span>' + g[1] + '</span><span class="n">' + n + '</span></button>' +
+          (popen ? '<div class="sx-rows">' + rows.map(function (s) { return sxRow(s, null, amb, s.form === 'short'); }).join('') + '</div>' : '') + '</section>';
+        return;
+      }
       if (g[2] === 'compact') {
         var open = !!SXL.open[id];
         html += '<section class="sx-g" data-g="' + id + '"><button type="button" class="sx-gh" data-sx="fold" data-g="' + id + '" aria-expanded="' + open + '">' +
@@ -3535,6 +3555,7 @@
       if (act === 'view') { sxViewMenu(false); return setSessionsView(t.getAttribute('data-view')); }
       if (act === 'view-menu') return sxViewMenu();
       if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint(); var gq = $('session-questions'), first = gq && gq.querySelector('button, input, [tabindex]'); if (first && first.focus) first.focus({ preventScroll: true }); return; }
+      if (act === 'fold' && t.getAttribute('data-g') === 'pinned') { sxPinnedSet(!sxPinnedOpen()); return renderSessionGroups(); }
       if (act === 'fold') { var g = t.getAttribute('data-g'), isF = g.indexOf('f:') === 0; SXL.open[g] = isF ? SXL.open[g] === false : !SXL.open[g]; return renderSessionGroups(); }
       if (/^(row-menu|org-|folder-|new-folder|rename-clear|inline-cancel)/.test(act)) { e.stopPropagation(); return sxOrgClick(act, t); }
       if (act === 'older-more') return sxLoadOlder(false, true);

@@ -1,6 +1,6 @@
 ## 7.0.29 - Control Web: on the folded Duo, the panes sit in a side rail at the right edge, and Back is at thumb height
 
-2026-11-12. 7.0.28 plus one Control Web layout change, for the folded Duo only.
+2026-11-12. 7.0.28 plus Control Web changes: a side rail for the folded Duo only, and small Sessions list changes for every screen.
 
 - **A side rail on the folded Duo.** Today, Messages, Speakers, Meetings, Memories, Threads, Sessions, Work, Dictation and Settings are one tap away in a slim rail at the right edge of the page, with the current one marked. Before, they sat behind the pane name's menu at the top left. The rail is the same list, in the same order, with the same icons and dots, as the rail on a wide screen.
 - **Back at thumb height.** Where the top bar showed Back (a session or a message you are reading), Back now sits at the foot of the rail instead. If the panes do not fit, they scroll inside the rail and Back stays put.
@@ -9,13 +9,14 @@
 - **Who gets it:** a touch screen, a page under 600 px wide, and a screen whose long side is less than 1.6 times its short side. The folded Duo is 1.46. Every iPhone is 1.78 or more, so none gets the rail, in the Home Screen app or a Safari tab, keyboard up or down. An iPhone SE (375 by 667) keeps today's layout. Nothing changes at 600 px and wider, so the open Duo is unchanged.
 - **What it costs:** the rail takes 58 of 449 layout px at 85 percent zoom (49 points), 50 of 382 at 100. A long session title shows about one character fewer at 85 percent and seven fewer at 100. Wide tables in a session still scroll inside their own box, never the page.
 - The page's existing layout report says whether the rail showed and its button size, so the phone tells the Mac what it saw.
+- **Sessions: Pinned folds.** The Pinned heading folds and unfolds like a folder, with its count, and this browser remembers the choice. It starts open, so nothing changes until you fold it. A pinned session that is working still shows under Working now, and one that is waiting or failed under Needs you, folded or not; it goes back under Pinned when it is idle. Needs you and Working now never fold. This is for every screen size.
 - Tested in a browser (WebKit) at the Duo's folded sizes (449 by 797 at 85 percent zoom, 382 by 678, and a shorter Safari tab), an iPhone SE, 16 and Pro Max (the Pro Max also in a tab), and the open Duo, in light and dark, on the Sessions list, a session, Today, Messages and with the keyboard up. Where the rail does not show, every element sits where it did in 7.0.28. Not yet tested on a real device.
 
-**Default-on for every install:** yes, with no switch, and only on a screen of that shape.
+**Default-on for every install:** yes, with no switch: the rail only on a screen of that shape; the folding Pinned heading everywhere, open until folded.
 
 ### If you roll back
 
-- To 7.0.28: the folded Duo goes back to the pane menu at the top left and Back in the top bar. Nothing is stored.
+- To 7.0.28: the folded Duo goes back to the pane menu at the top left and Back in the top bar, and Pinned no longer folds. The only thing stored is the Pinned fold choice, in the browser, which 7.0.28 does not read.
 - Further back: as in 7.0.28 below.
 
 ## 7.0.28 - Control Web: the sign-in screen is styled even before the page can reach your Mac, and the page fixes itself when it can; page errors are reported; phone approvals get a trusted certificate (off by default)

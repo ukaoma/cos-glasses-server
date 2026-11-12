@@ -24,7 +24,7 @@ const H = 3600e3, D = 86400e3
 const iso = (ms: number) => new Date(ms).toISOString()
 
 type Row = Record<string, unknown>
-function kit(o: { rows?: Row[]; older?: Row[]; held?: Array<{ provider: string; sessionId: string }>; clock?: string; search?: boolean; api?: (p: string) => Promise<unknown> } = {}) {
+function kit(o: { rows?: Row[]; older?: Row[]; held?: Array<{ provider: string; sessionId: string }>; clock?: string; search?: boolean; api?: (p: string) => Promise<unknown>; store?: Record<string, string> } = {}) {
   const timers: Array<{ fn: () => void; ms: number }> = []
   let now = NOW
   class FakeDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(now) } static now() { return now } }
@@ -60,9 +60,10 @@ function kit(o: { rows?: Row[]; older?: Row[]; held?: Array<{ provider: string; 
     sxQueryActive: () => !!o.search,
     sessionQs: () => ({ itemsFor: () => o.held ?? [] }),
     encodeURIComponent,
+    localStorage: o.store ? { getItem: (k: string) => (k in o.store! ? o.store![k] : null), setItem: (k: string, v: string) => { o.store![k] = String(v) }, removeItem: (k: string) => { delete o.store![k] } } : null,
   }
   // eslint-disable-next-line no-new-func
-  const k = new Function('deps', `with (deps) {\n${SRC}\nreturn { row: sxRow, group: sxGroupFor, all: sxAllRows, html: sxListHtml, rest: sxListAtRest, SXL, quiet: sxQuietLine, older: sxLoadOlder, held: sxHeldKeys, words: sxRowWords, GROUPS: SX_GROUPS, live: sxLiveRow, anchor: sxAnchor, restore: sxRestoreAnchor };\n}`)(deps)
+  const k = new Function('deps', `with (deps) {\n${SRC}\nreturn { pinSet: sxPinnedSet, pinOpen: sxPinnedOpen, row: sxRow, group: sxGroupFor, all: sxAllRows, html: sxListHtml, rest: sxListAtRest, SXL, quiet: sxQuietLine, older: sxLoadOlder, held: sxHeldKeys, words: sxRowWords, GROUPS: SX_GROUPS, live: sxLiveRow, anchor: sxAnchor, restore: sxRestoreAnchor };\n}`)(deps)
   if (o.older) k.SXL.older = o.older.map(r => ({ ...r, form: 'short' }))
   return { k, SX, timers, later: (ms: number) => { now += ms }, setActive: (a: any) => { active = a }, renders: () => renders, apiCalls }
 }
@@ -418,5 +419,72 @@ describe('THE LIST FITS ITS COLUMN (7.0.27)', () => {
   it('nothing is fixed by hiding: the rule sets no overflow on the list column', () => {
     expect(RULE).not.toMatch(/#sessions-list-col|\.split-list/)
     expect(RULE).not.toMatch(/overflow-x/)
+  })
+})
+
+// 7.0.29 ADD 1 (Miles 23:53 and 23:58): Pinned folds like a folder, remembered on this browser, open by default; a pinned
+// session that is active is drawn in Working now or Needs you, folded or not, and goes back under Pinned when idle.
+describe('7.0.29: Pinned folds, and an active pinned session still shows', () => {
+  const pinHead = (open: boolean, n: number) => '<button type="button" class="sx-gh" data-sx="fold" data-g="pinned" aria-expanded="' + open + '"><span class="fold"><span class="chev" aria-hidden="true"></span>Pinned</span><span class="n">' + n + '</span></button>'
+  const pins = () => [row('p1', 9 * D, { pinned: true }), row('p2', 2 * D, { cos_pinned: true }), row('t', H)]
+  it('open by default: a heading that folds, with its count, and its rows drawn', () => {
+    const html = kit({ rows: pins(), store: {} }).k.html()
+    expect(html).toContain(pinHead(true, 2))
+    expect(rowsIn(html, 'pinned').sort()).toEqual(['claude|p1', 'claude|p2'])
+  })
+  it('folded, it keeps its heading and count and draws no rows; the choice is kept in this browser and read back', () => {
+    const store: Record<string, string> = {}
+    const h = kit({ rows: pins(), store })
+    h.k.pinSet(false)
+    expect(store.cos_sx_pinned_folded).toBe('1')
+    const html = h.k.html()
+    expect(html).toContain(pinHead(false, 2))
+    expect(rowsIn(html, 'pinned')).toEqual([])
+    expect(rowsIn(html, 'today'), 'the rest of the list is drawn').toEqual(['claude|t'])
+    const again = kit({ rows: pins(), store }).k.html()
+    expect(again, 'a new page in the same browser opens folded').toContain(pinHead(false, 2))
+    h.k.pinSet(true)
+    expect('cos_sx_pinned_folded' in store).toBe(false)
+  })
+  it('with storage off, folding lasts this visit and nothing throws', () => {
+    const h = kit({ rows: pins() })
+    h.k.pinSet(false)
+    expect(h.k.html()).toContain(pinHead(false, 2))
+  })
+  it('a tap on the Pinned heading folds and unfolds it; Needs you and Working now have no fold', () => {
+    expect(APP).toContain("      if (act === 'fold' && t.getAttribute('data-g') === 'pinned') { sxPinnedSet(!sxPinnedOpen()); return renderSessionGroups(); }")
+    const html = kit({ rows: [row('w', H, { agent_state: 'waiting' }), row('r', H, { agent_state: 'running' })], store: {} }).k.html()
+    expect(html).not.toMatch(/data-sx="fold" data-g="(needs|working)"/)
+    expect(html).toContain('<h3 class="sx-gh state needs">')
+    expect(html).toContain('<h3 class="sx-gh state working">')
+  })
+  it('Pinned folded: a pinned session that runs is drawn in Working now, one that waits or fails in Needs you, and each goes back under Pinned when idle', () => {
+    const store = { cos_sx_pinned_folded: '1' }
+    const p = row('p', 9 * D, { pinned: true })
+    const h = kit({ rows: [p, row('q', 8 * D, { pinned: true })], store })
+    let html = h.k.html()
+    expect(html).toContain(pinHead(false, 2))
+    p.agent_state = 'running'
+    html = h.k.html()
+    expect(rowsIn(html, 'working')).toEqual(['claude|p'])
+    expect(html, 'Pinned counts only the idle one').toContain(pinHead(false, 1))
+    p.agent_state = 'waiting'
+    expect(rowsIn(h.k.html(), 'needs')).toEqual(['claude|p'])
+    p.agent_state = 'failed'
+    expect(rowsIn(h.k.html(), 'needs')).toEqual(['claude|p'])
+    p.agent_state = 'idle'
+    html = h.k.html()
+    expect(rowsIn(html, 'needs').concat(rowsIn(html, 'working'))).toEqual([])
+    expect(html).toContain(pinHead(false, 2))
+  })
+  it('the rest rule still holds: while the list is pressed, the row stays where it was drawn until rest', () => {
+    const p = row('p', 9 * D, { pinned: true, agent_state: 'running' })
+    const h = kit({ rows: [p], store: { cos_sx_pinned_folded: '1' } })
+    expect(rowsIn(h.k.html(), 'working')).toEqual(['claude|p'])
+    h.k.SXL.down = true
+    p.agent_state = 'idle'
+    expect(rowsIn(h.k.html(), 'working'), 'held while pressed').toEqual(['claude|p'])
+    h.k.SXL.down = false
+    expect(rowsIn(h.k.html(), 'working'), 'moved at rest').toEqual([])
   })
 })
