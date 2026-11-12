@@ -129,8 +129,8 @@
       if (!Object.prototype.hasOwnProperty.call(channels, s.action) || channels[s.action].indexOf(s.channel) < 0
         || !/^[a-z0-9@][a-z0-9@._/-]{0,127}$/.test(s.artifact) || !/^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,6}(-[0-9A-Za-z.-]{1,32})?$/.test(s.version)
         || !/^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128}|sha512-[A-Za-z0-9+/]{86}==)$/.test(s.digest) || !HEX64.test(s.packetSha256)) throw fail('scope_not_allowed')
-      var manifests = { 'gotcos-site': 'gotcos-site-manifest', 'control-downloads': 'cos-control-downloads-manifest', 'release-docs': 'cos-release-docs-manifest' }
-      if (Object.prototype.hasOwnProperty.call(manifests, s.channel) && (s.artifact !== manifests[s.channel] || !/^sha256:[0-9a-f]{64}$/.test(s.digest))) throw fail('scope_not_allowed')
+      var manifest = manifestArtifact(s.channel)
+      if (manifest && (s.artifact !== manifest || !/^sha256:[0-9a-f]{64}$/.test(s.digest))) throw fail('scope_not_allowed')
       return { kind: 'approve', action: s.action, artifact: s.artifact, version: s.version, digest: s.digest, channel: s.channel, packetSha256: s.packetSha256 }
     }
     throw fail('scope_not_allowed')
@@ -139,6 +139,13 @@
   // What an approval on each channel does, one fixed line per channel (Miles, 2026-11-12: a publish approval covers
   // its own push). A copy of APPROVE_CHANNEL_EFFECT in shared/web-turn-envelope.ts; signer-proof.test.ts pins the two.
   var CHANNEL_EFFECT = { 'mac-local': 'Installs on this Mac. No git push.', 'npm-next': 'Publishes to npm under the next tag, from the tested package. No git push.', 'npm-latest': 'Publishes to npm under the latest tag, from the tested package. No git push.', 'control-appcast': 'Pushes ukaoma/cos-starter main (control/appcast.json): the COS Control update feed on gotcos.com.', 'hub-alias': 'Pushes ukaoma/evenhub-g2-cos main: moves the Even Hub alias to this package.', 'gotcos-site': 'Pushes ukaoma/cos-starter main: republishes www.gotcos.com.', 'control-downloads': 'Creates a GitHub Release on ukaoma/cos-starter (a tag, no branch push) with the ZIP and its SHA-256 file.', 'release-docs': 'Pushes ukaoma/cos-starter main (docs/): republishes the public COS docs.' }
+  // Channels that approve one canonical deployment manifest, and the artifact each must name. A copy of
+  // PUBLISH_MANIFEST_ARTIFACTS in shared/web-turn-envelope.ts; signer-proof.test.ts pins the two (Q1, 2026-11-12).
+  var MANIFEST_ARTIFACTS = { 'gotcos-site': 'gotcos-site-manifest', 'control-downloads': 'cos-control-downloads-manifest', 'release-docs': 'cos-release-docs-manifest' }
+  /** The manifest artifact a channel requires, or '' when the channel is not a manifest channel. */
+  function manifestArtifact(channel) {
+    return typeof channel === 'string' && Object.prototype.hasOwnProperty.call(MANIFEST_ARTIFACTS, channel) ? MANIFEST_ARTIFACTS[channel] : ''
+  }
   /** The fixed line for a channel this page can sign, or '' for anything else. Never built from packet text. */
   function channelEffect(channel) {
     return typeof channel === 'string' && Object.prototype.hasOwnProperty.call(CHANNEL_EFFECT, channel) ? CHANNEL_EFFECT[channel] : ''
@@ -348,7 +355,7 @@
     canonicalJson: canonicalJson, jcsBytes: jcsBytes,
     signedWords: signedWords, wordsDigest: wordsDigest,
     buildEnvelope: buildEnvelope, passkeyChallenge: passkeyChallenge, passkeyHeader: passkeyHeader,
-    assembleTurnProof: assembleTurnProof, validateHandoffPacket: validateHandoffPacket, channelEffect: channelEffect,
+    assembleTurnProof: assembleTurnProof, validateHandoffPacket: validateHandoffPacket, channelEffect: channelEffect, manifestArtifact: manifestArtifact,
     sasCommit: sasCommit, sasCode: sasCode, kidOf: kidOf, fingerprintOf: fingerprintOf, enrollProofMessage: enrollProofMessage,
     spkiFromXY: spkiFromXY, xyFromSpki: xyFromSpki, coseFromXY: coseFromXY, xyFromCose: xyFromCose,
     xyFromAttestation: xyFromAttestation, passkeyXY: passkeyXY,

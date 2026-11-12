@@ -127,8 +127,7 @@
     // The fixed line for the channel (P.channelEffect), never text from the packet's requester (2026-11-12).
     var effect = scope && scope.kind === 'approve' ? P.channelEffect(scope.channel) : ''
     if (!effect) return ''
-    var manifest = scope.channel === 'gotcos-site' || scope.channel === 'control-downloads' || scope.channel === 'release-docs'
-    return '\nWhat this approves: ' + effect + (manifest ? '\nApproval is limited to this exact manifest SHA-256. The receiving release tool checks its files and destination.' : '')
+    return '\nWhat this approves: ' + effect + (P.manifestArtifact(scope.channel) ? '\nApproval is limited to this exact manifest SHA-256. The receiving release tool checks its files and destination.' : '')
   }
   function claim(id) {
     show('loading')

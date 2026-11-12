@@ -301,6 +301,29 @@ describe('the signer checks the full packet preimage before signing', () => {
     for (const channel of ['git-main', 'npm', 'gotcos-site/*', '__proto__', 'toString', '', undefined]) expect(P.channelEffect(channel)).toBe('')
     await expect(P.validateHandoffPacket(consistent({ channel: 'unknown-channel' }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')
   })
+  // Q1, 2026-11-12: the page's manifest map (MANIFEST_ARTIFACTS) is a copy of PUBLISH_MANIFEST_ARTIFACTS. Pinned by
+  // execution per channel, both ways, and by its literal, so dropping or changing a rule on the page fails.
+  it.each(allChannels)('the page requires the envelope\'s manifest artifact (or none) on %s', async channel => {
+    const required = PUBLISH_MANIFEST_ARTIFACTS[channel] ?? ''
+    expect(P.manifestArtifact(channel)).toBe(required)
+    const action = Object.entries(APPROVE_ACTION_CHANNELS).find(([, cs]) => cs.includes(channel))![0]
+    if (required) {
+      await expect(P.validateHandoffPacket(consistent({ action, channel, artifact: '@gotcos/glasses-server' }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')
+      await expect(P.validateHandoffPacket(consistent({ action, channel, artifact: required, digest: 'sha512:' + 'a'.repeat(128) }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')
+      const ok = consistent({ action, channel, artifact: required })
+      expect(await P.validateHandoffPacket(ok, NOW)).toEqual(ok.packet)
+    } else {
+      const ok = consistent({ action, channel, artifact: '@gotcos/glasses-server' })
+      expect(await P.validateHandoffPacket(ok, NOW)).toEqual(ok.packet)
+    }
+  })
+  it('the page\'s manifest map literal equals PUBLISH_MANIFEST_ARTIFACTS', () => {
+    const src = readFileSync(fileURLToPath(new URL('./signer-proof.js', import.meta.url)), 'utf8')
+    const literal = /var MANIFEST_ARTIFACTS = (\{[^\n]*\})/.exec(src)?.[1]
+    expect(literal, 'the page keeps one MANIFEST_ARTIFACTS literal').toBeTruthy()
+    expect(JSON.parse(literal!.replace(/'/g, '"'))).toEqual({ ...PUBLISH_MANIFEST_ARTIFACTS })
+    for (const channel of ['git-main', '__proto__', 'toString', '', undefined]) expect(P.manifestArtifact(channel)).toBe('')
+  })
   it('push-main on git-main is refused by the page (scope_not_allowed)', async () => {
     await expect(P.validateHandoffPacket(consistent({ action: 'push-main', channel: 'git-main' }), NOW)).rejects.toHaveProperty('reason', 'scope_not_allowed')
   })
