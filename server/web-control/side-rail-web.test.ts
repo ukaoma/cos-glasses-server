@@ -196,3 +196,15 @@ describe('Back at thumb height', () => {
     expect(APP).toContain("rail: typeof sideRail === 'function' ? sideRail() : false, railHit: typeof RAIL === 'object' ? RAIL.hit : 0, phone: isPhone(),")
   })
 })
+
+// F3 (lead 00:35): Back sits level with Send, so words in the reply box must survive Back. The behaviour is checked in
+// WebKit (back_words_check.cjs: kept after Back and after another pane; sent words never come back; 3 of 3 mutants
+// killed); these pin the four places it hangs on.
+describe('F3: unsent words in the reply box survive leaving the session', () => {
+  it('saved as he types, restored when the session opens again, re-saved when a refusal puts words back, dropped when sent', () => {
+    expect(APP).toContain("    if (e.target.id === 'session-input' && typeof unsentSave === 'function') unsentSave();")
+    expect(APP).toContain("      readerImagesMount($('session-turns'), r);\n      if (typeof unsentRestore === 'function') unsentRestore(r);")
+    expect(APP).toContain("input.value = text; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); sessionStatus(why + ' Your message is back in the box.'")
+    expect(APP).toContain("  function clearBoxOf(text) {\n    if (typeof unsentDrop === 'function') unsentDrop(text);")
+  })
+})

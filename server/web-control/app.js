@@ -3993,6 +3993,7 @@
         // edge says one waits. It sits in the reader, not the dock, because the dock scrolls by itself as a last resort.
         '<p class="sx-goq" id="session-goq" hidden><span>A question is waiting at the end.</span><button type="button" class="cx-btn quiet" data-sx="goto-question">Go to the question</button></p>';
       readerImagesMount($('session-turns'), r);
+      if (typeof unsentRestore === 'function') unsentRestore(r);
       sxNoteList(r, d);
       setLive({});
       if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
@@ -4467,8 +4468,28 @@
     if (!r.draft || r.draft.text !== text || (r.draft.ids || []).join(',') !== files.join(',')) r.draft = { text: text, key: newTurnKey(), ids: files };
     return r.draft;
   }
+  // 7.0.29 (lead F3: the rail's Back sits level with Send, so a mis-tap is likely): words typed in a session's reply
+  // box and not sent come back when that session opens again in this tab, after Back, the rail or another pane. Kept in
+  // memory, per session, as he types; dropped when the box is empty or when those words are sent.
+  var SX_UNSENT = {};
+  function unsentKey(provider, id) { return String(provider || '') + '|' + String(id || '').toLowerCase(); }
+  function unsentSave() {
+    var r = state.reading, input = $('session-input');
+    if (!r || !input) return;
+    var k = unsentKey(r.provider, r.id);
+    if (input.value.trim()) SX_UNSENT[k] = input.value; else delete SX_UNSENT[k];
+  }
+  function unsentRestore(r) {
+    var input = $('session-input'), v = r ? SX_UNSENT[unsentKey(r.provider, r.id)] : '';
+    if (input && v && !input.value) { input.value = v; autoGrow(input); }
+  }
+  function unsentDrop(text) {
+    var t = String(text).trim(), bare = typeof turnEndBare === 'function' ? turnEndBare(text) : t;
+    Object.keys(SX_UNSENT).forEach(function (k) { var v = SX_UNSENT[k].trim(); if (v === t || v === bare) delete SX_UNSENT[k]; });
+  }
   // The box is cleared only of the very words that were sent; anything typed since stays.
   function clearBoxOf(text) {
+    if (typeof unsentDrop === 'function') unsentDrop(text);
     var input = $('session-input');
     // 7.0.18: an answer to a turn-end ask was sent with the attribution in front; the box holds his words without it.
     if (input && (input.value.trim() === String(text).trim() || input.value.trim() === turnEndBare(text))) { input.value = ''; autoGrow(input); }
@@ -4478,7 +4499,7 @@
   // of the message's files (heldFilesBack).
   function returnToBox(text, why, files) {
     var input = $('session-input');
-    if (input && !input.value.trim()) { input.value = text; autoGrow(input); sessionStatus(why + ' Your message is back in the box.' + (files || ''), 'error'); }
+    if (input && !input.value.trim()) { input.value = text; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); sessionStatus(why + ' Your message is back in the box.' + (files || ''), 'error'); }
     else sessionStatus(why + ' Not sent: “' + String(text).slice(0, 80) + (text.length > 80 ? '…' : '') + '”' + (files || ''), 'error');
   }
   // Your words show in the conversation the moment the Mac accepts them; the next refresh of
@@ -7353,6 +7374,7 @@
   });
   document.addEventListener('input', function (e) {
     if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
+    if (e.target.id === 'session-input' && typeof unsentSave === 'function') unsentSave();
     if (e.target.id === 'ask-q') renderAsk();
     if (e.target.hasAttribute && e.target.hasAttribute('data-next-prep-steer')) nextPrepInput(e.target);
     if (e.target.id === 'sessions-q' && !e.target.value.trim()) renderSessionGroups(state.sessions);
