@@ -177,7 +177,9 @@ describe('app.js: when the rail is on', () => {
     h.listeners.resize!.forEach(f => f())
     expect(h.shapeCalls).toBe(2)
     expect(h.btn.inert).toBe(true)
-    expect(h.crumbs).toEqual([{ what: 'rail', data: { sw: 466, sh: 678, rail: true, railHit: 52 } }])
+    // 7.0.31: the fold report also carries 100dvh (app.js lrProbe; this harness has none, so null), the number Miles's
+    // 17:25 open-Duo frame was missing.
+    expect(h.crumbs).toEqual([{ what: 'rail', data: { sw: 466, sh: 678, rail: true, railHit: 52, dvh: null } }])
     h.listeners.orientationchange!.forEach(f => f())
     expect(h.crumbs, 'no change, no report').toHaveLength(1)
     h.env.short = false

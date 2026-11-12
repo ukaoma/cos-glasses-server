@@ -742,7 +742,7 @@
       // The rail changes the reply box's width: an empty box re-fits its placeholder (autoGrow, F2).
       var si = typeof $ === 'function' ? $('session-input') : null; if (si && typeof sxPlaceholderFit === 'function' && si.phLong) sxPlaceholderFit(si); else if (si && !si.value && typeof autoGrow === 'function') autoGrow(si);
       // A change after boot (a fold, a rotation, a new screen) is reported once, with the screen's own numbers.
-      if (RAIL.on !== null && RAIL.on !== on && typeof layoutCrumb === 'function') { var sc = window.screen || {}; layoutCrumb('rail', { sw: sc.width, sh: sc.height, rail: on, railHit: RAIL.hit }); }
+      if (RAIL.on !== null && RAIL.on !== on && typeof layoutCrumb === 'function') { var sc = window.screen || {}; layoutCrumb('rail', { sw: sc.width, sh: sc.height, rail: on, railHit: RAIL.hit, dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null }); }
       RAIL.on = on;
       if (!RAIL.hooked && typeof window.matchMedia === 'function' && typeof window.addEventListener === 'function') {
         RAIL.hooked = true;
@@ -782,6 +782,7 @@
 
     var reading = r.args.length > 0 && !isTabRoute(r.args);
     if (typeof sxFrameSync === 'function') sxFrameSync();
+    if (typeof rdFrameSync === 'function') rdFrameSync(r);
     var paneEl = $('pane-' + r.pane);
     if (paneEl) paneEl.classList.toggle('reading', reading);
     var split = paneEl && paneEl.querySelector('.split');
@@ -905,6 +906,7 @@
     // hidden, so the gate could not scroll and Connect sat below a keyboard-height screen. The gate is a normal page;
     // showShell's route() puts the frame back (sxFrameSync) when the shell returns.
     document.documentElement.classList.remove('sx-frame');
+    document.documentElement.classList.remove('rd-frame');
     // A later 401 from a pane still polling (W.api passes no message) must not blank what the gate already says:
     // the reason it opened, or "That code did not match" while the person retypes.
     if (!message && alreadyOpen) return;
@@ -2934,6 +2936,44 @@
     if (de && de.classList) de.classList.toggle('sx-frame', on);
     if (on) sxFrameHook();
     return on;
+  }
+  // 7.0.31 hotfix (Miles 17:25, the open Duo): the message reader in its own frame from 600 px. html.rd-frame makes the
+  // page one screen, as Sessions' frame does (panes/cos-chat.css): the app shell is the visible box (--vv-top, --vv-h
+  // from viewportFit, which falls back to innerHeight when the visual viewport reads 0 or less), and the reader scrolls
+  // inside its own box with Reply pinned to that box's bottom. Before, the reader was the document: its Reply stuck to the
+  // document's scrollport and the rail was 100dvh, so when Safari's viewport went stale after folds (his Duo reported
+  // visual viewport heights of 0 and -33554432 from 17:17 to 17:24) both ended mid-screen and the message drew below
+  // them. Below 600 px (phones, the folded Duo's side rail) the reader is unchanged; the CSS is gated the same way, so a
+  // class left on across a fold does nothing there. A message's image (#/messages/m/<no>/a/<id>) has no Reply: no frame.
+  function rdFrameOn(r) {
+    var shell = $('app-shell'), wide = !!(window.matchMedia && window.matchMedia('(min-width: 600px)').matches);
+    return !!(r && r.pane === 'messages' && r.args && r.args[0] === 'm' && r.args.length === 2 && wide && !(shell && shell.classList.contains('hidden')));
+  }
+  var RD_FRAME = { hooked: false, n: 0 };
+  function rdFrameSync(r) {
+    var de = document.documentElement, on = rdFrameOn(r || parseRoute());
+    if (de && de.classList) de.classList.toggle('rd-frame', on);
+    if (!RD_FRAME.hooked && window.matchMedia) {
+      RD_FRAME.hooked = true;
+      var mq = window.matchMedia('(min-width: 600px)');
+      if (mq && mq.addEventListener) mq.addEventListener('change', function () { rdFrameSync(); }); else if (mq && mq.addListener) mq.addListener(function () { rdFrameSync(); });
+    }
+    if (on && window.requestAnimationFrame) window.requestAnimationFrame(function () { rdFrameCrumb('open'); });
+    return on;
+  }
+  // Where the reader frame's box and its Reply sit against the visible area and against 100dvh, once per open, at most
+  // 8 a page load (numbers only). The 17:25 frame could not be measured; this one would have been.
+  function rdFrameCrumb(why) {
+    if (RD_FRAME.n >= 8 || typeof layoutCrumb !== 'function' || !document.documentElement.classList.contains('rd-frame')) return false;
+    try {
+      var v = viewportFit(), f = document.querySelector('#pane-messages .cx-reply-form'), cx = document.querySelector('#pane-messages > .cx');
+      var fr = f && f.getBoundingClientRect ? f.getBoundingClientRect() : null, cr = cx && cx.getBoundingClientRect ? cx.getBoundingClientRect() : null;
+      var se = document.scrollingElement || document.documentElement;
+      var out = { why: String(why || '').slice(0, 24), fb: !!v.bad, boxT: v.top, boxB: v.top + v.height, rdT: cr ? cr.top : -1, rdB: cr ? cr.bottom : -1,
+        replyB: fr ? fr.bottom : -1, docH: se ? se.scrollHeight : -1, dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null };
+      if (layoutCrumb('rd-frame', out)) { RD_FRAME.n++; return true; }
+    } catch (_e) { /* a report never stops the page */ }
+    return false;
   }
   // Where the frame's parts sit against the VISIBLE area (step 1's position report, lead 23:00): on a reader's open, and
   // KB_AFTER_MS after an on-screen keyboard closes while the frame is on. The visible area is viewportFit's box (a
