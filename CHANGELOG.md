@@ -1,3 +1,18 @@
+## 7.0.28 - Control Web: the sign-in screen is styled even before the page can reach your Mac, and the page fixes itself when it can; page errors are reported
+
+2026-11-11. 7.0.27 plus two Control Web changes.
+
+- **No more unstyled "Connect this browser" page.** Opening the web app before your phone could reach your Mac (Tailscale still connecting, or the Mac waking) could draw the page without its stylesheets: a plain black or white page with default text and buttons, and the COS mark drawn large twice. It stayed that way, because nothing asked for the stylesheets again. Now the sign-in and "not answering" screens carry their own styling inside the page, so they look right from the first moment. While a stylesheet or script is missing, the page checks after 1, 2, 4 and 8 seconds, then every 30 seconds, and as soon as your Mac answers it loads what was missing, reloading itself if a script was missing (never more than twice in 5 minutes). The "not answering" screen also checks again after 1, 2, 4 and 8 seconds before settling on every 30 seconds.
+- **Page errors are reported.** A script error or an unhandled failure in Control Web now sends one short, numbers-only report to your Mac (what kind, the file, the line), at most 10 per page load. It never includes what you typed, a message or any text from the page. A page that had to bring back its styling reports that too, the same way.
+- Tested in a browser with the page's files really blocked and then unblocked, at the open and folded phone sizes, in light and dark: 7.0.27 shows the unstyled page and stays broken, and this build shows the styled screen and recovers within seconds. The Sessions list, the reader and the reply box are unchanged.
+
+**Default-on for every install:** yes, both changes; there is no switch.
+
+### If you roll back
+
+- To 7.0.27: an open that cannot reach your Mac can show the unstyled page again until you close and reopen it, and page errors are no longer reported. Nothing is stored by this release.
+- To 7.0.18: as in 7.0.27 below.
+
 ## 7.0.27 - Control Web: the Sessions list fits its column at every width
 
 2026-11-11. 7.0.26 plus one Control Web layout fix.
