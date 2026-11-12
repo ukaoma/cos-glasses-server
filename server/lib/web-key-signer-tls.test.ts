@@ -1112,6 +1112,16 @@ describe('SR-01: trusted means publicly trusted (chain to Node\'s bundled roots,
     expect(checkSignerTlsPair(`${pairA.certPem}${tailCa.pem}${pairB.keyPem}`, NAME, Date.now(), roots)).toEqual({ ok: false, reason: 'cert_invalid' })
   })
 
+  it('the default roots are Node\'s bundled roots everywhere a pair is checked (source pin: no public key is available to a test)', () => {
+    // A behaviour test would need a publicly trusted leaf WITH its key, which no test can hold. So the three
+    // defaults are pinned by source; the chain logic itself is behaviour-tested above with injected roots.
+    const src = readFileSync(join(import.meta.dirname, 'web-key-signer-tls.ts'), 'utf8')
+    const count = (s: string): number => src.split(s).length - 1
+    expect(count('if (!bundledRoots) bundledRoots = Object.freeze(parseRootPems(rootCertificates))')).toBe(1)
+    expect(count('roots: readonly X509Certificate[] = signerTlsPublicRoots()): SignerTlsPairCheck')).toBe(1)
+    expect(count('this.roots = deps.roots ?? signerTlsPublicRoots()')).toBe(1)
+  })
+
   it('an untrusted stored pair never serves, never ends the check and never blocks the fetch', async () => {
     const base = mkdtempSync(join(tmpdir(), 'signer-tls-untrusted-'))
     dirs.push(base)
