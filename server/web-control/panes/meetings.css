@@ -28,6 +28,10 @@
 .mt-day:not(:disabled):hover { background: var(--qopen); }
 .mt-day[aria-pressed='true'] { background: color-mix(in srgb, var(--tint) 18%, transparent); font-weight: 600; }
 .mt-day:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 7.0.30 item 4: today is marked with a ring in the theme's accent (no fill, so a picked day still reads as picked). */
+.mt-day.mt-today { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.mt-day.mt-today .mt-dnum { font-weight: 600; }
+.mt-jump-row { margin: 0 2px 12px; }
 .mt-dot { width: 5px; height: 5px; border-radius: 50%; background: transparent; }
 .mt-dot.on { background: var(--tint); }
 .mt-all { margin-top: 8px; }

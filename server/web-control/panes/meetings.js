@@ -525,10 +525,12 @@
     for (var w = 0; w < 7; w++) heads += '<span class="mt-wd" aria-hidden="true">' + esc(new Date(2023, 0, 1 + (ws + w) % 7).toLocaleDateString(undefined, { weekday: 'narrow' })) + '</span>';
     var cells = '', n = 0;
     for (var i = 0; i < lead; i++) { cells += '<span class="mt-blank"></span>'; n++; }
+    // 7.0.30 item 4: today is marked (a ring, aria-current) and can be picked even with no meetings.
+    var todayKey = dayKey(new Date());
     for (var day = 1; day <= dim; day++) {
-      var key = S.month + '-' + pad2(day), c = counts[key] || 0, on = S.day === key;
-      cells += '<button type="button" class="mt-day" data-mt="day" data-day="' + key + '" aria-pressed="' + on + '"' + (c === 0 ? ' disabled' : '') +
-        ' aria-label="' + esc(key + (c === 0 ? ', no meetings' : ', ' + c + ' meetings')) + '"><span class="mt-dnum">' + day + '</span><span class="mt-dot' + (c > 0 ? ' on' : '') + '"></span></button>';
+      var key = S.month + '-' + pad2(day), c = counts[key] || 0, on = S.day === key, isToday = key === todayKey;
+      cells += '<button type="button" class="mt-day' + (isToday ? ' mt-today' : '') + '" data-mt="day" data-day="' + key + '" aria-pressed="' + on + '"' + (isToday ? ' aria-current="date"' : '') + (c === 0 && !isToday ? ' disabled' : '') +
+        ' aria-label="' + esc(key + (isToday ? ', today' : '') + (c === 0 ? ', no meetings' : ', ' + c + ' meetings')) + '"><span class="mt-dnum">' + day + '</span><span class="mt-dot' + (c > 0 ? ' on' : '') + '"></span></button>';
       n++;
     }
     while (n % 7 !== 0) { cells += '<span class="mt-blank"></span>'; n++; }
@@ -594,6 +596,20 @@
       (m.sessionId ? pillsHtml(m, isNew(m.sessionId)) : '') + '</span><span class="chev"></span></button>';
   }
   function emptyBox(text) { return '<div class="cx-list"><p class="cx-empty mt-empty">' + esc(text) + '</p></div>'; }
+  // 7.0.30 item 4: today with no meetings says so in plain words, with one tap to the latest earlier day that has some
+  // (this month), or to last month when this month has none. The calendar stays as it is.
+  function latestDayBefore(key) {
+    var best = '';
+    (S.days || []).forEach(function (d) { if (num(d.count) > 0 && d.date < key && d.date > best) best = d.date; });
+    return best;
+  }
+  function emptyToday() {
+    var last = latestDayBefore(dayKey(new Date()));
+    var jump = last
+      ? '<button type="button" class="cx-btn quiet mt-jump" data-mt="jump-day" data-day="' + esc(last) + '">Go to ' + esc(W.plainDay ? W.plainDay(last) : last) + '</button>'
+      : '<button type="button" class="cx-btn quiet mt-jump" data-mt="month" data-delta="-1">Go to last month</button>';
+    return '<div class="cx-list"><p class="cx-empty mt-empty">No meetings today.</p><p class="mt-jump-row">' + jump + '</p></div>';
+  }
   function paintList() {
     var el = $('mt-list'); if (!el) return;
     var html;
@@ -611,6 +627,7 @@
       var rows = visibleRows();
       html = rows.length ? '<div class="cx-list">' + rows.map(function (m) { return rowHtml(m, false); }).join('') + '</div>' +
           (monthCapped() ? '<p class="mt-capnote">Showing the newest ' + S.rows.length + ' of ' + monthTotal() + ' in ' + esc(monthTitle(S.month)) + '. Pick a day in the calendar to see all of its meetings.</p>' : '')
+        : S.day && S.day === dayKey(new Date()) ? emptyToday()
         : emptyBox(S.day ? 'No meetings stored on ' + S.day + '. Pick another day, or show the whole month.' : 'No meetings stored in ' + monthTitle(S.month) + '.');
     }
     if (S.listHtml === html) return;
@@ -643,9 +660,10 @@
       S.days = days;
       var kept = S.dayRows; S.dayRows = {};
       if (S.day && kept[S.day]) S.dayRows[S.day] = kept[S.day];
+      // 7.0.30 item 4 (Miles 10:15: "Meetings should SHOW the current day"): the current month opens on today, with
+      // meetings or without (the list then says so and offers the latest day that has some).
       if (!S.autoDay && S.month === monthKey(new Date())) {
-        var today = dayKey(new Date());
-        if (days.some(function (x) { return x.date === today && num(x.count) > 0; })) S.day = today;
+        S.day = dayKey(new Date());
         S.autoDay = true;
       }
       S.error = ''; S.loading = false;
@@ -2667,6 +2685,7 @@
       case 'month': shiftMonth(Number(t.getAttribute('data-delta')) || 0); return;
       case 'day': { var d = t.getAttribute('data-day'); S.day = S.day === d ? null : d; S.autoDay = true; paintBrowse(); ensureDay(); return; }
       case 'all-month': S.day = null; S.autoDay = true; paintBrowse(); return;
+      case 'jump-day': { S.day = t.getAttribute('data-day'); S.autoDay = true; paintBrowse(); ensureDay(); return; }
       case 'clear': {
         S.q = ''; S.hits = null; S.ranFor = ''; S.searching = false; S.searchError = ''; clearTimeout(S.qTimer);
         var q = $('mt-q'); if (q) { q.value = ''; q.focus(); }
