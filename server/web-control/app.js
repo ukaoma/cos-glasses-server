@@ -284,6 +284,16 @@
   }
 
   // ── API ─────────────────────────────────────────────────
+  // 7.0.29 R1 (Q1 FIX 1): a write on its way to the Mac (a send, a save). theme.js's restyle check asks window.CosBusy
+  // before it reloads the page, so a reload never lands on a message in flight.
+  var WRITES = { n: 0 };
+  function writeStart(method) {
+    if (!method || method === 'GET') return function () {};
+    WRITES.n++;
+    var once = false;
+    return function () { if (!once) { once = true; WRITES.n = Math.max(0, WRITES.n - 1); } };
+  }
+  if (typeof window === 'object' && window) window.CosBusy = function () { return WRITES.n > 0 || !!(typeof state === 'object' && state && state.reading && state.reading.sending); };
   function api(path, opts) {
     var o = opts || {};
     var headers = { 'X-COS-Web': '1' };
@@ -296,7 +306,7 @@
     var limit = o.timeoutMs != null ? o.timeoutMs : (method === 'GET' ? API_READ_TIMEOUT_MS : 0);
     var ctrl = limit && window.AbortController ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, limit) : null;
-    var sentAt = Date.now();
+    var sentAt = Date.now(), writeDone = typeof writeStart === 'function' ? writeStart(method) : function () {};
     return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: body, signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
       // Blob bodies keep their deadline after headers: a stalled download must release its queue slot.
       if (timer && o.responseType !== 'blob') clearTimeout(timer);
@@ -324,9 +334,11 @@
       });
     }).then(function (value) {
       if (timer) clearTimeout(timer);
+      writeDone();
       return value;
     }, function (err) {
       if (timer) clearTimeout(timer);
+      writeDone();
       if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {
         // 6.99.32 (QA 6.99.30 canary W1): a read the Mac never answered in time means it is not answering. A write has
         // no deadline unless its caller set one, and a slow save is not a Mac that went away, so only reads say so.
@@ -3920,7 +3932,7 @@
     var timer = ctrl && o.timeoutMs ? setTimeout(function () { ctrl.abort(); }, o.timeoutMs) : null;
     var headers = { 'X-COS-Web': '1' };
     if (o.body !== undefined) headers['Content-Type'] = 'application/json';
-    var sentAt = Date.now();
+    var sentAt = Date.now(), writeDone = typeof writeStart === 'function' ? writeStart(o.method || 'GET') : function () {};
     return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined, signal: ctrl ? ctrl.signal : undefined })
       .then(function (res) {
         sxNoteClock(res, sentAt);
@@ -3933,7 +3945,7 @@
         noteServer(false);
         throw unreachableError(err);
       })
-      .finally(function () { if (timer) clearTimeout(timer); });
+      .finally(function () { if (timer) clearTimeout(timer); writeDone(); });
   }
 
   // Per-browser memory for one session: messages held until a reply ends, and the queue keys
@@ -4584,21 +4596,34 @@
     var input = $('session-input'), v = r ? SX_UNSENT[unsentKey(r.provider, r.id)] : '';
     if (input && v && !input.value) { input.value = v; autoGrow(input); }
   }
-  function unsentDrop(text) {
+  // 7.0.29 R4 (Q1 Note 1): the saved words of the session the message was sent FROM only, never another session's
+  // words that happen to match. No session named, nothing is dropped.
+  function unsentDrop(text, r) {
+    if (!r || !r.provider || !r.id) return;
+    var k = unsentKey(r.provider, r.id), v = SX_UNSENT[k];
+    if (v == null) return;
     var t = String(text).trim(), bare = typeof turnEndBare === 'function' ? turnEndBare(text) : t;
-    Object.keys(SX_UNSENT).forEach(function (k) { var v = SX_UNSENT[k].trim(); if (v === t || v === bare) delete SX_UNSENT[k]; });
+    v = String(v).trim();
+    if (v === t || v === bare) delete SX_UNSENT[k];
   }
-  // The box is cleared only of the very words that were sent; anything typed since stays.
-  function clearBoxOf(text) {
-    if (typeof unsentDrop === 'function') unsentDrop(text);
+  // The box is cleared only of the very words that were sent; anything typed since stays. `r` is the session they were
+  // sent from: another session's box is never touched (R4).
+  function clearBoxOf(text, r) {
+    if (typeof unsentDrop === 'function') unsentDrop(text, r || state.reading);
+    if (r && state.reading !== r) return;
     var input = $('session-input');
     // 7.0.18: an answer to a turn-end ask was sent with the attribution in front; the box holds his words without it.
     if (input && (input.value.trim() === String(text).trim() || input.value.trim() === turnEndBare(text))) { input.value = ''; autoGrow(input); }
     if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null;
   }
   // Words go back in the box only if the box is empty; otherwise the status line keeps them. `files` says what became
-  // of the message's files (heldFilesBack).
-  function returnToBox(text, why, files) {
+  // of the message's files (heldFilesBack). 7.0.29 R4: when `r`, the session they came from, is not the one open, they
+  // go to that session's saved words (back in its box when it opens), never into the open session's box.
+  function returnToBox(text, why, files, r) {
+    if (r && r.provider && r.id && state.reading !== r) {
+      if (typeof unsentKey === 'function') { var k = unsentKey(r.provider, r.id), had = SX_UNSENT[k]; SX_UNSENT[k] = had && String(had).trim() ? had + '\n\n' + text : text; }
+      return;
+    }
     var input = $('session-input');
     if (input && !input.value.trim()) { input.value = text; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); sessionStatus(why + ' Your message is back in the box.' + (files || ''), 'error'); }
     else sessionStatus(why + ' Not sent: “' + String(text).slice(0, 80) + (text.length > 80 ? '…' : '') + '”' + (files || ''), 'error');
@@ -4627,7 +4652,7 @@
   var READER_VIEW = {
     status: function (r, text, kind, actionHtml) { sessionStatus(text, kind, actionHtml); },
     pending: function (r, text, note) { showPendingTurn(text, note); },
-    clear: function (r, text) { clearBoxOf(text); },
+    clear: function (r, text) { clearBoxOf(text, r); },
     verdict: function (r) { renderVerdict(r); },
     hold: function (r, draft) { holdUntilReplyEnds(r, draft); },
     watch: function (r, bindingId, key) { watchTurn(bindingId, key, r.provider, r.id); },
@@ -4742,9 +4767,11 @@
     if (r.refusal || r.cautionAsk) { r.refusal = null; r.cautionAsk = false; renderVerdict(r); }
     // 7.0.18: while a turn-end ask is open, the box's words are his own answer ('Other' in the contract): sent with the
     // same attribution as a choice. A fork goes to a copy and is not an answer, so it is sent as written.
-    if (!fork && r.turnEnd && turnEndOf(readerRowOf(r))) text = turnEndPrompt(text);
-    // 7.0.29 ADD 3: what he had been shown when he pressed Send (a turn-end answer never resends by itself).
-    if (!fork && typeof sxPressSeen === 'function') opts = Object.assign({}, opts || {}, { seen: r.turnEnd ? null : sxPressSeen(r) });
+    var answering = !!(!fork && r.turnEnd && turnEndOf(readerRowOf(r)));
+    if (answering) text = turnEndPrompt(text);
+    // 7.0.29 ADD 3: what he had been shown when he pressed Send. A turn-end answer never resends by itself; R6 (Q1's nit):
+    // the same test as the answer's prefix (r.turnEnd AND the ask still open), so a message after a closed ask is a message.
+    if (!fork && typeof sxPressSeen === 'function') opts = Object.assign({}, opts || {}, { seen: answering ? null : sxPressSeen(r) });
     r.sending = true;
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
     var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); paintReaderFiles(); };
@@ -5064,7 +5091,7 @@
       showPendingTurn(draft.text, 'sends after this reply', draft.key);
       saveHeld(r);
     }
-    clearBoxOf(draft.text);
+    clearBoxOf(draft.text, r);
     sessionStatus('COS is still answering. ' + (r.held.length > 1 ? r.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don’t send</button>');
     startHeldTimer(r);
   }
@@ -5097,7 +5124,7 @@
     } else {
       if (bubble) bubble.remove();
       // The whole message comes back: its words, and its files where the Mac still keeps them.
-      returnToBox(h.text, how === 'cancelled' ? 'Not sent.' : copy || 'Not sent.', heldFilesBack(r, h));
+      returnToBox(h.text, how === 'cancelled' ? 'Not sent.' : copy || 'Not sent.', heldFilesBack(r, h), r);
     }
     if (!r.held.some(function (x) { return !x.cancelled; })) clearInterval(r.heldTimer);
   }
@@ -5169,7 +5196,7 @@
     sessionStatus('Copying the session. This can take up to a minute.');
     var settle = function (b) {
       if (b.forked === true) {
-        r.forkDraft = null; clearBoxOf(text); readerFilesSent(readerFilesOn() ? readerBox(r) : null, ids);
+        r.forkDraft = null; clearBoxOf(text, r); readerFilesSent(readerFilesOn() ? readerBox(r) : null, ids);
         sessionStatus('Forked. The copy has your message and shows in Sessions in a moment.');
         setTimeout(function () { if (state.pane === 'sessions') loadSessions(true); }, 4000);
         return true;

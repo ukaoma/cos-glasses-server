@@ -94,7 +94,12 @@
    Mac for the failed file after 1, 2, 4 and 8 s, then every 30 s, only while the page is in front. When the Mac
    answers: a failed script reloads the page (app.js cannot be re-run in place); failed stylesheets are asked for again
    in place. A file that keeps failing never loops: at most 2 reloads in 5 minutes. What happened is kept for app.js's numbers-only 'restyle' row (window.CosRestyle.last, and sessionStorage
-   across the reload). */
+   across the reload).
+   7.0.29 (Q1 FIX 1 and 2, the lead's R1 and R2): the page never reloads by itself over his words. While any text box
+   holds words, focus is in a text box, or a send is in flight (app.js's window.CosBusy; when app.js is the script that
+   failed, the boxes alone), it shows one line with a Reload button instead, and only his tap reloads. The cap fails
+   closed: if the reload count cannot be read, or does not read back after writing (storage blocked), it gives up and
+   shows the same line rather than reloading. */
 (function () {
   var STEPS = [1000, 2000, 4000, 8000], SETTLED_MS = 30000, KEY = 'cos_web_restyle', RELOADS_KEY = 'cos_web_restyle_reloads';
   var RELOAD_MAX = 2, RELOAD_WINDOW_MS = 5 * 60000;
@@ -113,16 +118,66 @@
     R.last = { how: how, sheets: R.sheets, scripts: R.scripts.length, tries: R.tries, ms: R.t0 ? Date.now() - R.t0 : 0 };
     try { window.dispatchEvent(new CustomEvent('cos-restyle', { detail: R.last })); } catch (_e) {}
   }
+  // What would be lost by a reload: words in a text box he can see, focus in one, or a send on its way (app.js).
+  function busy() {
+    var out = { words: false, focus: false, sending: false };
+    try {
+      [].forEach.call(document.querySelectorAll('textarea, input, [contenteditable]'), function (el) {
+        if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return;   // app.js's hidden measuring copy
+        if (el.tagName === 'INPUT' && !/^(|text|search|email|url|tel|password|number)$/i.test(el.getAttribute('type') || '')) return;
+        var v = el.isContentEditable ? el.textContent : el.value;
+        if (v && String(v).trim()) out.words = true;
+      });
+      var a = document.activeElement;
+      out.focus = !!(a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && /^(|text|search|email|url|tel|password|number)$/i.test(a.getAttribute('type') || '')) || a.isContentEditable));
+    } catch (_e) {}
+    try { out.sending = typeof window.CosBusy === 'function' && !!window.CosBusy(); } catch (_e) {}
+    out.any = out.words || out.focus || out.sending;
+    return out;
+  }
+  // The one line, in place of a reload. Inline styles with the theme's own colours where they exist, so it reads right
+  // on a page whose stylesheet failed too. At the top: a fixed bar near the bottom fights the phone browser's own bar.
+  // On the folded Duo it stops at the side rail (--rail-w is set only while that rail shows).
+  function offer(b) {
+    try { offerLine(b); } catch (_e) { /* no line, and still no reload by itself */ }
+  }
+  function offerLine(b) {
+    var line = document.getElementById('cos-reload-line');
+    if (!line) {
+      line = document.createElement('div');
+      line.id = 'cos-reload-line'; line.setAttribute('role', 'status');
+      line.style.cssText = 'position:fixed;left:12px;right:calc(12px + var(--rail-w, 0px));top:calc(env(safe-area-inset-top, 0px) + 8px);z-index:90;display:flex;align-items:center;gap:12px;' +
+        'padding:10px 10px 10px 14px;border-radius:12px;border:1px solid var(--panel-border, #a08a66);background:var(--panel, #ffffff);color:var(--ink, #1f1712);' +
+        'font:400 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;max-width:560px;margin:0 auto;';
+      var p = document.createElement('p'); p.style.cssText = 'margin:0;flex:1 1 auto;min-width:0;'; p.id = 'cos-reload-words';
+      var btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Reload';
+      btn.style.cssText = 'flex:none;min-height:44px;padding:0 16px;border-radius:10px;border:0;background:var(--accent, #89662d);color:var(--on-accent, #ffffff);font-family:inherit;font-size:15px;font-weight:600;line-height:1;';
+      btn.addEventListener('click', function () { reloadNow(); });
+      line.appendChild(p); line.appendChild(btn);
+      (document.body || document.documentElement).appendChild(line);
+    }
+    var words = document.getElementById('cos-reload-words');
+    if (words) words.textContent = 'Part of this page did not load.' + (b && b.words ? ' Send or copy what you have typed first. A reload clears it.' : '');
+  }
+  function reloadNow() {
+    try { sessionStorage.setItem(KEY, JSON.stringify(R.last)); sessionStorage.setItem('cos_web_bust', String(Date.now())); } catch (_e) {}
+    location.reload();
+  }
   function recover() {
     if (R.scripts.length) {
-      // At most 2 reloads in 5 minutes: a file that keeps failing must never become a reload loop.
-      var recent = [];
-      try { recent = JSON.parse(sessionStorage.getItem(RELOADS_KEY) || '[]').filter(function (t) { return Date.now() - t < RELOAD_WINDOW_MS; }); } catch (_e) { recent = []; }
-      if (recent.length >= RELOAD_MAX) { R.done = true; record('gave-up'); return; }
-      try { recent.push(Date.now()); sessionStorage.setItem(RELOADS_KEY, JSON.stringify(recent)); } catch (_e) {}
+      // Never by itself over his words (R1): the line, and only his tap reloads.
+      var b = busy();
+      if (b.any) { R.done = true; record('offered'); offer(b); return; }
+      // At most 2 reloads in 5 minutes: a file that keeps failing must never become a reload loop. Fails closed (R2): a
+      // count that cannot be read, or that does not read back after writing, means no reload by itself.
+      var recent = null, back = null;
+      try { recent = JSON.parse(sessionStorage.getItem(RELOADS_KEY) || '[]').filter(function (t) { return Date.now() - t < RELOAD_WINDOW_MS; }); } catch (_e) { recent = null; }
+      if (!recent || recent.length >= RELOAD_MAX) { R.done = true; record('gave-up'); offer(b); return; }
+      var now = Date.now();
+      try { recent.push(now); sessionStorage.setItem(RELOADS_KEY, JSON.stringify(recent)); back = JSON.parse(sessionStorage.getItem(RELOADS_KEY) || 'null'); } catch (_e) { back = null; }
+      if (!back || back.length !== recent.length || back[back.length - 1] !== now) { R.done = true; record('gave-up'); offer(b); return; }
       record('reload');
-      try { sessionStorage.setItem(KEY, JSON.stringify(R.last)); sessionStorage.setItem('cos_web_bust', String(Date.now())); } catch (_e) {}
-      location.reload();
+      reloadNow();
       return;
     }
     var gone = missing();

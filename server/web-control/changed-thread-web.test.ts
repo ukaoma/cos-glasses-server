@@ -25,8 +25,9 @@ describe('what never resends by itself', () => {
     expect(held).toBeGreaterThan(-1)
     expect(held).toBeLessThan(branch.indexOf('sxChangedLook('))
   })
-  it('a turn-end answer: Send records no "shown" for it (null), so the automatic path never runs', () => {
-    expect(APP).toContain('if (!fork && typeof sxPressSeen === \'function\') opts = Object.assign({}, opts || {}, { seen: r.turnEnd ? null : sxPressSeen(r) });')
+  it('a turn-end answer (the ask still open, R6): Send records no "shown" for it (null), so the automatic path never runs; the same test makes the prefix', () => {
+    expect(APP).toContain('    var answering = !!(!fork && r.turnEnd && turnEndOf(readerRowOf(r)));\n    if (answering) text = turnEndPrompt(text);')
+    expect(APP).toContain('if (!fork && typeof sxPressSeen === \'function\') opts = Object.assign({}, opts || {}, { seen: answering ? null : sxPressSeen(r) });')
     expect(branch).toContain("opts.seen === null ? 'This session changed on your Mac. Your answer is not sent yet.'")
   })
   it('Today’s panel sends no "shown", so it keeps the box it had (the lead: unchanged this pass)', () => {

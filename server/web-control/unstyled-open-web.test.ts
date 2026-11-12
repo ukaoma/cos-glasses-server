@@ -56,27 +56,39 @@ describe('the inline critical CSS (index.html)', () => {
 
 // theme.js's second part, the restyle check, run against fakes.
 const RESTYLE = (() => { const a = THEME.indexOf('/* 7.0.28 (Miles 19:28'); expect(a).toBeGreaterThan(-1); return THEME.slice(THEME.indexOf('(function () {', a)) })()
-function kit(o: { sheets?: Array<'ok' | 'empty' | 'throws' | 'none'>; store?: Record<string, string>; fetchOk?: () => boolean } = {}) {
+type Box = { tagName: string; value?: string; type?: string; hidden?: boolean; editable?: boolean }
+function kit(o: { sheets?: Array<'ok' | 'empty' | 'throws' | 'none'>; store?: Record<string, string>; fetchOk?: () => boolean; boxes?: Box[]; active?: number; busy?: boolean; storage?: 'ok' | 'throws' | 'sticks-not' } = {}) {
   const timers: Array<{ fn: () => void; ms: number }> = [], fetched: string[] = [], inserted: string[] = []
   let reloads = 0
   const store: Record<string, string> = { ...(o.store || {}) }
+  const byId: Record<string, any> = {}
+  const mk = (tag: string): any => { const el: any = { tagName: tag.toUpperCase(), style: {}, children: [] as any[], listeners: {} as Record<string, () => void>, textContent: '',
+    setAttribute(k: string, v: string) { if (k === 'id') { el.id = v; byId[v] = el } else el['attr_' + k] = v }, getAttribute(k: string) { return el['attr_' + k] ?? null },
+    appendChild(c: any) { el.children.push(c); const reg = (x: any) => { if (x.id) byId[x.id] = x; (x.children || []).forEach(reg) }; reg(c); return c }, addEventListener(t: string, f: () => void) { el.listeners[t] = f } }
+    return new Proxy(el, { set(t, k, v) { t[k as string] = v; if (k === 'id') byId[v] = t; return true } }) }
+  const boxes = (o.boxes || []).map(b => ({ tagName: b.tagName.toUpperCase(), value: b.value ?? '', isContentEditable: !!b.editable, textContent: b.editable ? b.value : '', getAttribute: (k: string) => (k === 'aria-hidden' ? (b.hidden ? 'true' : null) : k === 'type' ? (b.type ?? null) : null) }))
+  const body = mk('body')
   const links = (o.sheets || ['ok']).map((k, i) => ({
     href: '/control/s' + i + '.css', getAttribute: () => '/control/s' + i + '.css',
     get sheet() { if (k === 'none') return null; return { get cssRules() { if (k === 'throws') throw new Error('SecurityError'); return { length: k === 'empty' ? 0 : 3 } } } },
     parentNode: { insertBefore: (el: any) => inserted.push(el.href), removeChild: () => {} }, nextSibling: null,
   }))
   const listeners: Record<string, () => void> = {}
-  const document = { hidden: false, readyState: 'complete', querySelectorAll: () => links, createElement: () => ({}), addEventListener: (t: string, f: () => void) => { listeners[t] = f } }
-  const window: any = { fetch: (u: string) => { fetched.push(u); return (o.fetchOk ? o.fetchOk() : true) ? Promise.resolve({ ok: true }) : Promise.reject(new Error('down')) }, addEventListener: () => {}, dispatchEvent: () => {} }
+  const document = { hidden: false, readyState: 'complete', body, get activeElement() { return o.active != null ? boxes[o.active] : body },
+    querySelectorAll: (sel: string) => (/link/.test(sel) ? links : boxes), createElement: (t: string) => mk(t), getElementById: (id: string) => byId[id] || null, addEventListener: (t: string, f: () => void) => { listeners[t] = f } }
+  const window: any = { fetch: (u: string) => { fetched.push(u); return (o.fetchOk ? o.fetchOk() : true) ? Promise.resolve({ ok: true }) : Promise.reject(new Error('down')) }, addEventListener: () => {}, dispatchEvent: () => {},
+    CosBusy: o.busy === undefined ? undefined : () => o.busy }
   const deps = {
     window, document, location: { reload: () => { reloads++ } },
-    sessionStorage: { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v }, removeItem: (k: string) => { delete store[k] } },
+    sessionStorage: o.storage === 'throws' ? { getItem: () => { throw new Error('SecurityError') }, setItem: () => { throw new Error('SecurityError') }, removeItem: () => { throw new Error('SecurityError') } }
+      : o.storage === 'sticks-not' ? { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+      : { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v }, removeItem: (k: string) => { delete store[k] } },
     setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, CustomEvent: class { constructor(public type: string, public init: any) {} },
     Date, JSON, Promise,
   }
   // eslint-disable-next-line no-new-func
   new Function('deps', `with (deps) {\n${RESTYLE}\n}`)(deps)
-  return { timers, fetched, inserted, store, get reloads() { return reloads }, R: window.CosRestyle, listeners }
+  return { timers, fetched, inserted, store, get reloads() { return reloads }, R: window.CosRestyle, listeners, line: () => byId['cos-reload-line'] || null, words: () => (byId['cos-reload-words'] || {}).textContent }
 }
 const flush = () => new Promise(r => setTimeout(r, 0))
 
@@ -123,5 +135,82 @@ describe("theme.js's restyle check (7.0.28)", () => {
     expect(THEME).toContain("bust = sessionStorage.getItem('cos_web_bust') || ''; sessionStorage.removeItem('cos_web_bust');")
     expect(THEME).toMatch(/el\.src = \/\^\\d\{1,15\}\$\/\.test\(bust\) \? src \+ \(src\.indexOf\('\?'\) >= 0 \? '&' : '\?'\) \+ 'r=' \+ bust : src;/)
     expect(THEME).toContain("el.onerror = function () { if (window.CosRestyle) window.CosRestyle.scriptFailed(src);")
+  })
+})
+
+// 7.0.29 R1 and R2 (Q1 FIX 1 and 2): never a reload by itself over his words, and a cap that fails closed.
+describe("theme.js's restyle never reloads over his words (R1) and its cap fails closed (R2)", () => {
+  const failedScript = async (o: Parameters<typeof kit>[0]) => { const k = kit({ sheets: ['ok'], ...o }); k.R.scriptFailed('/control/app.js'); k.timers[0]!.fn(); await flush(); return k }
+  const button = (k: ReturnType<typeof kit>) => k.line()!.children.find((c: any) => c.tagName === 'BUTTON')
+  it('words in a text box: no reload, one line that says so, and a Reload button; only the tap reloads', async () => {
+    const k = await failedScript({ boxes: [{ tagName: 'textarea', value: 'half a reply' }] })
+    expect(k.reloads).toBe(0)
+    expect(k.R.last.how).toBe('offered')
+    expect(k.words()).toBe('Part of this page did not load. Send or copy what you have typed first. A reload clears it.')
+    expect(button(k).textContent).toBe('Reload')
+    button(k).listeners.click()
+    expect(k.reloads).toBe(1)
+    expect(k.store.cos_web_bust, 'the reload still asks for its scripts afresh').toMatch(/^\d+$/)
+  })
+  it('focus in an empty text box: no reload; the line without the typed-words sentence', async () => {
+    const k = await failedScript({ boxes: [{ tagName: 'input', type: 'search', value: '' }], active: 0 })
+    expect(k.reloads).toBe(0)
+    expect(k.words()).toBe('Part of this page did not load.')
+  })
+  it('a send in flight (app.js window.CosBusy): no reload', async () => {
+    const k = await failedScript({ busy: true })
+    expect(k.reloads).toBe(0)
+    expect(k.R.last.how).toBe('offered')
+  })
+  it('nothing typed, no focus, nothing sending: the reload goes ahead as before; app.js\'s hidden measuring copy and a checkbox are not his words', async () => {
+    const k = await failedScript({ boxes: [{ tagName: 'textarea', value: 'Message this session (not an answer)', hidden: true }, { tagName: 'input', type: 'checkbox', value: 'on' }], busy: false })
+    expect(k.reloads).toBe(1)
+    expect(k.line()).toBeNull()
+  })
+  it('storage that throws: gave up, no reload, the line (5 page lifetimes, 0 reloads)', async () => {
+    let total = 0
+    for (let i = 0; i < 5; i++) { const k = await failedScript({ storage: 'throws' }); total += k.reloads; expect(k.R.last.how).toBe('gave-up'); expect(k.line()).not.toBeNull() }
+    expect(total).toBe(0)
+  })
+  it('storage that takes the write but keeps nothing: the count does not read back, so gave up and no reload', async () => {
+    const k = await failedScript({ storage: 'sticks-not' })
+    expect(k.reloads).toBe(0)
+    expect(k.R.last.how).toBe('gave-up')
+    expect(k.words()).toBe('Part of this page did not load.')
+  })
+})
+
+
+// R1's other half: app.js tells theme.js when a write is on its way to the Mac (window.CosBusy).
+describe('app.js window.CosBusy: a send or a save in flight', () => {
+  const APPJS = readFileSync(join(HERE, 'app.js'), 'utf8')
+  const BLOCK = (() => { const a = APPJS.indexOf('  // 7.0.29 R1 (Q1 FIX 1): a write on its way to the Mac'), b = APPJS.indexOf('  function api(path, opts) {'); expect(a).toBeGreaterThan(-1); expect(b).toBeGreaterThan(a); return APPJS.slice(a, b) })()
+  function busyKit() {
+    const window: any = {}, state: any = { reading: null }
+    // eslint-disable-next-line no-new-func
+    const writeStart = new Function('window', 'state', `${BLOCK}\nreturn writeStart;`)(window, state)
+    return { window, state, writeStart }
+  }
+  it('a read is never busy; a write is busy until it settles, once, however often its end is called', () => {
+    const k = busyKit()
+    k.writeStart('GET')
+    expect(k.window.CosBusy()).toBe(false)
+    const a = k.writeStart('POST'), b = k.writeStart('PATCH')
+    expect(k.window.CosBusy()).toBe(true)
+    a(); a()
+    expect(k.window.CosBusy(), 'one write still out').toBe(true)
+    b()
+    expect(k.window.CosBusy()).toBe(false)
+  })
+  it('the reader sending counts too', () => {
+    const k = busyKit()
+    k.state.reading = { sending: true }
+    expect(k.window.CosBusy()).toBe(true)
+  })
+  it('both of app.js\'s request paths count their writes and end the count on every way out', () => {
+    expect(APPJS).toContain("var sentAt = Date.now(), writeDone = typeof writeStart === 'function' ? writeStart(method) : function () {};")
+    expect(APPJS).toContain("    }).then(function (value) {\n      if (timer) clearTimeout(timer);\n      writeDone();\n      return value;\n    }, function (err) {\n      if (timer) clearTimeout(timer);\n      writeDone();")
+    expect(APPJS).toContain("var sentAt = Date.now(), writeDone = typeof writeStart === 'function' ? writeStart(o.method || 'GET') : function () {};")
+    expect(APPJS).toContain('      .finally(function () { if (timer) clearTimeout(timer); writeDone(); });')
   })
 })

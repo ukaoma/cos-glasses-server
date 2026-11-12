@@ -1500,6 +1500,37 @@ describe('the native head watermark, and the second turn that must not be refuse
     expect(calls).toHaveLength(0)
   })
 
+  it('7.0.29 (Q1 02:08, Note 5): the page\'s same-id pair: refused, the head moves, the resend with the refused revision is refused with the new one (no replay), Send it anyway with the newest delivers once, and an identical retry replays without delivering twice', async () => {
+    // Control Web resends the SAME clientTurnId (draftFor keeps the key for the same words), so a refusal before delivery
+    // must never be ledgered: each attempt is judged again against the current head.
+    const head = { value: 'h1' }
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      nativeHead: () => head.value,
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: head.value } },
+    }))
+    const a = await attached(base)
+    head.value = 'h2'
+    const body = { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-same-0001' }
+
+    const first = await post(base, turnsPath(a.bindingId), body)
+    expect(first.body).toMatchObject({ reason: 'native_thread_changed', revision: opaqueRevision('h2') })
+
+    head.value = 'h3'
+    const resend = await post(base, turnsPath(a.bindingId), { ...body, acknowledgedRevision: first.body.revision })
+    expect(resend.body).toMatchObject({ reason: 'native_thread_changed', revision: opaqueRevision('h3') })
+    expect(resend.body.replayed).not.toBe(true)
+    expect(calls).toHaveLength(0)
+
+    const anyway = await post(base, turnsPath(a.bindingId), { ...body, acknowledgedRevision: resend.body.revision })
+    expect(anyway.body.outcome).toBe('completed')
+    expect(calls).toHaveLength(1)
+
+    const again = await post(base, turnsPath(a.bindingId), { ...body, acknowledgedRevision: resend.body.revision })
+    expect(again.body.replayed).toBe(true)
+    expect(calls, 'delivered once').toHaveLength(1)
+  })
+
   it('refuses rather than delivering blind when the head cannot be read at turn time', async () => {
     const head: { value: string | null } = { value: 'native-head-1' }
     const calls: AttachedTurnRequest[] = []

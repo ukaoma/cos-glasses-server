@@ -173,8 +173,8 @@ describe('the reader’s card and its send', () => {
     expect(lost.r.sending).toBe(false)
   })
   it('the reader’s box: his own words go with the same attribution while the card is open, and the box clears after', () => {
-    expect(APP).toContain('    if (!fork && r.turnEnd && turnEndOf(readerRowOf(r))) text = turnEndPrompt(text);')
-    const CLEAR = block('  function clearBoxOf(text) {', '  // Words go back in the box only if the box is empty')
+    expect(APP).toContain('    var answering = !!(!fork && r.turnEnd && turnEndOf(readerRowOf(r)));\n    if (answering) text = turnEndPrompt(text);')
+    const CLEAR = block('  function clearBoxOf(text, r) {', '  // Words go back in the box only if the box is empty')
     const box = { value: 'Use the pane, but only after lunch' }
     // eslint-disable-next-line no-new-func
     const clearBoxOf = new Function('deps', `with (deps) {\n${CLEAR}\nreturn clearBoxOf;\n}`)({ $: () => box, autoGrow: () => {}, state: { reading: null }, turnEndBare: TE.turnEndBare }) as (t: string) => void

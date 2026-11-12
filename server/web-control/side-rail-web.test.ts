@@ -246,7 +246,7 @@ describe('F3: unsent words in the reply box survive leaving the session', () => 
     expect(APP).toContain("    if (e.target.id === 'session-input' && typeof unsentSave === 'function') unsentSave();")
     expect(APP).toContain("      readerImagesMount($('session-turns'), r);\n      if (typeof unsentRestore === 'function') unsentRestore(r);")
     expect(APP).toContain("input.value = text; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); sessionStatus(why + ' Your message is back in the box.'")
-    expect(APP).toContain("  function clearBoxOf(text) {\n    if (typeof unsentDrop === 'function') unsentDrop(text);")
+    expect(APP).toContain("  function clearBoxOf(text, r) {\n    if (typeof unsentDrop === 'function') unsentDrop(text, r || state.reading);")
   })
 })
 
@@ -265,5 +265,66 @@ describe('F2: the reply box never cuts its placeholder', () => {
   })
   it('a width change (the rail coming or going, a rotation) fits it again', () => {
     expect(APP).toContain("if (si && typeof sxPlaceholderFit === 'function' && si.phLong) sxPlaceholderFit(si);")
+  })
+})
+
+// R4 (Q1 Note 1): words belong to the session they were typed in. Run against fakes: two sessions, A and B.
+describe('R4: unsent words and returned words stay with their own session', () => {
+  const UNSENT = (() => { const a = APP.indexOf('  var SX_UNSENT = {};'), b = APP.indexOf('  // Your words show in the conversation the moment'); expect(a).toBeGreaterThan(-1); expect(b).toBeGreaterThan(a); return APP.slice(a, b) })()
+  function two() {
+    const A = { provider: 'claude', id: 'aaa' }, B = { provider: 'claude', id: 'bbb' }
+    const box = { value: '' }, status: string[] = []
+    const deps: any = { state: { reading: A }, $: (id: string) => (id === 'session-input' ? box : null), autoGrow: () => {}, turnEndBare: (t: string) => String(t).trim(), sessionStatus: (t: string) => { status.push(t) } }
+    // eslint-disable-next-line no-new-func
+    const f = new Function('deps', `with (deps) {\n${UNSENT}\nreturn { SX_UNSENT, unsentSave, unsentRestore, unsentDrop, clearBoxOf, returnToBox };\n}`)(deps)
+    const open = (r: any) => { deps.state.reading = r; box.value = ''; f.unsentRestore(r) }
+    return { A, B, box, status, deps, f, open }
+  }
+  it('words sent from A drop only A’s saved words; B’s identical words stay', () => {
+    const h = two()
+    h.box.value = 'ship it'; h.f.unsentSave()
+    h.open(h.B); h.box.value = 'ship it'; h.f.unsentSave()
+    h.f.unsentDrop('ship it', h.A)
+    expect(Object.keys(h.f.SX_UNSENT)).toEqual(['claude|bbb'])
+    h.f.unsentDrop('ship it', null)
+    expect(Object.keys(h.f.SX_UNSENT), 'no session named: nothing dropped').toEqual(['claude|bbb'])
+  })
+  it('a send from A that lands while B is open never clears B’s box', () => {
+    const h = two()
+    h.open(h.B); h.box.value = 'ship it'
+    h.f.clearBoxOf('ship it', h.A)
+    expect(h.box.value).toBe('ship it')
+    h.f.clearBoxOf('ship it', h.B)
+    expect(h.box.value).toBe('')
+  })
+  it('a held message from A that comes back while B is open goes to A’s saved words, not into B’s box; A shows it when opened', () => {
+    const h = two()
+    h.open(h.B)
+    h.f.returnToBox('the held words', 'Not sent.', '', h.A)
+    expect(h.box.value).toBe('')
+    expect(h.status, 'nothing is said on B').toEqual([])
+    expect(h.f.SX_UNSENT['claude|aaa']).toBe('the held words')
+    h.open(h.A)
+    expect(h.box.value).toBe('the held words')
+  })
+  it('words A already had saved are kept, with the returned words after them', () => {
+    const h = two()
+    h.box.value = 'typed later'; h.f.unsentSave()
+    h.open(h.B)
+    h.f.returnToBox('the held words', 'Not sent.', '', h.A)
+    expect(h.f.SX_UNSENT['claude|aaa']).toBe('typed later\n\nthe held words')
+  })
+  it('with A open, the words go back in its box and are saved under A, as before', () => {
+    const h = two()
+    h.f.returnToBox('the held words', 'Not sent.', '', h.A)
+    expect(h.box.value).toBe('the held words')
+    expect(h.f.SX_UNSENT['claude|aaa']).toBe('the held words')
+    expect(h.status[0]).toContain('Your message is back in the box.')
+  })
+  it('every caller names the session', () => {
+    expect(APP).toContain('    clear: function (r, text) { clearBoxOf(text, r); },')
+    expect(APP).toContain('    clearBoxOf(draft.text, r);\n    sessionStatus(\'COS is still answering.')
+    expect(APP).toContain("returnToBox(h.text, how === 'cancelled' ? 'Not sent.' : copy || 'Not sent.', heldFilesBack(r, h), r);")
+    expect(APP).toContain('r.forkDraft = null; clearBoxOf(text, r);')
   })
 })
