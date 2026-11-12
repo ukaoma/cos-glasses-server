@@ -1,3 +1,25 @@
+## 7.0.31 - Control Web: a message's text no longer runs under and below Reply on a wide screen
+
+2026-11-12. A hotfix to 7.0.30, nothing else in it.
+
+- **7.0.30 shipped this fault.** On a wide screen (the open Duo, an iPad, a desktop browser), a message's text could run past the bottom of the message, behind and below the pinned Reply box, with the left rail ending partway down. Miles saw it on the open Duo at 17:25. It came from 7.0.30's Reply staying at the bottom of the screen.
+- **The cause.** The message reader was the whole page. Its Reply box was pinned to the browser's view of the screen, and the rail was as tall as that view. After the Duo was folded and unfolded a few times, Safari's view of the screen was about half the real height (the page reported its visible height as 0, then as a large negative number). So Reply and the rail stopped halfway down, and the message carried on below them.
+- **The fix.** From 600 px wide, a message is now one screen, the way Sessions already is. The rail and the message each scroll by themselves. The message scrolls inside its own box, and Reply stays at that box's bottom. At the end of a message, the Reply section sits just above the Reply box, with nothing under it. With the keyboard up, the box sits above the keyboard as before. The screen's height now comes from the page's own measurement, which falls back to the window's height when the browser's reading is broken.
+- **Phones and the folded Duo are unchanged.** Under 600 px the message reader works as in 7.0.30, with the side rail on the folded Duo.
+- **The Reply section stays.** The "Reply. Continues this conversation…" block above the box is where replies sent from that message appear. It is not a second Reply box.
+- **Two new numbers in the page's own layout reports**, numbers only, to the Mac's diagnostics log:
+  - the height of 100dvh at each fold;
+  - where the message's box and its Reply sit when a message opens.
+  The 17:25 frame could not be measured; the next one will be.
+- Tested in a browser (WebKit) with a long message at seven sizes, in light and dark: a tall iPhone, the folded Duo at 85% zoom, 1000x703, the open Duo at 1119x787 and 951x539, an iPad at 1180x820, and a desktop at 1440x900. 7.0.30 fails 20 of these 48 checks; this build passes all 48. The other pinned parts (Sessions' reply box, a question card's buttons, the COS chat's box, Meetings' side panel) were swept at eight sizes. Not tested on a real phone. A stale browser view cannot be produced in a test browser while the window's height stays right, so the fix for that exact state is not proven until the Duo shows it.
+
+**Default-on for every install:** yes, from 600 px wide, with no switch: the message reader is one screen. Nothing changes under 600 px.
+
+### If you roll back
+
+- To 7.0.30: the message reader is the whole page again, and after folds its Reply box and the rail can end partway down the screen with the message below them.
+- Further back: as in 7.0.30 below.
+
 ## 7.0.30 - Control Web: Back goes the way you came, a phone shows how you got here, a message shows who said what, Reply stays at the bottom, Meetings opens on today, and clearer copy buttons
 
 2026-11-12. 7.0.29 plus eight Control Web changes from a tester's phone feedback, one clearer sign-in error, and phone-approval changes that stay off unless switched on.
@@ -22,6 +44,8 @@ Server:
   - The web-key mutation gate's two dead targets now match. The script ships in the npm pack, so pack bytes change; server behaviour does not.
 
 **Default-on for every install:** yes, all eight, with no switch, at every screen size (the how-you-got-here line below 600 px only). The sign-in line is on for everyone. The phone-approval items do nothing while the switch is off, which is the default everywhere.
+
+**Known fault, fixed in 7.0.31:** on a wide screen, after the Duo was folded and unfolded, a message's text could run behind and below the pinned Reply box.
 
 ### If you roll back
 
