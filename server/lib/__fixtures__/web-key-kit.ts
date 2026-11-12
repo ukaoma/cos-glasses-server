@@ -27,7 +27,7 @@ export function signJcs(key: TestKey, value: unknown): string {
 }
 
 // SR-12 (review 2026-11-10): a stand-in tailnet name, never a real Mac's. COS Control's golden fixture copies it.
-export const SELF_DNS = 'cos-mac.tailnet-example.ts.net'
+export const SELF_DNS = 'example-mac.tail00000a.ts.net'
 /** The signer origin (review B2/W2): 3144, never the big app's 3143. */
 export const ORIGIN = `https://${SELF_DNS}:3144`
 /** An anchor registered 25 hours before the fixed test clock (1_786_000_000_000): past its 24 h maturity. */

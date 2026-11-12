@@ -47,7 +47,7 @@ canonical, so one message has exactly one signable form.
   `signer_origin_required` unless the request reached the 3144 listener (socket local port). A page on 3143
   can neither make a key nor fetch a handoff.
 - **rpId:** `selfDnsName`, the full lower-case MagicDNS host, no trailing dot (for example
-  `cos-mac.tailnet-example.ts.net`; `ts.net` is a public suffix). The verifier derives it as
+  `example-mac.tail00000a.ts.net`; `ts.net` is a public suffix). The verifier derives it as
   the host of `envelope.origin`.
 - **aud:** `hex(sha256(anchor SPKI DER || utf8(lower(rpId))))`. The verifier computes it from ITS
   pinned anchor, never from a key in the answer.
