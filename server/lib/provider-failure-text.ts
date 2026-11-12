@@ -6,7 +6,10 @@
  * process machinery. Leaf module: no imports.
  */
 export const PROVIDER_QUOTA_RE = /usage[ _]limit|hit your (?:usage |session )?limit|session limit|rate.?limit|too many requests|\b429\b|\bquota\b|resets? (?:at|in) |over capacity|overloaded|\b529\b|plan limit/i
-export const PROVIDER_AUTH_RE = /not logged in|please (?:log ?in|sign in)|invalid api key|authentication|unauthori[sz]ed|\b401\b|\b403\b|login required|token (?:has )?expired|no credentials/i
+export const PROVIDER_AUTH_RE = /not logged in|failed to authenticate|please (?:log ?in|sign in)|invalid api key|authentication|unauthori[sz]ed|\b401\b|\b403\b|login required|token (?:has )?expired|no credentials/i
+// "Failed to authenticate" (7.0.30): claude -p says "Failed to authenticate: OAuth session expired and could not
+// be refreshed" for an expired sign-in, which matched none of the words above, so the reason fell back to
+// "provider process exited N". The four messages Claude Code documents are pinned in provider-failure-text.test.ts.
 export const PROVIDER_OVERFLOW_RE = /prompt is too long|context window|too many tokens|exceeds the (?:model|context)/i
 
 /** Codes a provider bridge raises when it has nothing better to say. Only these are upgraded. */
