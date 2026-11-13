@@ -309,6 +309,7 @@ sessionsRouter.get('/sessions/today/all-messages', async (req, res) => {
     query: string
     text: string
     timestamp: number
+    queryTimestamp?: number
     chatIndex: number
     sessionId: string
     source: 'live'
@@ -341,6 +342,8 @@ sessionsRouter.get('/sessions/today/all-messages', async (req, res) => {
             query: ex.content,
             text: next.content,
             timestamp: next.timestamp,
+            // 7.0.33 A2: when the question was asked, beside when COS answered (timestamp), for a time under each.
+            ...(Number.isFinite(ex.timestamp) ? { queryTimestamp: ex.timestamp } : {}),
             chatIndex: -1,
             sessionId: session.id,
             source: 'live',

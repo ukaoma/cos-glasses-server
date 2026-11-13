@@ -123,7 +123,8 @@
     return W.api('/api/web-bridge/memories', { method: 'POST', body: { id: ++seq, op: op, args: a }, timeoutMs: limit }).then(function (r) {
       if (r && r.ok) return r.details || {};
       var raw = (r && r.message) || 'Your Mac did not answer that.';
-      var err = new Error(PLAIN[raw] || raw); err.code = raw; throw err;
+      // 7.0.33 A8: a code this pane has no words for goes through the page's plain words, never on screen as is.
+      var err = new Error(PLAIN[raw] || (W.plainMessage ? W.plainMessage(raw) : raw)); err.code = raw; throw err;
     });
   }
   // A request that never reached COS is said in plain words by W.api itself (app.js, 6.99.30: code 'unreachable'),
@@ -217,7 +218,7 @@
       seedDecisions(r.rows); prefetchLessons(r.rows);
     }, function (e) {
       if (serial !== serials.recent) return;
-      if (more) W.toast(e.message); else { L.error = e.message; L.loaded = true; }
+      if (more) W.toast(e.message); else { L.error = e.message; L.errorCode = e.code || ''; L.loaded = true; }
     }).then(function () { if (serial === serials.recent) L.loading = false; paint(); });
   }
   function loadReview(more) {
@@ -239,7 +240,7 @@
       seedDecisions(r.rows);
     }, function (e) {
       if (serial !== serials.review) return;
-      if (more) W.toast(e.message + ' Refresh To review to start again.'); else { L.error = e.message; L.loaded = true; }
+      if (more) W.toast(e.message + ' Refresh To review to start again.'); else { L.error = e.message; L.errorCode = e.code || ''; L.loaded = true; }
     }).then(function () { if (serial === serials.review) L.loading = false; paint(); });
   }
   var memTimer = null;
@@ -267,7 +268,7 @@
       L.loaded = true; L.error = '';
     }, function (e) {
       if (serial !== serials.mem) return;
-      if (more) W.toast(e.message); else { L.error = e.message; L.loaded = true; }
+      if (more) W.toast(e.message); else { L.error = e.message; L.errorCode = e.code || ''; L.loaded = true; }
     }).then(function () { if (serial === serials.mem) L.loading = false; paint(); });
   }
   function memQuery(q) {
@@ -777,7 +778,8 @@
     if (n) parts.push('<span><b>' + fmt(n) + '</b> ' + plural(n, 'change', 'changes') + ' to review</span>');
     if (S.recent.total != null) parts.push('<span><b>' + fmt(S.recent.total) + '</b> ' + plural(S.recent.total, 'event', 'events') + ' in 90 days</span>');
     else if (S.recent.loading) parts.push('<span>Counting events…</span>');
-    else if (S.recent.error) parts.push('<span class="mm-warn">Events in 90 days could not be counted</span>');
+    // 7.0.33 A8: said once. When the Recent learning list below already says it failed, this line does not say it again.
+    else if (S.recent.error && S.recent.rows.length) parts.push('<span class="mm-warn">Events in 90 days could not be counted</span>');
     if (S.recent.loaded) parts.push('<span><b>' + fmt(checked) + '</b> ' + plural(checked, 'result', 'results') + ' checked on this page</span>');
     parts.push('<span>Capture status in ' + textBtn('settings', 'Memory settings') + '</span>');
     parts.push('<span>' + textBtn('log', 'View activity log') + '<span class="mm-phone-only"><span class="mm-dot" aria-hidden="true"> · </span>' + textBtn('refresh', 'Refresh') + '</span></span>');
@@ -816,6 +818,12 @@
   }
   function appliedExcerpt(e) { return ((e.source_refs || [])[0] || {}).excerpt || (e.detail && e.detail.excerpts && e.detail.excerpts[0]) || ''; }
   function groupHead(text, side) { return '<h2 class="group-title mm-group"><span>' + text + '</span>' + (side ? '<span>' + side + '</span>' : '') + '</h2>'; }
+  // 7.0.33 A8: a list that failed because its part of COS is not set up on this Mac says that, once, with no Try again
+  // (trying again cannot help); any other failure keeps its own title and Try again.
+  function failBox(L, title, retry) {
+    if (W.notSetUp && W.notSetUp(L.errorCode)) return stateBox('Not set up on this Mac.', L.error, null);
+    return stateBox(title, L.error, retry);
+  }
   function stateBox(title, body, retry) {
     return '<div class="cx-list"><div class="mm-state"><strong>' + esc(title) + '</strong>' + (body ? '<span>' + esc(body) + '</span>' : '') +
       (retry ? '<span class="mm-state-act">' + btn(retry, 'Try again') + '</span>' : '') + '</div></div>';
@@ -841,7 +849,7 @@
   function recentListHtml() {
     var L = S.recent, sel = selectedId();
     if (!L.loaded && L.loading) return groupHead('Recent learning', '90 days') + loadingBox('Reading what COS learned in the last 90 days');
-    if (L.error && !L.rows.length) return groupHead('Recent learning', '90 days') + stateBox('Recent learning did not load.', L.error, 'refresh');
+    if (L.error && !L.rows.length) return groupHead('Recent learning', '90 days') + failBox(L, 'Recent learning did not load.', 'refresh');
     if (!L.rows.length) return groupHead('Recent learning', '90 days') + stateBox('Nothing learned in the last 90 days.', 'Lessons, corrections and recalls show here as COS records them.');
     return groupHead('Recent learning', L.total != null ? fmt(L.total) + ' in 90 days' : '90 days') +
       '<div class="cx-list">' + L.rows.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' +
@@ -859,7 +867,7 @@
       '<p class="mm-group-note">Suggested rules still gathering evidence. They cannot become a rule until their confidence reaches the bar, and move to Needs you now on their own when it does.</p>' +
       '<div class="cx-list">' + learning.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' : '';
     if (!L.loaded && L.loading) return out + groupHead('Proposed changes') + loadingBox('Reading the changes waiting for you') + learnHtml;
-    if (L.error && !L.rows.length) return out + groupHead('Proposed changes') + stateBox('The review list did not load.', L.error, 'refresh') + learnHtml;
+    if (L.error && !L.rows.length) return out + groupHead('Proposed changes') + failBox(L, 'The review list did not load.', 'refresh') + learnHtml;
     if (!needs.length && !rest.length) return groupHead('To review') + stateBox('You are up to date.', 'Nothing is waiting for your decision.') + learnHtml;
     if (other.length) out += groupHead('Proposed changes', fmt(other.length) + ' open') + '<div class="cx-list">' + other.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
     if (ready.length) {
@@ -881,7 +889,7 @@
     var L = S.mem, q = L.q.trim(), rows = L.hits != null ? L.hits : L.rows, sel = selectedId();
     var head = groupHead(q ? 'Memories matching “' + esc(q) + '”' : 'Saved memories', !q && L.total != null ? fmt(L.total) + ' stored' : '');
     if (!L.loaded && L.loading) return head + loadingBox(q ? 'Searching your memories' : 'Reading your saved memories');
-    if (L.error && !rows.length) return head + stateBox(q ? 'That search did not finish.' : 'Your memories did not load.', L.error, 'mem-retry');
+    if (L.error && !rows.length) return head + failBox(L, q ? 'That search did not finish.' : 'Your memories did not load.', 'mem-retry');
     if (!rows.length) return head + stateBox(q ? 'No memories match that search.' : 'No memories yet.', q ? 'Try fewer or different words.' : 'COS saves memories as you work. Plain notes in the memory folder show here too.');
     var cursor = q ? L.hitCursor : L.cursor;
     return head + '<div class="cx-list">' + rows.map(function (m) { return memRowHtml(m, m.id === sel); }).join('') + '</div>' +

@@ -155,12 +155,12 @@
 
     <div class="main-col">
       <!-- Control's navigation bar (ActivityWindow navigationBar): shown off Today, from 600px. -->
-      <nav class="navbar hidden" id="navbar" aria-label="Where you are">
-        <button type="button" class="nav-btn" id="nav-home" title="Activity home"><svg class="icon"><use href="#i-today"/></svg><span>Home</span></button>
+      <!-- 7.0.33 A10 and A11 (Anand round 2, slides 5 and 28): Back and the way you came, as on the phone. Home and
+           Settings left this bar: the rail has Today and Settings. -->
+      <nav class="navbar hidden" id="navbar" aria-label="How you got here">
         <button type="button" class="nav-btn" id="nav-back" title="Go back one step"><svg class="icon"><use href="#i-back"/></svg><span>Back</span></button>
         <ol class="crumbs" id="crumbs"></ol>
         <span class="grow"></span>
-        <button type="button" class="nav-btn" id="nav-settings" aria-label="Open Activity settings"><svg class="icon"><use href="#i-settings"/></svg><span>Settings</span></button>
       </nav>
       <header class="topbar" id="topbar">
         <div class="topbar-left">
@@ -245,11 +245,13 @@
         <!-- SESSIONS -->
         <section id="pane-sessions" class="pane wide hidden" data-title="Sessions">
           <div class="cx sx" data-tint="sessions">
+            <!-- 7.0.33 A5 (Anand round 2, slide 17): the view switch comes first, so Sessions, Usage and COS cost sit in one place
+                 on all three, right under the top bar; Usage's and COS cost's header follows it. -->
+            <div class="cx-controls sx-views" id="sessions-views"></div>
             <header class="cx-hero sx-hero" id="sessions-hero" data-tint="sessions">
               <span class="cx-glyph"><svg class="icon"><use href="#i-sessions"/></svg></span>
               <div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">Claude · Codex · Cursor · reading the last 7 days…</p></div>
             </header>
-            <div class="cx-controls sx-views" id="sessions-views"></div>
             <div class="split sx-split" id="sessions-split">
               <div class="split-list" id="sessions-list-col">
                 <!-- 7.0.23 step 2b: the list's own head (DESIGN_PLAN v2 "The list"): the Sessions menu, Search, one quiet line and the sort menu. -->

@@ -180,19 +180,29 @@ describe('Back stays in reach on a tall phone', () => {
 // steps; the last step is always where Back goes. The browser check is W1_evidence/7030/items_check.cjs (T1 to T4).
 describe('the trail row: how he got here, from Back\'s own marks', () => {
   const fakeDoc = () => { const el: any = { hidden: true, innerHTML: '', clientWidth: 0, querySelectorAll: () => [], querySelector: () => null, classList: { add() {}, remove() {} } }; return { el, doc: { getElementById: (id: string) => (id === 'nav-trail' ? el : null) } } }
-  it('Anand\'s case: Today, Speakers, a review, Open meeting reads "Today / Speakers / Naming voices / Meeting"', () => {
+  it('Anand\'s case: Today, Speakers, a review, Open meeting: each step by its title (7.0.33 A11; "Naming voices" until 7.0.32)', () => {
     const f = fakeDoc(), b = browser('#/today', { document: f.doc })
     b.link('#/speakers'); b.link('#/speakers/review/m1'); b.name('Pricing review with Gina')
     b.link('#/meetings/quilt/2026-11/m1.md'); b.name('Pricing review with Gina')
     const t = b.k.navTrail()
-    expect(t.map((s: any) => s.label)).toEqual(['Today', 'Speakers', 'Naming voices'])
+    expect(t.map((s: any) => s.label)).toEqual(['Today', 'Speakers', 'Pricing review with Gina'])
     expect(t.map((s: any) => s.back)).toEqual([3, 2, 1])
     expect(t[t.length - 1].hash, 'the last step is where Back goes').toBe(b.entries[b.i]!.state.cosNav.back)
     b.k.paintTrail()
     expect(f.el.hidden).toBe(false)
     const steps = [...f.el.innerHTML.matchAll(/<a href="([^"]+)" data-trail-back="(\d+)">([^<]+)<\/a>/g)].map(m => [m[1], m[2], m[3]])
-    expect(steps).toEqual([['#/today', '3', 'Today'], ['#/speakers', '2', 'Speakers'], ['#/speakers/review/m1', '1', 'Naming voices']])
-    expect(f.el.innerHTML).toMatch(/<li class="trail-here" aria-current="page"><span>Meeting<\/span><\/li><\/ol>$/)
+    expect(steps).toEqual([['#/today', '3', 'Today'], ['#/speakers', '2', 'Speakers'], ['#/speakers/review/m1', '1', 'Pricing review with Gina']])
+    expect(f.el.innerHTML, 'this page by its title too').toMatch(/<li class="trail-here" aria-current="page"><span>Pricing review with Gina<\/span><\/li><\/ol>$/)
+  })
+  it('7.0.33 A11: a long title is cut to 28 characters with an ellipsis; a page whose title has not loaded keeps its kind', () => {
+    const b = browser('#/today')
+    b.link('#/meetings/quilt/2026-11/m1.md'); b.name('Quarterly pricing review with Gina and Graham')
+    b.link('#/speakers/review/m1')
+    const t = b.k.navTrail()
+    expect(t.map((s: any) => s.label)).toEqual(['Today', 'Quarterly pricing review wi\u2026'])
+    expect(t[1].label.length).toBe(28)
+    const c = browser('#/today'); c.link('#/meetings/quilt/2026-11/m1.md'); c.link('#/speakers/review/m1')
+    expect(c.k.navTrail().map((s: any) => s.label)).toEqual(['Today', 'Meeting'])
   })
   it('a step goes back that many entries in the browser\'s own history, so it lands where Back would and adds no entry', () => {
     const b = browser('#/today')

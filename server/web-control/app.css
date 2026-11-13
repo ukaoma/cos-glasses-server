@@ -492,6 +492,9 @@ select.field {
   .pane-head.with-ask { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
   .pane-head.with-ask .ask-bar { max-width: 400px; margin-top: 0; }
   .ask-bar .kbd { display: inline-block; }
+  /* 7.0.33 A9 (Anand round 2, slide 29): ⌘K is a keyboard's shortcut. A touch screen with no mouse (the open Duo, an
+     iPad held alone) does not show it. */
+  @media (hover: none) and (pointer: coarse) { .ask-bar .kbd { display: none; } }
   .pane-title { font-size: 44px; }
   .story { font-size: 26px; }
   .run-row { grid-template-columns: 118px minmax(0, 1fr); gap: 2px 14px; align-items: start; }

@@ -252,16 +252,13 @@
     bar.classList.toggle('hidden', onToday);
     document.body.classList.toggle('has-navbar', !onToday);
     var crumbs = $('crumbs');
-    var section = r.pane === 'usage' ? 'Sessions' : (W.titles[r.pane] || '');
     var detail = W.crumb();
-    var parts = ['<li class="crumb root">COS Control</li>'];
-    if (r.pane === 'settings') parts.push('<li class="crumb current">Settings</li>');
-    else {
-      parts.push('<li class="crumb' + (detail || r.pane === 'usage' ? ' dim' : ' current') + '">' + esc(section) + '</li>');
-      if (r.pane === 'usage') parts.push('<li class="crumb' + (detail ? ' dim' : ' current') + '">Usage</li>');
-      if (detail) parts.push('<li class="crumb current detail">' + esc(detail) + '</li>');
-    }
-    crumbs.innerHTML = parts.join('');
+    // 7.0.33 A11: the way you came, the phone's trail (app.js trailNow), not where the page lives. Each step goes back
+    // that many steps; this page last. With no path (a menu pick, a deep link), this page's name alone.
+    var now = W.trailNow ? W.trailNow(r) : { steps: [], here: detail || W.titles[r.pane] || '' };
+    crumbs.innerHTML = (now.steps || []).map(function (s) {
+      return '<li class="crumb dim"><a href="' + esc(s.hash) + '" data-trail-back="' + s.back + '">' + esc(s.label) + '</a></li>';
+    }).join('') + '<li class="crumb current' + (detail ? ' detail' : '') + '" aria-current="page">' + esc(now.here) + '</li>';
     $('nav-back').disabled = onToday;
     // Below 600 px the section name gets the detail too. On a reader that label is hidden (the section button gives way
     // to Back, which names where it goes), so this shows only on a list that has a detail.
@@ -271,11 +268,9 @@
 
   document.addEventListener('click', function (e) {
     if (e.target.closest('#section-btn')) loadStories(true);
-    var t = e.target.closest('#nav-home,#nav-back,#nav-settings');
+    var t = e.target.closest('#nav-back');
     if (!t) return;
-    if (t.id === 'nav-home') W.go('today');
-    else if (t.id === 'nav-back') W.goBack();
-    else W.go('settings');
+    W.goBack();
   });
   document.addEventListener('keydown', function (e) {
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return;

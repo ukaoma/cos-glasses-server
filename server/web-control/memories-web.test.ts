@@ -733,10 +733,11 @@ describe('Control Web Memories: QA fixes (6.99.26)', () => {
     expect(readFileSync(join(HERE, 'panes', 'memories.js'), 'utf8'), 'no second copy of the sentence in the pane').not.toContain('Could not reach')
   })
 
-  it('the events count says it could not be counted when the first read fails, and keeps its last value when a refresh fails', async () => {
+  it('a first read that fails is said once, by the list (7.0.33 A8), and the count keeps its last value when a refresh fails', async () => {
     const failing = load({ answers: { 'ws:learning_page': new TypeError('Failed to fetch'), 'learning.list': new TypeError('Failed to fetch') } })
     await failing.open()
-    expect(failing.t.countsHtml()).toContain('Events in 90 days could not be counted')
+    // 7.0.33 A8: said once. The Recent learning list says it did not load; the count line does not say it again.
+    expect(failing.t.countsHtml()).not.toContain('could not be counted')
     let fail = false
     const page = base()['ws:learning_page']
     const h = load({ answers: { 'ws:learning_page': () => (fail ? new TypeError('Failed to fetch') : page), 'learning.list': () => (fail ? new TypeError('Failed to fetch') : { events: [] }) } })

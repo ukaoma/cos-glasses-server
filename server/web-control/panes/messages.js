@@ -468,15 +468,27 @@
     }).join('') + '</div>';
   }
   function turnCards(t, msgKey) {
-    var a = atts(t);
+    // 7.0.33 A2 (Anand round 2, slide 10): a small time under each message, when he asked and when COS answered. The clock
+    // alone when it is the answer's day (the header has the date); the date too when the question was on an earlier one.
+    // A server before 7.0.33 sends no question time: then only the answer has one.
+    function saidTimes(t) {
+      var asked = t.queryTimestamp != null ? toDate(t.queryTimestamp) : null, answered = t.timestamp != null ? toDate(t.timestamp) : null;
+      var tag = function (d, text) { return '<time datetime="' + esc(d.toISOString()) + '">' + esc(text) + '</time>'; };
+      return {
+        asked: asked ? tag(asked, answered && sameDay(asked, answered) ? shortTime(asked) : timeLabel(asked)) : '',
+        answered: answered ? tag(answered, shortTime(answered)) : ''
+      };
+    }
+    var a = atts(t), when = saidTimes(t);
     // 7.0.30, Miles's pick A: who said what by side, in the COS chat's own shapes. His words on the right in the chat's
     // gold bubble with "You" under it; COS on the left beside its mark, on the page. A screen reader hears "You said"
     // and "COS said" first, since the side and the mark are visual only.
     return '<div class="cx-said you"><span class="sr-only">You said</span><div class="cx-said-bubble cx-card-body" data-hl>' + esc(String(t.query || '').trim() || '(empty query)').replace(/\n/g, '<br>') + '</div>' +
-      '<span class="cx-said-who" aria-hidden="true">You</span></div>' +
+      (when.asked ? '<span class="cx-said-who"><span aria-hidden="true">You · </span>' + when.asked + '</span>' : '<span class="cx-said-who" aria-hidden="true">You</span>') + '</div>' +
       stripHtml(a.filter(isUserAtt), true, msgKey) +
       '<div class="cx-said cos"><span class="cc-avatar" aria-hidden="true"><svg class="icon"><use href="#i-mark"/></svg></span><div class="cx-said-text"><span class="sr-only">COS said</span>' +
-      '<div class="cx-card-body md" data-hl>' + W.md(W.structureLensAnswer(String(t.text || ''))) + '</div></div></div>' +
+      '<div class="cx-card-body md" data-hl>' + W.md(W.structureLensAnswer(String(t.text || ''))) + '</div>' +
+      (when.answered ? '<span class="cx-said-who cx-said-when">' + when.answered + '</span>' : '') + '</div></div>' +
       stripHtml(a.filter(function (x) { return !isUserAtt(x); }), false, msgKey);
   }
   function copyTurnText(t) {

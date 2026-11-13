@@ -1420,10 +1420,10 @@ describe('Needs you lists every source, and the headline, count and rail agree (
     expect(list.replace(/ data-[a-z-]+="[^"]*"/g, '')).not.toContain(WAIT.session_id)
   })
 
-  it('never says clear while a source failed: it names it, with Try again', () => {
+  it('never says clear while a source failed: it names it once, in the sentence (7.0.33 A6; Needs you said it too until 7.0.32)', () => {
     const n = needsRegion({ at: WED_2PM, memories: { state: 'failed', n: 0 } })
     expect(n.els['needs-list']!.innerHTML).not.toContain('Nothing is waiting')
-    expect(n.els['needs-list']!.innerHTML).toContain('Couldn’t read memories. Try again')
+    expect(n.els['needs-list']!.innerHTML, 'not said twice').not.toContain('Couldn’t read memories')
     expect(n.els['today-story']!.textContent).toContain('Couldn’t read memories, so this may not be everything.')
     expect(n.els['today-story']!.textContent).not.toContain('Nothing is waiting')
     expect(n.rail[0]![1]).toBe('Couldn’t read memories')
@@ -1431,14 +1431,14 @@ describe('Needs you lists every source, and the headline, count and rail agree (
 
   it('6.99.30 design QA: every source unread is one row, "Your Mac is not answering", with no empty line above it; two are one row naming both', () => {
     const all = needsRegion({ at: WED_2PM, sessionsState: 'failed', workState: 'failed', voices: { state: 'failed', groups: [] }, memories: { state: 'failed', n: 0 } })
+    // 7.0.33 A6: said once, by the sentence; Needs you has nothing to add and steps aside.
     const html = all.els['needs-list']!.innerHTML
-    expect(html.match(/need-failed/g) || [], 'one retry row').toHaveLength(1)
-    expect(html).toContain('data-today-needs="retry">Your Mac is not answering. Try again.</button>')
-    expect(html, 'no empty line above it (the 45 px gap)').not.toContain('card-empty')
-    expect(html).not.toContain('Couldn’t read')
+    expect(html).toBe('')
+    expect(all.els['today-story']!.textContent).toContain('Your Mac is not answering, so this may not be everything.')
+    expect(all.els['today-story']!.textContent).not.toContain('Couldn’t read')
     const two = needsRegion({ at: WED_2PM, voices: { state: 'failed', groups: [] }, memories: { state: 'failed', n: 0 } })
-    expect(two.els['needs-list']!.innerHTML.match(/need-failed/g) || []).toHaveLength(1)
-    expect(two.els['needs-list']!.innerHTML).toContain('Couldn’t read voices and memories. Try again')
+    expect(two.els['needs-list']!.innerHTML).toBe('')
+    expect(two.els['today-story']!.textContent).toContain('Couldn’t read voices and memories, so this may not be everything.')
   })
 
   it('while a source is still reading it says so; once every source answered empty, and only then, Nothing is waiting on you', () => {
@@ -1447,12 +1447,19 @@ describe('Needs you lists every source, and the headline, count and rail agree (
     expect(reading.els['today-story']!.textContent).toContain('Still reading what needs you.')
     expect(reading.els['today-story']!.textContent).not.toContain('Nothing is waiting')
     const work = needsRegion({ at: WED_2PM, workState: 'failed' })
-    expect(work.els['needs-list']!.innerHTML).toContain('Couldn’t read Work. Try again')
+    expect(work.els['today-story']!.textContent).toContain('Couldn’t read Work, so this may not be everything.')
+    expect(work.els['needs-list']!.innerHTML, 'said once (7.0.33 A6)').toBe('')
     const clear = needsRegion({ at: WED_2PM })
-    expect(clear.els['needs-list']!.innerHTML).toContain('Nothing is waiting on you.')
+    expect(clear.els['needs-list']!.innerHTML, 'the sentence says it (7.0.33 A6)').toBe('')
     expect(clear.els['today-story']!.textContent).toMatch(/^Nothing is waiting on you\./)
     expect(clear.rail[0]![1]).toBe('Nothing needs you')
     expect(clear.els['needs-count']!.textContent).toBe('')
+  })
+
+  it('7.0.33 A6: with something waiting, the sentence counts it and Needs you names the failure once, with Try again', () => {
+    const n = needsRegion({ at: WED_2PM, sessions: [WAIT], memories: { state: 'failed', n: 0 } })
+    expect(n.els['today-story']!.textContent).not.toContain('Couldn’t read memories')
+    expect(n.els['needs-list']!.innerHTML).toContain('Couldn’t read memories. Try again')
   })
 
   it('quiet hours fold everything but a waiting session, with the count and the line saying the same', () => {
@@ -1755,6 +1762,20 @@ describe('W3-r2: Today never states an absence it did not observe', () => {
     const ok = needsRegion({ at: WED_2PM })
     ok.fns.renderRunning([], [])
     expect(ok.els['run-list']!.innerHTML, 'a list that was read and is empty may say so').toContain('Nothing running')
+  })
+
+  it('7.0.33 A6: when nothing runs the sentence says so and the Running card steps aside; a session or an unread list decide it too', () => {
+    const ok = needsRegion({ at: WED_2PM }), panel = new El()
+    ok.els['run-list'] ??= new El(); (ok.els['run-list'] as any).closest = (sel: string) => (sel === '.run-panel' ? panel : null)
+    ok.fns.renderRunning([], [])
+    expect(ok.els['today-story']!.textContent).toContain('No agents are running')
+    expect(panel.cls.has('hidden'), 'nothing running: the sentence alone').toBe(true)
+    ok.fns.renderRunning([WAIT], [])
+    expect(panel.cls.has('hidden'), 'a session running: the card is back').toBe(false)
+    const bad = needsRegion({ at: WED_2PM, sessionsState: 'failed' }), p2 = new El()
+    bad.els['run-list'] ??= new El(); (bad.els['run-list'] as any).closest = (sel: string) => (sel === '.run-panel' ? p2 : null)
+    bad.fns.renderRunning([], [])
+    expect(p2.cls.has('hidden'), 'sessions unread: the sentence says it once').toBe(true)
   })
 
   it('the pet hides instead of saying "Nothing running" (app.js renderPet)', () => {

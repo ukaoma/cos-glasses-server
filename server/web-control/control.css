@@ -104,7 +104,9 @@
   .nav-btn:disabled { opacity: 0.4; }
   .crumbs { display: flex; align-items: center; min-width: 0; list-style: none; margin: 0 0 0 6px; padding: 0; font: 400 12.5px/1.2 var(--body); color: var(--sub); }
   .crumb { white-space: nowrap; }
-  .crumb + .crumb::before { content: '›'; margin: 0 6px; color: var(--tertiary); }
+  /* 7.0.33 A11: the phone trail's look: '/' between steps, a step you can go back to in the accent colour. */
+  .crumb + .crumb::before { content: '/'; content: '/' / ''; margin: 0 6px; color: var(--tertiary); }
+  .crumb a { color: var(--accent); }
   .crumb.root { font-weight: 600; color: var(--ink); }
   .crumb.current { font-weight: 600; color: var(--ink); }
   .crumb.dim { color: var(--sub); }
@@ -246,6 +248,8 @@
 .cx-said-bubble { max-width: min(80%, 560px); background: color-mix(in srgb, var(--gold) 22%, var(--panel)); border: 1px solid var(--said-edge);
   border-radius: 18px 18px 6px 18px; padding: 10px 14px; line-height: 1.45; }
 .cx-said-who { font-size: 12px; color: var(--sub); margin: 4px 4px 0; }
+/* 7.0.33 A2: COS's answer time, under its text on the left, as "You" sits under the question on the right. */
+.cx-said-when { display: block; margin: 6px 0 0; }
 .cx-said.cos { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; margin: 0 0 14px; }
 .cx-said-text { min-width: 0; }
 .cx-card-body { font-size: 15px; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; }

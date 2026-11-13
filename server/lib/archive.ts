@@ -510,11 +510,11 @@ export function getArchiveChatMessages(
  *  (sessionId, timestamp) instead of bare timestamp (collision-prone). */
 export function getArchiveDayMessages(
   date: string,
-): Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; origin?: 'routine' | 'task'; originId?: string; attachments?: MediaAttachmentRef[] }> {
+): Array<{ query: string; text: string; timestamp: number; queryTimestamp?: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; origin?: 'routine' | 'task'; originId?: string; attachments?: MediaAttachmentRef[] }> {
   const archive = loadArchive(date)
   if (!archive) return []
 
-  const messages: Array<{ query: string; text: string; timestamp: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; origin?: 'routine' | 'task'; originId?: string; attachments?: MediaAttachmentRef[] }> = []
+  const messages: Array<{ query: string; text: string; timestamp: number; queryTimestamp?: number; chatIndex: number; sessionId: string; no?: number; globalMsgNum?: number; messageEra?: string; modelPreference?: string; origin?: 'routine' | 'task'; originId?: string; attachments?: MediaAttachmentRef[] }> = []
   for (const chat of archive.chats) {
     for (let i = 0; i < chat.exchanges.length; i++) {
       const ex = chat.exchanges[i]
@@ -531,6 +531,8 @@ export function getArchiveDayMessages(
             query: ex.content,
             text: next.content,
             timestamp: next.timestamp,
+            // 7.0.33 A2: the question's own time, as in the live view (routes/sessions.ts).
+            ...(Number.isFinite(ex.timestamp) ? { queryTimestamp: ex.timestamp } : {}),
             chatIndex: chat.id,
             sessionId: chat.sessionId,
             ...(globalMsgNum != null ? { no: globalMsgNum, globalMsgNum } : {}),

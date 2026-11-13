@@ -294,6 +294,22 @@
     return function () { if (!once) { once = true; WRITES.n = Math.max(0, WRITES.n - 1); } };
   }
   if (typeof window === 'object' && window) window.CosBusy = function () { return WRITES.n > 0 || !!(typeof state === 'object' && state && state.reading && state.reading.sending); };
+  // 7.0.33 A8 (Anand round 2, slide 19): an answer that is only a machine code ("cos_pipeline_not_configured") is never
+  // put on screen as is. Known codes get plain words that say what to do; any other bare code gets one plain sentence.
+  // err.code keeps the code, so a pane can still tell them apart.
+  var NOT_SET_UP = 'This part of COS is not set up on this Mac, so there is nothing to show here. Nothing is broken.';
+  var PLAIN_CODES = {
+    cos_pipeline_not_configured: NOT_SET_UP, pipeline_missing: NOT_SET_UP, bridge_missing: NOT_SET_UP,
+    task_runtime_unavailable: 'Work is not set up on this Mac yet. Open COS Control on your Mac to finish setting it up.',
+    unknown_command: 'COS on your Mac is older than this page. Update it from COS Control on your Mac.',
+    bridge_error: 'COS on your Mac could not read this just now. Try again in a moment.'
+  };
+  function plainMessage(msg) {
+    var m = String(msg || '').trim();
+    if (!/^[a-z0-9]+(?:_[a-z0-9]+)+$/.test(m)) return msg;
+    return PLAIN_CODES[m] || 'COS on your Mac could not do that just now. Try again in a moment.';
+  }
+  function notSetUp(code) { return code === 'cos_pipeline_not_configured' || code === 'pipeline_missing' || code === 'bridge_missing'; }
   function api(path, opts) {
     var o = opts || {};
     var headers = { 'X-COS-Web': '1' };
@@ -322,7 +338,7 @@
         try { data = text ? JSON.parse(text) : {}; } catch (_e) { data = {}; }
         if (!res.ok) {
           var msg = (data && (data.message || (data.error && data.error.message) || data.error)) || ('The server answered ' + res.status + '.');
-          var err = new Error(typeof msg === 'string' ? msg : 'The server answered ' + res.status + '.');
+          var err = new Error((typeof plainMessage === 'function' ? plainMessage : String)(typeof msg === 'string' ? msg : 'The server answered ' + res.status + '.'));
           err.status = res.status;
           // The machine-readable reason, so a pane can say the right thing for a refusal whose
           // body carries a code and no sentence (for example work-intake's {error: {code}}).
@@ -597,6 +613,10 @@
     else pos = NAV.replace ? NAV.replace.pos : history.length - 1;
     var back = null;
     if (!st && !NAV.replace && NAV.last && typeof NAV.last.pos === 'number' && pos === NAV.last.pos + 1) back = NAV.last.hash;
+    // 7.0.33 A11 (Anand round 2, slides 5 and 28): a place picked from the menu (the rail, the pane menu, Ask's Go to)
+    // starts a new trail. That page has no path behind it, so Back goes up from it, as after a deep link.
+    if (NAV.fresh && Date.now() - NAV.fresh < 2000) back = null;
+    NAV.fresh = 0;
     NAV.replace = null;
     // 7.0.30, Miles's pick B: the steps before this one ride in the same mark, the last of them being where Back goes.
     var trail = back ? (NAV.last.trail || []).concat([{ h: NAV.last.hash, t: NAV.last.label || '' }]).slice(-NAV_TRAIL_MAX) : null;
@@ -621,15 +641,19 @@
     var t = st.cosNav.trail;
     return t.map(function (s, i) { return { label: trailName(s.h, s.t), hash: s.h, back: t.length - i }; });
   }
-  // A step is named by what kind of page it is, not its title (the title is the heading under the row): "Meeting",
-  // "Session", "Naming voices". A list is its pane. A message, a day and a chat keep their own short name.
+  // 7.0.33 A11: a step is named by what it shows, its title (a meeting's, a session's, "Message #2", a day's date), cut
+  // to TRAIL_NAME_MAX characters with an ellipsis; a list is its pane. Only while the title is not loaded does the kind
+  // stand in ("Meeting", "Session", "Naming voices"). The same rule as COS Control's trail on the Mac (D4, 0.5.394).
+  var TRAIL_NAME_MAX = 28;
+  function trailCap(text) { var t = String(text || '').replace(/\s+/g, ' ').trim(); return t.length > TRAIL_NAME_MAX ? t.slice(0, TRAIL_NAME_MAX - 1).replace(/\s+$/, '') + '\u2026' : t; }
   function trailName(hash, crumb) {
     var a = String(hash || '').replace(/^#\/?/, '').split('/').filter(function (x) { return x !== ''; }), p = ROOT_PANES.indexOf(a[0]) >= 0 ? a[0] : 'today';
     if (a.length < 2 || isTabRoute(a.slice(1))) return TITLES[p] || 'Today';
+    if (crumb) return trailCap(crumb);
     if (p === 'meetings') return 'Meeting';
     if (p === 'sessions') return 'Session';
     if (p === 'speakers' && a[1] === 'review') return 'Naming voices';
-    return crumb || TITLES[p] || 'Today';
+    return TITLES[p] || 'Today';
   }
   // One line that never wraps. When it is too wide, steps leave from the middle (the one after the first, then the next),
   // never the first, the one before this page, or this page; "…" stands where they were. widths: each step's, then this
@@ -807,7 +831,7 @@
     if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();
     if (changedPane) window.scrollTo(0, 0);
-    barShow($('topbar'));
+    $('topbar').classList.remove('tucked');
     onScroll();
 
     if (!PANES[r.pane] && LAZY()[r.pane]) {
@@ -1885,7 +1909,10 @@
     var write = typeof storyWrite === 'function' ? storyWrite : function (e, kind, text, when) {
       if (kind === 'brief') e.innerHTML = esc(text) + '<span class="story-when">' + esc(when) + '</span>'; else e.textContent = text;
     };
-    if (TODAY.offline) { askBox(null); write(el, 'offline', 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'); return; }
+    // 7.0.33 A6 (Anand round 2, slide 20): what the sentence says, Needs you and Running do not say again. TODAY.storySaid
+    // is the list of failures this sentence named ('offline' when it says the Mac is not answering); renderNeeds reads it.
+    var said = function (v, brief) { var was = JSON.stringify([TODAY.storySaid, TODAY.storyBrief]); TODAY.storySaid = v; TODAY.storyBrief = !!brief; if (was !== JSON.stringify([v, !!brief]) && typeof renderNeeds === 'function' && $('needs-list')) renderNeeds(m); };
+    if (TODAY.offline) { askBox(null); write(el, 'offline', 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'); said('offline'); return; }
     // The model's summary when there is one (it never blocks: the counts line below shows until it lands). The test
     // harnesses that run this block alone have no requestBrief, so it is looked up, never assumed.
     askBox(null);
@@ -1893,7 +1920,7 @@
       requestBrief(m);
       var brief = briefShown();
       askBox(brief);
-      if (brief) { write(el, 'brief', brief.text, briefWhen(brief, m)); return; }
+      if (brief) { write(el, 'brief', brief.text, briefWhen(brief, m)); said([], true); return; }
     }
     var first = '';
     if (m.sessionsWaiting > 0) first = countWord(m.sessionsWaiting) + ' ' + plural(m.sessionsWaiting, 'session is', 'sessions are') + ' waiting on you';
@@ -1914,7 +1941,11 @@
     else second = 'No agents are running';
     if (TODAY.recording) second += (unread || working > 0 || open > 0 ? ', and ' : '. ') + 'COS is recording a meeting';
     var out = (first ? first + '. ' : '') + second + '.';
-    var others = m.failed.filter(function (n) { return n !== 'sessions'; });
+    // 7.0.33 A6: more than two sources unread is the Mac not answering, said once, here (it was Needs you's row).
+    if (m.failed.length > 2) { said(m.failed.slice()); write(el, 'counts', (first ? first + '. ' : '') + 'Your Mac is not answering, so this may not be everything.'); return; }
+    var others = m.failed.filter(function (n) { return n !== 'sessions'; }), named = unread ? ['sessions'] : [];
+    if (!m.settled && !m.now.length && !m.later.length && (unread ? others : m.failed).length) named = named.concat(unread ? others : m.failed);
+    said(named);
     if (!m.settled && !m.now.length && !m.later.length) out += (unread ? others : m.failed).length ? ' Couldn\u2019t read ' + listWords(unread ? others : m.failed) + ', so this may not be everything.' : unread ? ' This may not be everything that needs you.' : ' Still reading what needs you.';
     else if (unread) out += ' This may not be everything that needs you.';
     write(el, 'counts', out);
@@ -1944,6 +1975,10 @@
     $('run-count').textContent = working.length + jobs.n ? String(working.length + jobs.n) : '';
     var list = $('run-list');
     // Never "Nothing running" about a list that was not read.
+    // 7.0.33 A6: when nothing runs, the sentence ("No agents are running", or that sessions could not be read) is all
+    // Today says about it; the panel shows again the moment a session or a COS job runs.
+    var panel = list.closest ? list.closest('.run-panel') : null;
+    if (panel && panel.classList) panel.classList.toggle('hidden', !jobs.n && (TODAY.sessionsState === 'failed' || (TODAY.sessionsState === 'answered' && !working.length && !open.length)));
     if (TODAY.sessionsState === 'failed') { list.innerHTML = jobs.html + '<button type="button" class="run-more run-failed" data-today-needs="retry">Couldn\u2019t read sessions. Try again</button>'; return; }
     var shown = working.slice(0, 3);
     var html = jobs.html + shown.map(function (s) { return runRow(s, true); }).join('');
@@ -2449,12 +2484,18 @@
     if (m.later.length && !TODAY.showLater) html += '<button type="button" class="need-more" data-today-needs="later">' + esc(m.later.length + (m.later.length === 1 ? ' thing can' : ' things can') + ' wait until tomorrow. Show') + '</button>';
     // 6.99.30 (design QA): no empty line above a failed read (it left a 45 px gap), and one retry row, never one per
     // source: with the Mac not answering (sessions and Work both unread, or more than two sources) it says so once.
-    if (!m.rows.length) html = m.failed.length ? '' : '<p class="card-empty">' + esc(m.settled ? 'Nothing is waiting on you.' : 'Reading sessions, Work, voices and memories.') + '</p>';
-    if (m.failed.length) {
-      var silent = TODAY.offline || m.failed.length > 2;
-      html += '<button type="button" class="need-more need-failed" data-today-needs="retry">' + esc(silent ? 'Your Mac is not answering. Try again.' : 'Couldn’t read ' + listWords(m.failed) + '. Try again') + '</button>';
+    // 7.0.33 A6: a failure the sentence above already names is not said again here (Refresh at the top tries again), and
+    // with nothing to show (nothing waiting, which the sentence says, or only what it said) the card steps aside.
+    var said = TODAY.storySaid || [], left = said === 'offline' ? [] : m.failed.filter(function (n) { return said.indexOf(n) < 0; });
+    // A model summary does not say "Nothing is waiting on you", so under one the card still does.
+    if (!m.rows.length) html = m.failed.length || (m.settled && !TODAY.storyBrief) ? '' : '<p class="card-empty">' + esc(m.settled ? 'Nothing is waiting on you.' : 'Reading sessions, Work, voices and memories.') + '</p>';
+    if (left.length) {
+      var silent = TODAY.offline || left.length > 2;
+      html += '<button type="button" class="need-more need-failed" data-today-needs="retry">' + esc(silent ? 'Your Mac is not answering. Try again.' : 'Couldn’t read ' + listWords(left) + '. Try again') + '</button>';
     }
     list.innerHTML = html;
+    var card = list.closest ? list.closest('.card') : null;
+    if (card && card.classList) card.classList.toggle('hidden', !html);
   }
   // Weather sits under the date at the top left (Miles, 11/07), where the eye starts, not inside Next up.
   // It shows whether or not a meeting is next.
@@ -2925,7 +2966,8 @@
     var stats = view === 'sessions' ? sxStats(vis) : [];
     var busy = view === 'sessions' ? SX.loading : SX.usageLoading;
     hero.innerHTML = '<span class="cx-glyph"><svg class="icon"><use href="#i-sessions"/></svg></span>' +
-      '<div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">' + esc(detail) + liveHeroNote(view) + '</p></div>' +
+      // 7.0.33 A5: the heading names the view the top bar names (Usage, COS cost), not the place, so the page has one name.
+      '<div class="cx-hero-text"><h1 class="cx-title">' + esc(SX_VIEWS[view] || 'Sessions') + '</h1><p class="cx-detail-line">' + esc(detail) + liveHeroNote(view) + '</p></div>' +
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-sx="refresh"' + (busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>' +
       (stats.length ? '<div class="cx-stats">' + stats.map(function (s) { return '<span class="cx-stat"><b>' + esc(typeof s[0] === 'number' ? s[0].toLocaleString() : s[0]) + '</b><span>' + s[1] + '</span></span>'; }).join('') + '</div>' : '');
     // 7.0.23 step 2b: Updated and Opened are the sort menu now, and Pinned a group; no clock switches here.
@@ -3906,10 +3948,11 @@
     var el = $('sessions-hooks'); if (!el) return;
     var st = SX.hooks;
     if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) { el.innerHTML = ''; return; }
-    var text = st === 'route_absent' ? 'Live session state needs COS server 6.48.0 or later.'
-      : st === 'missing' ? 'Claude Code hooks are not installed: sessions read from their transcripts only.'
-      : 'Claude Code hooks need a refresh (' + (st === 'drift' ? 'settings changed' : 'script outdated') + ').';
-    var where = st === 'route_absent' ? 'Update Server from COS Control on your Mac.' : (st === 'missing' ? 'Install hooks' : 'Reinstall hooks') + ' from COS Control on your Mac.';
+    // 7.0.33 A8: plain words, then what to do.
+    var text = st === 'route_absent' ? 'Whether a session is working or waiting needs a newer COS on your Mac.'
+      : st === 'missing' ? 'COS cannot yet tell when a Claude Code session is working or waiting on you.'
+      : 'COS\u2019s link to Claude Code needs a refresh, so working and waiting may be out of date.';
+    var where = st === 'route_absent' ? 'Update it from COS Control on your Mac.' : 'In COS Control on your Mac, choose ' + (st === 'missing' ? 'Install hooks' : 'Reinstall hooks') + '.';
     el.innerHTML = '<div class="sx-hooks"><span class="sx-hooks-dot" aria-hidden="true"></span><span>' + esc(text) + ' <span class="sx-hooks-where">' + esc(where) + '</span></span></div>';
   }
 
@@ -7658,13 +7701,18 @@
         (recent.length ? '<h2 class="group-title">Recent sessions</h2><div class="list">' + recent.map(function (s) { return sessionRow(s); }).join('') + '</div>' : '');
       return;
     }
-    var jumps = JUMPS.filter(function (j) { return j[1].toLowerCase().indexOf(q.toLowerCase()) === 0; });
-    out.innerHTML = '<div class="list" style="margin-top:14px">' +
+    // 7.0.33 A7 (Anand round 2, slide 20): typing "usage" put Go to Usage last, under four Ask rows. When the words name a
+    // place (its whole name, or its first three letters or more, "go to" allowed in front), Go to comes first.
+    var ql = q.toLowerCase().replace(/^go to\s+/, '');
+    var jumps = JUMPS.filter(function (j) { return j[1].toLowerCase().indexOf(ql) === 0; });
+    var placeFirst = jumps.length > 0 && (ql.length >= 3 || jumps.some(function (j) { return j[1].toLowerCase() === ql; }));
+    var jumpRows = jumps.map(function (j) { return '<button type="button" class="nav-row" data-goto="' + j[0] + '"><svg class="icon"><use href="#i-' + j[0] + '"/></svg><span class="grow">Go to ' + esc(j[1]) + '</span><span class="chev"></span></button>'; }).join('');
+    out.innerHTML = '<div class="list" style="margin-top:14px">' + (placeFirst ? jumpRows : '') +
       '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">' + esc(askRowNote(q)) + '</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-file"' + (ASK_FILE.busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-work"/></svg><span class="grow">' + (ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + fileNoteHtml(q) + '</span></button>' +
       '<button type="button" class="nav-row" data-action="ask-meaning"><svg class="icon"><use href="#i-sessions"/></svg><span class="grow">Find a session about this<span class="note">Ranks every session by meaning</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-work"><svg class="icon"><use href="#i-work"/></svg><span class="grow">Find a task about this<span class="note">Searches Work by meaning</span></span></button>' +
-      jumps.map(function (j) { return '<button type="button" class="nav-row" data-goto="' + j[0] + '"><svg class="icon"><use href="#i-' + j[0] + '"/></svg><span class="grow">Go to ' + esc(j[1]) + '</span><span class="chev"></span></button>'; }).join('') +
+      (placeFirst ? '' : jumpRows) +
       '</div><div id="ask-hits"></div><p class="status-line" id="ask-status"></p>';
     paintAskRow();
     clearTimeout(renderAsk.t);
@@ -7728,6 +7776,8 @@
     }
     if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); return; }
     if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
+      // 7.0.33 A11: a pick from the menu (the rail, the pane menu, Ask's Go to) starts a new trail (navStamp).
+      if (t.closest('.rail, #section-menu, #ask-results')) NAV.fresh = Date.now();
       if (inSheet) closeAsk(); closeMenu();
       // "work/sort" is a pane and its arguments, not one name.
       var dest = String(t.getAttribute('data-goto') || t.getAttribute('data-pane')).split('/');
@@ -8113,6 +8163,9 @@
     // once a detail has loaded; route() clears it on every navigation.
     setCrumb: function (text) { crumbDetail = String(text || ''); navLabel(crumbDetail); paintTrail(); runHooks(routeHooks, parseRoute()); },
     crumb: function () { return crumbDetail; },
+    // 7.0.33 A11: the trail for the navigation bar from 600 px (shell.js paintNavbar): the same steps and names as the
+    // phone's row, and this page's name.
+    trailNow: function (r) { r = r || parseRoute(); var steps = r.args.length && !isTabRoute(r.args) ? navTrail() : null; return { steps: steps || [], here: steps || r.args.length ? trailName(location.hash, crumbDetail) : (crumbDetail || TITLES[r.pane] || 'Today') }; },
     // Panes that read with their own fetch call this on a 401 so the sign-in screen shows.
     showAuth: function (message) { showAuth(message); },
     // Control's session state (the Sessions pane's sxState) and warm-up test, so the rail's
@@ -8147,6 +8200,7 @@
   // Today as a place to act (panes/today-actions.js, Miles 11/06): what the Today cards show, a repaint after a
   // decision, and the Sessions reader's own pieces, so the overlay sends and reads through the reader's code.
   window.COSWeb.pane = function (name) { return PANES[name] || null; };
+  window.COSWeb.plainMessage = plainMessage; window.COSWeb.notSetUp = notSetUp;
   // Tap, then tap again (Today's Dismiss, Stop and Send anyway; a question card's Allow, Deny and Send): the second tap
   // counts only once the first has been on screen ARM_CONFIRM_MS, so a double tap or a finger bounce arms and never
   // confirms (W2-r2). The one rule both panes/today-actions.js and panes/questions.js read.
