@@ -159,3 +159,55 @@ describe('the frame CSS (panes/cos-chat.css)', () => {
     expect(block).not.toMatch(/z-index/)
   })
 })
+
+describe('the reading place across a fold (Q1 19:58 FIX FIRST): rdPosRestore, run on its own text', () => {
+  const POS = slice(APP, "  var RD_POS = { a: null, mode: '',", "  function rdPosHook() {")
+  function pos(o: { mode?: 'frame' | 'page'; key?: string; route?: any; rectTop?: number; wsTop?: number; cxTop?: number } = {}) {
+    const ws: any = { scrollTop: 500, getBoundingClientRect: () => ({ top: o.wsTop ?? 44 }) }
+    const cx: any = { getAttribute: () => o.key ?? 'i5', contains: () => true, getBoundingClientRect: () => ({ top: o.cxTop ?? -400, left: 0, width: 800 }) }
+    const node: any = { nodeType: 3, nodeValue: 'Paragraph 26. The price holds', isConnected: true, parentElement: { closest: () => null } }
+    const win: any = { scrollY: 0, scrolls: [] as number[], scrollTo: (_x: number, y: number) => win.scrolls.push(['to', y]), scrollBy: (_x: number, y: number) => win.scrolls.push(['by', y]) }
+    const deps: any = {
+      window: Object.assign(win, { getComputedStyle: true }),
+      getComputedStyle: (e: any) => (e === ws ? { overflowY: (o.mode ?? 'frame') === 'frame' ? 'auto' : 'visible' } : { display: 'none', position: 'static' }),
+      document: { querySelector: (s: string) => (s === '#pane-messages > .cx[data-reader-key]' ? cx : null), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({ top: o.rectTop ?? 300, height: 20, width: 9 }) }) },
+      $: (id: string) => (id === 'workspace' ? ws : null),
+      parseRoute: () => o.route ?? { pane: 'messages', args: ['m', 'i5'] },
+    }
+    // eslint-disable-next-line no-new-func
+    const k = new Function('deps', `with (deps) {\n${POS}\nreturn { restore: rdPosRestore, RD: RD_POS, off: rdPosCxOff };\n}`)(deps)
+    return { k, ws, win, node }
+  }
+  it('in the frame: the workspace moves by exactly how far the anchored character is from where it was read', () => {
+    const h = pos({ rectTop: 300, wsTop: 44 })
+    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4, cxOff: 0 }
+    expect(h.k.restore()).toBe(true)
+    expect(h.ws.scrollTop, '500 + (300 - 44 - 4)').toBe(752)
+  })
+  it('on the page (under 600 px): the window scrolls by the same difference, measured from the top bars', () => {
+    const h = pos({ mode: 'page', rectTop: 300 })
+    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4, cxOff: 0 }
+    h.k.restore()
+    expect(h.win.scrolls).toEqual([['by', 296]])
+  })
+  it('at the top he stays at the top; another message or a removed line changes nothing', () => {
+    const top = pos(); top.k.RD.a = { key: 'i5', atTop: true }
+    top.k.restore(); expect(top.ws.scrollTop).toBe(0)
+    const other = pos({ key: 'i4' }); other.k.RD.a = { key: 'i5', node: other.node, offset: 3, dy: 4 }
+    expect(other.k.restore()).toBe(false); expect(other.ws.scrollTop).toBe(500)
+    const gone = pos(); gone.node.isConnected = false; gone.k.RD.a = { key: 'i5', node: gone.node, offset: 3, dy: 4 }
+    expect(gone.k.restore()).toBe(false); expect(gone.k.RD.a).toBe(null)
+  })
+  it('a restore records where the message now starts, so the next scroll is read as his and not as a shift', () => {
+    const h = pos({ rectTop: 300, cxTop: -400, wsTop: 44 })
+    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4, cxOff: 0 }
+    h.k.restore()
+    expect(h.k.RD.a.cxOff, '-400 - 44 + 752').toBe(308)
+  })
+  it('the wiring: rdFrameSync hooks it, a settle restores before captures resume, and a shift above restores on scroll', () => {
+    expect(slice(APP, '  function rdFrameSync(r) {', '\n  }\n')).toContain('    rdPosHook();\n')
+    expect(APP).toContain('var run = function () { RD_POS.frame = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch(); };')
+    expect(APP).toContain("Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosRestore(); return; }")
+    expect(slice(APP, '  function rdPosHook() {', '\n  }\n')).toContain("document.addEventListener('scroll', rdPosOnScroll, { capture: true, passive: true });")
+  })
+})
