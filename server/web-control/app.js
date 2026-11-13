@@ -1663,10 +1663,10 @@
   function petCardPlace(card) {
     if (!card || !card.getBoundingClientRect) return;
     var c = card.getBoundingClientRect(), drop = 0;
-    document.querySelectorAll('#conn-notice:not([hidden]) button, #sq-host:not([hidden]) button, #sq-host:not([hidden]) a').forEach(function (b) {
+    document.querySelectorAll('#conn-notice:not([hidden]) button, #sq-host:not([hidden]) button, #sq-host:not([hidden]) a, .rec-banner').forEach(function (b) {
       var r = b.getBoundingClientRect();
       if (r.width && r.height && r.left < c.right && r.right > c.left && r.top < c.bottom && r.bottom > c.top) {
-        var host = b.closest('#conn-notice, #sq-host'), h = host ? host.getBoundingClientRect() : r;
+        var host = b.closest('#conn-notice, #sq-host'), h = host ? host.getBoundingClientRect() : r;   // the recording banner is its own button
         drop = Math.max(drop, h.bottom + 8 - c.top);
       }
     });
