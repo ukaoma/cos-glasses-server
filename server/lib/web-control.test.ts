@@ -708,6 +708,42 @@ describe('Sign-in failures say what went wrong (6.99.3)', () => {
     expect(classifyWebLogin({ code: 'AAAA-AAAA' }, API_TOKEN, handoffs, codes, () => { throw new Error('boom') })).toEqual({ ok: false, reason: 'wrong_code', length: 8 })
   })
 
+  // 7.0.32 (O1 00:13, fix 4 of round 2): the glasses' 14-character code typed into the browser box is named by its
+  // SHAPE only: never looked up, nothing consumed. 9 to 13 and 15 or more stay a wrong code; 8 answers as before.
+  it('a 14-character glasses code answers glasses_code by shape: any typing, no lookup, nothing consumed', () => {
+    const handoffs = new WebHandoffStore()
+    const codes = new WebDeviceCodeStore()
+    const asked: string[] = []
+    const glasses = (code: string) => { asked.push(code); return true }
+    const live = codes.mint()
+    for (const typed of ['K7P3-QX9M-AB12-CD', 'K7P3QX9MAB12CD', 'k7p3-qx9m-ab12-cd', ' k7p3 qx9m ab12 cd ', 'K7P3-QX9M-ABI2-CO', 'K7P3-QX9M-ABL2-CD']) {
+      expect(classifyWebLogin({ code: typed }, API_TOKEN, handoffs, codes, glasses), typed).toEqual({ ok: false, reason: 'glasses_code', length: 14 })
+    }
+    expect(asked, 'never looked up').toEqual([])
+    expect(classifyWebLogin({ code: live.display }, API_TOKEN, handoffs, codes, glasses), 'the live web code was not consumed').toEqual({ ok: true, kind: 'code' })
+  })
+  it('9 to 13 and 15 or more characters stay a wrong code (no lookup); 8 characters answer exactly as before', () => {
+    const handoffs = new WebHandoffStore()
+    const codes = new WebDeviceCodeStore()
+    const asked: string[] = []
+    const glasses = (code: string) => { asked.push(code); return code === 'K7P3QX9M' }
+    const base = 'K7P3QX9MAB12CDEF7'
+    for (const n of [9, 10, 11, 12, 13, 15, 16, 17]) {
+      expect(classifyWebLogin({ code: base.slice(0, n) }, API_TOKEN, handoffs, codes, glasses), String(n)).toEqual({ ok: false, reason: 'wrong_code', length: n })
+    }
+    expect(asked).toEqual([])
+    expect(classifyWebLogin({ code: 'k7p3-qx9m' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'glasses_code', length: 8 })
+    expect(classifyWebLogin({ code: 'AAAA-AAAA' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_code', length: 8 })
+    expect(asked).toEqual(['K7P3QX9M', 'AAAAAAAA'])
+    // A 14-character run with a character outside the alphabet (U) is not that shape.
+    expect(classifyWebLogin({ code: 'K7P3QX9MAB12CU' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_code', length: 14 })
+  })
+  it('the sign-in box takes the glasses code with its dashes: maxlength 17 (14 characters and 3 dashes)', () => {
+    const page = readFileSync(new URL('../web-control/index.html', import.meta.url), 'utf8')
+    const box = page.match(/<input id="auth-code"[^>]*>/)
+    expect(box && box[0]).toContain('maxlength="17"')
+  })
+
   it('answers 401 with the reason and message, logs kind and length only, and the lockout names the last failure', async () => {
     const app = express()
     let port = 0

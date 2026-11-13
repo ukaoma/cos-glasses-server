@@ -64,7 +64,8 @@ export const PAIRING_REASON_STATUS: Record<PairingReason, number> = {
 }
 
 export const PAIRING_REASON_MESSAGE: Record<PairingReason, string> = {
-  bad_request: 'That pairing request was not understood. Scan the code again.',
+  // 7.0.32 (Miles 11/13 06:34): the glasses pair by the typed code only, so no pairing answer says scan.
+  bad_request: 'That pairing request was not understood. Check the code in COS Control and type it again.',
   not_loopback: 'Pairing codes are made only by COS Control on this Mac.',
   not_allowed_network: 'Connect over Tailscale, or turn on "Allow pairing on this Wi-Fi" in COS Control.',
   denied: 'Pairing was denied on the Mac.',

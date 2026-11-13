@@ -134,8 +134,9 @@ export function requireApiToken(apiToken: string, options: RequireApiTokenOption
       error: 'unauthorized',
       // Stable on purpose: clients key off this value, not the message.
       reason: 'pairing_token_rejected',
-      // Older COS Glasses builds, which cannot scan, show this message word for word.
-      message: 'Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer.',
+      // Older COS Glasses builds show this message word for word. 7.0.32 (Miles 11/13 06:34): the glasses pair by
+      // the typed code only, so it no longer says scan.
+      message: 'Paste the pairing token from COS Control, or update COS Glasses and type the pairing code COS Control shows.',
     })
   }
 }

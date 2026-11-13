@@ -444,6 +444,8 @@ export function classifyWebLogin(
   }
   if (codeStore && typeof input.code === 'string' && input.code.trim().length > 0) {
     if (codeStore.consume(input.code)) return { ok: true, kind: 'code' }
+    // The glasses' 14-character code: by shape only, never looked up (see looksLikeGlassesPairingCode).
+    if (looksLikeGlassesPairingCode(input.code)) return { ok: false, reason: 'glasses_code', length: GLASSES_PAIRING_CODE_TYPED_LENGTH }
     const code = normalizeDeviceCode(input.code)
     let glasses = false
     if (code && isGlassesCode) {
@@ -504,6 +506,21 @@ export function normalizeDeviceCode(input: unknown): string | null {
   if (clean.length !== DEVICE_CODE_LENGTH) return null
   for (const ch of clean) if (!DEVICE_CODE_ALPHABET.includes(ch)) return null
   return clean
+}
+
+/**
+ * 7.0.32 (O1 00:13, fix 4 of round 2): the code the glasses pair with is 14 characters of the same alphabet. Typed into
+ * the browser's sign-in box, it is recognised by its SHAPE only (the same cleaning as normalizeDeviceCode, then exactly
+ * 14 characters of the alphabet), never looked up, so a 14-character guess learns nothing about the live glasses code.
+ * No browser sign-in code has 14 characters, so nothing valid changes meaning. The 8-character lookup stays as it is.
+ */
+export const GLASSES_PAIRING_CODE_TYPED_LENGTH = 14
+export function looksLikeGlassesPairingCode(input: unknown): boolean {
+  if (typeof input !== 'string') return false
+  const clean = input.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1')
+  if (clean.length !== GLASSES_PAIRING_CODE_TYPED_LENGTH) return false
+  for (const ch of clean) if (!DEVICE_CODE_ALPHABET.includes(ch)) return false
+  return true
 }
 
 /**
