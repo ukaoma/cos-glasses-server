@@ -2,7 +2,7 @@
 // the session's title, one count, and for two minutes after an answer, where it was answered. Present whatever the
 // full-hold switches say (these tests run with both OFF unless they say otherwise).
 import { afterEach, describe, expect, it } from 'vitest'
-import { PermissionBroker, QUEUE_ANSWERED_KEEP_MS, answerSurfaceOf, type BrokerQueueSource, type PermissionBrokerDeps } from './permission-broker.js'
+import { PermissionBroker, QUEUE_ANSWERED_KEEP_MS, WAITING_ANSWERED_KEEP_MS, answerSurfaceOf, type BrokerQueueSource, type PermissionBrokerDeps } from './permission-broker.js'
 import { QUEUE_LINE_MAX, QUEUE_MAX, buildQuestionQueue, type QueueInput } from './question-queue.js'
 import { TURN_ASK_ANSWERED_KEEP_MS, TurnEndAskTracker, WRAP_UP_TOOL, turnAskAnswerSurface } from './turn-end-ask.js'
 import { SESSION_TITLE_CACHE_MAX, __resetSessionTitlesForTests, noteSessionTitle, sessionTitleFor } from './session-title-cache.js'
@@ -97,6 +97,10 @@ describe('broker.queueSources, with every full-hold switch OFF', () => {
     b.observeHookEvent(ev(s.now + 5, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm publish' }, tool_use_id: 'toolu_b1' }), false)
     expect(b.queueSources().map(x => [x.kind, x.state, x.answeredBy])).toEqual([['approval', 'answered', 'mac']])
     void aid
+  })
+
+  it('the queue\'s answered window is the waiting list\'s (one rule drops an answered question)', () => {
+    expect(QUEUE_ANSWERED_KEEP_MS).toBe(WAITING_ANSWERED_KEEP_MS)
   })
 
   it('answerSurfaceOf: web is web; the token door names glasses, phone or mac_app when it says so, else cos', () => {

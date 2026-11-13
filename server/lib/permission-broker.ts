@@ -762,7 +762,11 @@ export function answerSurfaceOf(by: AnswerSurface, client: unknown): QueueSurfac
   return CLIENT_SURFACES.has(said) ? said as QueueSurface : 'cos'
 }
 
-/** X1: an answered entry stays in the queue this long, saying where it was answered. */
+/**
+ * X1: an answered entry stays in the queue this long, saying where it was answered. The same window the waiting list
+ * already keeps an answered question for (WAITING_ANSWERED_KEEP_MS), so a question's answered entry is dropped by the
+ * list's own prune; an approval's by the check in `queueSources`.
+ */
 export const QUEUE_ANSWERED_KEEP_MS = 120_000
 
 /** X1: one waiting thing the broker knows of, for the queue (`lib/question-queue.ts` builds the wire entries). */
@@ -2026,8 +2030,9 @@ export class PermissionBroker {
     }
     for (const v of views) {
       if (v.state === 'answered') {
+        // `waitingViews` lists an answered question only within WAITING_ANSWERED_KEEP_MS (= QUEUE_ANSWERED_KEEP_MS).
         const answeredAt = v.answeredAt ? Date.parse(v.answeredAt) : null
-        if (answeredAt === null || now - answeredAt > QUEUE_ANSWERED_KEEP_MS) continue
+        if (answeredAt === null) continue
         const by: QueueSurface = v.answeredBy === 'cos'
           ? settledSurface(item => item.kind === 'question' && item.sessionId === v.sessionId && (!!v.toolUseId && item.toolUseId === v.toolUseId)) ?? 'cos'
           : 'mac'
