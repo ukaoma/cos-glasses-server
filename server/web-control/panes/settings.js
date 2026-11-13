@@ -50,8 +50,17 @@
   }
   function petBody() {
     var prefs = W.petPrefs ? W.petPrefs() : { pet: 'mac', show: true };
-    var out = group('On this browser', '',
-      row('Show the pet on Today', 'Only here. The pet on your Mac stays as it is.', toggle(prefs.show, 'data-set="pet-show"', 'Show the pet on Today')));
+    // 7.0.33 A13 (Anand round 2, slide 9): where the pet shows, one of three, in the choice rows Character uses.
+    var where = !prefs.show ? 'off' : prefs.place === 'bar' ? 'bar' : 'today';
+    var placeRow = function (v, name, desc) {
+      return '<button type="button" class="cx-set-row cx-set-choice" data-set="pet-place" data-place="' + v + '" aria-pressed="' + (where === v) + '">' +
+        '<span class="cx-set-text"><span class="cx-set-name">' + esc(name) + '</span><span class="cx-set-desc">' + esc(desc) + '</span></span>' +
+        '<span class="value">' + (where === v ? '<span class="check">✓</span>' : '') + '</span></button>';
+    };
+    var out = group('On this browser', 'Where the pet shows here. The pet on your Mac stays as it is.',
+      placeRow('today', 'On Today', 'With what it is doing under it.') +
+      placeRow('bar', 'Small, in the top bar', 'On a phone or the folded Duo, on every page. Tap it to see what it is doing. Wider screens show it on Today.') +
+      placeRow('off', 'Off', 'No pet in this browser.'));
     if (PET.state === 'idle') loadPetCatalog();
     if (PET.state !== 'ready') {
       return out + group('Character', '', PET.state === 'error'
@@ -371,12 +380,11 @@
     }
     var t = e.target.closest('[data-set]');
     if (!t || t.disabled) return;
-    if (t.getAttribute('data-set') === 'pet-show') {
-      var shown = t.getAttribute('aria-checked') === 'true';
-      t.setAttribute('aria-checked', String(!shown));
-      if (W.setPetPrefs) W.setPetPrefs({ show: !shown });
-      W.toast(!shown ? 'Pet on' : 'Pet off');
-      return;
+    if (t.getAttribute('data-set') === 'pet-place') {
+      var v = t.getAttribute('data-place');
+      if (W.setPetPrefs) W.setPetPrefs(v === 'off' ? { show: false } : { show: true, place: v });
+      W.toast(v === 'off' ? 'Pet off' : v === 'bar' ? 'Pet in the top bar' : 'Pet on Today');
+      return render();
     }
     if (t.getAttribute('data-set') === 'pet-retry') { PET.state = 'idle'; return render(); }
     var act = t.getAttribute('data-set');

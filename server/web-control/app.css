@@ -225,6 +225,17 @@ select.field {
 .pet-caption { color: var(--sub); font-size: 14px; }
 /* A still pet (gallery pick, Cloud Puff, single image). Small pixel art scales without blur. */
 .pet-still { height: 140px; width: auto; max-width: 220px; object-fit: contain; }
+/* 7.0.33 A13: the pet small in the top bar (Settings > Pet > Small, in the top bar; under 600 px). Next to Ask, 36 px
+   tall; its line and Change pet open in a card under it. */
+.topbar .today-pet.in-bar { position: relative; min-height: 0; margin: 0 2px 0 auto; flex-direction: row; }
+.today-pet.in-bar .pet-btn { width: 44px; height: 44px; justify-content: center; }
+.today-pet.in-bar .pet-still { height: 36px; max-width: 44px; }
+.today-pet.in-bar .pet-sprite { zoom: 0.26; }
+.today-pet.in-bar > .pet-btn .pet-caption, .today-pet.in-bar > .pet-change { display: none; }
+.pet-card { position: absolute; top: calc(100% + 6px); right: -44px; width: min(260px, calc(100vw - 32px)); padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; z-index: 30; }
+.pet-card-line { margin: 0 0 4px; color: var(--ink); font-size: 14px; }
+.pet-card .pet-change { padding-left: 0; }
 .pet-still.pixel { image-rendering: pixelated; }
 .pet-change { background: none; border: 0; padding: 6px 10px; margin-top: 2px; color: var(--sub); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .pet-change:focus-visible { outline: 2px solid var(--sub); outline-offset: 2px; border-radius: 6px; }
