@@ -225,17 +225,26 @@ select.field {
 .pet-caption { color: var(--sub); font-size: 14px; }
 /* A still pet (gallery pick, Cloud Puff, single image). Small pixel art scales without blur. */
 .pet-still { height: 140px; width: auto; max-width: 220px; object-fit: contain; }
-/* 7.0.33 A13: the pet small in the top bar (Settings > Pet > Small, in the top bar; under 600 px). Next to Ask, 36 px
-   tall; its line and Change pet open in a card under it. */
-.topbar .today-pet.in-bar { position: relative; min-height: 0; margin: 0 2px 0 auto; flex-direction: row; }
-.today-pet.in-bar .pet-btn { width: 44px; height: 44px; justify-content: center; }
-.today-pet.in-bar .pet-still { height: 36px; max-width: 44px; }
-.today-pet.in-bar .pet-sprite { zoom: 0.26; }
+/* 7.0.33 A13, Anand's mock (slide 9): in a phone's top bar, the pet in a small round button left of Ask, keeping its own
+   animation; a tap opens a card under it with the pet, its line, Change pet and Hide. The card floats, so it has the
+   mock's soft shadow and no border. */
+.topbar .today-pet.in-bar { position: relative; min-height: 0; margin: 0 6px 0 auto; flex-direction: row; }
+.today-pet.in-bar > .pet-btn { width: 36px; height: 36px; border-radius: 50%; justify-content: center; overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 16%, var(--page)); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent); }
+.today-pet.in-bar > .pet-btn .pet-still { height: 30px; max-width: 30px; }
+.today-pet.in-bar > .pet-btn .pet-sprite { zoom: 0.21; }
 .today-pet.in-bar > .pet-btn .pet-caption, .today-pet.in-bar > .pet-change { display: none; }
-.pet-card { position: absolute; top: calc(100% + 6px); right: -44px; width: min(260px, calc(100vw - 32px)); padding: 12px 14px;
-  background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; z-index: 30; }
-.pet-card-line { margin: 0 0 4px; color: var(--ink); font-size: 14px; }
-.pet-card .pet-change { padding-left: 0; }
+.pet-card { position: absolute; top: calc(100% + 8px); right: -40px; width: min(250px, calc(100vw - 32px)); padding: 14px; text-align: left;
+  background: var(--panel); border-radius: 16px; box-shadow: 0 8px 28px rgba(40, 30, 15, 0.16); z-index: 30; }
+.pet-card-head { display: flex; align-items: center; gap: 12px; width: 100%; background: none; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.pet-card-head[aria-disabled="true"] { cursor: default; }
+.pet-card-pet { flex: none; width: 44px; display: grid; place-items: center; }
+.pet-card-pet .pet-still { height: 48px; max-width: 44px; }
+.pet-card-pet .pet-sprite { zoom: 0.34; }
+.pet-card-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pet-card-title { color: var(--ink); font-weight: 600; font-size: 16px; }
+.pet-card-sub { color: var(--sub); font-size: 14px; line-height: 1.35; }
+.pet-card-acts { display: flex; gap: 8px; margin-top: 12px; }
 .pet-still.pixel { image-rendering: pixelated; }
 .pet-change { background: none; border: 0; padding: 6px 10px; margin-top: 2px; color: var(--sub); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .pet-change:focus-visible { outline: 2px solid var(--sub); outline-offset: 2px; border-radius: 6px; }

@@ -2452,7 +2452,7 @@ describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
     expect(pet.match(/class="pet-btn" data-today="pet"/g)).toHaveLength(2)
     expect(pet).not.toContain('class="pet-btn" data-goto="sessions"')
     expect(pet).toContain('data-goto="settings/pet">Change pet</button>')
-    expect(APP).toContain("if (t.hasAttribute('data-today')) return t.getAttribute('data-today') === 'pet' ? (petInBar() ? petCardToggle() : petTap(t)) : openTodayAction(t);")
+    expect(APP).toContain("return dt === 'pet' ? (petInBar() ? petCardToggle() : petTap(t)) : openTodayAction(t);")
     const { kit } = petKit([])
     const btn = new El(), box = { querySelector: () => btn }
     kit.petButtonState(box, { working: 0, waiting: 0 }, 'Nothing running')

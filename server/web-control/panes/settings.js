@@ -58,8 +58,8 @@
         '<span class="value">' + (where === v ? '<span class="check">✓</span>' : '') + '</span></button>';
     };
     var out = group('On this browser', 'Where the pet shows here. The pet on your Mac stays as it is.',
-      placeRow('today', 'On Today', 'With what it is doing under it.') +
-      placeRow('bar', 'Small, in the top bar', 'On a phone or the folded Duo, on every page. Tap it to see what it is doing. Wider screens show it on Today.') +
+      placeRow('today', 'On Today', 'As it has been: on Today, with what it is doing under it.') +
+      placeRow('bar', 'In the top bar', 'On a phone: small, beside Ask, on every page. Tap it to see what it is doing. The Duo shows it on Today.') +
       placeRow('off', 'Off', 'No pet in this browser.'));
     if (PET.state === 'idle') loadPetCatalog();
     if (PET.state !== 'ready') {

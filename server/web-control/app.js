@@ -1612,10 +1612,12 @@
   // Folded (one column) the pet sits above the story. Unfolded (two columns, the same 760px line as
   // .today-cols in app.css) it moves to the top of the right-hand column, above Needs you (Miles 11/06).
   var PET_WIDE = window.matchMedia ? window.matchMedia('(min-width: 760px)') : null;
-  // 7.0.33 A13: "Small, in the top bar" moves the same pet into the top bar under 600 px (a phone, the folded Duo), on every
-  // page, next to Ask; a tap opens a small card with what it is doing. From 600 px it stays on Today, where there is room.
+  // 7.0.33 A13 (Anand round 2, slide 9; Miles 12:43, the three choices and Anand's top bar mock): "In the top bar" puts the
+  // same pet, small and round, in a phone's top bar left of Ask, on every page; a tap opens a card under it (the pet, its
+  // line, Change pet and Hide). The folded and the open Duo have the rail instead of that bar: there it stays on Today
+  // until its place there is chosen (render sent to the lead). The default stays On Today.
   var PET_BAR_MQ = window.matchMedia ? window.matchMedia('(min-width: 600px)') : null;
-  function petInBar() { var p = petPrefs(); return p.show && p.place === 'bar' && !(PET_BAR_MQ && PET_BAR_MQ.matches); }
+  function petInBar() { var p = petPrefs(); return p.show && p.place === 'bar' && !(PET_BAR_MQ && PET_BAR_MQ.matches) && !(typeof sideRail === 'function' && sideRail()); }
   function placePet() {
     var box = $('today-pet'), side = document.querySelector('#pane-today .today-side'), rec = $('today-rec');
     if (!box || !side || !rec) return;
@@ -1627,14 +1629,34 @@
   }
   function petReplace() { placePet(); if (petInBar() && state.sessions) renderPet(state.sessions); }
   [PET_WIDE, PET_BAR_MQ].forEach(function (mq) { if (mq) { if (mq.addEventListener) mq.addEventListener('change', petReplace); else if (mq.addListener) mq.addListener(petReplace); } });
-  // The card under the small pet: its line and Change pet, the two things Today shows under it.
+  // The card under the small pet, as in Anand's mock: the pet, its line (petCaption, the words Today shows under it), one
+  // more line when nothing runs, then Change pet and Hide. With something to open, the pet and its line open it, as the
+  // pet on Today does (petTap). Hide turns the pet off and says where it comes back.
+  var PET_IDLE_LINE = 'I\u2019ll wave when an agent starts.';
   function petCardToggle() {
     var box = $('today-pet'); if (!box) return;
     if (box.querySelector('.pet-card')) return petCardClose();
-    var cap = box.querySelector('.pet-caption'), txt = cap ? cap.textContent : '';
-    box.insertAdjacentHTML('beforeend', '<div class="pet-card" role="dialog" aria-label="Your pet"><p class="pet-card-line"></p>' + PET_CHANGE + '</div>');
-    box.querySelector('.pet-card-line').textContent = txt;
-    var btn = box.querySelector('.pet-btn'); if (btn) btn.setAttribute('aria-expanded', 'true');
+    var cap = box.querySelector('.pet-caption'), txt = cap ? cap.textContent : '', btn = box.querySelector('.pet-btn');
+    var live = btn && btn.getAttribute('aria-disabled') === 'false';
+    box.insertAdjacentHTML('beforeend', '<div class="pet-card" role="dialog" aria-label="Your pet">' +
+      '<button type="button" class="pet-card-head" data-today="pet-open"' + (live ? '' : ' aria-disabled="true"') + '><span class="pet-card-pet" aria-hidden="true"></span>' +
+      '<span class="pet-card-text"><span class="pet-card-title"></span>' + (txt === 'Nothing running' ? '<span class="pet-card-sub">' + esc(PET_IDLE_LINE) + '</span>' : '') + '</span></button>' +
+      '<div class="pet-card-acts"><button type="button" class="cx-btn quiet" data-goto="settings/pet">Change pet</button><button type="button" class="cx-btn quiet" data-action="pet-hide">Hide</button></div></div>');
+    box.querySelector('.pet-card-title').textContent = txt;
+    var art = box.querySelector('.pet-btn .pet-still, .pet-btn .pet-sprite');
+    if (art) box.querySelector('.pet-card-pet').appendChild(art.cloneNode(true));
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+  }
+  function petHide() {
+    petCardClose(); setPetPrefs({ show: false });
+    toast('Pet hidden. Turn it back on in Settings, Pet.');
+  }
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('click', function (e) {
+      var box = $('today-pet');
+      if (box && box.querySelector('.pet-card') && !box.contains(e.target)) petCardClose();
+    }, true);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') petCardClose(); });
   }
   function petCardClose() {
     var box = $('today-pet'), card = box && box.querySelector('.pet-card');
@@ -1703,6 +1725,8 @@
             if (token !== PET.token || document.hidden || (state.pane !== 'today' && !petInBar())) { PET.timer = null; return; }
             PET.frame = (PET.frame + 1) % spec.frames;
             petPaint(el, spec, PET.frame, scale);
+            // 7.0.33 A13: the card's copy of the pet moves with it.
+            var cardArt = box.querySelector('.pet-card .pet-sprite'); if (cardArt) petPaint(cardArt, spec, PET.frame, scale);
             PET.timer = setTimeout(step, Math.max(20, spec.interval * 1000));
           };
           PET.timer = setTimeout(step, Math.max(20, spec.interval * 1000));
@@ -7789,7 +7813,12 @@
       return;
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
-    if (t.hasAttribute('data-today')) return t.getAttribute('data-today') === 'pet' ? (petInBar() ? petCardToggle() : petTap(t)) : openTodayAction(t);
+    if (t.hasAttribute('data-today')) {
+      var dt = t.getAttribute('data-today');
+      if (dt === 'pet-open') { if (t.getAttribute('aria-disabled') !== 'true') { petCardClose(); petTap($('today-pet').querySelector('.pet-btn')); } return; }
+      return dt === 'pet' ? (petInBar() ? petCardToggle() : petTap(t)) : openTodayAction(t);
+    }
+    if (t.getAttribute('data-action') === 'pet-hide') return petHide();
     if (t.hasAttribute('data-today-next')) return prepNext();
     if (t.hasAttribute('data-next-prep')) return toggleNextPrep(t.getAttribute('data-next-prep'));
     if (t.hasAttribute('data-next-prep-cancel')) return closeNextPrep(true);
