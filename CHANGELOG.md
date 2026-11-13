@@ -5,10 +5,13 @@
 - **7.0.30 shipped this fault.** On a wide screen (the open Duo, an iPad, a desktop browser), a message's text could run behind and below the pinned Reply box. The top bar was gone, and the left rail started partway down its list and ended partway down the screen. Miles saw it on the open Duo at 17:25 and could not make it happen again. It came from 7.0.30's Reply staying at the bottom of the screen.
 - **The cause.** The message reader was the whole page. Its Reply box was pinned to Safari's idea of the screen, and the rail was as tall as that idea. On his Duo, typing a reply moved Safari's view about 409 px down the page, as a keyboard does, so the field stays in sight. After the keyboard closed, he folded and unfolded the Duo five times. Safari then reported its visible area as 0 px tall, then as a large negative number, with its top still about 409 px down. The view stayed shifted, and Reply and the rail stopped about halfway down the screen, with the rest of the message painted below them. It needs that keyboard-then-fold sequence, which is why it came and went. No part of the page was too tall for its box.
 - **The fix.** From 600 px wide, an open message is now one screen, the way Sessions already is. The rail and the area under the top bar each scroll by themselves, and the page itself no longer scrolls. The sign-in notice, a question card and the message still scroll together, as in 7.0.30, and Reply stays at the bottom of that area. At the end of a message, the Reply section sits just above the Reply box, with nothing under it. With the keyboard up, the box sits above the keyboard as before. The screen's height comes from the page's own measurement, which falls back to the window's height when Safari's reading is broken.
-- **Known limits.**
-  - **If Safari's view is shifted again** the way it was at 17:25, the page has nothing below one screen left to draw. You would see the lower part of the page (the end of the message and Reply) with plain background under it, not text running under Reply. Whether Safari then moves its view back by itself has not been seen.
-  - **If the window's own height is wrong too**, the page fills only that height, with everything inside it.
-  - **Either way**, the page grows back to the full screen on the next resize or visual-viewport change, with no reload. That was tested in a browser by resizing the window.
+- **What 7.0.31 does and does not fix.**
+  - **Fixed:** it stops the message showing behind and below Reply.
+  - **Not fixed:** Safari leaving the page pushed down after the keyboard and a fold. If that happens again, the app can sit shifted, with a blank band at the bottom of the screen and the top bar out of sight. It returns to the full screen when Safari's view moves back, for example on the next fold, rotation or keyboard. In a browser test, the page refilled the screen after a resize, with no reload.
+  - **Not done:** the page does not follow Safari's reported position. On his Duo that reading was 40 to 85 px off while the height read 0.
+  - **What's next:** we now record Safari's readings on every message opened, every fold and every keyboard close, to find out how often it happens.
+  - **Seen once in the readings we have:** today, from 07:42, the only stranded push came after a keyboard in the message reader. After five keyboard uses in Sessions and one in the COS chat, which were already one screen, every following reading was back at the top, through folds that broke the height readings the same way. One day of readings proves nothing either way.
+- **On the open Duo with a question card showing**, a short message's Reply box starts just below the bottom of the screen, as in 7.0.30. The page stays one screen, and scrolling the message brings Reply up.
 - **Phones and the folded Duo are unchanged.** Under 600 px the message reader works as in 7.0.30, with the side rail on the folded Duo.
 - **The Reply section stays.** The "Reply. Continues this conversation" block above the box is where replies sent from that message appear. It is not a second Reply box.
 - **The rest of the app in the same Safari state** (Today, the Messages list, Meetings, Speakers, Work and Settings, at 600 px and wider): no pinned part has text under it, but the rail can end partway down with the page continuing below it. Sessions already stays inside one screen. Those panes are not changed in this hotfix.
@@ -63,7 +66,7 @@ Server:
 
 **Default-on for every install:** yes, all eight, with no switch, at every screen size (the how-you-got-here line below 600 px only). The sign-in line is on for everyone. The phone-approval items do nothing while the switch is off, which is the default everywhere.
 
-**Known fault, fixed in 7.0.31:** on a wide screen, after the keyboard and then folds on the Duo, a message's text could run behind and below the pinned Reply box.
+**Known fault, fixed in 7.0.31:** on a wide screen, after the keyboard and then folds on the Duo, a message's text could run behind and below the pinned Reply box. 7.0.31 stops that. Safari can still leave the page pushed down after the keyboard and a fold; 7.0.31 does not fix that and records it when it happens.
 
 ### If you roll back
 
