@@ -14,7 +14,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 // [name, file, exact target, replacement, a substring of the test that must fail, tests]
 const mutations = [
   ["question-default-on", "server/lib/full-hold.ts", "  return readSwitch(env.COS_QUESTION_FULL_HOLD, false)\n", "  return readSwitch(env.COS_QUESTION_FULL_HOLD, true)\n", "read the one switch grammar", ["server/lib/full-hold.test.ts"]],
-  ["approval-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_APPROVAL_FULL_HOLD, false)", "readSwitch(env.COS_APPROVAL_FULL_HOLD, true)", "both full-hold switches default OFF", ["server/lib/full-hold.test.ts"]],
+  ["approval-default-on", "server/lib/full-hold.ts", "readSwitch(env.COS_APPROVAL_FULL_HOLD, false)", "readSwitch(env.COS_APPROVAL_FULL_HOLD, true)", "approvals default OFF", ["server/lib/full-hold.test.ts"]],
   ["engine-gate-open", "server/lib/full-hold.ts", "return version !== null && versionAtLeast(version, floor)", "return true", "refuses older", ["server/lib/full-hold.test.ts"]],
   ["cli-floor-lowered", "server/lib/full-hold.ts", "cli: Object.freeze([2, 1, 321])", "cli: Object.freeze([2, 1, 320])", "refuses older", ["server/lib/full-hold.test.ts"]],
   ["desktop-floor-lowered", "server/lib/full-hold.ts", "'claude-desktop': Object.freeze([2, 1, 317])", "'claude-desktop': Object.freeze([2, 1, 316])", "refuses older", ["server/lib/full-hold.test.ts"]],
