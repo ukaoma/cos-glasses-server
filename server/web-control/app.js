@@ -1656,6 +1656,21 @@
     var art = box.querySelector('.pet-btn .pet-still, .pet-btn .pet-sprite');
     if (art) box.querySelector('.pet-card-pet').appendChild(art.cloneNode(true));
     if (btn) btn.setAttribute('aria-expanded', 'true');
+    petCardPlace(box.querySelector('.pet-card'));
+  }
+  // The card hangs under the pet, but never over a banner's own buttons (the sign-in notice's Hide, the question banner's
+  // Answer, lead 12:5x): if it would cover one, it sits just below the lowest such banner instead.
+  function petCardPlace(card) {
+    if (!card || !card.getBoundingClientRect) return;
+    var c = card.getBoundingClientRect(), drop = 0;
+    document.querySelectorAll('#conn-notice:not([hidden]) button, #sq-host:not([hidden]) button, #sq-host:not([hidden]) a').forEach(function (b) {
+      var r = b.getBoundingClientRect();
+      if (r.width && r.height && r.left < c.right && r.right > c.left && r.top < c.bottom && r.bottom > c.top) {
+        var host = b.closest('#conn-notice, #sq-host'), h = host ? host.getBoundingClientRect() : r;
+        drop = Math.max(drop, h.bottom + 8 - c.top);
+      }
+    });
+    if (drop > 0) card.style.top = 'calc(100% + 8px + ' + Math.ceil(drop) + 'px)';
   }
   function petHide() {
     petCardClose(); setPetPrefs({ show: false });
