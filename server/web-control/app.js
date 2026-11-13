@@ -2991,7 +2991,15 @@
   // change of the scroller, and after anything above the message changes size (a question card arriving or leaving,
   // the sign-in notice), the scroller moves so that character is back at the top. At the very top he stays at the top.
   // Content, not pixels, so the reflow at the new width does not move him. Only on a message reader.
-  var RD_POS = { a: null, mode: '', hold: false, frame: 0, hooked: false, ro: null, watched: null, cx: null, capturing: false };
+  // Never snap him around (Miles; lead 20:16, Q1): a restore happens only after the LAYOUT changed under him (the width,
+  // which a fold or a rotation changes; the scroller; or the message moved down the page because something above it
+  // changed size). A height-only resize (a keyboard, Safari's bars) never restores: the top line does not move then. A
+  // restore waits until he is still (no finger down, no scroll for RD_POS_QUIET_MS), and is dropped if he touched,
+  // wheeled or pressed a key after the change or within RD_POS_QUIET_MS before it: then the place is his, read afresh.
+  // On an iPhone, setting the scroll position during a flick stops the flick, so nothing here runs while he scrolls.
+  var RD_POS_QUIET_MS = 250, RD_POS_POLL_MS = 80;
+  var RD_POS = { a: null, mode: '', hold: false, hooked: false, ro: null, watched: null, cx: null, capturing: false,
+    pending: 0, timer: 0, userAt: 0, scrollAt: 0, touching: false, w: 0 };
   function rdPosReader() {
     var r = parseRoute();
     if (!(r && r.pane === 'messages' && r.args && r.args[0] === 'm' && r.args.length === 2)) return null;
@@ -3071,15 +3079,26 @@
     a.cxOff = rdPosCxOff(mode, cx);
     return Math.abs(want) >= 2;
   }
-  // One restore after the layout settles; captures wait for it, so the browser's own scroll clamp is never taken as
-  // where he was reading.
+  // A layout change under him: hold captures (the browser's own scroll clamp is never taken as where he was reading) and
+  // restore once he is still. His own input after the change, or just before it, cancels it.
+  function rdPosNow() { return Date.now(); }
   function rdPosSettle() {
     RD_POS.hold = true;
-    if (RD_POS.frame) return;
-    var run = function () { RD_POS.frame = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch(); };
-    RD_POS.frame = window.requestAnimationFrame ? window.requestAnimationFrame(function () { window.requestAnimationFrame(run); }) : (setTimeout(run, 32), 1);
+    if (!RD_POS.pending) RD_POS.pending = rdPosNow();
+    if (RD_POS.timer) return;
+    var tick = function () {
+      RD_POS.timer = 0;
+      var now = rdPosNow(), at = RD_POS.pending;
+      if (!at) { RD_POS.hold = false; return; }
+      if (RD_POS.userAt >= at - RD_POS_QUIET_MS) { RD_POS.pending = 0; RD_POS.hold = false; rdPosCapture(); rdPosWatch(); return; }
+      if (RD_POS.touching || now - RD_POS.scrollAt < RD_POS_QUIET_MS || now - at < RD_POS_QUIET_MS) { RD_POS.timer = setTimeout(tick, RD_POS_POLL_MS); return; }
+      RD_POS.pending = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch();
+    };
+    RD_POS.timer = setTimeout(tick, RD_POS_POLL_MS);
   }
+  function rdPosUser() { RD_POS.userAt = rdPosNow(); }
   function rdPosOnScroll() {
+    RD_POS.scrollAt = rdPosNow();
     if (RD_POS.hold || !rdPosReader()) return;
     if (RD_POS.mode && rdPosMode() !== RD_POS.mode) { rdPosSettle(); return; }   // the scroller changed under him
     if (RD_POS.capturing) return;
@@ -3088,7 +3107,7 @@
       RD_POS.capturing = false;
       if (RD_POS.hold) return;
       var cx = rdPosReader(), a = RD_POS.a, mode = rdPosMode();
-      if (cx && a && a.cxOff != null && a.key === cx.getAttribute('data-reader-key') && mode === RD_POS.mode && Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosRestore(); return; }
+      if (cx && a && a.cxOff != null && a.key === cx.getAttribute('data-reader-key') && mode === RD_POS.mode && Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosSettle(); return; }
       rdPosCapture();
     };
     if (window.requestAnimationFrame) window.requestAnimationFrame(go); else go();
@@ -3103,14 +3122,25 @@
     RD_POS.watched = sig; RD_POS.cx = cx;
     if (!cx) { RD_POS.ro = null; return; }
     var first = true;
-    RD_POS.ro = new ResizeObserver(function () { if (first) { first = false; return; } if (RD_POS.a) rdPosSettle(); });
+    // Only a move of the message's start is a shift above it; the Reply box compacting for a keyboard, or a reply
+    // landing below, changes nothing he is reading.
+    RD_POS.ro = new ResizeObserver(function () {
+      if (first) { first = false; return; }
+      var c2 = rdPosReader(), a = RD_POS.a, mode = rdPosMode();
+      if (c2 && a && a.cxOff != null && mode === RD_POS.mode && Math.abs(rdPosCxOff(mode, c2) - a.cxOff) > 1) rdPosSettle();
+    });
     list.forEach(function (e) { RD_POS.ro.observe(e); });
   }
   function rdPosHook() {
     if (RD_POS.hooked || !document.addEventListener) return;
     RD_POS.hooked = true;
     document.addEventListener('scroll', rdPosOnScroll, { capture: true, passive: true });
-    window.addEventListener('resize', function () { if (rdPosReader()) rdPosSettle(); });
+    ['touchstart', 'touchmove', 'wheel', 'keydown', 'pointerdown'].forEach(function (t) { document.addEventListener(t, rdPosUser, { capture: true, passive: true }); });
+    document.addEventListener('touchstart', function () { RD_POS.touching = true; }, { capture: true, passive: true });
+    ['touchend', 'touchcancel'].forEach(function (t) { document.addEventListener(t, function () { RD_POS.touching = false; RD_POS.userAt = rdPosNow(); }, { capture: true, passive: true }); });
+    RD_POS.w = window.innerWidth || 0;
+    // Only a change of WIDTH restores (a fold, a rotation): a keyboard or Safari's bars change the height alone.
+    window.addEventListener('resize', function () { var w = window.innerWidth || 0, changed = w !== RD_POS.w; RD_POS.w = w; if (changed && rdPosReader()) rdPosSettle(); });
     if (window.matchMedia) { var mq = window.matchMedia('(min-width: 600px)'); if (mq && mq.addEventListener) mq.addEventListener('change', function () { if (rdPosReader()) rdPosSettle(); }); }
   }
   // Where the frame's parts sit against the VISIBLE area (step 1's position report, lead 23:00): on a reader's open, and

@@ -206,8 +206,55 @@ describe('the reading place across a fold (Q1 19:58 FIX FIRST): rdPosRestore, ru
   })
   it('the wiring: rdFrameSync hooks it, a settle restores before captures resume, and a shift above restores on scroll', () => {
     expect(slice(APP, '  function rdFrameSync(r) {', '\n  }\n')).toContain('    rdPosHook();\n')
-    expect(APP).toContain('var run = function () { RD_POS.frame = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch(); };')
-    expect(APP).toContain("Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosRestore(); return; }")
+    expect(APP).toContain('      RD_POS.pending = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch();')
+    expect(APP).toContain("Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosSettle(); return; }")
     expect(slice(APP, '  function rdPosHook() {', '\n  }\n')).toContain("document.addEventListener('scroll', rdPosOnScroll, { capture: true, passive: true });")
+  })
+})
+
+describe('never snap him around (lead 20:16, Q1): a restore waits for stillness and gives way to his own input', () => {
+  const SRC = slice(APP, "  var RD_POS_QUIET_MS = 250", "  function rdPosHook() {")
+  function gate() {
+    let now = 10_000
+    const timers: Array<{ fn: () => void; at: number }> = []
+    let restores = 0, captures = 0
+    const deps: any = {
+      Date: { now: () => now },
+      setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, at: now + ms }); return timers.length },
+      window: {}, document: {}, $: () => null, parseRoute: () => ({ pane: 'messages', args: ['m', 'i5'] }),
+    }
+    // eslint-disable-next-line no-new-func
+    const k = new Function('deps', `with (deps) {\n${SRC}\nrdPosRestore = function () { deps.restored(); return true; };\nrdPosCapture = function () { deps.captured(); return null; };\nrdPosWatch = function () {};\nreturn { settle: rdPosSettle, user: rdPosUser, scroll: rdPosOnScroll, RD: RD_POS, QUIET: RD_POS_QUIET_MS };\n}`)(Object.assign(deps, { restored: () => { restores++ }, captured: () => { captures++ } }))
+    const advance = (ms: number) => { const end = now + ms; for (;;) { timers.sort((x, y) => x.at - y.at); const t = timers[0]; if (!t || t.at > end) break; timers.shift(); now = t.at; t.fn() } now = end }
+    return { k, advance, setNow: (v: number) => { now = v }, get now() { return now }, get restores() { return restores }, get captures() { return captures } }
+  }
+  it('a layout change with him still: one restore, after the quiet time, and captures held until then', () => {
+    const g = gate()
+    g.k.settle()
+    expect(g.k.RD.hold).toBe(true)
+    g.advance(g.k.QUIET - 10); expect(g.restores).toBe(0)
+    g.advance(200); expect(g.restores).toBe(1); expect(g.k.RD.hold).toBe(false); expect(g.k.RD.pending).toBe(0)
+  })
+  it('he touches, wheels or presses a key after the change: no restore, the place is his (read afresh)', () => {
+    const g = gate()
+    g.k.settle(); g.advance(40); g.k.user(); g.advance(2000)
+    expect(g.restores).toBe(0); expect(g.captures).toBe(1); expect(g.k.RD.hold).toBe(false)
+  })
+  it('his input just before the change also hands him the place', () => {
+    const g = gate()
+    g.k.user(); g.advance(g.k.QUIET - 50); g.k.settle(); g.advance(2000)
+    expect(g.restores).toBe(0)
+  })
+  it('a finger down or a scroll still running makes it wait; it runs only once he is still', () => {
+    const g = gate()
+    g.k.RD.touching = true
+    g.k.settle(); g.advance(1500); expect(g.restores).toBe(0)
+    g.k.RD.touching = false; g.k.RD.scrollAt = g.now; g.advance(100); expect(g.restores).toBe(0)
+    g.advance(400); expect(g.restores).toBe(1)
+  })
+  it('only a change of width restores on resize: a keyboard or Safari bars (height only) never do', () => {
+    const hook = slice(APP, '  function rdPosHook() {', '\n  }\n')
+    expect(hook).toContain("window.addEventListener('resize', function () { var w = window.innerWidth || 0, changed = w !== RD_POS.w; RD_POS.w = w; if (changed && rdPosReader()) rdPosSettle(); });")
+    for (const t of ['touchstart', 'touchmove', 'wheel', 'keydown', 'pointerdown']) expect(hook).toContain(`'${t}'`)
   })
 })
