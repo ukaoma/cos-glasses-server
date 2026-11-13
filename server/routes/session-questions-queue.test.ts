@@ -31,13 +31,13 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r()))))
 })
 
-async function start() {
+async function start(fullHold: { questions: boolean; approvals: boolean; questionsByDefault?: boolean } = { questions: false, approvals: false }, questionBlockS = 630) {
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const broker = new PermissionBroker({
     now: () => Date.now(), mode: () => 'all', admissionsOpen: () => true,
     lastQuestionsPollAt: () => Date.now(), lastLegacyPollAt: () => Date.now(), lastHoldPollAt: () => Date.now(), presenceAgeMs: () => 1_000,
     readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, timeoutMs: () => 110_000, awayHoldMs: () => 600_000, installedHookTimeoutS: () => 630,
-    fullHold: () => ({ questions: false, approvals: false }),
+    fullHold: () => fullHold, installedHookTimeoutForKindS: kind => (kind === 'question' ? questionBlockS : 630),
     signals: brokerSignalSink(store), pollMs: 60_000,
   })
   brokers.push(broker)
@@ -84,6 +84,18 @@ describe('queue on GET /api/session-questions (switches off)', () => {
     expect(res.status).toBe(200)
     const approval = (await h.get()).queue.find((e: any) => e.kind === 'approval')
     expect(approval).toMatchObject({ state: 'answered', answeredBy: 'glasses' })
+  })
+})
+
+describe('7.0.34: the question hold on by default, pending per Mac', () => {
+  it('unset with old hooks answers the route with exactly the keys of switch-off; reinstalled, it adds the extended view', async () => {
+    const keys = async (h: Awaited<ReturnType<typeof start>>) => Object.keys(await h.get()).sort()
+    const off = await keys(await start({ questions: false, approvals: false, questionsByDefault: false }))
+    const dflt = await keys(await start({ questions: false, approvals: false, questionsByDefault: true }))
+    expect(dflt).toEqual(off)
+    expect(off).not.toContain('waiting')
+    const reinstalled = await keys(await start({ questions: false, approvals: false, questionsByDefault: true }, 28_800))
+    expect(reinstalled).toEqual([...off, 'waiting', 'webAnswer'].sort())
   })
 })
 

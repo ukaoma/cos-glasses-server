@@ -156,6 +156,7 @@
     "!server/scripts/full-hold-mutation-gate.mjs",
     "!server/scripts/turn-end-ask-mutation-gate.mjs",
     "!server/scripts/question-8h-mutation-gate.mjs",
+    "!server/scripts/question-hold-default-mutation-gate.mjs",
     "docs/web-key-verifier-contract.md"
   ],
   "author": "COS Contributors",

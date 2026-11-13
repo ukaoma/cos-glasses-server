@@ -58,6 +58,7 @@ import {
 import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './routes/permission-broker.js'
 // X1: the full hold's switches and the engine gate's registry read (kept on their own lines, apart from other lanes' imports).
 import { fullHoldSwitches } from './lib/full-hold.js'
+import { readQuestionHoldSetting } from './lib/question-hold-setting.js'
 import { engineForHookProcess, registryStatusForPid } from './lib/full-hold-engine.js'
 import { lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs, webPresenceAgeMs } from './lib/client-liveness.js'
 import {
@@ -377,8 +378,9 @@ const permissionBroker = new PermissionBroker({
     return !!signal && !signal.ended && signal.waiting?.fingerprint === fingerprint
   },
   signals: brokerSignalSink(sessionSignalStore),
-  // X1: the full hold (lib/full-hold.ts). Both switches default OFF; the registry is read only while one is on.
-  fullHold: () => fullHoldSwitches(process.env),
+  // X1: the full hold (lib/full-hold.ts). Approvals default OFF. 7.0.34: questions default ON, pending per request
+  // (a long stamp from a reinstalled hook); `COS_QUESTION_FULL_HOLD` wins, then the Settings row's file.
+  fullHold: () => fullHoldSwitches(process.env, readQuestionHoldSetting()),
   engineFor: (sessionId, ppid) => engineForHookProcess(sessionId, ppid),
   // X1 round 3: the asking engine's own status, read each tick for full-hold items only.
   engineStatus: (sessionId, pid) => registryStatusForPid(pid, sessionId),

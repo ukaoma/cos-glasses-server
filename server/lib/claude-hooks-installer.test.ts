@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   HALT_CAPABLE_PRIOR_SCRIPT_SHAS,
   cursorDeskHaltReady,
@@ -27,6 +27,15 @@ import {
   uninstallClaudeHooks,
   type HookPaths,
 } from './claude-hooks-installer.js'
+
+// X1, 7.0.34: this file pins the ONE-block install, which 7.0.34 writes when the question hold is OFF (0). Unset is
+// now the default, whose Reinstall writes the long question block; that is pinned in question-hold-default.test.ts.
+const savedQuestionHold = process.env.COS_QUESTION_FULL_HOLD
+beforeEach(() => { process.env.COS_QUESTION_FULL_HOLD = '0' })
+afterEach(() => {
+  if (savedQuestionHold === undefined) delete process.env.COS_QUESTION_FULL_HOLD
+  else process.env.COS_QUESTION_FULL_HOLD = savedQuestionHold
+})
 
 // The real ~/.claude/settings.json shape on the machine this was written on
 // (2026-09-15): two foreign async blocks for an iTerm colour script, plus keys the

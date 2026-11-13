@@ -113,10 +113,11 @@ describe('the questions route under the full hold', () => {
     expect([confirm.status, await confirm.json()]).toEqual([404, { error: 'not_found' }])
   })
 
-  it('index.ts wires the switches from the environment, the engine from the registry, and leaves the 6.60.0 timeout line as it was', async () => {
+  it('index.ts wires the switches from the environment and the setting, the engine from the registry, and leaves the 6.60.0 timeout line as it was', async () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
-    expect(index).toContain('  fullHold: () => fullHoldSwitches(process.env),')
+    // 7.0.34: and the Settings row's file, which the environment beats (lib/full-hold.ts questionHoldMode).
+    expect(index).toContain('  fullHold: () => fullHoldSwitches(process.env, readQuestionHoldSetting()),')
     expect(index).toContain('  engineFor: (sessionId, ppid) => engineForHookProcess(sessionId, ppid),')
     expect(index).toContain('  engineStatus: (sessionId, pid) => registryStatusForPid(pid, sessionId),')
     expect(index).toContain('  installedHookTimeoutS: () => cachedHookStatus().permissionHookTimeoutS,')

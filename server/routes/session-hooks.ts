@@ -12,6 +12,9 @@ import { refreshAfterInstall } from '../lib/provider-observe.js'
 import { Router } from 'express'
 import { installClaudeHooks, uninstallClaudeHooks } from '../lib/claude-hooks-installer.js'
 import { deskIdleSeconds, invalidateHookStatus, sessionHooksHealthFields, sessionSignalStore } from '../lib/session-hooks-runtime.js'
+import { API_AUTH_BY_LOCAL } from '../lib/api-auth.js'
+import { questionHoldMode } from '../lib/full-hold.js'
+import { writeQuestionHoldSetting } from '../lib/question-hold-setting.js'
 import { workspaceFromCwd } from '../lib/claude-session-registry.js'
 
 /** The registry entrypoints a person sits at; everything else (`sdk-cli`, unknown) may be a job. */
@@ -67,6 +70,26 @@ export function createSessionHooksRouter(options: { port: number; codex?: Sessio
   router.get('/session-hooks/status', (_req, res) => {
     res.set('Cache-Control', 'private, no-store')
     res.json({ ok: true, ...sessionHooksHealthFields() })
+  })
+
+  // X1, 7.0.34: the question hold's server-side setting, for Control's Settings row (Control 0.5.394). Body
+  // `{"mode":"on"|"off"|"default"}`; `default` removes the setting. The Mac app only: a browser session is refused
+  // (Control Web shows the state read-only). `COS_QUESTION_FULL_HOLD` in the environment wins over the setting, so
+  // while it is set nothing is written and the answer says so (409 `set_by_env`). Turning the hold on or off here
+  // changes what Reinstall hooks writes; the status's `state` then says whether a Reinstall is due.
+  router.put('/session-hooks/question-hold', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    if (res.locals[API_AUTH_BY_LOCAL] !== 'token') { res.status(403).json({ ok: false, reason: 'web_read_only' }); return }
+    const mode = req.body && typeof req.body === 'object' ? (req.body as { mode?: unknown }).mode : undefined
+    if (mode !== 'on' && mode !== 'off' && mode !== 'default') { res.status(400).json({ ok: false, reason: 'bad_mode' }); return }
+    if (questionHoldMode(process.env).source === 'env') {
+      res.status(409).json({ ok: false, reason: 'set_by_env', questionWait: sessionHooksHealthFields().sessionHooks.questionWait ?? null })
+      return
+    }
+    try { writeQuestionHoldSetting(mode) } catch { res.status(500).json({ ok: false, reason: 'write_failed' }); return }
+    invalidateHookStatus()
+    const hooks = sessionHooksHealthFields().sessionHooks
+    res.json({ ok: true, questionWait: hooks.questionWait ?? null, state: hooks.state })
   })
 
   router.post('/session-hooks/install', (req, res) => {

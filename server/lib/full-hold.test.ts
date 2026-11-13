@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { approvalFullHoldEnabled, engineProvenForFullHold, fullHoldSwitches, parseEngineVersion, questionFullHoldEnabled, versionAtLeast, waitingQuestionWordsEnabled } from './full-hold.js'
 
 describe('the switches', () => {
-  it('both full-hold switches default OFF', () => {
-    expect(fullHoldSwitches({})).toEqual({ questions: false, approvals: false })
+  it('approvals default OFF; questions default to the 7.0.34 default (on, pending per request), never outright on', () => {
+    expect(fullHoldSwitches({})).toEqual({ questions: false, approvals: false, questionsByDefault: true })
   })
   it('the row-words switch defaults ON (Miles 22:10) and reads off only for an explicit off', () => {
     expect(waitingQuestionWordsEnabled({})).toBe(true)
@@ -21,8 +21,9 @@ describe('the switches', () => {
       expect(questionFullHoldEnabled({ COS_QUESTION_FULL_HOLD: off })).toBe(false)
       expect(approvalFullHoldEnabled({ COS_APPROVAL_FULL_HOLD: off })).toBe(false)
     }
-    expect(fullHoldSwitches({ COS_QUESTION_FULL_HOLD: '1' })).toEqual({ questions: true, approvals: false })
-    expect(fullHoldSwitches({ COS_APPROVAL_FULL_HOLD: '1' })).toEqual({ questions: false, approvals: true })
+    expect(fullHoldSwitches({ COS_QUESTION_FULL_HOLD: '1' })).toEqual({ questions: true, approvals: false, questionsByDefault: false })
+    expect(fullHoldSwitches({ COS_QUESTION_FULL_HOLD: '0' })).toEqual({ questions: false, approvals: false, questionsByDefault: false })
+    expect(fullHoldSwitches({ COS_APPROVAL_FULL_HOLD: '1' })).toEqual({ questions: false, approvals: true, questionsByDefault: true })
   })
 })
 
@@ -64,7 +65,8 @@ describe('the documented route (final review S6)', () => {
   it('all three switches are in the managed runtime contract and in .env.example, commented out at their non-default values', () => {
     const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
     const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8')
-    for (const [key, shown] of [['COS_QUESTION_FULL_HOLD', '1'], ['COS_APPROVAL_FULL_HOLD', '1'], ['COS_WAITING_QUESTION_WORDS', '0']] as const) {
+    // 7.0.34: the question hold's non-default value is 0 (it is on by default, pending per request).
+    for (const [key, shown] of [['COS_QUESTION_FULL_HOLD', '0'], ['COS_APPROVAL_FULL_HOLD', '1'], ['COS_WAITING_QUESTION_WORDS', '0']] as const) {
       expect(contract.optionalEnvironment, key).toContain(key)
       expect(example, key).toContain(`\n# ${key}=${shown}\n`)
       // Never set live by the example: an uncommented line would turn it on for anyone who copies the file.

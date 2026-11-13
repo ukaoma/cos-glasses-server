@@ -140,7 +140,7 @@ import { randomBytes } from 'node:crypto'
 import { boundForRedaction } from './activity-preview.js'
 import { inferHookProvider, toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
 import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signal-store.js'
-import { FULL_HOLD_QUESTION_WAIT_S, WEB_ANSWER_TOUCH_MAX_MS, WEB_CONFIRM_TTL_MS, engineProvenForFullHold, type EngineFacts, type FullHoldSwitches } from './full-hold.js'
+import { FULL_HOLD_QUESTION_WAIT_S, WEB_ANSWER_TOUCH_MAX_MS, WEB_CONFIRM_TTL_MS, defaultHoldTakesStamp, engineProvenForFullHold, type EngineFacts, type FullHoldSwitches } from './full-hold.js'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1327,20 +1327,31 @@ export class PermissionBroker {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
   }
 
-  /** X1: the two switches now; both off when absent or unreadable. */
+  /** X1: the two switches now; both off when absent or unreadable. 7.0.34: plus the question default. */
   private fullHoldSwitches(): FullHoldSwitches {
     try {
       const on = this.deps.fullHold?.()
-      return { questions: on?.questions === true, approvals: on?.approvals === true }
+      return { questions: on?.questions === true, approvals: on?.approvals === true, questionsByDefault: on?.questionsByDefault === true }
     } catch {
-      return { questions: false, approvals: false }
+      return { questions: false, approvals: false, questionsByDefault: false }
     }
   }
 
-  /** X1: either switch is on (the web door then needs a touch, and an approval a confirm). */
+  /**
+   * X1: either switch is on (the web door then needs a touch, and an approval a confirm, and the `waiting` view
+   * shows). 7.0.34: under the question DEFAULT this is on only once this Mac's hooks carry the long question block,
+   * the same thing that makes its questions eligible (`defaultHoldTakesStamp` of the installed AskUserQuestion
+   * block). Before that a Mac reads exactly as 7.0.33 with the switch off: no `waiting`, the same web door.
+   */
   private anyFullHoldOn(): boolean {
     const on = this.fullHoldSwitches()
-    return on.questions || on.approvals
+    if (on.questions || on.approvals) return true
+    return on.questionsByDefault === true && defaultHoldTakesStamp(this.installedHookTimeoutS('question'))
+  }
+
+  /** X1, 7.0.34: a question of this kind may be fully held under the switches now: on, or the default with a long stamp. */
+  private questionHoldAllows(on: FullHoldSwitches, hookWaitS: number | null | undefined): boolean {
+    return on.questions || (on.questionsByDefault === true && defaultHoldTakesStamp(hookWaitS))
   }
 
   /**
@@ -1352,7 +1363,7 @@ export class PermissionBroker {
    */
   private fullHoldEligible(isQuestion: boolean, askHold: boolean, background: boolean, facts: Omit<PermissionRequestFacts, 'fingerprint'>): boolean {
     const on = this.fullHoldSwitches()
-    if (isQuestion ? !on.questions : !on.approvals) return false
+    if (isQuestion ? !this.questionHoldAllows(on, facts.hookWaitS) : !on.approvals) return false
     if (background || facts.provider === 'codex') return false
     if (isQuestion && !askHold) return false
     if (facts.hookWaitS === null) return false
@@ -2206,7 +2217,8 @@ export class PermissionBroker {
     // The switches are read only while one is held, so with both off nothing here runs.
     if ([...this.items.values()].some(item => item.state === 'pending' && item.fullHold)) {
       const on = this.fullHoldSwitches()
-      this.settleAll('handed_to_desk', item => item.fullHold && (item.kind === 'question' ? !on.questions : !on.approvals))
+      // 7.0.34: a question held under the default stays held while the default (or on) still stands; off hands it back.
+      this.settleAll('handed_to_desk', item => item.fullHold && (item.kind === 'question' ? !(on.questions || on.questionsByDefault === true) : !on.approvals))
       if (this.pendingCount() === 0) return
       // X1 round 3: a held item whose settling hook event never arrived (a lost spool event) must not sit
       // to its deadline. Its own engine's registry record says whether the session moved on: the record is
