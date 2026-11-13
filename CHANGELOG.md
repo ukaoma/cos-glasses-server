@@ -2,10 +2,13 @@
 
 2026-11-13. 7.0.31 plus three pieces: X1's question wait, W1's pairing words and sign-in field, and one Control Web label.
 
-**The 8-hour question wait is OFF.** It turns on only when `COS_QUESTION_FULL_HOLD` is switched on, in the server's environment or its LaunchAgent. On 11/12 at 20:17 neither switch was set anywhere on Miles's Mac. With it on:
-- a question Claude asks waits up to 8 hours instead of 1, and can be answered from the web, the glasses or the Mac;
-- it shows on all of them at once;
-- the first answer wins, and it stays everywhere until answered. Approvals keep their 1 hour (`COS_APPROVAL_FULL_HOLD`, also off).
+**The 8-hour question wait is OFF.** With it off, a question waits about 10 minutes, as before. It turns on only when `COS_QUESTION_FULL_HOLD` is switched on. On 11/12 at 20:17 neither switch was set anywhere on Miles's Mac.
+- **To turn it on:** set `COS_QUESTION_FULL_HOLD=1` in `~/.cos-glasses/.env`, restart the server, then choose **Reinstall hooks**. The installed hook keeps its old wait, and shows the Reinstall banner, until then.
+- **With it on:**
+  - a question Claude asks waits up to 8 hours, and can be answered from the web, the glasses or the Mac;
+  - it shows on all of them at once;
+  - the first answer wins, and it stays everywhere until answered.
+- **Approvals** wait 1 hour only with `COS_APPROVAL_FULL_HOLD` on (also off), otherwise about 10 minutes.
 The 8 hours was measured on a real engine: a hook held 7 h 55 m and its answer was applied.
 
 **On for everyone, with no switch:**
@@ -31,7 +34,7 @@ Both are for a later release, before the 8-hour switch is ever turned on.
 
 ### If you roll back
 
-- To 7.0.31: no queue fields, a turn-end question older than 6 hours is lost on a restart, the sign-in box takes 9 characters, the two pairing messages say scan again, and the time left reads in minutes. The question wait stays 1 hour (it was off in 7.0.32 unless switched on).
+- To 7.0.31: no queue fields, a turn-end question older than 6 hours is lost on a restart, the sign-in box takes 9 characters, the two pairing messages say scan again, and the time left reads in minutes. A question waits about 10 minutes, as it did in 7.0.32 unless the switch was on; a hook reinstalled with the switch on keeps its longer wait until it is reinstalled again.
 - Further back: as in 7.0.31 below.
 
 ## 7.0.31 - Control Web: a message's text no longer runs under and below Reply on a wide screen

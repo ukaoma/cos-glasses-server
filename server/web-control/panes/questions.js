@@ -110,7 +110,7 @@
     return Math.max(0, Math.min(span, isFinite(left) ? left : 0));
   }
   // 7.0.32 (X1 ask 1): a question can wait 8 hours, so from one hour the time left reads hours and minutes ("7 h 59 m
-  // left", never "480 min left"). Rounded down, so it never promises more time than is left.
+  // left", never "480 min left"). From an hour on it is rounded down; under an hour it keeps 7.0.31's minutes (rounded up).
   function timeLeft(s) {
     if (s >= 3600) { var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h + ' h' + (m ? ' ' + m + ' m' : '') + ' left'; }
     return s > 99 ? Math.ceil(s / 60) + ' min left' : s + ' s left';
