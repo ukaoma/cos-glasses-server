@@ -30,8 +30,6 @@ The 8 hours was measured on a real engine: a hook held 7 h 55 m and its answer w
 - "Answered on <app>" on a card answered elsewhere.
 Both are for a later release, before the 8-hour switch is ever turned on.
 
-**Tested:** the full server suite and the Control Web layout checks on this build (numbers in COORD). Not on a real phone.
-
 ### If you roll back
 
 - To 7.0.31: no queue fields, a turn-end question older than 6 hours is lost on a restart, the sign-in box takes 9 characters, the two pairing messages say scan again, and the time left reads in minutes. A question waits about 10 minutes, as it did in 7.0.32 unless the switch was on; a hook reinstalled with the switch on keeps its longer wait until it is reinstalled again.
