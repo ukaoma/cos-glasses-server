@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { approvalFullHoldEnabled, engineProvenForFullHold, fullHoldSwitches, parseEngineVersion, questionFullHoldEnabled, versionAtLeast, waitingQuestionWordsEnabled } from './full-hold.js'
 
 describe('the switches', () => {
-  it('both full-hold switches default OFF', () => {
-    expect(fullHoldSwitches({})).toEqual({ questions: false, approvals: false })
+  it('approvals default OFF; questions default to the 7.0.34 default (on, pending per request), never outright on', () => {
+    expect(fullHoldSwitches({})).toEqual({ questions: false, approvals: false, questionsByDefault: true })
   })
   it('the row-words switch defaults ON (Miles 22:10) and reads off only for an explicit off', () => {
     expect(waitingQuestionWordsEnabled({})).toBe(true)
@@ -21,8 +21,9 @@ describe('the switches', () => {
       expect(questionFullHoldEnabled({ COS_QUESTION_FULL_HOLD: off })).toBe(false)
       expect(approvalFullHoldEnabled({ COS_APPROVAL_FULL_HOLD: off })).toBe(false)
     }
-    expect(fullHoldSwitches({ COS_QUESTION_FULL_HOLD: '1' })).toEqual({ questions: true, approvals: false })
-    expect(fullHoldSwitches({ COS_APPROVAL_FULL_HOLD: '1' })).toEqual({ questions: false, approvals: true })
+    expect(fullHoldSwitches({ COS_QUESTION_FULL_HOLD: '1' })).toEqual({ questions: true, approvals: false, questionsByDefault: false })
+    expect(fullHoldSwitches({ COS_QUESTION_FULL_HOLD: '0' })).toEqual({ questions: false, approvals: false, questionsByDefault: false })
+    expect(fullHoldSwitches({ COS_APPROVAL_FULL_HOLD: '1' })).toEqual({ questions: false, approvals: true, questionsByDefault: true })
   })
 })
 

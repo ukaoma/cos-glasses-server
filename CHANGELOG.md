@@ -1,3 +1,37 @@
+## 7.0.34 (unreleased) - Questions can wait 8 hours, on by default (takes effect when you choose Reinstall hooks)
+
+2026-11-13. Not published. Miles, 15:02: "I want the 8 hour question hold ON. please keep it on by default." Private until he says; the release bump drops "(unreleased)".
+
+**On for everyone, and what that means:**
+- **If you do nothing, nothing changes.** After updating, your Claude Code hooks, your questions' wait (about 10 minutes, and only while a device is with you), what reaches your browser and how you answer there are all exactly 7.0.33 with the switch off. No banner appears; Sessions keeps saying hooks are installed.
+- **If you choose Reinstall hooks** (COS Control on your Mac, Sessions; a newer COS Control offers it with one plain line), a Claude Code question waits up to 8 hours:
+  - it shows on Control Web and the glasses at once, even while you sit at the Mac;
+  - the Mac's own dialog stays up as before, and the first answer anywhere counts.
+  - Only sessions started after the click get it; a session already running keeps the hooks it loaded.
+- **How it is decided, per question:** a question gets the long wait only when its own hook asked for more than an hour. Only the question hook Reinstall writes asks for that (8 hours). An older hook asks for about 10 minutes and is treated exactly as before.
+
+**Turning it off:**
+- **`COS_QUESTION_FULL_HOLD=0`** in `~/.cos-glasses/.env`, then restart from COS Control and choose Reinstall hooks. `1` turns it on outright, as in 7.0.32.
+- **Or the new setting** a coming COS Control (0.5.394) writes: `PUT /api/session-hooks/question-hold` with `{"mode":"off"}`, `"on"` or `"default"`. It is the Mac app's only: a browser is refused, and Control Web shows the state only.
+- **The `.env` value wins over the setting.** It is what someone set on purpose at the Mac, and every release since 7.0.16 documents it as the off switch, rollback included, so a Settings click never undoes it. While it is set, the route writes nothing and answers `set_by_env`.
+
+**For developers:** `GET /api/session-hooks/status` adds `sessionHooks.questionWait`:
+- `{ mode, source, installedWaitS, waitS, active, offered }`;
+- `offered` is true when Reinstall hooks would turn the long wait on;
+- `state` is unchanged, so an older COS Control shows nothing new.
+
+**Not proven yet, said plainly:**
+- The 8 hour wait was measured only on Claude Code 2.1.321 and 2.1.322, overnight, with a stand-in hook. Claude Desktop's engine 2.1.317 to 2.1.320 was proven to 1 hour. Older engines keep the old rule.
+- The real COS server has never held a question for 8 hours end to end.
+- A Mac that sleeps while a question waits is untested.
+- Restarting COS ends any wait in progress; the question stays answerable in the Mac's own dialog.
+- Codex has no question hook, so its questions are unchanged. COS does not hold Cursor's questions.
+- The glasses show "480m left" for a new question until a glasses update says "8h left". The Mac's question card shows no time left.
+
+**Tests:**
+- `server/lib/question-hold-default.test.ts`: never reinstalled equals switch-off at every layer; reinstalled is the full hold; 0 is off and 1 is on; the environment beats the setting; the route's refusals. The questions route keys are also pinned in `session-questions-queue.test.ts`.
+- Mutation gate `question-hold-default-mutation-gate.mjs`, one mutant per branch. The 7.0.16 full-hold gate's 14 stale targets are repointed: 5 had gone stale with 7.0.32's 8 hour change, 9 with this change. One is retired because 7.0.32 shipped its mutant on purpose.
+
 ## 7.0.33 - Hotfix: a tap where Ask was could sign out every browser; plus Anand's second round of Control Web fixes
 
 2026-11-13. 7.0.32 plus a hotfix and Control Web fixes from Anand's second review. 7.0.32 never reached npm, so anyone updating from 7.0.31 also gets everything in 7.0.32 (listed below again).

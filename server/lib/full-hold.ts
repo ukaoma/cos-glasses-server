@@ -16,9 +16,31 @@
 
 import { readSwitch } from './env-switch.js'
 
-/** `COS_QUESTION_FULL_HOLD`: hold a question for the whole hook wait. Default OFF. Read per request. */
+/** `COS_QUESTION_FULL_HOLD` set explicitly ON (`1`, `true`, `on`). Unset is the default below, never this. Read per request. */
 export function questionFullHoldEnabled(env: NodeJS.ProcessEnv): boolean {
   return readSwitch(env.COS_QUESTION_FULL_HOLD, false)
+}
+
+/**
+ * X1, 7.0.34 (Miles 2026-11-13 15:02, "I want the 8 hour question hold ON. please keep it on by default."): the
+ * question hold has THREE states, decided in this order:
+ *   1. `COS_QUESTION_FULL_HOLD` set to on (`1`, `true`, `on`) or off (`0`, `false`, `off`): that, source `env`.
+ *   2. Else the server-side setting Control's Settings row writes (`lib/question-hold-setting.ts`), source `setting`.
+ *   3. Else `default`: ON BY DEFAULT, PENDING PER REQUEST. A question is held for the whole wait only when ITS OWN
+ *      hook stamped a wait longer than DEFAULT_HOLD_MIN_STAMP_S, which only the split question block Reinstall hooks
+ *      writes ever sends. Until a Mac reinstalls, every request reads exactly as 7.0.33 with the switch off.
+ * The env value wins over the setting: it is what the launcher or the person at the terminal set on purpose, and
+ * every release since 7.0.16 documents it as the off switch (rollback included). A Settings click must never undo it.
+ */
+export type QuestionHoldMode = 'on' | 'off' | 'default'
+export type QuestionHoldSource = 'env' | 'setting' | 'default'
+export type QuestionHoldSetting = 'on' | 'off'
+
+export function questionHoldMode(env: NodeJS.ProcessEnv, setting: QuestionHoldSetting | null = null): { mode: QuestionHoldMode; source: QuestionHoldSource } {
+  if (readSwitch(env.COS_QUESTION_FULL_HOLD, false)) return { mode: 'on', source: 'env' }
+  if (!readSwitch(env.COS_QUESTION_FULL_HOLD, true)) return { mode: 'off', source: 'env' }
+  if (setting === 'on' || setting === 'off') return { mode: setting, source: 'setting' }
+  return { mode: 'default', source: 'default' }
 }
 
 /** `COS_APPROVAL_FULL_HOLD`: hold a tool approval for the whole hook wait while the desk stays idle. Default OFF. */
@@ -45,10 +67,16 @@ export function questionRowText(question: unknown): string {
   return question.replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
 }
 
-export interface FullHoldSwitches { questions: boolean; approvals: boolean }
+/**
+ * `questions`: the question hold is ON outright (env or setting). `questionsByDefault`: it is the 7.0.34 default,
+ * which holds a question only when its own hook stamped a long wait (`defaultHoldTakesStamp`). Both false: off.
+ * A caller that predates 7.0.34 and passes only `questions` and `approvals` reads as off, exactly as before.
+ */
+export interface FullHoldSwitches { questions: boolean; approvals: boolean; questionsByDefault?: boolean }
 
-export function fullHoldSwitches(env: NodeJS.ProcessEnv): FullHoldSwitches {
-  return { questions: questionFullHoldEnabled(env), approvals: approvalFullHoldEnabled(env) }
+export function fullHoldSwitches(env: NodeJS.ProcessEnv, setting: QuestionHoldSetting | null = null): FullHoldSwitches {
+  const q = questionHoldMode(env, setting)
+  return { questions: q.mode === 'on', approvals: approvalFullHoldEnabled(env), questionsByDefault: q.mode === 'default' }
 }
 
 /**
@@ -125,6 +153,18 @@ export const FULL_HOLD_QUESTION_WAIT_HOURS = 8
 export const FULL_HOLD_QUESTION_WAIT_S = FULL_HOLD_QUESTION_WAIT_HOURS * 60 * 60
 /** The question block 7.0.16 to 7.0.31 wrote: an install from then reads as an earlier wait (`priorWaitOnly`), still halt-ready. */
 export const FULL_HOLD_QUESTION_WAIT_PRIOR_S = 3600
+
+/**
+ * X1, 7.0.34: under the default, a question is held for the whole wait only when its hook stamped MORE than this.
+ * The one block 6.60.0 to 7.0.33 writes stamps 630 and the 7.0.16 to 7.0.31 question block 3600, so neither does;
+ * only the split question block Reinstall hooks writes under 7.0.32 or later (28,800) does. The gate is the
+ * invocation's own stamp, so a session still running on hooks it loaded before Reinstall keeps 7.0.33's behaviour.
+ */
+export const DEFAULT_HOLD_MIN_STAMP_S = FULL_HOLD_QUESTION_WAIT_PRIOR_S
+
+export function defaultHoldTakesStamp(hookWaitS: number | null | undefined): boolean {
+  return typeof hookWaitS === 'number' && Number.isFinite(hookWaitS) && hookWaitS > DEFAULT_HOLD_MIN_STAMP_S
+}
 
 /**
  * The matcher of the non-question PermissionRequest block once the hook is split (canary C9:

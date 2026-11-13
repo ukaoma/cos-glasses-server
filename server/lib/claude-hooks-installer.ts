@@ -24,7 +24,8 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { atomicWriteFileSync } from './atomic-fs.js'
-import { FULL_HOLD_HOOK_WAIT_S, FULL_HOLD_QUESTION_WAIT_PRIOR_S, FULL_HOLD_QUESTION_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER, fullHoldSwitches } from './full-hold.js'
+import { FULL_HOLD_HOOK_WAIT_S, FULL_HOLD_QUESTION_WAIT_PRIOR_S, FULL_HOLD_QUESTION_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER, approvalFullHoldEnabled, defaultHoldTakesStamp, questionHoldMode, type QuestionHoldMode, type QuestionHoldSetting, type QuestionHoldSource } from './full-hold.js'
+import { questionHoldSettingPath, readQuestionHoldSetting } from './question-hold-setting.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -200,14 +201,61 @@ function priorWaitBlock(scriptPath: string, sub: HookSubscription, paths: HookPa
  */
 export interface PermissionHookPlan { split: boolean; questionWaitS: number; otherWaitS: number }
 
-export function permissionHookPlan(env: NodeJS.ProcessEnv = process.env): PermissionHookPlan {
-  const on = fullHoldSwitches(env)
-  if (!on.questions && !on.approvals) return { split: false, questionWaitS: PERMISSION_HOOK_TIMEOUT_S, otherWaitS: PERMISSION_HOOK_TIMEOUT_S }
+/**
+ * X1, 7.0.34: under the DEFAULT question hold (`questionHoldMode` `default`) the plan depends on who asks.
+ *   - Reinstall hooks (`forInstall`): the split block with the 8 h question wait. That click is the opt-in.
+ *   - The status: the split plan only once the file already carries a question block longer than
+ *     DEFAULT_HOLD_MIN_STAMP_S (`installedQuestionWaitS`); before that, the one unsplit block, so a Mac that never
+ *     clicks reads `installed` with no banner and the 7.0.31 script stays current, exactly as 7.0.33.
+ * Explicit on and off (env or setting) are the same for both, as before.
+ */
+export interface PermissionHookPlanOptions {
+  /** The server-side setting; absent reads the file (`lib/question-hold-setting.ts`). */
+  setting?: QuestionHoldSetting | null
+  /** The AskUserQuestion block's timeout in the settings file now (status only). */
+  installedQuestionWaitS?: number | null
+  /** Reinstall hooks is asking: under the default, write the long question block. */
+  forInstall?: boolean
+}
+
+export function permissionHookPlan(env: NodeJS.ProcessEnv = process.env, options: PermissionHookPlanOptions = {}): PermissionHookPlan {
+  const setting = options.setting === undefined ? readQuestionHoldSetting() : options.setting
+  const mode = questionHoldMode(env, setting).mode
+  const questions = mode === 'on' || (mode === 'default' && (options.forInstall === true || defaultHoldTakesStamp(options.installedQuestionWaitS)))
+  const approvals = approvalFullHoldEnabled(env)
+  if (!questions && !approvals) return { split: false, questionWaitS: PERMISSION_HOOK_TIMEOUT_S, otherWaitS: PERMISSION_HOOK_TIMEOUT_S }
   return {
     split: true,
     // X1 (Miles 11/12 17:42): a held question waits 8 hours; approvals keep the 7.0.16 hour.
-    questionWaitS: on.questions ? FULL_HOLD_QUESTION_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
-    otherWaitS: on.approvals ? FULL_HOLD_HOOK_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
+    questionWaitS: questions ? FULL_HOLD_QUESTION_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
+    otherWaitS: approvals ? FULL_HOLD_HOOK_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
+  }
+}
+
+/**
+ * X1, 7.0.34: what `GET /api/session-hooks/status` adds as `sessionHooks.questionWait` (additive: `state` is
+ * untouched, so a Control that predates it shows exactly what it showed). `offered`: the default is on and this
+ * Mac's hooks do not carry the long question block yet, so Reinstall hooks would turn it on. `active`: the hooks
+ * carry it and the hold is not off, so a question from a session started since is held up to `waitS`.
+ */
+export interface QuestionWaitStatus {
+  mode: QuestionHoldMode
+  source: QuestionHoldSource
+  installedWaitS: number | null
+  waitS: number
+  active: boolean
+  offered: boolean
+}
+
+export function questionWaitStatus(env: NodeJS.ProcessEnv, setting: QuestionHoldSetting | null, installedQuestionWaitS: number | null): QuestionWaitStatus {
+  const { mode, source } = questionHoldMode(env, setting)
+  const long = defaultHoldTakesStamp(installedQuestionWaitS)
+  return {
+    mode, source,
+    installedWaitS: installedQuestionWaitS,
+    waitS: FULL_HOLD_QUESTION_WAIT_S,
+    active: mode !== 'off' && long,
+    offered: mode === 'default' && !long,
   }
 }
 
@@ -409,6 +457,8 @@ export interface HookStatus {
    */
   permissionHookTimeouts?: { question: number | null; approval: number | null }
   tokenPresent: boolean
+  /** X1, 7.0.34: the question hold for this Mac (`questionWaitStatus`); absent only when the settings could not be read. */
+  questionWait?: QuestionWaitStatus
 }
 
 function sha256File(path: string): string | null {
@@ -439,7 +489,7 @@ function hooksDisabled(settings: unknown): boolean {
   return !!settings && typeof settings === 'object' && (settings as { disableAllHooks?: unknown }).disableAllHooks === true
 }
 
-export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; packageScriptPath?: string; hookPaths?: HookPaths; plan?: PermissionHookPlan } = {}): HookStatus {
+export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; packageScriptPath?: string; hookPaths?: HookPaths; plan?: PermissionHookPlan; env?: NodeJS.ProcessEnv; setting?: QuestionHoldSetting | null } = {}): HookStatus {
   const settingsPath = paths.settingsPath ?? claudeSettingsPath()
   const scriptPath = paths.scriptPath ?? stableHookScriptPath()
   const packageScriptPath = paths.packageScriptPath ?? packagedHookScriptPath()
@@ -451,7 +501,13 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   if (!read.ok) {
     return { state: read.reason, installed: false, settingsPath, scriptPath, scriptSha, packageScriptSha, subscribed: [], missing: HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [], priorWait: [], priorWaitOnly: false, permissionHookTimeoutS: null, tokenPresent }
   }
-  const events = subscribedEvents(read.settings, scriptPath, hookPaths, paths.plan ?? permissionHookPlan())
+  // X1, 7.0.34: the setting is read once per status; the plan then follows what the file already carries.
+  const env = paths.env ?? process.env
+  // The setting lives in the same COS home the hooks point at (production: ~/.cos-glasses; a test: its own box).
+  const setting = paths.setting === undefined ? readQuestionHoldSetting(questionHoldSettingPath(hookPaths.home)) : paths.setting
+  const installedQuestionWaitS = permissionHookTimeoutForToolS(read.settings, 'AskUserQuestion')
+  const plan = paths.plan ?? permissionHookPlan(env, { setting, installedQuestionWaitS })
+  const events = subscribedEvents(read.settings, scriptPath, hookPaths, plan)
   const permissionWaitS = permissionHookTimeoutS(read.settings)
   const permissionHookTimeouts = {
     question: permissionHookTimeoutForToolS(read.settings, 'AskUserQuestion'),
@@ -461,12 +517,12 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   if (hooksDisabled(read.settings)) state = 'disabled_by_settings'
   else if (events.subscribed.length === 0 && events.drifted.length === 0) state = 'missing'
   else if (events.missing.length > 0 || events.drifted.length > 0) state = 'drift'
-  else if (!scriptCurrentForPlan(scriptSha, packageScriptSha, paths.plan ?? permissionHookPlan())) state = 'script_outdated'
+  else if (!scriptCurrentForPlan(scriptSha, packageScriptSha, plan)) state = 'script_outdated'
   else state = 'installed'
   const priorWaitOnly = state === 'drift' && events.missing.length === 0 && events.drifted.length > 0
     && events.drifted.every(event => events.priorWait.includes(event))
   const observerOnlyDrift = state === 'drift' && events.missing.length > 0 && events.missing.every(event => event === 'PreCompact') && events.drifted.every(event => events.priorWait.includes(event))
-  return { observerOnlyDrift, state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, ...(paths.plan?.split || permissionHookPlan().split || permissionHookTimeouts.question !== permissionHookTimeouts.approval ? { permissionHookTimeouts } : {}), tokenPresent }
+  return { observerOnlyDrift, state, installed: state === 'installed', settingsPath, scriptPath, scriptSha, packageScriptSha, ...events, priorWaitOnly, permissionHookTimeoutS: permissionWaitS, ...(plan.split || permissionHookTimeouts.question !== permissionHookTimeouts.approval ? { permissionHookTimeouts } : {}), tokenPresent, questionWait: questionWaitStatus(env, setting, installedQuestionWaitS) }
 }
 
 /**
@@ -675,7 +731,8 @@ export function installClaudeHooks(options: InstallOptions = {}): InstallResult 
   const packageScriptPath = options.packageScriptPath ?? packagedHookScriptPath()
   const hookPaths = options.hookPaths ?? currentHookPaths()
   const read = readSettings(settingsPath)
-  const plan = options.plan ?? permissionHookPlan()
+  // X1, 7.0.34: Reinstall hooks is the opt-in, so under the default it writes the long question block.
+  const plan = options.plan ?? permissionHookPlan(process.env, { forInstall: true, setting: readQuestionHoldSetting(questionHoldSettingPath(hookPaths.home)) })
   const statusNow = () => hookStatus({ settingsPath, scriptPath, packageScriptPath, hookPaths, plan })
   const refuse = (reason: string, scriptCopied = false): InstallResult => ({ ok: false, reason, changed: false, scriptCopied, backupPath: null, status: statusNow() })
   if (!read.ok) return refuse(read.reason)

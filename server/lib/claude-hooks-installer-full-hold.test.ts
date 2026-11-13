@@ -97,9 +97,10 @@ describe('Reinstall hooks applies it, and status stays halt-ready in between', (
     return { settingsPath, scriptPath, hookPaths }
   }
 
-  it('unsplit install, then a switch on: drift with priorWaitOnly and halt-ready; Reinstall writes the split; switch off: drift, halt-ready, Reinstall restores 7.0.13', () => {
+  // 7.0.34: "off" is an explicit 0 now; unset is the default, pinned in question-hold-default.test.ts.
+  it('unsplit install, then a switch on: drift with priorWaitOnly and halt-ready; Reinstall writes the split; switch off (0): drift, halt-ready, Reinstall restores 7.0.13', () => {
     const box = sandbox()
-    setFlags(undefined, undefined)
+    setFlags('0', undefined)
     const first = installClaudeHooks({ ...box, port: 3999 })
     expect(first.status.state).toBe('installed')
     // Unsplit with the switches off: no per-kind field, so the status reads as 7.0.13's.
@@ -112,7 +113,7 @@ describe('Reinstall hooks applies it, and status stays halt-ready in between', (
     const split = installClaudeHooks({ ...box, port: 3999 })
     expect(split.status.state).toBe('installed')
     expect(split.status.permissionHookTimeouts).toEqual({ question: FULL_HOLD_QUESTION_WAIT_S, approval: 630 })
-    setFlags(undefined, undefined)
+    setFlags('0', undefined)
     status = hookStatus(box)
     expect([status.state, status.priorWaitOnly]).toEqual(['drift', true])
     expect(hookHaltReady(status)).toBe(true)

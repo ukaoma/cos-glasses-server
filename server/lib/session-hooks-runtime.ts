@@ -374,6 +374,8 @@ export interface SessionHooksHealth {
   /** The install state word; `installed` below is its boolean. */
   state: HookStatus['state']
   installed: boolean
+  /** X1, 7.0.34: the question hold for this Mac (additive). */
+  questionWait?: HookStatus['questionWait']
   scriptSha: string | null
   /**
    * 6.60.0: our PermissionRequest hook's `timeout` in the Claude settings file (630 after
@@ -433,6 +435,8 @@ export function sessionHooksHealthFields(): { sessionHooks: SessionHooksHealth }
       installed: status.installed,
       scriptSha: status.scriptSha,
       permissionHookTimeoutS: status.permissionHookTimeoutS,
+      // X1, 7.0.34: additive. `state` is untouched; Control 0.5.394 and Control Web read this to offer the long wait.
+      ...(status.questionWait ? { questionWait: status.questionWait } : {}),
       priorWaitOnly: status.priorWaitOnly,
       tokenPresent: status.tokenPresent,
       lastEventAt: newest ? new Date(newest).toISOString() : null,

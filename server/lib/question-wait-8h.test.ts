@@ -95,11 +95,14 @@ describe('a Mac that never turns the switch on: nothing changes', () => {
   }
   /** An install made by 7.0.31: this package's settings, the 7.0.31 script at the stable path. */
   function installedBy7031(b: ReturnType<typeof box>) {
-    installClaudeHooks({ ...b, port: 3999 })
+    // 7.0.34: an unset question switch was OFF to 7.0.31 (the one 630 block), but is the default here, whose Reinstall
+    // writes the long block. So for unset, write what 7.0.31 wrote: this package's plan with the question hold off.
+    const plan = process.env.COS_QUESTION_FULL_HOLD === undefined ? permissionHookPlan({ ...process.env, COS_QUESTION_FULL_HOLD: '0' }, { setting: null, forInstall: true }) : undefined
+    installClaudeHooks({ ...b, port: 3999, ...(plan ? { plan } : {}) })
     copyFileSync(FIXTURE_7031, b.scriptPath)
   }
 
-  it('switch off: the 7.0.31 script reads installed, halt-ready and Cursor-ready (no banner)', () => {
+  it('switch unset (the 7.0.34 default, never reinstalled): the 7.0.31 script reads installed, halt-ready and Cursor-ready (no banner)', () => {
     delete process.env.COS_QUESTION_FULL_HOLD; delete process.env.COS_APPROVAL_FULL_HOLD
     const b = box()
     installedBy7031(b)
@@ -110,8 +113,8 @@ describe('a Mac that never turns the switch on: nothing changes', () => {
     expect(cursorDeskHaltReady(status)).toBe(true)
   })
 
-  it('approval switch only: still current (no question block passes more than an hour)', () => {
-    delete process.env.COS_QUESTION_FULL_HOLD; process.env.COS_APPROVAL_FULL_HOLD = '1'
+  it('approval switch only (question hold off): still current (no question block passes more than an hour)', () => {
+    process.env.COS_QUESTION_FULL_HOLD = '0'; process.env.COS_APPROVAL_FULL_HOLD = '1'
     const b = box()
     installedBy7031(b)
     expect(hookStatus(b).state).toBe('installed')
