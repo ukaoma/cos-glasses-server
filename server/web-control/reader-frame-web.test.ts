@@ -28,16 +28,17 @@ function kit(o: { wide?: boolean; shellHidden?: boolean; route?: { pane: string;
   const mqs: Array<{ q: string; fns: Array<() => void> }> = []
   const frames: Array<() => void> = []
   const crumbs: Array<{ what: string; data: any }> = []
-  const box = (t: number, b: number) => ({ getBoundingClientRect: () => ({ top: t, bottom: b }) })
+  const box = (t: number, b: number, more: any = {}) => ({ getBoundingClientRect: () => ({ top: t, bottom: b }), ...more })
   let wide = o.wide ?? true
   const win: any = {
+    scrollY: 0,
     matchMedia: (q: string) => { const m = { q, fns: [] as Array<() => void> }; mqs.push(m); return { get matches() { return q === '(min-width: 600px)' ? wide : false }, addEventListener: (_t: string, fn: () => void) => m.fns.push(fn) } },
     requestAnimationFrame: (fn: () => void) => { frames.push(fn); return frames.length },
   }
   const deps: any = {
     window: win,
-    document: { documentElement: de, scrollingElement: { scrollHeight: 787 }, querySelector: (s: string) => (s === '#pane-messages .cx-reply-form' ? (o.reply === false ? null : box(680, 787)) : s === '#pane-messages > .cx' ? box(62, 787) : null) },
-    $: (id: string) => (id === 'app-shell' ? { classList: { contains: (c: string) => c === 'hidden' && !!o.shellHidden } } : null),
+    document: { documentElement: de, scrollingElement: { scrollHeight: 787 }, querySelector: (s: string) => (s === '#pane-messages .cx-reply-form' ? (o.reply === false ? null : box(680, 787)) : s === '#pane-messages > .cx' ? box(62, 787, { clientHeight: 725, scrollHeight: 2142 }) : null) },
+    $: (id: string) => (id === 'app-shell' ? { classList: { contains: (c: string) => c === 'hidden' && !!o.shellHidden } } : id === 'workspace' ? { clientHeight: 743, scrollHeight: 2400 } : null),
     parseRoute: () => o.route ?? { pane: 'messages', args: ['m', 'i5'] },
     viewportFit: () => ({ top: 0, height: 787, bad: false }),
     layoutCrumb: (what: string, data: any) => { crumbs.push({ what, data }); return o.crumbOk ?? true },
@@ -98,22 +99,30 @@ describe('html.rd-frame: on only for a message reader from 600 px', () => {
   })
 })
 
-describe('the rd-frame report: where the box and Reply sit, numbers only, bounded', () => {
-  it('one report a frame after it turns on, with the box, the reader, Reply, the document height and 100dvh', () => {
+describe('the reader report (lead 17:48): where the box and Reply sit, numbers only, bounded', () => {
+  it('one report a frame after a message reader opens, with the box, the reader, the workspace and its content, Reply, the document and 100dvh', () => {
     const h = kit()
     h.k.sync()
     expect(h.crumbs).toHaveLength(0)
     h.frames.forEach(f => f())
     expect(h.crumbs).toHaveLength(1)
-    expect(h.crumbs[0]).toEqual({ what: 'rd-frame', data: { why: 'open', fb: false, boxT: 0, boxB: 787, rdT: 62, rdB: 787, replyB: 787, docH: 787, dvh: 787 } })
+    expect(h.crumbs[0]).toEqual({ what: 'reader', data: { why: 'open', frame: true, fb: false, boxT: 0, boxB: 787, rdT: 62, rdB: 787, rdH: 725, wsH: 743, wsSH: 2400,
+      replyT: 680, replyB: 787, docH: 787, sy: 0, dvh: 787 } })
     for (const v of Object.values(h.crumbs[0].data)) expect(['number', 'boolean', 'string']).toContain(typeof v)
   })
-  it('never while the frame is off, and at most 8 a page load', () => {
-    const off = kit({ wide: false })
-    off.k.sync(); off.frames.forEach(f => f())
-    expect(off.crumbs).toHaveLength(0)
+  it('a reader under 600 px reports too, with frame false; another page never does', () => {
+    const narrow = kit({ wide: false })
+    narrow.k.sync(); narrow.frames.forEach(f => f())
+    expect(narrow.crumbs).toHaveLength(1)
+    expect(narrow.crumbs[0].data.frame).toBe(false)
+    for (const route of [{ pane: 'messages', args: [] }, { pane: 'messages', args: ['m', 'i5', 'a', 'x'] }, { pane: 'today', args: [] }]) {
+      const h = kit({ route })
+      h.k.sync(route); h.frames.forEach(f => f())
+      expect(h.crumbs, JSON.stringify(route)).toHaveLength(0)
+    }
+  })
+  it('at most 8 a page load', () => {
     const h = kit()
-    h.de.classList.add('rd-frame')
     for (let i = 0; i < 12; i++) h.k.crumb('open')
     expect(h.crumbs).toHaveLength(8)
   })
@@ -138,10 +147,10 @@ describe('the frame CSS (panes/cos-chat.css)', () => {
     expect(block).toContain('html.rd-frame, html.rd-frame body { height: 100%; overflow: hidden; overscroll-behavior: none; }')
     expect(block).toMatch(/html\.rd-frame \.app-shell \{ position: fixed; left: 0; right: 0; top: var\(--vv-top, 0px\); height: var\(--vv-h, 100dvh\);/)
   })
-  it('the rail is a column of the shell (not 100dvh) and the reader is the scroller', () => {
+  it('the rail is a column of the shell (not 100dvh), and the workspace is the one scroller, with no bottom padding', () => {
     expect(block).toContain('html.rd-frame .rail { position: static; top: auto; height: auto; min-height: 0; overflow-y: auto;')
-    expect(block).toContain('html.rd-frame #pane-messages > .cx { flex: 1 1 auto; min-height: 0; overflow-y: auto;')
-    expect(block).toContain('html.rd-frame .workspace { flex: 1 1 auto; min-height: 0;')
+    expect(block).toContain('html.rd-frame .workspace { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 0; }')
+    expect(block, 'the notice and the question card scroll with the message, as in 7.0.30').not.toMatch(/#sq-host|#conn-notice|#pane-messages > \.cx \{/)
   })
   it('with the keyboard up the Reply box stays at the frame bottom (the frame is already the visible box)', () => {
     expect(block).toContain('html.rd-frame.kb-reply .cx-reply-form { bottom: 0; }')

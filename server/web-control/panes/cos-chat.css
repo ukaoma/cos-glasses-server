@@ -222,10 +222,12 @@ html.kb-up .cc-kb .cc-model .field { width: 100%; }
 html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px; }
 /* 7.0.31 hotfix (Miles 17:25, the open Duo): from 600 px the message reader is its own frame (app.js rdFrameSync sets
    html.rd-frame on #/messages/m/<no>). The page is one screen, never taller, as in Sessions (panes/sessions.css): the
-   app shell is the visible box, the rail a column of it that scrolls by itself, and the reader scrolls inside its own
-   box with Reply stuck to that box's bottom. Before, the reader was the document, so its Reply stuck to the document's
-   scrollport and the rail was 100dvh: with Safari's viewport stale after folds, both ended mid-screen and the message
-   drew below them. Nothing here reaches under 600 px, where the phone and the folded Duo keep the reader as shipped. */
+   app shell is the visible box and the rail a column of it that scrolls by itself. The workspace under the navigation
+   bar is the one thing that scrolls: the sign-in notice, a question card and the message scroll together as they did
+   in 7.0.30, and Reply sticks to the workspace's bottom. Before, the reader was the document, so Reply stuck to the
+   document's viewport and the rail was 100dvh: with Safari's view left panned or short after folds, both ended
+   mid-screen and the message drew below them. Nothing here reaches under 600 px, where the phone and the folded Duo
+   keep the reader as shipped. */
 @media (min-width: 600px) {
   html.rd-frame, html.rd-frame body { height: 100%; overflow: hidden; overscroll-behavior: none; }
   html.rd-frame body { min-height: 0; }
@@ -234,14 +236,8 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
   html.rd-frame .rail { position: static; top: auto; height: auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   html.rd-frame .main-col { min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
   html.rd-frame .topbar, html.rd-frame .navbar { flex: none; position: relative; }
-  html.rd-frame .workspace { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
-  html.rd-frame .workspace > :not(.pane) { flex: none; }
-  html.rd-frame #sq-host { max-height: 35%; overflow: auto; overscroll-behavior: contain; }
-  html.rd-frame #pane-messages { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; width: 100%; }
-  html.rd-frame #pane-messages > .pane-head { flex: none; }
-  /* The reader's own scroll. Its last child is the Reply box (sticky, bottom 0), so at the end of the message the
-     Reply section sits just above it and nothing is under it. */
-  html.rd-frame #pane-messages > .cx { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  /* The scroller. No bottom padding: at the end of the message, Reply is the last thing and sits on the frame's bottom. */
+  html.rd-frame .workspace { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 0; }
   /* With the keyboard up the frame is already the visible box (--vv-top, --vv-h), so the box stays at the frame's bottom. */
   html.rd-frame.kb-reply .cx-reply-form { bottom: 0; }
 }

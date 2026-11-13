@@ -2940,7 +2940,7 @@
   // 7.0.31 hotfix (Miles 17:25, the open Duo): the message reader in its own frame from 600 px. html.rd-frame makes the
   // page one screen, as Sessions' frame does (panes/cos-chat.css): the app shell is the visible box (--vv-top, --vv-h
   // from viewportFit, which falls back to innerHeight when the visual viewport reads 0 or less), and the reader scrolls
-  // inside its own box with Reply pinned to that box's bottom. Before, the reader was the document: its Reply stuck to the
+  // in the workspace under the navigation bar, with Reply pinned to its bottom. Before, the reader was the document: its Reply stuck to the
   // document's scrollport and the rail was 100dvh, so when Safari's viewport went stale after folds (his Duo reported
   // visual viewport heights of 0 and -33554432 from 17:17 to 17:24) both ended mid-screen and the message drew below
   // them. Below 600 px (phones, the folded Duo's side rail) the reader is unchanged; the CSS is gated the same way, so a
@@ -2958,20 +2958,25 @@
       var mq = window.matchMedia('(min-width: 600px)');
       if (mq && mq.addEventListener) mq.addEventListener('change', function () { rdFrameSync(); }); else if (mq && mq.addListener) mq.addListener(function () { rdFrameSync(); });
     }
-    if (on && window.requestAnimationFrame) window.requestAnimationFrame(function () { rdFrameCrumb('open'); });
+    var r2 = r || parseRoute();
+    if (r2 && r2.pane === 'messages' && r2.args && r2.args[0] === 'm' && r2.args.length === 2 && window.requestAnimationFrame) window.requestAnimationFrame(function () { rdFrameCrumb('open'); });
     return on;
   }
-  // Where the reader frame's box and its Reply sit against the visible area and against 100dvh, once per open, at most
-  // 8 a page load (numbers only). The 17:25 frame could not be measured; this one would have been.
+  // One report per message reader opened, at any width, at most 8 a page load (numbers only; lead 17:48): whether the frame
+  // is on, the visible box viewportFit uses, the reader's box (top, bottom, height), the workspace's height and content height (the frame's scroller), Reply's top
+  // and bottom, the document's height and scroll, and 100dvh. layoutCrumb adds innerWidth and innerHeight and the visual
+  // viewport's height, top and scale, so a pan like 17:25's (top about 409) shows in the same row. The 17:25 frame could
+  // not be measured; the next one will be.
   function rdFrameCrumb(why) {
-    if (RD_FRAME.n >= 8 || typeof layoutCrumb !== 'function' || !document.documentElement.classList.contains('rd-frame')) return false;
+    if (RD_FRAME.n >= 8 || typeof layoutCrumb !== 'function') return false;
     try {
-      var v = viewportFit(), f = document.querySelector('#pane-messages .cx-reply-form'), cx = document.querySelector('#pane-messages > .cx');
+      var v = viewportFit(), f = document.querySelector('#pane-messages .cx-reply-form'), cx = document.querySelector('#pane-messages > .cx'), ws = $('workspace');
       var fr = f && f.getBoundingClientRect ? f.getBoundingClientRect() : null, cr = cx && cx.getBoundingClientRect ? cx.getBoundingClientRect() : null;
       var se = document.scrollingElement || document.documentElement;
-      var out = { why: String(why || '').slice(0, 24), fb: !!v.bad, boxT: v.top, boxB: v.top + v.height, rdT: cr ? cr.top : -1, rdB: cr ? cr.bottom : -1,
-        replyB: fr ? fr.bottom : -1, docH: se ? se.scrollHeight : -1, dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null };
-      if (layoutCrumb('rd-frame', out)) { RD_FRAME.n++; return true; }
+      var out = { why: String(why || '').slice(0, 24), frame: !!(document.documentElement.classList && document.documentElement.classList.contains('rd-frame')), fb: !!v.bad,
+        boxT: v.top, boxB: v.top + v.height, rdT: cr ? cr.top : -1, rdB: cr ? cr.bottom : -1, rdH: cx ? cx.clientHeight : -1, wsH: ws ? ws.clientHeight : -1, wsSH: ws ? ws.scrollHeight : -1,
+        replyT: fr ? fr.top : -1, replyB: fr ? fr.bottom : -1, docH: se ? se.scrollHeight : -1, sy: window.scrollY || 0, dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null };
+      if (layoutCrumb('reader', out)) { RD_FRAME.n++; return true; }
     } catch (_e) { /* a report never stops the page */ }
     return false;
   }
