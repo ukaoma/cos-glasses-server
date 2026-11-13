@@ -704,8 +704,8 @@ html { touch-action: manipulation; }
   /* The focus ring sits inside the button: the rail clips anything past its edge. */
   html.short-screen .rail :focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 12px; }
   /* One way to switch panes on a screen: the rail. On a list the top bar keeps the pane's name, without the caret and
-     its menu (app.js makes the button inert); on a reader its Back moves to the rail and the left of the top bar is
-     empty. */
-  html.short-screen .section-btn .caret, html.short-screen #topbar-back { display: none !important; }
+     its menu (app.js makes the button inert). On a reader (7.0.33 A12) the top bar shows Back with the name of where it
+     goes, and stays put while you read; the rail's foot keeps its own Back within the thumb's reach. */
+  html.short-screen .section-btn .caret { display: none !important; }
   html.short-screen .section-btn { cursor: default; }
 }

@@ -807,7 +807,7 @@
     if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();
     if (changedPane) window.scrollTo(0, 0);
-    $('topbar').classList.remove('tucked');
+    barShow($('topbar'));
     onScroll();
 
     if (!PANES[r.pane] && LAZY()[r.pane]) {
@@ -861,16 +861,39 @@
   var lastY = 0;
   function onScroll() {
     var y = Math.max(0, window.scrollY || 0);
-    // On a reader the bar stays (its Back is there). The folded Duo's Back is on the side rail (the bar's is hidden by CSS,
-    // not the class), so there the bar tucks as before (Q1 7.0.30 M1).
-    var bar = $('topbar'), back = $('topbar-back'), onReader = !!(back && !back.classList.contains('hidden')) && !(typeof sideRail === 'function' && sideRail());
+    // On a reader the bar stays (its Back is there). 7.0.33 A12: on the folded Duo too, where the bar now shows a named
+    // Back (app.css); before, the bar tucked there and a tap meant for it landed on the page.
+    var bar = $('topbar'), back = $('topbar-back'), onReader = !!(back && !back.classList.contains('hidden'));
     bar.classList.toggle('scrolled', y > 8);
-    if (y < 60 || y < lastY - 4 || onReader) bar.classList.remove('tucked');
+    if (y < 60 || y < lastY - 4 || onReader) barShow(bar);
     else if (y > lastY + 4 && isPhone()) bar.classList.add('tucked');
     lastY = y;
   }
   function openMenu() { if (sideRail()) return; $('section-menu').classList.remove('hidden'); var cur = document.querySelector('#section-menu [aria-current="page"]') || document.querySelector('#section-menu [data-goto]'); if (cur) cur.focus(); }
   function closeMenu() { $('section-menu').classList.add('hidden'); }
+  // 7.0.33 A12 (Anand round 2, slide 27): no tap falls through a hidden top bar. Once the bar has slid away its band shows
+  // the page, and a tap meant for the bar (Ask, Back) landed on whatever was there; on Settings that armed, then fired,
+  // "Sign out every browser". Now, while the bar is away or still sliding back, the first tap in its band only brings
+  // the bar back. Every page and size: the class is the test, so wherever the bar tucks, its band catches.
+  var barBackAt = 0, barCatch = null;
+  function barShow(bar) { if (bar.classList.contains('tucked')) { bar.classList.remove('tucked'); barBackAt = Date.now(); } }
+  function barCatches(y) {
+    var bar = $('topbar');
+    if (!bar || !(y >= 0) || y >= bar.offsetHeight) return false;
+    return bar.classList.contains('tucked') || Date.now() - barBackAt < BAR_SLIDE_MS;
+  }
+  var BAR_SLIDE_MS = 320;   // app.css: the bar's transform takes 220 ms; a little more for the finger
+  document.addEventListener('pointerdown', function (e) {
+    barCatch = null;
+    if (!barCatches(e.clientY)) return;
+    barCatch = { y: e.clientY, until: Date.now() + 1500 };
+    barShow($('topbar')); lastY = Math.max(0, window.scrollY || 0);
+  }, true);
+  document.addEventListener('click', function (e) {
+    var c = barCatch; barCatch = null;
+    if (!c || Date.now() > c.until || Math.abs(e.clientY - c.y) > 24) return;
+    e.preventDefault(); e.stopPropagation();
+  }, true);
 
   // ── auth ────────────────────────────────────────────────
   // 7.0.19: the first paint (index.html #first-paint) ends the moment the sign-in card or the app shows, whichever
@@ -7723,7 +7746,7 @@
     if (action === 'drop-after') return dropHeld();
     if (action === 'unqueue') return removeQueued(t.getAttribute('data-turn-key'));
     if (action === 'revoke-all') {
-      if (t.getAttribute('data-armed') !== '1') { t.setAttribute('data-armed', '1'); t.querySelector('.grow').firstChild.textContent = 'Tap again to sign out every browser'; return; }
+      if (!window.COSWeb.armTap(t, t.querySelector('.grow').firstChild, 'Tap again to sign out every browser')) return;
       api('/api/web-session/revoke-all', { method: 'POST', body: {} }).then(function () { showAuth('Every browser is signed out, this one too.'); }).catch(function (err) { setStatus($('settings-status'), err.message, true); });
       return;
     }
@@ -8130,6 +8153,22 @@
   var ARM_CONFIRM_MS = 400;
   window.COSWeb.armConfirmMs = ARM_CONFIRM_MS;
   window.COSWeb.confirmReady = function (armedAt) { return typeof armedAt === 'number' && Date.now() - armedAt >= ARM_CONFIRM_MS; };
+  // 7.0.33 A12: the same rule for a button armed in place (Sign out every browser, Settings' Release), which until now
+  // stayed armed with no time limit, so a stray tap minutes later confirmed it. armTap(button, label, armedText) returns
+  // true on a confirming tap; otherwise it arms (label says armedText) for ARM_EXPIRE_MS and puts the words back after.
+  var ARM_EXPIRE_MS = 5000;
+  window.COSWeb.armExpireMs = ARM_EXPIRE_MS;
+  window.COSWeb.armTap = function (el, label, armedText) {
+    var now = Date.now(), at = Number(el.getAttribute('data-armed-at')) || 0;
+    if (el.getAttribute('data-armed') === '1' && now - at < ARM_EXPIRE_MS) return now - at >= ARM_CONFIRM_MS;
+    if (el.getAttribute('data-armed') !== '1') el.setAttribute('data-idle-text', label.textContent);
+    el.setAttribute('data-armed', '1'); el.setAttribute('data-armed-at', String(now)); label.textContent = armedText;
+    setTimeout(function () {
+      if (el.getAttribute('data-armed-at') !== String(now)) return;
+      el.removeAttribute('data-armed'); el.removeAttribute('data-armed-at'); label.textContent = el.getAttribute('data-idle-text') || label.textContent;
+    }, ARM_EXPIRE_MS);
+    return false;
+  };
   window.COSWeb.today = {
     data: function () {
       return { needs: TODAY.needs, working: TODAY.working, open: TODAY.open, welcome: TODAY.welcome, offline: TODAY.offline, at: TODAY.at,

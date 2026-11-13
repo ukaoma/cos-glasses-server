@@ -439,7 +439,7 @@
       return;
     }
     if (act === 'release') {
-      if (t.getAttribute('data-armed') !== '1') { t.setAttribute('data-armed', '1'); t.textContent = 'Tap again to release'; return; }
+      if (!W.armTap(t, t, 'Tap again to release')) return;
       // The server fails closed without confirm; the second tap is the confirmation.
       api('/api/agent-sessions/fences/release', { method: 'POST', body: { target: t.getAttribute('data-target'), confirm: true } })
         .then(function () { W.toast('Released'); S.data = null; S.state = 'idle'; load(true); }, function (err) { say(err.message, true); });

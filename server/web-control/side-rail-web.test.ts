@@ -111,8 +111,9 @@ describe('app.css: the side rail is drawn only on a short screen, under 600 px, 
     expect(APP).toContain("var SIDE_RAIL_MQ = '(max-width: 599px) and (pointer: coarse)';")
     expect(sideBlock()).toContain('@media (max-width: 599px) and (pointer: coarse) {')
   })
-  it('the pane menu loses its caret and the top bar loses its Back while the rail shows', () => {
-    expect(sideBlock()).toContain('html.short-screen .section-btn .caret, html.short-screen #topbar-back { display: none !important; }')
+  it('the pane menu loses its caret while the rail shows; the top bar keeps its named Back on a reader (7.0.33 A12)', () => {
+    expect(sideBlock()).toContain('html.short-screen .section-btn .caret { display: none !important; }')
+    expect(sideBlock()).not.toContain('#topbar-back { display: none')
   })
   it('no new colours: every colour in the block is a theme token (the one shadow is the wide rail\'s own)', () => {
     const inner = sideBlock().replace(/\/\*[\s\S]*?\*\//g, '')

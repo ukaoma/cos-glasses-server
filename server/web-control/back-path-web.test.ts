@@ -155,7 +155,7 @@ describe('Back stays in reach on a tall phone', () => {
     const els: any = { topbar: { classList: { toggle: (c: string, on: boolean) => (on ? cls.add(c) : cls.delete(c)), add: (c: string) => cls.add(c), remove: (c: string) => cls.delete(c) } },
       'topbar-back': { classList: { contains: (c: string) => c === 'hidden' && !onReader } } }
     // eslint-disable-next-line no-new-func
-    const f = new Function('deps', `with (deps) {\n${SCROLL}\nreturn onScroll;\n}`)({ window: win, $: (id: string) => els[id], isPhone: () => true, sideRail: () => rail })
+    const f = new Function('deps', `with (deps) {\n${SCROLL}\nreturn onScroll;\n}`)({ window: win, $: (id: string) => els[id], isPhone: () => true, sideRail: () => rail, barShow: (b: any) => b.classList.remove('tucked') })
     return { scroll: (y: number) => { win.scrollY = y; f() }, tucked: () => cls.has('tucked') }
   }
   it('on a list the top bar tucks away while scrolling down, as before', () => {
@@ -166,8 +166,12 @@ describe('Back stays in reach on a tall phone', () => {
     const b = bar(true); b.scroll(100); b.scroll(400); b.scroll(900)
     expect(b.tucked()).toBe(false)
   })
-  it('the folded Duo (side rail): on a reader the bar tucks as before, since its Back is on the rail (Q1 M1)', () => {
-    const b = bar(true, true); b.scroll(100); b.scroll(400)
+  it('the folded Duo (side rail): on a reader the bar stays too, now that it shows a named Back there (7.0.33 A12; it tucked in 7.0.30 to 7.0.32)', () => {
+    const b = bar(true, true); b.scroll(100); b.scroll(400); b.scroll(900)
+    expect(b.tucked()).toBe(false)
+  })
+  it('the folded Duo on a list still tucks the bar', () => {
+    const b = bar(false, true); b.scroll(100); b.scroll(400)
     expect(b.tucked()).toBe(true)
   })
 })
