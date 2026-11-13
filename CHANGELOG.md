@@ -1,3 +1,39 @@
+## 7.0.32 - Questions can wait 8 hours (off unless switched on), one queue of waiting questions, code-only glasses pairing words, and the sign-in box takes the glasses code
+
+2026-11-13. 7.0.31 plus three pieces: X1's question wait, W1's pairing words and sign-in field, and one Control Web label.
+
+**The 8-hour question wait is OFF.** It turns on only when `COS_QUESTION_FULL_HOLD` is switched on, in the server's environment or its LaunchAgent. On 11/12 at 20:17 neither switch was set anywhere on Miles's Mac. With it on:
+- a question Claude asks waits up to 8 hours instead of 1, and can be answered from the web, the glasses or the Mac;
+- it shows on all of them at once;
+- the first answer wins, and it stays everywhere until answered. Approvals keep their 1 hour (`COS_APPROVAL_FULL_HOLD`, also off).
+The 8 hours was measured on a real engine: a hook held 7 h 55 m and its answer was applied.
+
+**On for everyone, with no switch:**
+- **The waiting-questions route gains a queue.** `GET /api/session-questions` adds `queue` and `queueCount`, one list of every question or approval waiting anywhere, with answered ones for two minutes. No current client reads them yet.
+  - A waiting question's entry carries its first 80 characters only, as sessions already do (off with `COS_WAITING_QUESTION_WORDS=0`).
+  - Approvals waiting only at the Mac, and answered entries, carry no words.
+- **A question asked at the end of a turn survives a server restart for its full 8 hours.** Before, one asked 6 to 8 hours before a restart was lost.
+- **An answer records which app gave it** (web, glasses, phone or Mac), from the app's own label. It is a label for the queue, not proof of who answered.
+- **The server keeps the titles of up to 400 sessions in memory**, filled by the session list, so the queue can name them.
+- **The session hook script carries one new line.** A hook installed by 7.0.31 still counts as installed. Nothing asks to reinstall it; it matters only after a Reinstall.
+- **The glasses pair by the code alone, so no server message says scan.** Signing a browser in by QR is unchanged, and Control Web, its Settings and the sign-in page already had no such line. Two messages the glasses app shows changed:
+  - a pairing request that was not understood: "That pairing request was not understood. Scan the code again." becomes "That pairing request was not understood. Check the code in COS Control and type it again." The parity copy `docs/pairing-fixture.json` changes with it.
+  - a request without the pairing token: "Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer." becomes "Paste the pairing token from COS Control, or update COS Glasses and type the pairing code COS Control shows." Clients act on its reason, not its words.
+- **The browser sign-in box takes the glasses' full 14-character code** (17 keys with its dashes; it took 9 before). Typed with or without dashes, it says it is the glasses code. It is recognised by its shape, never looked up, and nothing is used up. A real 8-character sign-in code works as before.
+- **Control Web: a waiting question's time left reads hours and minutes past an hour**, for example "7 h 59 m left", where an 8-hour question would have read "480 min left".
+
+**Not in this release (X1's other two asks for Control Web):**
+- the Today count, the Sessions rail and the pet reading the shared queue;
+- "Answered on <app>" on a card answered elsewhere.
+Both are for a later release, before the 8-hour switch is ever turned on.
+
+**Tested:** the full server suite and the Control Web layout checks on this build (numbers in COORD). Not on a real phone.
+
+### If you roll back
+
+- To 7.0.31: no queue fields, a turn-end question older than 6 hours is lost on a restart, the sign-in box takes 9 characters, the two pairing messages say scan again, and the time left reads in minutes. The question wait stays 1 hour (it was off in 7.0.32 unless switched on).
+- Further back: as in 7.0.31 below.
+
 ## 7.0.31 - Control Web: a message's text no longer runs under and below Reply on a wide screen
 
 2026-11-12. A hotfix to 7.0.30, nothing else in it.
