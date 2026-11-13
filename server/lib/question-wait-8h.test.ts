@@ -17,7 +17,7 @@ import {
 } from './claude-hooks-installer.js'
 import { codexHookStatus, installCodexHooks } from './codex-hooks-installer.js'
 import { HOOK_REPLY_MARGIN_S, HOOK_WAIT_STAMP_MAX_S, holdCeilingS } from './permission-broker.js'
-import { LEDGER_REPLAY_WINDOW_MS, __resetSessionHooksForTests, sessionSignalStore, startSessionHooksRuntime, turnAskReplayExtraMs, turnEndAskStats } from './session-hooks-runtime.js'
+import { LEDGER_REPLAY_WINDOW_MS, __resetSessionHooksForTests, sessionHooksHealthFields, sessionSignalStore, startSessionHooksRuntime, turnAskReplayExtraMs, turnEndAskStats } from './session-hooks-runtime.js'
 import { TURN_ASK_MAX_AGE_MS, WRAP_UP_TOOL, __setTurnEndAsksForTests } from './turn-end-ask.js'
 import { dataPath } from './data-dir.js'
 
@@ -128,6 +128,16 @@ describe('a Mac that never turns the switch on: nothing changes', () => {
     expect(sha(b.scriptPath)).toBe(sha(SCRIPT))
   })
 
+  it('a split install from 7.0.16 to 7.0.31 (question block 3600) reads an earlier wait, halt-ready, under the 8 h plan', () => {
+    process.env.COS_QUESTION_FULL_HOLD = '1'; delete process.env.COS_APPROVAL_FULL_HOLD
+    const b = box()
+    installClaudeHooks({ ...b, port: 3999, plan: { split: true, questionWaitS: FULL_HOLD_QUESTION_WAIT_PRIOR_S, otherWaitS: 630 } })
+    const status = hookStatus(b)
+    expect([status.state, status.priorWaitOnly, status.drifted]).toEqual(['drift', true, ['PermissionRequest']])
+    expect(hookHaltReady(status)).toBe(true)
+    expect(installClaudeHooks({ ...b, port: 3999 }).status.permissionHookTimeouts).toEqual({ question: FULL_HOLD_QUESTION_WAIT_S, approval: 630 })
+  })
+
   it('a script that is neither still reads script_outdated and is not Cursor-ready', () => {
     delete process.env.COS_QUESTION_FULL_HOLD
     const b = box()
@@ -198,6 +208,8 @@ describe('turn-end asks survive a restart for their whole 8 hours', () => {
     try {
       expect(turnEndAskStats()).toMatchObject({ armed: 1, tracked: 1 })
       expect(sessionSignalStore.get(SID)).toBeUndefined()
+      // The health count is the store's: rows only the tracker read are not counted as applied.
+      expect(sessionHooksHealthFields().sessionHooks.replayed).toEqual({ rows: 3, applied: 0 })
     } finally {
       runtime.stop()
     }
