@@ -1,6 +1,6 @@
-## 7.0.34 (unreleased) - Questions can wait 8 hours, on by default (takes effect when you choose Reinstall hooks)
+## 7.0.34 - Questions can wait 8 hours, on by default (takes effect when you choose Reinstall hooks)
 
-2026-11-13. Not published. Miles, 15:02: "I want the 8 hour question hold ON. please keep it on by default." Private until he says; the release bump drops "(unreleased)".
+2026-11-13. 7.0.33 plus one change, the 8 hour question hold on by default. Miles, 15:02: "I want the 8 hour question hold ON. please keep it on by default." Everything in 7.0.33 (and in 7.0.32, which never reached npm) is in this update too; see their entries below.
 
 **On for everyone, and what that means:**
 - **If you do nothing, one line is new; nothing else changes.** After updating, your Claude Code hooks, your questions' wait (about 10 minutes, and only while a device is with you), what reaches your browser and how you answer there are all exactly 7.0.33 with the switch off, and COS Control shows no banner. The one thing you see: Control Web's Sessions shows "Questions can now wait up to 8 hours. In COS Control on your Mac, choose Reinstall hooks." until this Mac's hooks are reinstalled (it does not show while the hooks have a problem, whose line already says Reinstall hooks). **Not now** at the end of the line puts it away in that browser; a browser that cannot store it shows the line again next visit. The lasting on or off is COS Control's setting or `.env`.
