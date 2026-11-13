@@ -24,7 +24,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { atomicWriteFileSync } from './atomic-fs.js'
-import { FULL_HOLD_HOOK_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER, fullHoldSwitches } from './full-hold.js'
+import { FULL_HOLD_HOOK_WAIT_S, FULL_HOLD_QUESTION_WAIT_PRIOR_S, FULL_HOLD_QUESTION_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER, fullHoldSwitches } from './full-hold.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -193,7 +193,8 @@ function priorWaitBlock(scriptPath: string, sub: HookSubscription, paths: HookPa
  * `COS_APPROVAL_FULL_HOLD` both off (the default) it is the ONE block every release since 6.60.0
  * writes, byte for byte (`split: false`). With either on it is TWO blocks of ours, split by matcher
  * (canary C9, both engines): `AskUserQuestion` waits `questionWaitS`, everything else `otherWaitS`;
- * a kind whose switch is on waits FULL_HOLD_HOOK_WAIT_S, the other keeps 630. Each block passes its
+ * a question whose switch is on waits FULL_HOLD_QUESTION_WAIT_S (8 h), an approval FULL_HOLD_HOOK_WAIT_S (1 h),
+ * and a kind whose switch is off keeps 630. Each block passes its
  * own wait to the script, so the stamp a request carries is its own block's. Reinstall hooks is what
  * writes it: until then the file reads `drift` (`priorWaitOnly`, still halt-ready).
  */
@@ -204,7 +205,8 @@ export function permissionHookPlan(env: NodeJS.ProcessEnv = process.env): Permis
   if (!on.questions && !on.approvals) return { split: false, questionWaitS: PERMISSION_HOOK_TIMEOUT_S, otherWaitS: PERMISSION_HOOK_TIMEOUT_S }
   return {
     split: true,
-    questionWaitS: on.questions ? FULL_HOLD_HOOK_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
+    // X1 (Miles 11/12 17:42): a held question waits 8 hours; approvals keep the 7.0.16 hour.
+    questionWaitS: on.questions ? FULL_HOLD_QUESTION_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
     otherWaitS: on.approvals ? FULL_HOLD_HOOK_WAIT_S : PERMISSION_HOOK_TIMEOUT_S,
   }
 }
@@ -235,8 +237,10 @@ function priorWaitVariants(scriptPath: string, sub: HookSubscription, paths: Hoo
   if (!prior) return []
   const out: Record<string, unknown>[][] = [[prior]]
   if (plan.split) out.push([canonicalBlock(scriptPath, sub, paths)])
-  const waits = [PERMISSION_HOOK_TIMEOUT_S, FULL_HOLD_HOOK_WAIT_S]
-  for (const q of waits) for (const o of waits) {
+  // X1: the question block also had 3600 (7.0.16 to 7.0.31) before FULL_HOLD_QUESTION_WAIT_S.
+  const questionWaits = [PERMISSION_HOOK_TIMEOUT_S, FULL_HOLD_QUESTION_WAIT_PRIOR_S, FULL_HOLD_QUESTION_WAIT_S]
+  const otherWaits = [PERMISSION_HOOK_TIMEOUT_S, FULL_HOLD_HOOK_WAIT_S]
+  for (const q of questionWaits) for (const o of otherWaits) {
     if (plan.split && q === plan.questionWaitS && o === plan.otherWaitS) continue
     if (q === PERMISSION_HOOK_TIMEOUT_S && o === PERMISSION_HOOK_TIMEOUT_S) continue
     out.push(splitPermissionBlocks(scriptPath, sub, paths, q, o))
@@ -457,7 +461,7 @@ export function hookStatus(paths: { settingsPath?: string; scriptPath?: string; 
   if (hooksDisabled(read.settings)) state = 'disabled_by_settings'
   else if (events.subscribed.length === 0 && events.drifted.length === 0) state = 'missing'
   else if (events.missing.length > 0 || events.drifted.length > 0) state = 'drift'
-  else if (!scriptSha || (packageScriptSha && scriptSha !== packageScriptSha)) state = 'script_outdated'
+  else if (!scriptCurrentForPlan(scriptSha, packageScriptSha, paths.plan ?? permissionHookPlan())) state = 'script_outdated'
   else state = 'installed'
   const priorWaitOnly = state === 'drift' && events.missing.length === 0 && events.drifted.length > 0
     && events.drifted.every(event => events.priorWait.includes(event))
@@ -493,7 +497,30 @@ export const HALT_CAPABLE_PRIOR_SCRIPT_SHAS: readonly string[] = [
   '0e1bbb9816c9475436f89f6326d5504eccc9aa6519ff5e466b949d53a73d8439',
   '1877c90c5359571dfc74c6d03395104a73925868147e8a50cd9d7b4226b1b5ca',
   '0fd4f98801333399625701bdc83ed1a5906bbf18c449d0586daa6b8e58ada7f3',
+  // X1: the 6.71.7 to 7.0.31 script (WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS below); its halt check is this package's.
+  'ee32d7a6b051cc1b9250c0b732fbfe528a59b4930daaf27696830d5803d6687a',
 ]
+
+/**
+ * X1 (8 h question wait): the script 6.71.7 through 7.0.31 shipped. It differs from this package's in ONE line,
+ * the longest PermissionRequest wait it accepts (3600 then, FULL_HOLD_QUESTION_WAIT_S now), and only a question
+ * block written with the full hold on ever passes more than 3600. So while the plan does not ask for a longer
+ * question wait it does everything this package's script does, and is reported current: no Reinstall banner,
+ * Cursor and Codex desk cancel unchanged. A Mac that never turns COS_QUESTION_FULL_HOLD on sees no change. With
+ * the switch on it reads `script_outdated` until Reinstall hooks copies this package's script (which that switch
+ * needs anyway for the split block). Pinned against `__fixtures__/cos-session-hook-7.0.31` by a test that diffs
+ * it with this package's script line by line.
+ */
+export const WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS: readonly string[] = [
+  'ee32d7a6b051cc1b9250c0b732fbfe528a59b4930daaf27696830d5803d6687a',
+]
+
+/** Whether the installed script is current for this plan (see WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS). */
+export function scriptCurrentForPlan(scriptSha: string | null, packageScriptSha: string | null, plan: Pick<PermissionHookPlan, 'questionWaitS'>): boolean {
+  if (!scriptSha) return false
+  if (!packageScriptSha || scriptSha === packageScriptSha) return true
+  return plan.questionWaitS <= FULL_HOLD_QUESTION_WAIT_PRIOR_S && WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS.includes(scriptSha)
+}
 
 /**
  * 6.53.3: can the hooks on this Mac stop a desk Claude run now? `installed`, or the only
@@ -523,7 +550,9 @@ export function hookHaltReady(status: Pick<HookStatus, 'installed' | 'state' | '
  * the wrong run. Claude's own readiness (`hookHaltReady`) is unchanged.
  */
 export function cursorDeskHaltReady(status: Parameters<typeof hookHaltReady>[0]): boolean {
-  return hookHaltReady(status) && typeof status.scriptSha === 'string' && status.scriptSha === status.packageScriptSha
+  if (!hookHaltReady(status) || typeof status.scriptSha !== 'string') return false
+  // X1: the 7.0.31 script reads Cursor's payload exactly as this package's does (they differ only in the wait cap).
+  return status.scriptSha === status.packageScriptSha || WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS.includes(status.scriptSha)
 }
 
 const INSTALL_COMMAND = 'npx --yes @gotcos/glasses-server@latest --hooks install'

@@ -11,7 +11,7 @@ import {
   hookHaltReady, hookStatus, installClaudeHooks, mergeHookSettings, permissionHookPlan, permissionHookTimeoutForToolS,
   permissionHookTimeoutS, subscribedEvents, type HookPaths,
 } from './claude-hooks-installer.js'
-import { FULL_HOLD_HOOK_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER } from './full-hold.js'
+import { FULL_HOLD_HOOK_WAIT_S, FULL_HOLD_QUESTION_WAIT_S, NON_QUESTION_MATCHER, QUESTION_MATCHER } from './full-hold.js'
 
 const SCRIPT = '/Users/example/.cos-glasses/bin/cos-session-hook'
 const PATHS: HookPaths = { home: '/Users/example/.cos-glasses', spoolDir: '/Users/example/.cos-glasses/data/hook-spool' }
@@ -52,10 +52,11 @@ describe('with both switches off: 7.0.13 byte for byte', () => {
 
 describe('with a switch on: the split block', () => {
   it.each([
-    ['1', undefined, FULL_HOLD_HOOK_WAIT_S, 630],
+    // X1 (Miles 11/12): a question waits FULL_HOLD_QUESTION_WAIT_S (8 h); an approval keeps FULL_HOLD_HOOK_WAIT_S (1 h).
+    ['1', undefined, FULL_HOLD_QUESTION_WAIT_S, 630],
     [undefined, 'on', 630, FULL_HOLD_HOOK_WAIT_S],
-    ['true', 'yes-but-not-a-switch-value', FULL_HOLD_HOOK_WAIT_S, 630],
-    ['1', '1', FULL_HOLD_HOOK_WAIT_S, FULL_HOLD_HOOK_WAIT_S],
+    ['true', 'yes-but-not-a-switch-value', FULL_HOLD_QUESTION_WAIT_S, 630],
+    ['1', '1', FULL_HOLD_QUESTION_WAIT_S, FULL_HOLD_HOOK_WAIT_S],
   ])('q=%s a=%s writes AskUserQuestion at %d and everything else at %d, each passing its own wait', (q, a, qWait, otherWait) => {
     setFlags(q, a)
     const merged = mergeHookSettings(FOREIGN, SCRIPT, PATHS)
@@ -110,7 +111,7 @@ describe('Reinstall hooks applies it, and status stays halt-ready in between', (
     expect(hookHaltReady(status)).toBe(true)
     const split = installClaudeHooks({ ...box, port: 3999 })
     expect(split.status.state).toBe('installed')
-    expect(split.status.permissionHookTimeouts).toEqual({ question: 3600, approval: 630 })
+    expect(split.status.permissionHookTimeouts).toEqual({ question: FULL_HOLD_QUESTION_WAIT_S, approval: 630 })
     setFlags(undefined, undefined)
     status = hookStatus(box)
     expect([status.state, status.priorWaitOnly]).toEqual(['drift', true])

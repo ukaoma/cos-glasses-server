@@ -140,7 +140,7 @@ import { randomBytes } from 'node:crypto'
 import { boundForRedaction } from './activity-preview.js'
 import { inferHookProvider, toolFingerprint, SESSION_ID_RE, type HookEnvelope } from './session-hook-events.js'
 import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signal-store.js'
-import { WEB_ANSWER_TOUCH_MAX_MS, WEB_CONFIRM_TTL_MS, engineProvenForFullHold, type EngineFacts, type FullHoldSwitches } from './full-hold.js'
+import { FULL_HOLD_QUESTION_WAIT_S, WEB_ANSWER_TOUCH_MAX_MS, WEB_CONFIRM_TTL_MS, engineProvenForFullHold, type EngineFacts, type FullHoldSwitches } from './full-hold.js'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -228,7 +228,7 @@ export const LEGACY_HOOK_WAIT_S = 130
  */
 export const HOOK_REPLY_MARGIN_S = 10
 /** A `hookWaitS` stamp outside this range is not one the installer writes: no stamp. */
-export const HOOK_WAIT_STAMP_MAX_S = 3_600
+export const HOOK_WAIT_STAMP_MAX_S = FULL_HOLD_QUESTION_WAIT_S
 
 /**
  * 6.60.0: the longest a request may be held, in seconds, from the hook's own start.
@@ -1485,7 +1485,10 @@ export class PermissionBroker {
       ...(webOnly ? { webOnly: true as const, webPresenceAgeMs: Math.round(presence.webAgeMs ?? 0) } : {}),
       ...(full ? { fullHold: true as const } : {}),
     }
-    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), ...(full ? { fullHold: true, enginePid } : {}), hold: holdFacts } }
+    // X1 (Miles 11/12 17:42, "At once, on all three"): a fully held question is on the web and the glasses the moment
+    // it is asked, beside the Mac's own dialog; the first answer wins. Only a full-hold item (its switch on, engine
+    // proven): with the switches off, a stamped question still waits for the desk to be idle, exactly as 7.0.31.
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || full || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), ...(full ? { fullHold: true, enginePid } : {}), hold: holdFacts } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -1700,7 +1703,9 @@ export class PermissionBroker {
     if (handBack) return this.handBack(item, clientAnswerId)
     // Q1 O1: while a switch is on, an item no device is shown yet (the desk-idle latch has not fired) is
     // not answerable by its id, from any door. A hand-back stays allowed: it only shows the Mac's dialog.
-    if (!item.lensVisible && (this.anyFullHoldOn() || item.fullHold)) {
+    // X1 (at once): a full-hold item is shown the moment it is parked, so only a stamped question the full hold
+    // did not take can be unshown here.
+    if (!item.lensVisible && this.anyFullHoldOn()) {
       this.log(`not_shown ${item.id} kind=${item.kind}`)
       return { status: 409, body: { error: 'not_shown' } }
     }

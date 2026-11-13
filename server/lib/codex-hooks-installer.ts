@@ -40,6 +40,7 @@ import { dirname, join, resolve } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import {
   PERMISSION_HOOK_TIMEOUT_S,
+  WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS,
   backupSettings,
   currentHookPaths,
   ensureStableHookScript,
@@ -264,7 +265,9 @@ export function codexHookStatus(paths: CodexHookPaths = {}): CodexHookStatus {
   const hookPaths = paths.hookPaths ?? currentHookPaths()
   const scriptSha = sha256File(scriptPath)
   const packageScriptSha = sha256File(packageScriptPath)
-  const scriptOk = scriptSha !== null && scriptSha === packageScriptSha
+  // X1: the 7.0.31 script differs from this package's only in the longest question wait it accepts, which Codex never
+  // uses (it has no question block), so it stays current for Codex (WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS).
+  const scriptOk = scriptSha !== null && (scriptSha === packageScriptSha || WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS.includes(scriptSha))
   const read = readHooksFile(hooksPath)
   if (!read.ok) {
     return { state: read.reason, installed: false, hooksPath, scriptPath, scriptSha, packageScriptSha, scriptOk, subscribed: [], missing: CODEX_HOOK_SUBSCRIPTIONS.map(s => s.event), drifted: [], duplicated: [] }

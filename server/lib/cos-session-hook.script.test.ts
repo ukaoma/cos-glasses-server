@@ -2,6 +2,7 @@
 // stdin and only the baked environment. Every path must exit 0 and print nothing except a
 // permission decision. macOS-only (BSD head, ioreg); skipped elsewhere.
 
+import { FULL_HOLD_QUESTION_WAIT_S } from './full-hold.js'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
@@ -70,7 +71,14 @@ const SCRIPT_6_62_0_PREQA_SHA256 = '1877c90c5359571dfc74c6d03395104a73925868147e
  * The pre-QA build is halt-capable for Claude (a local build could have installed it).
  */
 const SCRIPT_6_62_0_SHA256 = '0fd4f98801333399625701bdc83ed1a5906bbf18c449d0586daa6b8e58ada7f3'
-const SCRIPT_QUESTION_HOLD_SHA256 = 'ee32d7a6b051cc1b9250c0b732fbfe528a59b4930daaf27696830d5803d6687a'
+/** sha256 of the script 6.71.7 through 7.0.31 shipped (the question hold); `__fixtures__/cos-session-hook-7.0.31`. */
+const SCRIPT_7_0_31_SHA256 = 'ee32d7a6b051cc1b9250c0b732fbfe528a59b4930daaf27696830d5803d6687a'
+/**
+ * X1 (8 h question wait): the script this package ships. It differs from 7.0.31's in ONE line, the longest wait it
+ * stamps (FULL_HOLD_QUESTION_WAIT_S), so the 7.0.31 script stays current while no question block asks for more
+ * (WAIT_CAP_ONLY_PRIOR_SCRIPT_SHAS): no reinstall on a Mac that never turns the question full hold on.
+ */
+const SCRIPT_QUESTION_HOLD_SHA256 = 'c49ba85cf3f051eaa436b46a418cec9693d4b848ab40d5ad470aab108c8571fc'
 const SESSION = 'a1b2c3d4-0000-4000-8000-00000000abcd'
 const payload = (extra: Record<string, unknown> = {}) => JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: '/Users/example/project', ...extra })
 
@@ -304,7 +312,10 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       const file = readFileSync(join(paths.spool, latest), 'utf8')
       expect(JSON.parse(file).hookWaitS).toBe(630)
       // No argument (an earlier block), or nothing the installer writes: no stamp at all.
-      for (const args of [[], ['0630'], ['abc'], ['19'], ['3601'], ['99999999999999999999'], ['']]) {
+      // X1: the 8 h question block's wait is the longest it stamps (FULL_HOLD_QUESTION_WAIT_S, 5 digits).
+      expect(await stamp([String(FULL_HOLD_QUESTION_WAIT_S)])).toBe(FULL_HOLD_QUESTION_WAIT_S)
+      expect(await stamp(['3601'])).toBe(3601)
+      for (const args of [[], ['0630'], ['abc'], ['19'], [String(FULL_HOLD_QUESTION_WAIT_S + 1)], ['100000'], ['99999999999999999999'], ['']]) {
         expect(await stamp(args), JSON.stringify(args)).toBeUndefined()
       }
       // Any other event never carries it, argument or not.
@@ -655,7 +666,9 @@ describe.skipIf(!onMac)('bin/hooks/cos-session-hook', () => {
       expect(SCRIPT_6_53_3_SHA256).not.toBe(SCRIPT_6_53_3_PREQA_SHA256)
       expect(SCRIPT_6_53_0_SHA256).not.toBe(SCRIPT_6_51_0_SHA256)
       // The current script is never its own "prior"; every earlier halt-capable one is.
-      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256, SCRIPT_6_62_0_PREQA_SHA256, SCRIPT_6_62_0_SHA256])
+      expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).toEqual([SCRIPT_6_53_0_SHA256, SCRIPT_6_53_3_PREQA_SHA256, SCRIPT_6_53_3_SHA256, SCRIPT_6_60_0_SHA256, SCRIPT_6_62_0_PREQA_SHA256, SCRIPT_6_62_0_SHA256, SCRIPT_7_0_31_SHA256])
+      const fixture7031 = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-7.0.31'))
+      expect(createHash('sha256').update(fixture7031).digest('hex')).toBe(SCRIPT_7_0_31_SHA256)
       expect(HALT_CAPABLE_PRIOR_SCRIPT_SHAS).not.toContain(SCRIPT_QUESTION_HOLD_SHA256)
       const preqa = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'cos-session-hook-6.62.0-preqa'))
       expect(createHash('sha256').update(preqa).digest('hex')).toBe(SCRIPT_6_62_0_PREQA_SHA256)

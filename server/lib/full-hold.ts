@@ -107,8 +107,24 @@ export function engineProvenForFullHold(engine: EngineFacts | null | undefined):
   return version !== null && versionAtLeast(version, floor)
 }
 
-/** The PermissionRequest wait the installer writes for a kind under the full hold. */
+/** The PermissionRequest wait the installer writes for an APPROVAL under the full hold (7.0.16; unchanged). */
 export const FULL_HOLD_HOOK_WAIT_S = 3600
+
+/**
+ * X1 (Miles 2026-11-12 17:42, "8 hours"): how long a fully held QUESTION stays answerable from the web and the
+ * glasses. Everything below is derived from this one number:
+ *   the question block's `timeout`      = FULL_HOLD_QUESTION_WAIT_S = 8 h x 60 min x 60 s = 28,800 s
+ *   the longest stamp the script takes  = 28,800 (5 digits; `bin/hooks/cos-session-hook`, pinned by a test)
+ *   the longest stamp the broker trusts = HOOK_WAIT_STAMP_MAX_S = 28,800
+ *   the script's curl gives up at       = 28,800 - 5 = 28,795 s
+ *   the broker's deadline               = holdCeilingS = 28,800 - HOOK_REPLY_MARGIN_S (10) = 28,790 s
+ * so the deadline stays under the hook's own wait, as every release since 6.52.0 keeps it. Approvals keep
+ * FULL_HOLD_HOOK_WAIT_S. The Mac's own dialog has no limit past this: only the remote answer ends.
+ */
+export const FULL_HOLD_QUESTION_WAIT_HOURS = 8
+export const FULL_HOLD_QUESTION_WAIT_S = FULL_HOLD_QUESTION_WAIT_HOURS * 60 * 60
+/** The question block 7.0.16 to 7.0.31 wrote: an install from then reads as an earlier wait (`priorWaitOnly`), still halt-ready. */
+export const FULL_HOLD_QUESTION_WAIT_PRIOR_S = 3600
 
 /**
  * The matcher of the non-question PermissionRequest block once the hook is split (canary C9:
