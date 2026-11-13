@@ -748,6 +748,42 @@ export type BrokerItemKind = 'question' | 'approval'
 /** 6.99.27: the door an answer came through: the Even app with the API token, or COS Control Web's browser session. */
 export type AnswerSurface = 'app' | 'web'
 
+/**
+ * X1 (the one queue, 7.0.32 candidate): which surface answered, as the queue says it ("Answered on the glasses").
+ * `web` is the browser door. The token door names its client when it says so (`X-Cos-Client` or `?client=`:
+ * glasses, phone, mac_app); otherwise `cos` (a COS surface that did not say which). `mac` is the Mac's own dialog.
+ */
+export type QueueSurface = 'mac' | 'web' | 'glasses' | 'phone' | 'mac_app' | 'cos'
+const CLIENT_SURFACES: ReadonlySet<string> = new Set(['glasses', 'phone', 'mac_app'])
+
+export function answerSurfaceOf(by: AnswerSurface, client: unknown): QueueSurface {
+  if (by === 'web') return 'web'
+  const said = typeof client === 'string' ? client.trim().toLowerCase().replace(/-/g, '_') : ''
+  return CLIENT_SURFACES.has(said) ? said as QueueSurface : 'cos'
+}
+
+/** X1: an answered entry stays in the queue this long, saying where it was answered. */
+export const QUEUE_ANSWERED_KEEP_MS = 120_000
+
+/** X1: one waiting thing the broker knows of, for the queue (`lib/question-queue.ts` builds the wire entries). */
+export interface BrokerQueueSource {
+  key: string
+  sessionId: string
+  provider: 'claude' | 'codex'
+  kind: 'question' | 'approval'
+  tool: string
+  questions: BrokerQuestion[]
+  approval: ApprovalCard | null
+  askedAt: number
+  /** `here`: a COS surface can answer it now (`heldId`); `mac`: only the Mac's own dialog can. */
+  where: 'here' | 'mac'
+  heldId: string | null
+  deadlineAt: number | null
+  state: 'waiting' | 'answered'
+  answeredBy: QueueSurface | null
+  answeredAt: number | null
+}
+
 export type BrokerResolution = 'answered' | 'handed_to_desk' | 'expired' | 'hook_gone' | 'retracted' | 'drained' | 'no_client'
 export type BrokerFastPath =
   | 'broker_off' | 'draining' | 'malformed' | 'cursor' | 'approvals_off' | 'unsupported_tool'
@@ -942,7 +978,7 @@ interface BrokerItem {
   deadlineAt: number
   state: 'pending' | BrokerResolution
   settledAt: number | null
-  answer: { clientAnswerId: string; chosen: Chosen } | null
+  answer: { clientAnswerId: string; chosen: Chosen; surface?: QueueSurface } | null
   /** The clientAnswerId of the "Leave for the Mac" that settled it, so its retry replays. */
   handedBackBy: string | null
   channel: HookReplyChannel | null
@@ -1678,7 +1714,7 @@ export class PermissionBroker {
    * clientAnswerId) replays its 200. `handBack` wins over any answer fields in the same body:
    * it is the safe direction, since it only shows the dialog that would have shown anyway.
    */
-  answer(id: string, body: unknown, by: AnswerSurface = 'app'): AnswerResult {
+  answer(id: string, body: unknown, by: AnswerSurface = 'app', client?: unknown): AnswerResult {
     const item = BROKER_ID_RE.test(id) ? this.items.get(id) : undefined
     if (!item) return { status: 404, body: { error: 'not_found' } }
     const input = isRecord(body) ? body : {}
@@ -1745,7 +1781,7 @@ export class PermissionBroker {
     }
     item.state = 'answered'
     item.settledAt = this.deps.now()
-    item.answer = { clientAnswerId, chosen }
+    item.answer = { clientAnswerId, chosen, surface: answerSurfaceOf(by, client) }
     item.channel = null
     item.toolInput = {}
     item.questions = null
@@ -1923,6 +1959,11 @@ export class PermissionBroker {
 
   waitingList(): WaitingQuestionView[] {
     if (!this.extendedQuestionsView()) return []
+    return this.waitingViews()
+  }
+
+  /** X1: the waiting views, whatever the switches (the queue needs them; `waitingList` is gated as before). */
+  private waitingViews(): WaitingQuestionView[] {
     const now = this.deps.now()
     this.pruneWaiting(now)
     const answerable = (item: BrokerItem): boolean => item.state === 'pending' && item.lensVisible && now < item.deadlineAt
@@ -1965,6 +2006,59 @@ export class PermissionBroker {
       })
     }
     return views.sort((a, b) => a.askedAt.localeCompare(b.askedAt))
+  }
+
+  /**
+   * X1 (the one queue): every question and approval a live session waits on that this server knows of, whatever
+   * the switches, plus what was answered in the last QUEUE_ANSWERED_KEEP_MS with where. Questions come from the
+   * waiting entries (held or at the Mac) and from settled questions the Mac still waits on that no entry speaks
+   * for (asked before a restart); approvals from pending items and settled ones the Mac still waits on. Text is
+   * kept only while it waits, as everywhere in this file. Turn-end asks are added by the queue builder.
+   */
+  queueSources(): BrokerQueueSource[] {
+    const now = this.deps.now()
+    this.prune()
+    const out: BrokerQueueSource[] = []
+    const views = this.waitingViews()
+    const settledSurface = (match: (item: BrokerItem) => boolean): QueueSurface | null => {
+      for (const item of this.items.values()) if (item.state === 'answered' && item.answer && item.answer.clientAnswerId !== 'cos-cancel' && match(item)) return item.answer.surface ?? 'cos'
+      return null
+    }
+    for (const v of views) {
+      if (v.state === 'answered') {
+        const answeredAt = v.answeredAt ? Date.parse(v.answeredAt) : null
+        if (answeredAt === null || now - answeredAt > QUEUE_ANSWERED_KEEP_MS) continue
+        const by: QueueSurface = v.answeredBy === 'cos'
+          ? settledSurface(item => item.kind === 'question' && item.sessionId === v.sessionId && (!!v.toolUseId && item.toolUseId === v.toolUseId)) ?? 'cos'
+          : 'mac'
+        out.push({ key: v.key, sessionId: v.sessionId, provider: v.provider, kind: 'question', tool: ASK_USER_QUESTION_TOOL, questions: [], approval: null, askedAt: Date.parse(v.askedAt), where: 'mac', heldId: null, deadlineAt: null, state: 'answered', answeredBy: by, answeredAt })
+        continue
+      }
+      out.push({ key: v.key, sessionId: v.sessionId, provider: v.provider, kind: 'question', tool: ASK_USER_QUESTION_TOOL, questions: v.questions, approval: null, askedAt: Date.parse(v.askedAt), where: v.answerable ? 'here' : 'mac', heldId: v.heldId, deadlineAt: v.deadlineAt ? Date.parse(v.deadlineAt) : null, state: 'waiting', answeredBy: null, answeredAt: null })
+    }
+    const listedQuestion = (item: BrokerItem): boolean => views.some(v => v.heldId === item.id || (v.sessionId === item.sessionId && !!v.toolUseId && v.toolUseId === item.toolUseId))
+    for (const item of this.items.values()) {
+      const key = `${item.sessionId}:${item.toolUseId ?? item.id}`
+      const base = { key, sessionId: item.sessionId, provider: item.provider, kind: item.kind, tool: item.toolName, askedAt: item.requestedAt }
+      if (item.kind === 'question') {
+        // A question the Mac still waits on that no waiting entry speaks for (asked before a restart): no words.
+        if (item.state !== 'pending' && item.waitingAtMac && !listedQuestion(item)) {
+          out.push({ ...base, questions: [], approval: null, where: 'mac', heldId: null, deadlineAt: null, state: 'waiting', answeredBy: null, answeredAt: null })
+        }
+        continue
+      }
+      if (item.state === 'pending') {
+        if (!item.lensVisible || now >= item.deadlineAt) continue
+        out.push({ ...base, questions: [], approval: item.approval, where: 'here', heldId: item.id, deadlineAt: item.deadlineAt, state: 'waiting', answeredBy: null, answeredAt: null })
+      } else if (item.waitingAtMac) {
+        out.push({ ...base, questions: [], approval: null, where: 'mac', heldId: null, deadlineAt: null, state: 'waiting', answeredBy: null, answeredAt: null })
+      } else if (item.settledAt !== null && now - item.settledAt <= QUEUE_ANSWERED_KEEP_MS && (item.state === 'answered' || item.state === 'retracted')) {
+        const by: QueueSurface | null = item.state === 'retracted' ? 'mac' : item.answer?.clientAnswerId === 'cos-cancel' ? null : (item.answer?.surface ?? 'cos')
+        if (by === null) continue
+        out.push({ ...base, questions: [], approval: null, where: 'mac', heldId: null, deadlineAt: null, state: 'answered', answeredBy: by, answeredAt: item.settledAt })
+      }
+    }
+    return out
   }
 
   /** X1: what a web page must send with an answer right now (`webAnswer` on the questions route). */

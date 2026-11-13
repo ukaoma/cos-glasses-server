@@ -107,6 +107,28 @@ export function projectedTurnAsk(value: unknown): TurnAskCapture | null {
 /** What a row shows (`deriveSessionState` input). */
 export interface VisibleTurnAsk { ask: string; choices: string[]; stoppedAt: number }
 
+/** X1 (the one queue): a turn-end ask the queue lists, with its session. */
+export interface QueueTurnAsk extends VisibleTurnAsk { sessionId: string }
+
+/** X1: a turn-end ask answered in the last TURN_ASK_ANSWERED_KEEP_MS, and from where (never the reply's words). */
+export interface AnsweredTurnAsk { sessionId: string; ask: string; stoppedAt: number; answeredAt: number; by: TurnAskAnswerSurface }
+export type TurnAskAnswerSurface = 'mac' | 'web' | 'glasses' | 'mac_app' | 'cos'
+export const TURN_ASK_ANSWERED_KEEP_MS = 120_000
+
+/**
+ * X1: where a reply that cleared a turn-end ask came from, read from the words COS itself puts on it (contract
+ * v1.2: "Answer sent from <SURFACE> through COS, not typed in this session"; a dictated reply carries the
+ * `[COS-G2 turn` footer). A COS-spawned Continue child is COS. Anything else was typed at the Mac. Only the
+ * surface is kept.
+ */
+export function turnAskAnswerSurface(prompt: unknown, child: boolean): TurnAskAnswerSurface {
+  const text = typeof prompt === 'string' ? prompt.slice(0, 2_000) : ''
+  if (text.includes('Answer sent from COS Control Web through COS')) return 'web'
+  if (text.includes('Answer sent from COS Control on the Mac through COS')) return 'mac_app'
+  if (text.includes('[COS-G2 turn')) return 'glasses'
+  return child ? 'cos' : 'mac'
+}
+
 interface AskState {
   sessionId: string
   promptId: string | null
@@ -140,6 +162,8 @@ export class TurnEndAskTracker {
   private readonly asks = new Map<string, AskState>()
   /** The newest Stop per session, for a wrap_up whose (async) PostToolUse lands after it. */
   private readonly lastStop = new Map<string, { at: number; promptId: string | null }>()
+  /** X1: asks answered in the last TURN_ASK_ANSWERED_KEEP_MS that a surface had shown, newest last. */
+  private readonly answered: AnsweredTurnAsk[] = []
   private poll: ReturnType<typeof setTimeout> | null = null
   private pollInFlight = false
   private stopped = false
@@ -162,7 +186,14 @@ export class TurnEndAskTracker {
     const current = this.asks.get(sessionId)
     // Any prompt, from the desk or a COS-spawned Continue child, is a reply: the question is answered.
     if (env.event === 'UserPromptSubmit') {
-      if (current) { this.asks.delete(sessionId); this.counters.clearedByReply++ }
+      if (current) {
+        this.asks.delete(sessionId)
+        this.counters.clearedByReply++
+        if (current.stoppedAt !== null && current.visibleAt !== null) {
+          this.answered.push({ sessionId, ask: current.capture.ask, stoppedAt: current.stoppedAt, answeredAt: env.ts, by: turnAskAnswerSurface(p.prompt, child) })
+          if (this.answered.length > MAX_TURN_ASKS) this.answered.splice(0, this.answered.length - MAX_TURN_ASKS)
+        }
+      }
       return
     }
     // A COS-spawned child's other events are not the session's own turn.
@@ -232,6 +263,24 @@ export class TurnEndAskTracker {
     }
     if (state.visibleAt === null) return null
     return { ask: state.capture.ask, choices: [...state.capture.choices], stoppedAt: state.stoppedAt }
+  }
+
+  /** X1 (the one queue): every ask a row would show now, oldest stop first. */
+  visibleAsks(now = this.deps.now()): QueueTurnAsk[] {
+    if (!this.deps.enabled()) return []
+    const out: QueueTurnAsk[] = []
+    for (const state of [...this.asks.values()]) {
+      const shown = this.visibleAsk(state.sessionId, now)
+      if (shown) out.push({ sessionId: state.sessionId, ...shown })
+    }
+    return out.sort((a, b) => a.stoppedAt - b.stoppedAt)
+  }
+
+  /** X1: asks answered within TURN_ASK_ANSWERED_KEEP_MS (by when the reply arrived), oldest first. */
+  recentlyAnswered(now = this.deps.now()): AnsweredTurnAsk[] {
+    if (!this.deps.enabled()) return []
+    while (this.answered.length > 0 && now - this.answered[0]!.answeredAt > TURN_ASK_ANSWERED_KEEP_MS) this.answered.shift()
+    return this.answered.filter(a => now - a.answeredAt <= TURN_ASK_ANSWERED_KEEP_MS).map(a => ({ ...a }))
   }
 
   /** The session's row ended: nothing it asked can still be answered. */

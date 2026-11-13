@@ -658,7 +658,9 @@ describe('6.60.0: the away hold over the real route (the contract shared with CO
     const hookStart = Date.now()
     const reply = ask(h, { ...permissionEnvelope('Bash', { command: 'touch away' }, {}, hookStart), hookWaitS: PERMISSION_HOOK_TIMEOUT_S })
     const body = await until(() => peek(h), b => b.items.length === 1)
-    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'awayRecentClientMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'serverStartedAt', 'settled', 'stats', 'waitingAtMac', 'waitingAtMacForgottenBefore'])
+    // X1 (the one queue): 7.0.31's keys, plus `queue` and `queueCount` appended after every one of them.
+    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'awayRecentClientMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'queue', 'queueCount', 'serverStartedAt', 'settled', 'stats', 'waitingAtMac', 'waitingAtMacForgottenBefore'])
+    expect(Object.keys(body).slice(-2)).toEqual(['queue', 'queueCount'])
     expect(body).toMatchObject({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 3_000, liveWindowMs: 30_000, pending: 1, awayHoldMs: 600_000, awayRecentClientMs: 1_800_000, settled: [], waitingAtMac: 0, serverStartedAt: SERVER_STARTED_AT })
     expect(Date.parse(body.serverStartedAt)).toBeLessThanOrEqual(Date.now())
     expect(Date.parse(body.waitingAtMacForgottenBefore)).toBeGreaterThan(0)

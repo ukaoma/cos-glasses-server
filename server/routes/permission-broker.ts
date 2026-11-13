@@ -50,7 +50,10 @@
 
 import express, { Router, type NextFunction, type Request, type Response } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
-import { turnEndAskStats } from '../lib/session-hooks-runtime.js'
+import { turnEndAskStats, turnEndAsksForQueue } from '../lib/session-hooks-runtime.js'
+import { buildQuestionQueue, type QuestionQueue } from '../lib/question-queue.js'
+import { sessionTitleFor } from '../lib/session-title-cache.js'
+import { waitingQuestionWordsEnabled } from '../lib/full-hold.js'
 import {
   ANSWERING_CLIENTS,
   CLIENT_LIVE_WINDOW_MS,
@@ -163,6 +166,9 @@ export interface SessionQuestionsRouterDeps {
    * rules: `isWebSessionAuthorized` in production). Absent: only the token opens the list, as before.
    */
   webSessionAuthorized?: (req: Request) => boolean
+  /** X1 (the one queue): the turn-end asks and the session titles the queue reads. Default to the runtime's and the list's. */
+  turnEndQueue?: () => ReturnType<typeof turnEndAsksForQueue>
+  titleFor?: (sessionId: string) => string | null
   /** 7.0.18 (X1): the turn-end ask counters (lib/turn-end-ask.ts), null while COS_TURN_END_ASKS is off. Defaults to the runtime's. */
   turnEndAskStats?: () => Record<string, number> | null
   /** Where a counted poll is recorded; `noteQuestionsPoll` in production. */
@@ -274,6 +280,26 @@ export function requestFromThisMac(
   return own.some(a => normalizeRemoteIp(String(a)).toLowerCase() === ip)
 }
 
+/**
+ * X1 (the one queue, Miles 11/12 17:31): `queue` and `queueCount`, always present (whatever the full-hold switches),
+ * appended after every existing key so a client that reads the 7.0.31 keys reads exactly what it read before. A
+ * failure to build it never costs the rest of the response: the keys are then an empty queue.
+ */
+export function questionQueueFields(deps: SessionQuestionsRouterDeps): QuestionQueue {
+  try {
+    const turnEnd = (deps.turnEndQueue ?? turnEndAsksForQueue)()
+    return buildQuestionQueue({
+      broker: deps.broker.queueSources(),
+      turnEnd: turnEnd.asks,
+      turnEndAnswered: turnEnd.answered,
+      titleFor: deps.titleFor ?? sessionTitleFor,
+      words: waitingQuestionWordsEnabled(process.env),
+    })
+  } catch {
+    return { queue: [], queueCount: 0 }
+  }
+}
+
 function turnEndAskCounters(deps: SessionQuestionsRouterDeps): { turnEndAsks?: Record<string, number> } {
   let counters: Record<string, number> | null = null
   try { counters = (deps.turnEndAskStats ?? turnEndAskStats)() } catch { counters = null }
@@ -341,6 +367,7 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
       // 7.0.18 (X1), additive and only while COS_TURN_END_ASKS is on: how many turn-end asks armed, were shown,
       // were answered, were overtaken by a new turn, or aged out. Counts only, never words.
       ...turnEndAskCounters(deps),
+      ...questionQueueFields(deps),
     })
   })
   router.post('/session-questions/:id/answer', (req: Request, res: Response) => {
@@ -350,7 +377,9 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     let expected = ''
     try { expected = deps.apiToken() } catch { expected = '' }
     const by = timingSafeTokenEqual(req.headers['x-cos-token'], expected) ? 'app' : 'web'
-    const result = deps.broker.answer(String(req.params.id ?? ''), req.body, by)
+    // X1 (the one queue): the answering client may name itself (glasses, phone, mac_app) so others can say where.
+    const client = req.get('x-cos-client') ?? (typeof req.query.client === 'string' ? req.query.client : undefined)
+    const result = deps.broker.answer(String(req.params.id ?? ''), req.body, by, client)
     res.status(result.status).json(result.body)
   })
   // X1: the web door's confirm step for an approval (lib/permission-broker.ts `confirm`). The /api gate let the

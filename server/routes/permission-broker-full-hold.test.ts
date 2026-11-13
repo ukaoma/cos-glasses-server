@@ -63,10 +63,12 @@ async function list(base: string, headers: Record<string, string> = app) {
 }
 
 describe('the questions route under the full hold', () => {
-  it('with every switch off it has 7.0.13\'s keys exactly', async () => {
+  it('with every switch off it has 7.0.13\'s keys exactly, plus the queue appended last (X1)', async () => {
     const { base } = await start({ questions: false, approvals: false })
     const body = await list(base)
-    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'awayRecentClientMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'serverStartedAt', 'settled', 'stats', 'waitingAtMac', 'waitingAtMacForgottenBefore'])
+    // X1 (the one queue): 7.0.31's keys, plus `queue` and `queueCount` appended after every one of them.
+    expect(Object.keys(body).sort()).toEqual(['awayHoldMs', 'awayRecentClientMs', 'enabled', 'items', 'liveWindowMs', 'mode', 'pending', 'pollIntervalMs', 'protocolVersion', 'queue', 'queueCount', 'serverStartedAt', 'settled', 'stats', 'waitingAtMac', 'waitingAtMacForgottenBefore'])
+    expect(Object.keys(body).slice(-2)).toEqual(['queue', 'queueCount'])
   })
 
   it('holds a question with no client live, lists it as held with its words, and a web answer with a touch reaches the hook', async () => {
