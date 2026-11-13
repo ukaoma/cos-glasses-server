@@ -65,7 +65,7 @@
     "draining": 503
   },
   "reasonMessages": {
-    "bad_request": "That pairing request was not understood. Scan the code again.",
+    "bad_request": "That pairing request was not understood. Check the code in COS Control and type it again.",
     "not_loopback": "Pairing codes are made only by COS Control on this Mac.",
     "not_allowed_network": "Connect over Tailscale, or turn on \"Allow pairing on this Wi-Fi\" in COS Control.",
     "denied": "Pairing was denied on the Mac.",
