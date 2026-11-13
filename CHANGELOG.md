@@ -1,3 +1,63 @@
+## 7.0.33 - Hotfix: a tap where Ask was could sign out every browser; plus Anand's second round of Control Web fixes
+
+2026-11-13. 7.0.32 plus a hotfix and Control Web fixes from Anand's second review. 7.0.32 never reached npm, so anyone updating from 7.0.31 also gets everything in 7.0.32 (listed below again).
+
+**The 8-hour question wait is still OFF** unless `COS_QUESTION_FULL_HOLD` is switched on, as in 7.0.32. With it off, a question waits about 10 minutes. Approvals wait 1 hour only with `COS_APPROVAL_FULL_HOLD` on.
+
+**The hotfix (7.0.31 and 7.0.32 have this fault).** On a phone, the top bar slides away as you scroll a list. Its strip then showed the page, so a tap meant for the bar landed on whatever was under it. On Settings that could be "Sign out every browser": two taps where Ask had been armed it, then signed out every browser. Reproduced with real taps at a 390 x 844 phone and at the folded Duo, against the published 7.0.31.
+
+**On for everyone, with no switch:**
+- **No tap falls through a hidden top bar.** While the bar is away, or for 320 ms while it slides back (also after a page change), the first tap in its strip only brings it back. The strip is the bar's own width, so the folded Duo's rail beside it still takes taps.
+- **Two-tap buttons expire.** Sign out every browser and Settings' Release stay armed for 5 seconds and the second tap counts only after 400 ms, the rule Today's and the question cards' buttons already use. A tap after 5 seconds arms again, even if the phone paused the page. Memories' two-tap buttons use the same 5 seconds (they used 6).
+- **The folded Duo, reading a message:** the top bar stays while you read and shows Back with the name of where it goes ("‹ Today"). The rail's Back stays too.
+- **A time under each message:** "You · 12:20 PM" under your question, and the answer's time under COS's answer. The server adds `queryTimestamp` (when the question was asked) to each message from `GET /api/sessions/today/all-messages` and the archive. With a server older than 7.0.33, only the answer has a time.
+- **Sessions, Usage and COS cost:** the three tabs sit in the same place on all three, and Usage's and COS cost's heading says Usage and COS cost, as the top bar does (it said Sessions).
+- **Today says each thing once.**
+  - A source that could not be read is named once, in the sentence. Needs you does not say it again.
+  - More than two sources unread reads "Your Mac is not answering, so this may not be everything." in the sentence.
+  - Needs you steps aside when it has nothing to add. Under a model summary it still says "Nothing is waiting on you."
+  - The Running card steps aside when nothing runs or the session list could not be read, and comes back when something runs.
+- **Ask:** when the words name a place, or its first three letters or more, Go to comes first ("usage" puts Go to Usage first).
+- **No machine codes on screen.** A server answer that is only a code now reads:
+  - `cos_pipeline_not_configured`, `pipeline_missing`: "This part of COS is not set up on this Mac, so there is nothing to show here. Nothing is broken." On Memories the box says "Not set up on this Mac.", with no Try again.
+  - `bridge_missing`: "COS on your Mac is set to use a scripts folder it cannot run, so this cannot be read. Check the COS_SCRIPTS_DIR setting on your Mac, then restart COS from the COS Control menu."
+  - `task_runtime_unavailable`: "Work is not set up on this Mac yet. Open COS Control on your Mac to finish setting it up."
+  - `unknown_command`: "COS on your Mac is older than this page. Update it from COS Control on your Mac."
+  - `bridge_error`: "COS on your Mac could not read this just now. Try again in a moment. If it keeps happening, restart COS from the COS Control menu on your Mac."
+  - any other code: "COS on your Mac could not do that just now. Try again in a moment. If it keeps happening, restart COS from the COS Control menu on your Mac."
+  - Memories: "Events in 90 days could not be counted" no longer shows when the list below already says it did not load.
+  - Sessions, hooks not installed: "COS cannot yet tell when a Claude Code session is working or waiting on you. In COS Control on your Mac, choose Install hooks."
+  - Sessions, hooks out of date: "COS’s link to Claude Code needs a refresh, so working and waiting may be out of date. In COS Control on your Mac, choose Reinstall hooks."
+  - Sessions, server too old: "Whether a session is working or waiting needs a newer COS on your Mac. Update it from COS Control on your Mac."
+- **No ⌘K hint on a touch screen** with no mouse (the open Duo, an iPad on its own). A desktop browser keeps it.
+- **The open Duo and wider screens: one way to get around.** Home and Settings left the bar at the top; the rail has Today and Settings.
+- **The trail (how you got here), the same rule at every size:**
+  - a place picked from the rail, the pane menu or Ask's Go to starts a new trail;
+  - steps are named by what they show, a meeting or session by its title and a message by "Message #N", cut to 28 characters with "…"; the kind ("Meeting") shows only until the title loads;
+  - from 600 px the bar shows that trail ("Messages / Message #2"), no longer "COS Control › Messages › …".
+- **The pet: three choices** in Settings > Pet: On Today (the default; nobody's Today changes unless they pick), In the top bar, and Off.
+  - In the top bar, on a phone: a small round pet beside Ask on every page, keeping its own animation. A tap opens a card with the pet, what it is doing, "I’ll wave when an agent starts." when nothing runs, Change pet and Hide.
+  - Hide turns the pet off and says "Pet hidden. Turn it back on in Settings, Pet." The card never covers a banner's button.
+  - On the folded and the open Duo the pet stays on Today for now.
+  - The Mac's own pet is not changed.
+
+**From 7.0.32, also on for everyone (never on npm before this):**
+- the waiting-questions route's `queue` and `queueCount`;
+- a question asked at the end of a turn survives a server restart for its full 8 hours;
+- an answer records which app gave it;
+- the server keeps up to 400 session titles in memory;
+- one new line in the session hook script;
+- the glasses pair by the typed code alone, so no server message says scan (two pairing messages changed);
+- the browser sign-in box takes the glasses' 14-character code;
+- a waiting question's time left reads hours and minutes past an hour.
+
+**Not in this release:** Work's Filter button and the one refresh control with pull to refresh (both wait for Miles's pick, for 7.0.34), and the pet's place on the Duo.
+
+### If you roll back
+
+- To 7.0.32: taps can fall through the hidden top bar again, the two-tap buttons stay armed with no limit, messages have one time, Today repeats a failure, Ask lists Go to last, codes can show on screen, ⌘K shows on touch, the bar has Home and Settings, the trail names steps by kind, and the pet has only on and off (a pet set to the top bar shows on Today).
+- To 7.0.31: also as in 7.0.32's rollback below.
+
 ## 7.0.32 - Questions can wait 8 hours (off unless switched on), one queue of waiting questions, code-only glasses pairing words, and the sign-in box takes the glasses code
 
 2026-11-13. 7.0.31 plus three pieces: X1's question wait, W1's pairing words and sign-in field, and one Control Web label.
