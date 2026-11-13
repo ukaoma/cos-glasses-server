@@ -15,6 +15,10 @@ import { requireApiToken } from '../lib/api-auth.js'
 import { PermissionBroker, brokerSignalSink } from '../lib/permission-broker.js'
 import { SessionSignalStore } from '../lib/session-signal-store.js'
 import { createSessionQuestionsRouter } from './permission-broker.js'
+import { agentSessionsRouter } from './agent-sessions.js'
+import { __resetSessionTitlesForTests, sessionTitleFor } from '../lib/session-title-cache.js'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { ASK_INPUT, Q1, SESSION, permissionEnvelope } from '../lib/__fixtures__/permission-broker.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -111,5 +115,43 @@ describe('client shape: Control Web reads the response exactly as before', () =>
     const without = await render(old)
     expect(withQueue.html).toContain('npm publish')
     expect(withQueue).toEqual(without)
+  })
+})
+
+describe('the titles the queue reads come from the session list', () => {
+  it('a session the list showed is named in the cache, by full and short id', async () => {
+    __resetSessionTitlesForTests()
+    const home = mkdtempSync(join(tmpdir(), 'x1-queue-titles-'))
+    const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    const day = new Date().toISOString().slice(0, 10).split('-').join('/')
+    const dir = join(home, '.codex', 'sessions', day)
+    mkdirSync(dir, { recursive: true })
+    mkdirSync(join(home, '.claude', 'projects'), { recursive: true })
+    const meta = JSON.stringify({ type: 'session_meta', payload: { id, cwd: '/repo/quilt', timestamp: new Date().toISOString() } })
+    const user = JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Build the deck' }] } })
+    writeFileSync(join(dir, `rollout-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}-${id}.jsonl`), meta + '\n' + user + '\n')
+    writeFileSync(join(home, '.codex', 'session_index.jsonl'), JSON.stringify({ id, thread_name: 'Quilt deck thread' }) + '\n')
+    const prev = { home: process.env.COS_AGENT_SESSIONS_HOME, codex: process.env.CODEX_HOME }
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    process.env.CODEX_HOME = join(home, '.codex')
+    try {
+      const app = express()
+      app.use('/api', agentSessionsRouter)
+      const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
+      servers.push(server)
+      expect(sessionTitleFor(id)).toBeNull()
+      const res = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/agent-sessions`)
+      expect(res.status).toBe(200)
+      const listed = ((await res.json()).sessions ?? []) as Array<{ session_id: string; display_label: string }>
+      const row = listed.find(r => r.session_id === id)
+      expect(row).toBeDefined()
+      expect(sessionTitleFor(id)).toBe(row!.display_label)
+      expect(sessionTitleFor(id.slice(0, 8))).toBe(row!.display_label)
+    } finally {
+      if (prev.home === undefined) delete process.env.COS_AGENT_SESSIONS_HOME; else process.env.COS_AGENT_SESSIONS_HOME = prev.home
+      if (prev.codex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev.codex
+      rmSync(home, { recursive: true, force: true })
+      __resetSessionTitlesForTests()
+    }
   })
 })

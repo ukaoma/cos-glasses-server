@@ -279,8 +279,9 @@ export class TurnEndAskTracker {
   /** X1: asks answered within TURN_ASK_ANSWERED_KEEP_MS (by when the reply arrived), oldest first. */
   recentlyAnswered(now = this.deps.now()): AnsweredTurnAsk[] {
     if (!this.deps.enabled()) return []
+    // Kept in the order replies arrived, so dropping from the front drops exactly the ones past the window.
     while (this.answered.length > 0 && now - this.answered[0]!.answeredAt > TURN_ASK_ANSWERED_KEEP_MS) this.answered.shift()
-    return this.answered.filter(a => now - a.answeredAt <= TURN_ASK_ANSWERED_KEEP_MS).map(a => ({ ...a }))
+    return this.answered.map(a => ({ ...a }))
   }
 
   /** The session's row ended: nothing it asked can still be answered. */

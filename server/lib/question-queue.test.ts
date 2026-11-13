@@ -91,7 +91,7 @@ describe('broker.queueSources, with every full-hold switch OFF', () => {
     expect(b.queueSources().map(x => [x.state, x.answeredBy, x.questions.length])).toEqual([['answered', 'mac', 0]])
   })
 
-  it('an approval the session moved past at the Mac reads answered by the Mac; a COS cancel is not listed', async () => {
+  it('an approval the session moved past at the Mac reads answered by the Mac', async () => {
     const { s, b } = broker()
     const aid = park(b, await b.admit(bashEnv(s.now)))
     b.observeHookEvent(ev(s.now + 5, 'PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm publish' }, tool_use_id: 'toolu_b1' }), false)
