@@ -30,6 +30,12 @@ The 8 hours was measured on a real engine: a hook held 7 h 55 m and its answer w
 - "Answered on <app>" on a card answered elsewhere.
 Both are for a later release, before the 8-hour switch is ever turned on.
 
+**Tested on this build** (the full suite on its parent 90453233; this commit adds only these lines):
+- **The full server suite, alone:** 16,543 passed, 0 failed, type check clean.
+- **The Control Web layout checks, in a test browser (WebKit) against 7.0.31:** every check passed except 16 in the narrow-and-folded matrix and one known short-page check, all of which fail the same way in 7.0.30.
+- **The sign-in box:** 17 typed keys reach the server (7.0.31 kept 9).
+- **Not on a real phone.**
+
 ### If you roll back
 
 - To 7.0.31: no queue fields, a turn-end question older than 6 hours is lost on a restart, the sign-in box takes 9 characters, the two pairing messages say scan again, and the time left reads in minutes. A question waits about 10 minutes, as it did in 7.0.32 unless the switch was on; a hook reinstalled with the switch on keeps its longer wait until it is reinstalled again.
