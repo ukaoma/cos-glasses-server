@@ -1,5 +1,6 @@
 // 6.52.0: the permission broker's rules, executed. The HTTP doors and the real hook script
 // are in routes/permission-broker.test.ts and cos-session-hook.script.test.ts.
+import { FULL_HOLD_QUESTION_WAIT_S } from './full-hold.js'
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -269,7 +270,9 @@ describe('reading the envelope', () => {
     }
     expect(wait(630)).toBe(630)
     expect(wait(3_600)).toBe(3_600)
-    for (const junk of [undefined, null, '630', 630.5, 0, -1, 3_601, Number.NaN, Infinity, [630]]) expect(wait(junk), String(junk)).toBeNull()
+    // X1: up to the 8 h question block (FULL_HOLD_QUESTION_WAIT_S), not one second more.
+    expect(wait(FULL_HOLD_QUESTION_WAIT_S)).toBe(FULL_HOLD_QUESTION_WAIT_S)
+    for (const junk of [undefined, null, '630', 630.5, 0, -1, FULL_HOLD_QUESTION_WAIT_S + 1, Number.NaN, Infinity, [630]]) expect(wait(junk), String(junk)).toBeNull()
   })
 
   it('a Cursor payload is Cursor in any form; junk is malformed', () => {

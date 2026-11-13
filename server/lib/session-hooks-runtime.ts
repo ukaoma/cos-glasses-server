@@ -23,7 +23,7 @@ import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatu
 import { codexHooksHealthField, cursorObserverHealthField, type CodexHooksHealth, type CursorObserverHealth } from './provider-observe.js'
 import { readHidIdleSeconds } from './permission-broker.js'
 import { waitingQuestionWordsEnabled } from './full-hold.js'
-import { TurnEndAskTracker, turnEndAsksEnabled, type TurnEndAskCounters } from './turn-end-ask.js'
+import { TURN_ASK_MAX_AGE_MS, TurnEndAskTracker, turnEndAsksEnabled, type AnsweredTurnAsk, type QueueTurnAsk, type TurnEndAskCounters } from './turn-end-ask.js'
 
 export function sessionHooksEnabled(): boolean {
   const raw = process.env.COS_SESSION_HOOKS
@@ -43,6 +43,11 @@ export function deskIdleSeconds(): number {
 
 /** Replay this much ledger history into the store at boot. */
 export const LEDGER_REPLAY_WINDOW_MS = 6 * 60 * 60_000
+
+/** X1: how much further back than the store the turn-end ask tracker replays: its age-out minus the store's window (2 h). */
+export function turnAskReplayExtraMs(): number {
+  return Math.max(0, TURN_ASK_MAX_AGE_MS - LEDGER_REPLAY_WINDOW_MS)
+}
 
 // A hook's ppid is the claude process itself: macOS `sh -c '<script> <Event>'` execs the
 // single command, and every recorded session (fixtures, 2026-09-15) shows one ppid across all
@@ -288,12 +293,22 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   }) : null
   const tracker = turnEndAskTracker
   const unsubscribeTurnAsk = tracker ? sessionSignalStore.subscribe((signal, env, child) => tracker.observe(env, child, signal)) : () => {}
-  const replay = ledger.replay(since, (env, _key, child, entrypoint) => {
+  // X1: a turn-end ask stays answerable TURN_ASK_MAX_AGE_MS (8 h) but the store replays LEDGER_REPLAY_WINDOW_MS (6 h),
+  // so an ask asked 6 to 8 h before a restart was lost. The tracker alone reads back to its own age-out: rows older
+  // than the store's window go to the tracker only, never into the store, so every other signal replays as before.
+  const trackerSince = tracker ? since - turnAskReplayExtraMs() : since
+  let trackerOnly = 0
+  const replay = ledger.replay(trackerSince, (env, _key, child, entrypoint) => {
     if (!enabled) return
+    if (env.ts < since) {
+      trackerOnly++
+      tracker?.observe(env, child, { entrypoint })
+      return
+    }
     sessionSignalStore.apply(env, child)
     if (entrypoint) sessionSignalStore.setEntrypoint(env.sessionId, entrypoint)
   })
-  replayed = { rows: replay.rows, applied: replay.applied }
+  replayed = { rows: replay.rows, applied: replay.applied - trackerOnly }
   ingester = startSpoolIngester({
     dir,
     ledger,
@@ -513,6 +528,12 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
 /** 7.0.18 (X1): the turn-end ask counters for the authenticated stats, or null with the switch off. */
 export function turnEndAskStats(): (TurnEndAskCounters & { tracked: number }) | null {
   return turnEndAskTracker ? turnEndAskTracker.stats() : null
+}
+
+/** X1 (the one queue): the turn-end asks a row shows now, and those answered in the last two minutes. Empty when off. */
+export function turnEndAsksForQueue(): { asks: QueueTurnAsk[]; answered: AnsweredTurnAsk[] } {
+  if (!turnEndAskTracker) return { asks: [], answered: [] }
+  return { asks: turnEndAskTracker.visibleAsks(), answered: turnEndAskTracker.recentlyAnswered() }
 }
 
 /** Tests only: the tracker the runtime would build, installed directly. */

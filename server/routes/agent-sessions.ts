@@ -94,6 +94,7 @@ import { createSessionPreviewRouter } from './session-preview.js'
 import { organizerKey, sessionOrganizer, type OrganizerRowFields } from '../lib/session-organizer.js'
 import { listOlderSessions, shortRowFor, OLDER_DEFAULT_DAYS, OLDER_DEFAULT_LIMIT, OLDER_MAX_DAYS, OLDER_MAX_LIMIT, OLDER_MIN_DAYS } from '../lib/agent-session-older.js'
 import { cachedListModel, warmListModels } from '../lib/list-model-memo.js'
+import { noteSessionTitle } from '../lib/session-title-cache.js'
 import { cosStartedSessionIds } from '../lib/cos-started-sessions.js'
 
 /** Step 2a: the organizer, or null when it is unavailable or empty (the list is then exactly today's). */
@@ -649,6 +650,8 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
     }))
     // Step 2a: read the models this answer lacked, in the background, for a later poll. Never awaited.
     warmListModels(sessions)
+    // X1 (the one queue): the titles this list showed, so the questions route can name a waiting session.
+    for (const entry of sessions) noteSessionTitle(entry.session_id, entry.display_label)
   } catch (error) {
     console.error(`[agent-sessions] list failed: ${error instanceof Error ? error.message : error}`)
     res.status(500).json({ error: 'Failed to read agent sessions', reason: 'agent_sessions_read_failed' })

@@ -3,9 +3,9 @@
 // its own dialog up while the hook waits; the web door's touch and confirm steps while a switch is on;
 // the `waiting` list. Every state transition, and every guard, has a test here that names it.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PermissionBroker, CONFIRM_ID_RE, MAX_WAITING, WAITING_ANSWERED_KEEP_MS, WAITING_MAX_AGE_MS, type PermissionBrokerDeps } from './permission-broker.js'
+import { PermissionBroker, CONFIRM_ID_RE, HOOK_REPLY_MARGIN_S, MAX_WAITING, WAITING_ANSWERED_KEEP_MS, WAITING_MAX_AGE_MS, type PermissionBrokerDeps } from './permission-broker.js'
 import { ASK_INPUT, SESSION, permissionEnvelope, Q1, Q2 } from './__fixtures__/permission-broker.js'
-import type { EngineFacts, FullHoldSwitches } from './full-hold.js'
+import { FULL_HOLD_QUESTION_WAIT_S, type EngineFacts, type FullHoldSwitches } from './full-hold.js'
 import type { HookEnvelope } from './session-hook-events.js'
 
 const live: PermissionBroker[] = []
@@ -61,7 +61,7 @@ function park(h: ReturnType<typeof harness>, r: Awaited<ReturnType<PermissionBro
 }
 
 describe('full hold: admission', () => {
-  it('holds a question with no client, no presence and the desk in use, for the whole hook wait, hidden until the desk is idle', async () => {
+  it('holds a question with no client, no presence and the desk in use, for the whole hook wait, on every surface at once', async () => {
     const h = harness()
     const r = await h.b.admit(ask())
     expect(r.ok).toBe(true)
@@ -69,8 +69,31 @@ describe('full hold: admission', () => {
     expect(r.request.fullHold).toBe(true)
     // holdCeilingS(3600, 3600) = 3590 s from the hook's own start.
     expect(r.request.deadlineAt).toBe(1_000_000 + 3_590_000)
-    expect(r.request.lensVisible).toBe(false)
+    // X1 (Miles 11/12 17:42, "At once, on all three"): no desk-idle wait for a fully held question.
+    expect(r.request.lensVisible).toBe(true)
     expect(r.request.hold?.fullHold).toBe(true)
+  })
+
+  it('X1: the 8 hour question block holds 8 h minus the 10 s margin, never at or past the hook\'s own wait', async () => {
+    const h = harness({ kindTimeout: { question: FULL_HOLD_QUESTION_WAIT_S, approval: 3600 } })
+    const r = await h.b.admit(ask(1_000_000, { hookWaitS: FULL_HOLD_QUESTION_WAIT_S }))
+    if (!r.ok) throw Error(r.reason)
+    expect(FULL_HOLD_QUESTION_WAIT_S).toBe(8 * 60 * 60)
+    expect(r.request.deadlineAt).toBe(1_000_000 + (FULL_HOLD_QUESTION_WAIT_S - HOOK_REPLY_MARGIN_S) * 1000)
+    expect(r.request.deadlineAt).toBeLessThan(1_000_000 + FULL_HOLD_QUESTION_WAIT_S * 1000)
+    // An approval stamped 8 h under a 1 h approval block is held the block's hour, not 8 h.
+    h.s.idle = 200
+    const a = await h.b.admit(approval(1_000_000, { hookWaitS: FULL_HOLD_QUESTION_WAIT_S }))
+    if (!a.ok) throw Error(a.reason)
+    expect(a.request.deadlineAt).toBe(1_000_000 + (3600 - HOOK_REPLY_MARGIN_S) * 1000)
+  })
+
+  it('X1: a stamped question the full hold does NOT take (engine unproven) still waits for the desk to be idle, as 7.0.31', async () => {
+    const h = harness({ engine: null }, { lastHoldPollAt: () => 1_000_000 })
+    const r = await h.b.admit(ask())
+    if (!r.ok) throw Error(r.reason)
+    expect(r.request.fullHold).toBeUndefined()
+    expect(r.request.lensVisible).toBe(false)
   })
 
   it('with the question switch off it is exactly today: no client means the Mac at once', async () => {
@@ -205,7 +228,8 @@ describe('Q1 review fixes', () => {
   })
 
   it('O1: an item no device is shown yet cannot be answered by id (any door); a hand-back can; after the latch it answers', async () => {
-    const h = harness()
+    // X1: a fully held question is shown at once, so "not shown yet" is a stamped question the full hold did not take.
+    const h = harness({ engine: null }, { lastHoldPollAt: () => h.s.now })
     const { id } = park(h, await h.b.admit(ask()))
     expect(h.b.answer(id, { clientAnswerId: 'app', ...ANSWER }, 'app')).toEqual({ status: 409, body: { error: 'not_shown' } })
     expect(h.b.answer(id, { clientAnswerId: 'web', ...ANSWER, presenceAgeMs: 1 }, 'web')).toEqual({ status: 409, body: { error: 'not_shown' } })
@@ -213,7 +237,7 @@ describe('Q1 review fixes', () => {
     h.s.idle = 95
     await h.b.tick()
     expect(h.b.answer(id, { clientAnswerId: 'app', ...ANSWER }, 'app').status).toBe(200)
-    const other = harness()
+    const other = harness({ engine: null }, { lastHoldPollAt: () => other.s.now })
     const second = park(other, await other.b.admit(ask()))
     expect(other.b.answer(second.id, { clientAnswerId: 'leave', handBack: true }, 'app').status).toBe(200)
     expect(second.sent).toEqual([{}])
@@ -243,15 +267,14 @@ describe('Q1 review fixes', () => {
 })
 
 describe('full hold: while held', () => {
-  it('a question stays answerable with no client and an active desk, and its card appears once the desk is idle', async () => {
+  it('a question stays answerable with no client and an active desk, and its card is listed at once (X1: no desk-idle wait)', async () => {
     const h = harness()
     const { id } = park(h, await h.b.admit(ask()))
+    expect(h.b.list().map(v => [v.id, v.fullHold, v.toolUseId])).toEqual([[id, true, 'toolu_q1']])
     for (let i = 0; i < 5; i++) { h.s.now += 60_000; h.s.idle = 5; await h.b.tick() }
     expect(h.b.pendingCount()).toBe(1)
-    expect(h.b.list()).toEqual([])
-    h.s.idle = 95
-    await h.b.tick()
-    expect(h.b.list().map(v => [v.id, v.fullHold, v.toolUseId])).toEqual([[id, true, 'toolu_q1']])
+    expect(h.b.list().map(v => v.id)).toEqual([id])
+    expect(h.b.answer(id, { clientAnswerId: 'app', ...ANSWER }, 'app').status).toBe(200)
   })
 
   it('an approval stays held with no client while the desk is idle, and goes back to the Mac when the desk is used', async () => {
@@ -558,11 +581,9 @@ describe('Q1 C1: an item held under the full hold keeps its web steps if the swi
     const c = h.b.confirm(a.id, { decision: 'allow', presenceAgeMs: 0 }, 'web')
     expect(c.status).toBe(200)
     expect(h.b.answer(a.id, { clientAnswerId: 'w', decision: 'allow', presenceAgeMs: 0, confirmId: c.body.confirmId }, 'web').status).toBe(200)
-    const hidden = harness()
-    const hq = park(hidden, await hidden.b.admit(ask()))
-    hidden.s.switches = { questions: false, approvals: false }
-    expect(hidden.b.answer(hq.id, { clientAnswerId: 'app', ...ANSWER }, 'app')).toEqual({ status: 409, body: { error: 'not_shown' } })
-    void q
+    // X1 (at once): a fully held question is never behind the latch, so the not-shown refusal has no full-hold item
+    // left to keep; the question parked above is answerable from the app with the switches off.
+    expect(h.b.answer(q.id, { clientAnswerId: 'app', ...ANSWER }, 'app').status).toBe(200)
   })
 })
 
@@ -624,10 +645,18 @@ describe('the waiting list', () => {
   })
 
   it('a held question behind the desk latch reads at_mac', async () => {
-    const h = harness()
+    // X1: only a stamped question the full hold did not take sits behind the latch now.
+    const h = harness({ engine: null }, { lastHoldPollAt: () => h.s.now })
     h.b.observeHookEvent(ev(h.s.now, 'PreToolUse'), false)
     park(h, await h.b.admit(ask()))
     expect(h.b.waitingList()[0]!.state).toBe('at_mac')
+  })
+
+  it('X1: a fully held question reads held (answerable) in the waiting list the moment it is asked', async () => {
+    const h = harness()
+    h.b.observeHookEvent(ev(h.s.now, 'PreToolUse'), false)
+    const { id } = park(h, await h.b.admit(ask()))
+    expect(h.b.waitingList().map(w => [w.state, w.answerable, w.heldId])).toEqual([['held', true, id]])
   })
 
   it('a held question whose PreToolUse has not arrived is still listed, held', async () => {
