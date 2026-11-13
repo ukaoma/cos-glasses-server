@@ -14,18 +14,32 @@ const START = APP.indexOf('  function loadSessionHooks() {')
 const END = APP.indexOf('  // The view switch: Sessions | Usage | COS cost.')
 const SOURCE = APP.slice(START, END)
 
-async function paint(status: unknown): Promise<string> {
-  const el = { innerHTML: 'stale' }
+type Store = { getItem(k: string): string | null; setItem(k: string, v: string): void }
+function memoryStore(): Store & { data: Map<string, string> } {
+  const data = new Map<string, string>()
+  return { data, getItem: k => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v) } }
+}
+const blockedStore: Store = { getItem: () => { throw new Error('SecurityError') }, setItem: () => { throw new Error('SecurityError') } }
+
+/** One page visit: runs the real functions, returns the painted HTML and a click on "Not now" if it is there. */
+/** `storage`: a store, or null for a page with no localStorage at all. */
+async function visit(status: unknown, storage: Store | null = memoryStore()) {
+  const button = { onclick: null as null | (() => void) }
+  const el = { innerHTML: 'stale', querySelector: (sel: string) => (sel === '[data-sx-offer="hide"]' && el.innerHTML.includes('data-sx-offer="hide"') ? button : null) }
   const ctx = vm.createContext({
-    SX: { hooks: null, hooksAt: 0, hooksOffer: false },
+    SX: { hooks: null, hooksAt: 0, hooksOffer: false, offerPutAway: false },
     $: (id: string) => (id === 'sessions-hooks' ? el : null),
     esc: (s: unknown) => String(s),
     api: () => (status instanceof Error ? Promise.reject(status) : Promise.resolve(status)),
     Date,
+    ...(storage ? { localStorage: storage } : {}),
   })
   vm.runInContext(SOURCE + '\nloadSessionHooks();', ctx)
   for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r))
-  return el.innerHTML
+  return { el, notNow: button.onclick ? () => button.onclick!() : null }
+}
+async function paint(status: unknown, storage: Store | null = memoryStore()): Promise<string> {
+  return (await visit(status, storage)).el.innerHTML
 }
 const hooks = (state: string, questionWait?: Record<string, unknown>) => ({ ok: true, sessionHooks: { state, ...(questionWait ? { questionWait } : {}) } })
 
@@ -61,5 +75,35 @@ describe('Control Web: the 8 hour question wait offer', () => {
 
   it('a failed status call shows no offer', async () => {
     expect(await paint(Object.assign(new Error('x'), { status: 500 }))).toBe('')
+  })
+  it('Not now puts the offer away in this browser: gone now, and on the next visit', async () => {
+    const store = memoryStore()
+    const offered = hooks('installed', { mode: 'default', offered: true })
+    const first = await visit(offered, store)
+    expect(first.el.innerHTML).toContain('Not now')
+    expect(first.notNow).not.toBeNull()
+    first.notNow!()
+    expect(first.el.innerHTML).toBe('')
+    expect(store.data.get('cos.sx.questionWaitOfferHidden')).toBe('1')
+    expect(await paint(offered, store)).toBe('')
+  })
+
+  it('Not now never hides a hooks-problem line', async () => {
+    const store = memoryStore()
+    store.setItem('cos.sx.questionWaitOfferHidden', '1')
+    const html = await paint(hooks('drift', { mode: 'default', offered: true }), store)
+    expect(html).toContain('needs a refresh')
+    expect(html).toContain('Reinstall hooks')
+    expect(html).not.toContain('Not now')
+  })
+
+  it('a store that cannot be read or written: the line shows, Not now hides it for this visit, and it shows again next visit', async () => {
+    const offered = hooks('installed', { mode: 'default', offered: true })
+    const first = await visit(offered, blockedStore)
+    expect(first.el.innerHTML).toContain('Questions can now wait up to 8 hours.')
+    first.notNow!()
+    expect(first.el.innerHTML).toBe('')
+    expect(await paint(offered, blockedStore)).toContain('Questions can now wait up to 8 hours.')
+    expect(await paint(offered, null)).toContain('Questions can now wait up to 8 hours.')
   })
 })

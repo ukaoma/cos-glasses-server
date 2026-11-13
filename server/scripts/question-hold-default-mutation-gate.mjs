@@ -45,6 +45,9 @@ const mutations = [
   ["web-offer-ignores-flag", "server/web-control/app.js", "st === 'installed' && SX.hooksOffer", "st === 'installed'", "installed and not offered", ["server/web-control/question-wait-offer-web.test.ts"]],
   ["web-offer-never-read", "server/web-control/app.js", "questionWait.offered === true)", "questionWait.offered === 'never')", "installed and offered: one plain line", ["server/web-control/question-wait-offer-web.test.ts"]],
   ["web-offer-beside-problem", "server/web-control/app.js", "    if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) {\n      // 7.0.34", "    if (SX.hooksOffer || ['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) {\n      // 7.0.34", "a hooks problem plus an offer", ["server/web-control/question-wait-offer-web.test.ts"]],
+  ["web-not-now-not-kept", "server/web-control/app.js", "localStorage.setItem(SX_OFFER_HIDE_KEY, '1')", "void SX_OFFER_HIDE_KEY", "Not now puts the offer away in this browser", ["server/web-control/question-wait-offer-web.test.ts"]],
+  ["web-not-now-ignored", "server/web-control/app.js", "SX.hooksOffer && !SX.offerPutAway && !offerHidden()", "SX.hooksOffer", "Not now puts the offer away in this browser", ["server/web-control/question-wait-offer-web.test.ts"]],
+  ["web-blocked-store-hides", "server/web-control/app.js", "localStorage.getItem(SX_OFFER_HIDE_KEY) === '1'; } catch (_e) { return false; }", "localStorage.getItem(SX_OFFER_HIDE_KEY) === '1'; } catch (_e) { return true; }", "a store that cannot be read or written", ["server/web-control/question-wait-offer-web.test.ts"]],
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

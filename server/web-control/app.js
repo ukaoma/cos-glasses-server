@@ -2907,7 +2907,7 @@
     view: sxPref('view', 'sessions', ['sessions', 'usage', 'cost']),
     recency: sxPref('recency', 'newest', ['newest', 'oldest', 'match']),
     q: '', instant: [], remote: [], searching: false, searchError: '', ranFor: '', semantic: null, semanticReason: '', searchSeq: 0, searchTimer: null,
-    hooks: null, hooksAt: 0, hooksOffer: false,
+    hooks: null, hooksAt: 0, hooksOffer: false, offerPutAway: false,
     usage: null, usageAt: 0, usageLoading: false, usageError: '',
     uPeriod: 'Last 30 days', uTool: 'All tools', uModel: 'All models',
     // Usage on a wide screen (uWideModel): the custom range, the chart sentence, the chosen bar, the table's order.
@@ -4026,15 +4026,27 @@
       paintHooks();
     }, function (err) { SX.hooks = err && err.status === 404 ? 'route_absent' : null; SX.hooksOffer = false; paintHooks(); });
   }
+  // 7.0.34 (X1): "Not now" puts the 8 hour offer away in THIS browser only. A store that cannot be read or written
+  // just means the line shows again; a hooks-problem line is never hidden by it.
+  var SX_OFFER_HIDE_KEY = 'cos.sx.questionWaitOfferHidden';
+  function offerHidden() {
+    try { return typeof localStorage === 'object' && !!localStorage && localStorage.getItem(SX_OFFER_HIDE_KEY) === '1'; } catch (_e) { return false; }
+  }
+  function hideOffer() {
+    try { if (typeof localStorage === 'object' && localStorage) localStorage.setItem(SX_OFFER_HIDE_KEY, '1'); } catch (_e) { /* not kept: it shows next visit */ }
+  }
   function paintHooks() {
     var el = $('sessions-hooks'); if (!el) return;
     var st = SX.hooks;
     if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) {
       // 7.0.34 (X1): read-only, no dot. A hooks problem above already says Reinstall hooks, so this shows only
       // when there is none (A8: each thing once). Installing hooks stays a Mac action.
-      el.innerHTML = st === 'installed' && SX.hooksOffer
-        ? '<div class="sx-hooks"><span>' + esc('Questions can now wait up to 8 hours.') + ' <span class="sx-hooks-where">' + esc('In COS Control on your Mac, choose Reinstall hooks.') + '</span></span></div>'
+      var offer = st === 'installed' && SX.hooksOffer && !SX.offerPutAway && !offerHidden();
+      el.innerHTML = offer
+        ? '<div class="sx-hooks"><span>' + esc('Questions can now wait up to 8 hours.') + ' <span class="sx-hooks-where">' + esc('In COS Control on your Mac, choose Reinstall hooks.') + '</span> <button type="button" class="sx-link" data-sx-offer="hide">' + esc('Not now') + '</button></span></div>'
         : '';
+      var notNow = offer && el.querySelector ? el.querySelector('[data-sx-offer="hide"]') : null;
+      if (notNow) notNow.onclick = function () { SX.offerPutAway = true; hideOffer(); paintHooks(); };
       return;
     }
     // 7.0.33 A8: plain words, then what to do.
