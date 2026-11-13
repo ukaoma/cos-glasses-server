@@ -92,7 +92,8 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   const crypto = opts.noRandomUUID ? { getRandomValues: (b: Uint8Array) => globalThis.crypto.getRandomValues(b) } : globalThis.crypto
   // Waits up to 3 s (polls, debounces) run at once; the 6 s disarm of a two-tap button never fires here.
   const held: Array<() => void> = []
-  const timeout = (fn: () => void, ms?: number) => { if ((ms ?? 0) >= 6000) { held.push(fn); return 0 } return setTimeout(fn, 0) }
+  // 7.0.33: arms expire at app.js ARM_EXPIRE_MS (5 s, was 6 s here); those timers are held, shorter ones run at once.
+  const timeout = (fn: () => void, ms?: number) => { if ((ms ?? 0) >= 5000) { held.push(fn); return 0 } return setTimeout(fn, 0) }
   const window = { COSWeb: W, matchMedia: () => media, crypto, localStorage: { getItem: () => null, setItem: () => {} } }
   // location.replace changes the hash, and the browser's hashchange runs the route again (app.js route, then load).
   const location = {

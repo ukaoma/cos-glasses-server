@@ -298,18 +298,22 @@
   // put on screen as is. Known codes get plain words that say what to do; any other bare code gets one plain sentence.
   // err.code keeps the code, so a pane can still tell them apart.
   var NOT_SET_UP = 'This part of COS is not set up on this Mac, so there is nothing to show here. Nothing is broken.';
+  // When trying again does not help, the next step: COS Control's menu restarts the server.
+  var STILL = ' If it keeps happening, restart COS from the COS Control menu on your Mac.';
   var PLAIN_CODES = {
-    cos_pipeline_not_configured: NOT_SET_UP, pipeline_missing: NOT_SET_UP, bridge_missing: NOT_SET_UP,
+    cos_pipeline_not_configured: NOT_SET_UP, pipeline_missing: NOT_SET_UP,
+    // Q1: a scripts folder is set (COS_SCRIPTS_DIR) but COS cannot run it: a broken setup, not a missing feature.
+    bridge_missing: 'COS on your Mac is set to use a scripts folder it cannot run, so this cannot be read. Check the COS_SCRIPTS_DIR setting on your Mac, then restart COS from the COS Control menu.',
     task_runtime_unavailable: 'Work is not set up on this Mac yet. Open COS Control on your Mac to finish setting it up.',
     unknown_command: 'COS on your Mac is older than this page. Update it from COS Control on your Mac.',
-    bridge_error: 'COS on your Mac could not read this just now. Try again in a moment.'
+    bridge_error: 'COS on your Mac could not read this just now. Try again in a moment.' + STILL
   };
   function plainMessage(msg) {
     var m = String(msg || '').trim();
     if (!/^[a-z0-9]+(?:_[a-z0-9]+)+$/.test(m)) return msg;
-    return PLAIN_CODES[m] || 'COS on your Mac could not do that just now. Try again in a moment.';
+    return PLAIN_CODES[m] || 'COS on your Mac could not do that just now. Try again in a moment.' + STILL;
   }
-  function notSetUp(code) { return code === 'cos_pipeline_not_configured' || code === 'pipeline_missing' || code === 'bridge_missing'; }
+  function notSetUp(code) { return code === 'cos_pipeline_not_configured' || code === 'pipeline_missing'; }
   function api(path, opts) {
     var o = opts || {};
     var headers = { 'X-COS-Web': '1' };
@@ -831,7 +835,8 @@
     if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();
     if (changedPane) window.scrollTo(0, 0);
-    $('topbar').classList.remove('tucked');
+    // 7.0.33 A12 (Q1): through barShow, so a bar sliding back after a page change catches its first tap too.
+    barShow($('topbar'));
     onScroll();
     // 7.0.33 A13: the pet in the top bar stays on every page; its card closes when the page changes.
     if (typeof petCardClose === 'function') petCardClose();
@@ -904,15 +909,20 @@
   // the bar back. Every page and size: the class is the test, so wherever the bar tucks, its band catches.
   var barBackAt = 0, barCatch = null;
   function barShow(bar) { if (bar.classList.contains('tucked')) { bar.classList.remove('tucked'); barBackAt = Date.now(); } }
-  function barCatches(y) {
+  // Inside the bar's own band only: its height, and its own left and right (Q1: on the folded Duo the rail's top icon
+  // sits beside the bar, and a tap on it while the bar was away was swallowed). The bar only moves up and down, so its
+  // left and right hold while it is away.
+  function barCatches(x, y) {
     var bar = $('topbar');
     if (!bar || !(y >= 0) || y >= bar.offsetHeight) return false;
+    var r = bar.getBoundingClientRect ? bar.getBoundingClientRect() : null;
+    if (r && !(x >= r.left && x < r.right)) return false;
     return bar.classList.contains('tucked') || Date.now() - barBackAt < BAR_SLIDE_MS;
   }
   var BAR_SLIDE_MS = 320;   // app.css: the bar's transform takes 220 ms; a little more for the finger
   document.addEventListener('pointerdown', function (e) {
     barCatch = null;
-    if (!barCatches(e.clientY)) return;
+    if (!barCatches(e.clientX, e.clientY)) return;
     barCatch = { y: e.clientY, until: Date.now() + 1500 };
     barShow($('topbar')); lastY = Math.max(0, window.scrollY || 0);
   }, true);

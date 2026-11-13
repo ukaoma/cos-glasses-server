@@ -1145,12 +1145,15 @@ function routeRegion() {
     return n }
   const els: Record<string, any> = {}
   const PANES: Record<string, any> = {}
+  const barShows: unknown[] = []
   const deps: Record<string, unknown> = {
     document: { getElementById: (id: string) => (id === 'lazy-panes' ? { textContent: JSON.stringify({ work: '/control/panes/work.js' }) } : null),
       createElement: () => { const s: any = {}; scripts.push(s); s.remove = () => {}; return s }, body: { appendChild: () => {} },
       querySelector: () => null, querySelectorAll: () => [] },
     $: (id: string) => (els[id] ??= mk()), state: { pane: 'today', lastLoad: {}, sessions: [] }, PANES, TITLES: { work: 'Work', today: 'Today' }, ROOT_PANES: ['today', 'work'],
     closeMenu: () => {}, onScroll: () => {}, skeletonRows: () => '<i>loading</i>', esc, runHooks: () => {}, loadToday: () => {},
+    // 7.0.33 A12 (Q1): route shows the top bar through barShow, which starts the bar's catch window.
+    barShow: (b: unknown) => { barShows.push(b) },
     // route() releases reader output images on every navigation (readerMedia merge, 6.99.28).
     readerImagesStop: () => {},
     location: { hash: '#/work' }, window: { scrollTo: () => {} }, setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {},
@@ -1158,8 +1161,15 @@ function routeRegion() {
   }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { route: route };\n}')(deps)
-  return { fns, timers, scripts, els, PANES }
+  return { fns, timers, scripts, els, PANES, barShows }
 }
+describe('7.0.33 A12 (Q1): a page change shows the top bar through barShow', () => {
+  it('route hands barShow the top bar, so a bar sliding back after a page change catches its first tap', () => {
+    const r = routeRegion()
+    r.fns.route()
+    expect(r.barShows).toEqual([r.els.topbar])
+  })
+})
 describe('a lazy pane that loads after its 15 s wait ran out clears its own error card (app.js route)', () => {
   it('the card says it is taking too long; when the script finally loads, the card goes and the pane loads', async () => {
     const r = routeRegion()

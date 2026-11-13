@@ -28,6 +28,15 @@ describe('plainMessage', () => {
       expect(t.length, c).toBeGreaterThan(30)
     }
   })
+  it('Q1: bridge_missing is a broken setup, not "not set up", and says what to fix', () => {
+    const t = k.plainMessage('bridge_missing')
+    expect(t).not.toContain('Nothing is broken')
+    expect(t).toContain('COS_SCRIPTS_DIR')
+    expect(k.notSetUp('bridge_missing')).toBe(false)
+  })
+  it('Q1: when trying again does not help, the line says what to do next', () => {
+    for (const c of ['bridge_error', 'some_new_code']) expect(k.plainMessage(c), c).toContain('restart COS from the COS Control menu on your Mac')
+  })
   it('a sentence from the server passes through untouched, a code inside a sentence too', () => {
     expect(k.plainMessage('Work is busy. Try again.')).toBe('Work is busy. Try again.')
     expect(k.plainMessage('The server answered 500.')).toBe('The server answered 500.')

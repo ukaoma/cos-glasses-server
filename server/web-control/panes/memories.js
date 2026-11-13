@@ -1872,7 +1872,8 @@
   function stopWatches() { clearInterval(watch.ingest); watch.ingest = null; clearInterval(watch.fetch); watch.fetch = null; clearInterval(watch.build); watch.build = null; clearInterval(askTimer); }
 
   // ── decisions (writes, each from a tap) ──────────────────
-  function arm(key) { S.armed = key; paint(); setTimeout(function () { if (S.armed === key) { S.armed = ''; paint(); } }, 6000); }
+  // 7.0.33 (Q1): the one expiry every armed button uses (app.js ARM_EXPIRE_MS, 5 s; this was 6 s).
+  function arm(key) { S.armed = key; paint(); setTimeout(function () { if (S.armed === key) { S.armed = ''; paint(); } }, W.armExpireMs || 5000); }
   function afterWrite() { loadStatus(); }
   function reviewMemory(id, decision) {
     if (S.reviewBusy) return;

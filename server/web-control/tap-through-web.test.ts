@@ -16,34 +16,40 @@ describe('the top bar band: while the bar is away or sliding back, the first tap
   const BAND = cut('  var barBackAt = 0, barCatch = null;', "  document.addEventListener('pointerdown'")
   function band(height: number) {
     const cls = new Set<string>(['tucked']), clock = { now: 1_000_000 }
-    const bar = { offsetHeight: height, classList: { contains: (c: string) => cls.has(c), remove: (c: string) => cls.delete(c) } }
+    const bar = { offsetHeight: height, getBoundingClientRect: () => ({ left: 0, right: 390 }), classList: { contains: (c: string) => cls.has(c), remove: (c: string) => cls.delete(c) } }
     // eslint-disable-next-line no-new-func
     const k = new Function('deps', `with (deps) {\n${BAND}\nreturn { barShow, barCatches };\n}`)({ $: () => bar, Date: { now: () => clock.now } })
     return { k, cls, clock, bar }
   }
   it('tucked: a tap inside the band is caught, one below it is not', () => {
     const { k } = band(48)
-    expect(k.barCatches(24)).toBe(true)
-    expect(k.barCatches(0)).toBe(true)
-    expect(k.barCatches(48)).toBe(false)
-    expect(k.barCatches(300)).toBe(false)
+    expect(k.barCatches(200, 24)).toBe(true)
+    expect(k.barCatches(200, 0)).toBe(true)
+    expect(k.barCatches(200, 48)).toBe(false)
+    expect(k.barCatches(200, 300)).toBe(false)
+  })
+  it('only the bar\'s own width: a tap beside the bar (the folded Duo\'s rail) is not caught (Q1)', () => {
+    const { k } = band(48)
+    expect(k.barCatches(389, 24)).toBe(true)
+    expect(k.barCatches(390, 24)).toBe(false)
+    expect(k.barCatches(426, 24)).toBe(false)
   })
   it('the band is the bar\'s own height, safe area included', () => {
     const { k } = band(92)
-    expect(k.barCatches(80)).toBe(true)
+    expect(k.barCatches(200, 80)).toBe(true)
   })
   it('sliding back: still caught for the slide, then the bar is the bar again', () => {
     const { k, cls, clock, bar } = band(48)
     k.barShow(bar)
     expect(cls.has('tucked')).toBe(false)
-    clock.now += 100; expect(k.barCatches(24)).toBe(true)
-    clock.now += 400; expect(k.barCatches(24)).toBe(false)
+    clock.now += 100; expect(k.barCatches(200, 24)).toBe(true)
+    clock.now += 400; expect(k.barCatches(200, 24)).toBe(false)
   })
   it('a bar that was never away catches nothing', () => {
     const { k, cls, bar } = band(48)
     cls.delete('tucked')
     k.barShow(bar)   // already shown: no new slide starts
-    expect(k.barCatches(24)).toBe(false)
+    expect(k.barCatches(200, 24)).toBe(false)
   })
 })
 
@@ -99,5 +105,16 @@ describe('both buttons that armed with no time limit now go through armTap', () 
     const SET = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'panes/settings.js'), 'utf8')
     expect(SET).toContain("if (!W.armTap(t, t, 'Tap again to release')) return;")
     expect((APP + SET).match(/setAttribute\('data-armed', '1'\)/g) || []).toHaveLength(1)   // only armTap itself
+  })
+})
+
+describe('one expiry for every armed button that has one (Q1)', () => {
+  it('app.js names it once and exports it; Memories reads it instead of its own 6 s', () => {
+    expect(APP.match(/var ARM_EXPIRE_MS = (\d+);/)![1]).toBe('5000')
+    expect(APP).toContain('window.COSWeb.armExpireMs = ARM_EXPIRE_MS;')
+    const MEM = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'panes/memories.js'), 'utf8')
+    const arm = /function arm\(key\) \{[^\n]*\n/.exec(MEM)![0]
+    expect(arm).toContain('W.armExpireMs || 5000')
+    expect(arm).not.toMatch(/\b6000\b/)
   })
 })
