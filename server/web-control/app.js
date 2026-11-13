@@ -2960,8 +2960,12 @@
     }
     var r2 = r || parseRoute();
     rdPosHook();
-    if (RD_POS.a && !rdPosReader()) RD_POS.a = null;
-    if (window.requestAnimationFrame) window.requestAnimationFrame(rdPosWatch);
+    // A different message just opened: its place is its top until he scrolls. (This also runs when the width crosses
+    // 600 px; the same message then keeps its anchor and its pending restore.)
+    if (window.requestAnimationFrame) window.requestAnimationFrame(function () {
+      var cx = rdPosReader(), key = cx ? cx.getAttribute('data-reader-key') : '';
+      if (!RD_POS.a || RD_POS.a.key !== key) { RD_POS.pending = false; rdPosCapture(); }
+    });
     if (r2 && r2.pane === 'messages' && r2.args && r2.args[0] === 'm' && r2.args.length === 2 && window.requestAnimationFrame) window.requestAnimationFrame(function () { rdFrameCrumb('open'); });
     return on;
   }
@@ -2983,165 +2987,99 @@
     } catch (_e) { /* a report never stops the page */ }
     return false;
   }
-  // 7.0.31 (Q1 19:58 FIX FIRST, lead 20:01): the reading place survives a fold. From 600 px the message scrolls in the
-  // frame's workspace; under 600 px the page scrolls. A fold or an unfold crosses that line, the scroller changes, and
-  // before this the folded page opened at the top (7.0.30 kept the page's pixel offset, which the reflow turned into
-  // about eleven paragraphs early). So the page keeps an ANCHOR, a character in the message: the one at the top of the
-  // reading area, found as he scrolls (caretRangeFromPoint), with how far its line sat from that top. After a resize or a
-  // change of the scroller, and after anything above the message changes size (a question card arriving or leaving,
-  // the sign-in notice), the scroller moves so that character is back at the top. At the very top he stays at the top.
-  // Content, not pixels, so the reflow at the new width does not move him. Only on a message reader.
-  // Never snap him around (Miles; lead 20:16, Q1): a restore happens only after the LAYOUT changed under him (the width,
-  // which a fold or a rotation changes; the scroller; or the message moved down the page because something above it
-  // changed size). A height-only resize (a keyboard, Safari's bars) never restores: the top line does not move then. A
-  // restore waits until he is still (no finger down, no scroll for RD_POS_QUIET_MS), and is dropped if he touched,
-  // wheeled or pressed a key after the change or within RD_POS_QUIET_MS before it: then the place is his, read afresh.
-  // On an iPhone, setting the scroll position during a flick stops the flick, so nothing here runs while he scrolls.
-  var RD_POS_QUIET_MS = 250, RD_POS_POLL_MS = 80;
-  var RD_POS = { a: null, mode: '', hold: false, hooked: false, ro: null, watched: null, cx: null, capturing: false,
-    pending: 0, timer: 0, userAt: 0, scrollAt: 0, touching: false, w: 0 };
+  // 7.0.31 (Q1 FIX FIRST, lead 20:41): ONE job. A fold or an unfold that crosses 600 px switches the message between the
+  // page's scroll (under 600) and the frame's workspace (600 and up), and the new scroller would open at the top. So the
+  // page keeps an anchor, the character at the top of the reading area, read as he scrolls, and applies it ONCE after a
+  // switch: when no finger is down and the scroll has been still for RD_POS_STILL_MS. If he scrolls on purpose first (a
+  // touch that moves, the wheel, a key), his scroll wins and the anchor is dropped. Nothing else moves the text: no
+  // other resize, no keyboard, no card or notice. Under 600 px with no switch, the reader is 7.0.30's.
+  var RD_POS_STILL_MS = 300, RD_POS_MOVE_PX = 10;
+  var RD_POS = { a: null, mode: '', pending: false, timer: 0, touching: false, ty: 0, moved: false, scrollAt: 0, queued: false, hooked: false };
   function rdPosReader() {
     var r = parseRoute();
-    if (!(r && r.pane === 'messages' && r.args && r.args[0] === 'm' && r.args.length === 2)) return null;
-    return document.querySelector('#pane-messages > .cx[data-reader-key]');
+    return r && r.pane === 'messages' && r.args && r.args[0] === 'm' && r.args.length === 2 ? document.querySelector('#pane-messages > .cx[data-reader-key]') : null;
   }
-  // 'frame' when the workspace is the scroller (the CSS decides, so this is right even before any event), else 'page'.
-  function rdPosMode() { var ws = $('workspace'); return ws && window.getComputedStyle && getComputedStyle(ws).overflowY === 'auto' ? 'frame' : 'page'; }
-  function rdPosScrolled(mode) { var ws = $('workspace'); return mode === 'frame' ? (ws ? ws.scrollTop : 0) : (window.scrollY || 0); }
-  // The top of the reading area: the workspace's top in the frame; on the page, below whatever top bar is pinned there.
+  function rdPosMode() { var ws = $('workspace'); return ws && getComputedStyle(ws).overflowY === 'auto' ? 'frame' : 'page'; }
+  // The top of the reading area: the workspace's top in the frame; on the page, below the pinned top bar.
   function rdPosTop(mode) {
-    if (mode === 'frame') { var ws = $('workspace'); return ws ? ws.getBoundingClientRect().top : 0; }
+    if (mode === 'frame') return $('workspace').getBoundingClientRect().top;
     var t = 0;
     ['.topbar', '.navbar'].forEach(function (sel) {
-      var e = document.querySelector(sel); if (!e) return;
-      var st = getComputedStyle(e), r = e.getBoundingClientRect();
-      if (st.display !== 'none' && r.height > 0 && r.bottom > 0 && (st.position === 'sticky' || st.position === 'fixed')) t = Math.max(t, r.bottom);
+      var e = document.querySelector(sel), st = e && getComputedStyle(e), r = e && e.getBoundingClientRect();
+      if (e && st.display !== 'none' && r.height > 0 && r.bottom > 0 && (st.position === 'sticky' || st.position === 'fixed')) t = Math.max(t, r.bottom);
     });
     return t;
   }
-  // Where the message starts in the scrolled content. If it moved while the scroller did not change, something above it
-  // changed size (a card arrived or left): the place is restored, never re-read from the shifted page. The browser's own
-  // scroll event for that shift can arrive before the resize notice, so this is checked on every scroll.
-  function rdPosCxOff(mode, cx) {
-    var ws = $('workspace');
-    return Math.round(cx.getBoundingClientRect().top - (mode === 'frame' && ws ? ws.getBoundingClientRect().top : 0) + rdPosScrolled(mode));
-  }
-  function rdPosCaret(x, y) {
-    if (document.caretRangeFromPoint) { var rg = document.caretRangeFromPoint(x, y); return rg ? { node: rg.startContainer, offset: rg.startOffset } : null; }
-    if (document.caretPositionFromPoint) { var cp = document.caretPositionFromPoint(x, y); return cp ? { node: cp.offsetNode, offset: cp.offset } : null; }
-    return null;
-  }
-  // The line box of one character (a collapsed range has no box in every engine).
+  // One character's line box (a collapsed range has none in every engine).
   function rdPosRect(node, offset) {
-    try {
-      var rg = document.createRange(), len = node.nodeValue ? node.nodeValue.length : 0;
-      if (!len) return null;
-      var at = Math.min(offset, len - 1);
-      rg.setStart(node, at); rg.setEnd(node, at + 1);
-      var r = rg.getBoundingClientRect();
-      return r && (r.height || r.width) ? r : null;
-    } catch (_e) { return null; }
+    var len = node && node.nodeValue ? node.nodeValue.length : 0;
+    if (!len) return null;
+    var rg = document.createRange(), at = Math.min(offset, len - 1);
+    rg.setStart(node, at); rg.setEnd(node, at + 1);
+    var r = rg.getBoundingClientRect();
+    return r.height || r.width ? r : null;
   }
   function rdPosCapture() {
     var cx = rdPosReader();
     if (!cx) { RD_POS.a = null; RD_POS.mode = ''; return null; }
     var mode = rdPosMode(), top = rdPosTop(mode), key = cx.getAttribute('data-reader-key');
     RD_POS.mode = mode;
-    if (rdPosScrolled(mode) <= 2) { RD_POS.a = { key: key, atTop: true, cxOff: rdPosCxOff(mode, cx) }; return RD_POS.a; }
-    var c = cx.getBoundingClientRect(), xs = [], body = cx.querySelector('.cx-said.cos .cx-card-body');
-    if (body) xs.push(body.getBoundingClientRect().left + 6);
-    xs.push(c.left + 8, c.left + c.width / 2);
+    if ((mode === 'frame' ? $('workspace').scrollTop : window.scrollY || 0) <= 2) return (RD_POS.a = { key: key, atTop: true });
+    var c = cx.getBoundingClientRect(), body = cx.querySelector('.cx-said.cos .cx-card-body'), xs = [c.left + 8, c.left + c.width / 2];
+    if (body) xs.unshift(body.getBoundingClientRect().left + 6);
     for (var dy = 2; dy <= 62; dy += 12) {
       for (var i = 0; i < xs.length; i++) {
-        var hit = rdPosCaret(xs[i], top + dy);
-        if (!hit || !hit.node || hit.node.nodeType !== 3 || !cx.contains(hit.node)) continue;
-        var p = hit.node.parentElement;
-        if (p && p.closest && p.closest('.cx-reply-form')) continue;
-        var r = rdPosRect(hit.node, hit.offset);
-        if (!r) continue;
-        RD_POS.a = { key: key, node: hit.node, offset: hit.offset, dy: r.top - top, cxOff: rdPosCxOff(mode, cx) };
-        return RD_POS.a;
+        var hit = document.caretRangeFromPoint ? document.caretRangeFromPoint(xs[i], top + dy) : null, n = hit && hit.startContainer;
+        if (!n || n.nodeType !== 3 || !cx.contains(n) || n.parentElement.closest('.cx-reply-form')) continue;
+        var r = rdPosRect(n, hit.startOffset);
+        if (r) return (RD_POS.a = { key: key, node: n, offset: hit.startOffset, dy: r.top - top });
       }
     }
-    return null;   // nothing readable at the top (a picture): keep the last anchor
+    return null;
   }
-  function rdPosRestore() {
-    var cx = rdPosReader(), a = RD_POS.a;
-    if (!cx || !a || a.key !== cx.getAttribute('data-reader-key')) return false;
-    var mode = rdPosMode(), ws = $('workspace');
+  function rdPosApply() {
+    var cx = rdPosReader(), a = RD_POS.a, mode = rdPosMode(), ws = $('workspace');
     RD_POS.mode = mode;
-    if (a.atTop) { if (mode === 'frame') { if (ws) ws.scrollTop = 0; } else window.scrollTo(0, 0); a.cxOff = rdPosCxOff(mode, cx); return true; }
-    if (!a.node || !a.node.isConnected || !cx.contains(a.node)) { RD_POS.a = null; return false; }
-    var r = rdPosRect(a.node, a.offset);
+    if (!cx || !a || a.key !== cx.getAttribute('data-reader-key')) return false;
+    if (a.atTop) { if (mode === 'frame') ws.scrollTop = 0; else window.scrollTo(0, 0); return true; }
+    var r = a.node.isConnected ? rdPosRect(a.node, a.offset) : null;
     if (!r) return false;
     var want = Math.round(r.top - rdPosTop(mode) - a.dy);
-    if (Math.abs(want) >= 2) { if (mode === 'frame') { if (ws) ws.scrollTop += want; } else window.scrollBy(0, want); }
-    a.cxOff = rdPosCxOff(mode, cx);
-    return Math.abs(want) >= 2;
+    if (mode === 'frame') ws.scrollTop += want; else window.scrollBy(0, want);
+    return true;
   }
-  // A layout change under him: hold captures (the browser's own scroll clamp is never taken as where he was reading) and
-  // restore once he is still. His own input after the change, or just before it, cancels it.
-  function rdPosNow() { return Date.now(); }
-  function rdPosSettle() {
-    RD_POS.hold = true;
-    if (!RD_POS.pending) RD_POS.pending = rdPosNow();
-    if (RD_POS.timer) return;
-    var tick = function () {
-      RD_POS.timer = 0;
-      var now = rdPosNow(), at = RD_POS.pending;
-      if (!at) { RD_POS.hold = false; return; }
-      if (RD_POS.userAt >= at - RD_POS_QUIET_MS) { RD_POS.pending = 0; RD_POS.hold = false; rdPosCapture(); rdPosWatch(); return; }
-      if (RD_POS.touching || now - RD_POS.scrollAt < RD_POS_QUIET_MS || now - at < RD_POS_QUIET_MS) { RD_POS.timer = setTimeout(tick, RD_POS_POLL_MS); return; }
-      RD_POS.pending = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch();
-    };
-    RD_POS.timer = setTimeout(tick, RD_POS_POLL_MS);
+  // The scroller changed under him: wait for no finger and a still scroll, then apply once; his own scroll drops it.
+  function rdPosTick() {
+    RD_POS.timer = 0;
+    if (!RD_POS.pending) return;
+    if (RD_POS.moved) { RD_POS.pending = false; rdPosCapture(); return; }
+    if (RD_POS.touching || Date.now() - RD_POS.scrollAt < RD_POS_STILL_MS) { RD_POS.timer = setTimeout(rdPosTick, 80); return; }
+    RD_POS.pending = false;
+    rdPosApply();
   }
-  function rdPosUser() { RD_POS.userAt = rdPosNow(); }
-  function rdPosOnScroll() {
-    RD_POS.scrollAt = rdPosNow();
-    if (RD_POS.hold || !rdPosReader()) return;
-    if (RD_POS.mode && rdPosMode() !== RD_POS.mode) { rdPosSettle(); return; }   // the scroller changed under him
-    if (RD_POS.capturing) return;
-    RD_POS.capturing = true;
-    var go = function () {
-      RD_POS.capturing = false;
-      if (RD_POS.hold) return;
-      var cx = rdPosReader(), a = RD_POS.a, mode = rdPosMode();
-      if (cx && a && a.cxOff != null && a.key === cx.getAttribute('data-reader-key') && mode === RD_POS.mode && Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosSettle(); return; }
-      rdPosCapture();
-    };
-    if (window.requestAnimationFrame) window.requestAnimationFrame(go); else go();
-  }
-  // What sits above the message (the notice, the question cards) and the reader itself: a change of size moves the text.
-  function rdPosWatch() {
-    if (typeof ResizeObserver !== 'function') return;
-    var cx = rdPosReader(), list = [cx, $('sq-host'), $('conn-notice')].filter(Boolean);
-    var sig = list.map(function (e) { return e.id || e.getAttribute('data-reader-key') || ''; }).join('|');
-    if (RD_POS.ro && RD_POS.watched === sig && cx === RD_POS.cx) return;
-    if (RD_POS.ro) RD_POS.ro.disconnect();
-    RD_POS.watched = sig; RD_POS.cx = cx;
-    if (!cx) { RD_POS.ro = null; return; }
-    var first = true;
-    // Only a move of the message's start is a shift above it; the Reply box compacting for a keyboard, or a reply
-    // landing below, changes nothing he is reading.
-    RD_POS.ro = new ResizeObserver(function () {
-      if (first) { first = false; return; }
-      var c2 = rdPosReader(), a = RD_POS.a, mode = rdPosMode();
-      if (c2 && a && a.cxOff != null && mode === RD_POS.mode && Math.abs(rdPosCxOff(mode, c2) - a.cxOff) > 1) rdPosSettle();
-    });
-    list.forEach(function (e) { RD_POS.ro.observe(e); });
+  function rdPosCheck() {
+    var mode = rdPosReader() ? rdPosMode() : '';
+    if (!mode || !RD_POS.mode || mode === RD_POS.mode || RD_POS.pending) return;
+    RD_POS.pending = true; RD_POS.moved = false;
+    if (!RD_POS.timer) RD_POS.timer = setTimeout(rdPosTick, 80);
   }
   function rdPosHook() {
     if (RD_POS.hooked || !document.addEventListener) return;
     RD_POS.hooked = true;
-    document.addEventListener('scroll', rdPosOnScroll, { capture: true, passive: true });
-    ['touchstart', 'touchmove', 'wheel', 'keydown', 'pointerdown'].forEach(function (t) { document.addEventListener(t, rdPosUser, { capture: true, passive: true }); });
-    document.addEventListener('touchstart', function () { RD_POS.touching = true; }, { capture: true, passive: true });
-    ['touchend', 'touchcancel'].forEach(function (t) { document.addEventListener(t, function () { RD_POS.touching = false; RD_POS.userAt = rdPosNow(); }, { capture: true, passive: true }); });
-    RD_POS.w = window.innerWidth || 0;
-    // Only a change of WIDTH restores (a fold, a rotation): a keyboard or Safari's bars change the height alone.
-    window.addEventListener('resize', function () { var w = window.innerWidth || 0, changed = w !== RD_POS.w; RD_POS.w = w; if (changed && rdPosReader()) rdPosSettle(); });
-    if (window.matchMedia) { var mq = window.matchMedia('(min-width: 600px)'); if (mq && mq.addEventListener) mq.addEventListener('change', function () { if (rdPosReader()) rdPosSettle(); }); }
+    var o = { capture: true, passive: true };
+    document.addEventListener('scroll', function () {
+      RD_POS.scrollAt = Date.now();
+      if (!rdPosReader()) return;
+      rdPosCheck();
+      if (RD_POS.pending || RD_POS.queued) return;
+      RD_POS.queued = true;
+      requestAnimationFrame(function () { RD_POS.queued = false; rdPosCheck(); if (!RD_POS.pending) rdPosCapture(); });
+    }, o);
+    window.addEventListener('resize', rdPosCheck);
+    document.addEventListener('touchstart', function (e) { RD_POS.touching = true; RD_POS.ty = e.touches && e.touches[0] ? e.touches[0].clientY : 0; }, o);
+    document.addEventListener('touchmove', function (e) { var y = e.touches && e.touches[0] ? e.touches[0].clientY : RD_POS.ty; if (RD_POS.pending && Math.abs(y - RD_POS.ty) > RD_POS_MOVE_PX) RD_POS.moved = true; }, o);
+    ['touchend', 'touchcancel'].forEach(function (t) { document.addEventListener(t, function () { RD_POS.touching = false; }, o); });
+    ['wheel', 'keydown'].forEach(function (t) { document.addEventListener(t, function () { if (RD_POS.pending) RD_POS.moved = true; }, o); });
   }
   // Where the frame's parts sit against the VISIBLE area (step 1's position report, lead 23:00): on a reader's open, and
   // KB_AFTER_MS after an on-screen keyboard closes while the frame is on. The visible area is viewportFit's box (a

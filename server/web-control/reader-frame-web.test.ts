@@ -160,101 +160,78 @@ describe('the frame CSS (panes/cos-chat.css)', () => {
   })
 })
 
-describe('the reading place across a fold (Q1 19:58 FIX FIRST): rdPosRestore, run on its own text', () => {
-  const POS = slice(APP, "  var RD_POS = { a: null, mode: '',", "  function rdPosHook() {")
-  function pos(o: { mode?: 'frame' | 'page'; key?: string; route?: any; rectTop?: number; wsTop?: number; cxTop?: number } = {}) {
+describe('the reading place, ONLY across a fold (lead 20:41): run on its own text', () => {
+  const POS = slice(APP, '  var RD_POS_STILL_MS = 300', '  function rdPosHook() {')
+  function pos(o: { mode?: 'frame' | 'page'; key?: string; route?: any; rectTop?: number; wsTop?: number } = {}) {
+    let now = 10_000, mode = o.mode ?? 'frame'
+    const timers: Array<{ fn: () => void; at: number }> = []
     const ws: any = { scrollTop: 500, getBoundingClientRect: () => ({ top: o.wsTop ?? 44 }) }
-    const cx: any = { getAttribute: () => o.key ?? 'i5', contains: () => true, getBoundingClientRect: () => ({ top: o.cxTop ?? -400, left: 0, width: 800 }) }
-    const node: any = { nodeType: 3, nodeValue: 'Paragraph 26. The price holds', isConnected: true, parentElement: { closest: () => null } }
-    const win: any = { scrollY: 0, scrolls: [] as number[], scrollTo: (_x: number, y: number) => win.scrolls.push(['to', y]), scrollBy: (_x: number, y: number) => win.scrolls.push(['by', y]) }
+    const cx: any = { getAttribute: () => o.key ?? 'i5', contains: () => true, querySelector: () => null, getBoundingClientRect: () => ({ top: 0, left: 0, width: 800 }) }
+    const node: any = { nodeType: 3, nodeValue: 'Paragraph 26. The price holds', isConnected: true }
+    const win: any = { scrollY: 0, scrolls: [] as any[], scrollTo: (_x: number, y: number) => win.scrolls.push(['to', y]), scrollBy: (_x: number, y: number) => win.scrolls.push(['by', y]) }
     const deps: any = {
-      window: Object.assign(win, { getComputedStyle: true }),
-      getComputedStyle: (e: any) => (e === ws ? { overflowY: (o.mode ?? 'frame') === 'frame' ? 'auto' : 'visible' } : { display: 'none', position: 'static' }),
+      window: win, Date: { now: () => now },
+      setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, at: now + ms }); return timers.length },
+      getComputedStyle: (e: any) => (e === ws ? { overflowY: mode === 'frame' ? 'auto' : 'visible' } : { display: 'none', position: 'static' }),
       document: { querySelector: (s: string) => (s === '#pane-messages > .cx[data-reader-key]' ? cx : null), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({ top: o.rectTop ?? 300, height: 20, width: 9 }) }) },
       $: (id: string) => (id === 'workspace' ? ws : null),
       parseRoute: () => o.route ?? { pane: 'messages', args: ['m', 'i5'] },
     }
     // eslint-disable-next-line no-new-func
-    const k = new Function('deps', `with (deps) {\n${POS}\nreturn { restore: rdPosRestore, RD: RD_POS, off: rdPosCxOff };\n}`)(deps)
-    return { k, ws, win, node }
+    const k = new Function('deps', `with (deps) {\n${POS}\nreturn { apply: rdPosApply, check: rdPosCheck, tick: rdPosTick, RD: RD_POS, STILL: RD_POS_STILL_MS };\n}`)(deps)
+    const advance = (ms: number) => { const end = now + ms; for (;;) { timers.sort((x, y) => x.at - y.at); const t = timers[0]; if (!t || t.at > end) break; timers.shift(); now = t.at; t.fn() } now = end }
+    return { k, ws, win, node, advance, setMode: (m: 'frame' | 'page') => { mode = m }, get now() { return now } }
   }
-  it('in the frame: the workspace moves by exactly how far the anchored character is from where it was read', () => {
+  it('apply, in the frame: the workspace moves by exactly how far the anchored character is from where it was read', () => {
     const h = pos({ rectTop: 300, wsTop: 44 })
-    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4, cxOff: 0 }
-    expect(h.k.restore()).toBe(true)
+    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4 }
+    expect(h.k.apply()).toBe(true)
     expect(h.ws.scrollTop, '500 + (300 - 44 - 4)').toBe(752)
   })
-  it('on the page (under 600 px): the window scrolls by the same difference, measured from the top bars', () => {
+  it('apply, on the page: the window scrolls by the same difference, measured from the top bars', () => {
     const h = pos({ mode: 'page', rectTop: 300 })
-    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4, cxOff: 0 }
-    h.k.restore()
+    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4 }
+    h.k.apply()
     expect(h.win.scrolls).toEqual([['by', 296]])
   })
-  it('at the top he stays at the top; another message or a removed line changes nothing', () => {
-    const top = pos(); top.k.RD.a = { key: 'i5', atTop: true }
-    top.k.restore(); expect(top.ws.scrollTop).toBe(0)
+  it('apply: at the top he stays at the top; another message or a removed line changes nothing', () => {
+    const top = pos(); top.k.RD.a = { key: 'i5', atTop: true }; top.k.apply(); expect(top.ws.scrollTop).toBe(0)
     const other = pos({ key: 'i4' }); other.k.RD.a = { key: 'i5', node: other.node, offset: 3, dy: 4 }
-    expect(other.k.restore()).toBe(false); expect(other.ws.scrollTop).toBe(500)
+    expect(other.k.apply()).toBe(false); expect(other.ws.scrollTop).toBe(500)
     const gone = pos(); gone.node.isConnected = false; gone.k.RD.a = { key: 'i5', node: gone.node, offset: 3, dy: 4 }
-    expect(gone.k.restore()).toBe(false); expect(gone.k.RD.a).toBe(null)
+    expect(gone.k.apply()).toBe(false); expect(gone.ws.scrollTop).toBe(500)
   })
-  it('a restore records where the message now starts, so the next scroll is read as his and not as a shift', () => {
-    const h = pos({ rectTop: 300, cxTop: -400, wsTop: 44 })
-    h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4, cxOff: 0 }
-    h.k.restore()
-    expect(h.k.RD.a.cxOff, '-400 - 44 + 752').toBe(308)
+  it('a switch is only a change of scroller: the same mode, no recorded mode, or another page never starts one', () => {
+    const same = pos(); same.k.RD.mode = 'frame'; same.k.check(); expect(same.k.RD.pending).toBe(false)
+    const fresh = pos(); fresh.k.RD.mode = ''; fresh.k.check(); expect(fresh.k.RD.pending).toBe(false)
+    const other = pos({ route: { pane: 'today', args: [] } }); other.k.RD.mode = 'page'; other.k.check(); expect(other.k.RD.pending).toBe(false)
+    const fold = pos(); fold.k.RD.mode = 'page'; fold.k.check(); expect(fold.k.RD.pending).toBe(true)
   })
-  it('the wiring: rdFrameSync hooks it, a settle restores before captures resume, and a shift above restores on scroll', () => {
-    expect(slice(APP, '  function rdFrameSync(r) {', '\n  }\n')).toContain('    rdPosHook();\n')
-    expect(APP).toContain('      RD_POS.pending = 0; rdPosRestore(); RD_POS.hold = false; rdPosWatch();')
-    expect(APP).toContain("Math.abs(rdPosCxOff(mode, cx) - a.cxOff) > 1) { rdPosSettle(); return; }")
-    expect(slice(APP, '  function rdPosHook() {', '\n  }\n')).toContain("document.addEventListener('scroll', rdPosOnScroll, { capture: true, passive: true });")
+  it('after a switch with him still: one apply, no sooner than the first tick', () => {
+    const h = pos({ rectTop: 300 }); h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4 }; h.k.RD.mode = 'page'
+    h.k.check(); expect(h.ws.scrollTop).toBe(500)
+    h.advance(100); expect(h.ws.scrollTop).toBe(752); expect(h.k.RD.pending).toBe(false)
+    h.advance(2000); expect(h.ws.scrollTop, 'once only').toBe(752)
   })
-})
-
-describe('never snap him around (lead 20:16, Q1): a restore waits for stillness and gives way to his own input', () => {
-  const SRC = slice(APP, "  var RD_POS_QUIET_MS = 250", "  function rdPosHook() {")
-  function gate() {
-    let now = 10_000
-    const timers: Array<{ fn: () => void; at: number }> = []
-    let restores = 0, captures = 0
-    const deps: any = {
-      Date: { now: () => now },
-      setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, at: now + ms }); return timers.length },
-      window: {}, document: {}, $: () => null, parseRoute: () => ({ pane: 'messages', args: ['m', 'i5'] }),
-    }
-    // eslint-disable-next-line no-new-func
-    const k = new Function('deps', `with (deps) {\n${SRC}\nrdPosRestore = function () { deps.restored(); return true; };\nrdPosCapture = function () { deps.captured(); return null; };\nrdPosWatch = function () {};\nreturn { settle: rdPosSettle, user: rdPosUser, scroll: rdPosOnScroll, RD: RD_POS, QUIET: RD_POS_QUIET_MS };\n}`)(Object.assign(deps, { restored: () => { restores++ }, captured: () => { captures++ } }))
-    const advance = (ms: number) => { const end = now + ms; for (;;) { timers.sort((x, y) => x.at - y.at); const t = timers[0]; if (!t || t.at > end) break; timers.shift(); now = t.at; t.fn() } now = end }
-    return { k, advance, setNow: (v: number) => { now = v }, get now() { return now }, get restores() { return restores }, get captures() { return captures } }
-  }
-  it('a layout change with him still: one restore, after the quiet time, and captures held until then', () => {
-    const g = gate()
-    g.k.settle()
-    expect(g.k.RD.hold).toBe(true)
-    g.advance(g.k.QUIET - 10); expect(g.restores).toBe(0)
-    g.advance(200); expect(g.restores).toBe(1); expect(g.k.RD.hold).toBe(false); expect(g.k.RD.pending).toBe(0)
+  it('a finger down waits, with no movement while it is held; the place comes back once it lifts and the scroll is still', () => {
+    const h = pos({ rectTop: 300 }); h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4 }; h.k.RD.mode = 'page'
+    h.k.RD.touching = true; h.k.check(); h.advance(2000); expect(h.ws.scrollTop).toBe(500)
+    h.k.RD.touching = false; h.k.RD.scrollAt = h.now; h.advance(h.k.STILL - 50); expect(h.ws.scrollTop).toBe(500)
+    h.advance(200); expect(h.ws.scrollTop).toBe(752)
   })
-  it('he touches, wheels or presses a key after the change: no restore, the place is his (read afresh)', () => {
-    const g = gate()
-    g.k.settle(); g.advance(40); g.k.user(); g.advance(2000)
-    expect(g.restores).toBe(0); expect(g.captures).toBe(1); expect(g.k.RD.hold).toBe(false)
+  it('his deliberate scroll before it applies wins: nothing is applied', () => {
+    const h = pos({ rectTop: 300 }); h.k.RD.a = { key: 'i5', node: h.node, offset: 3, dy: 4 }; h.k.RD.mode = 'page'
+    h.k.RD.touching = true; h.k.check(); h.advance(200); h.k.RD.moved = true; h.k.RD.touching = false; h.advance(2000)
+    expect(h.ws.scrollTop).toBe(500); expect(h.k.RD.pending).toBe(false)
   })
-  it('his input just before the change also hands him the place', () => {
-    const g = gate()
-    g.k.user(); g.advance(g.k.QUIET - 50); g.k.settle(); g.advance(2000)
-    expect(g.restores).toBe(0)
-  })
-  it('a finger down or a scroll still running makes it wait; it runs only once he is still', () => {
-    const g = gate()
-    g.k.RD.touching = true
-    g.k.settle(); g.advance(1500); expect(g.restores).toBe(0)
-    g.k.RD.touching = false; g.k.RD.scrollAt = g.now; g.advance(100); expect(g.restores).toBe(0)
-    g.advance(400); expect(g.restores).toBe(1)
-  })
-  it('only a change of width restores on resize: a keyboard or Safari bars (height only) never do', () => {
-    const hook = slice(APP, '  function rdPosHook() {', '\n  }\n')
-    expect(hook).toContain("window.addEventListener('resize', function () { var w = window.innerWidth || 0, changed = w !== RD_POS.w; RD_POS.w = w; if (changed && rdPosReader()) rdPosSettle(); });")
-    for (const t of ['touchstart', 'touchmove', 'wheel', 'keydown', 'pointerdown']) expect(hook).toContain(`'${t}'`)
+  it('the wiring: nothing but a change of scroller restores (no ResizeObserver, no shift check), and his scroll is a moved touch, the wheel or a key', () => {
+    const block = slice(APP, '  var RD_POS_STILL_MS = 300', '  // Where the frame')
+    expect(block).not.toMatch(/ResizeObserver|cxOff|rdPosSettle/)
+    expect(block).toContain("window.addEventListener('resize', rdPosCheck);")
+    expect(block).toContain('if (RD_POS.pending && Math.abs(y - RD_POS.ty) > RD_POS_MOVE_PX) RD_POS.moved = true;')
+    expect(block).toContain("['wheel', 'keydown'].forEach(function (t) { document.addEventListener(t, function () { if (RD_POS.pending) RD_POS.moved = true; }, o); });")
+    const sync = slice(APP, '  function rdFrameSync(r) {', '\n  }\n')
+    expect(sync).toContain('    rdPosHook();\n')
+    expect(sync).toContain("if (!RD_POS.a || RD_POS.a.key !== key) { RD_POS.pending = false; rdPosCapture(); }")
   })
 })
