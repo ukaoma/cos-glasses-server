@@ -132,6 +132,8 @@ try {
   cpSync(join(root, 'vitest.config.ts'), join(scratch, 'vitest.config.ts'))
   cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
   cpSync(join(root, 'managed-runtime-contract.json'), join(scratch, 'managed-runtime-contract.json'))
+  // full-hold.test.ts reads .env.example (the S6 lesson; the 8 h and turn-end gates already copy it).
+  cpSync(join(root, '.env.example'), join(scratch, '.env.example'))
   symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'), 'dir')
   const run = tests => spawnSync(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), 'run', '--maxWorkers=1', ...tests], {
     cwd: scratch, env: { PATH: process.env.PATH, HOME: scratch, COS_DATA_DIR: join(scratch, 'data') }, encoding: 'utf8', timeout: 300_000,

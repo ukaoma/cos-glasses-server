@@ -42,6 +42,9 @@ const mutations = [
   ["route-any-mode", "server/routes/session-hooks.ts", "if (mode !== 'on' && mode !== 'off' && mode !== 'default') {", "if (false) {", "a browser session is refused", ["server/lib/question-hold-default.test.ts"]],
   ["setting-default-kept", "server/lib/question-hold-setting.ts", "  if (mode === 'default') {\n", "  if (false) {\n", "the setting file: on and off", ["server/lib/question-hold-default.test.ts"]],
   ["setting-any-value", "server/lib/question-hold-setting.ts", "parsed && (parsed.mode === 'on' || parsed.mode === 'off') ? parsed.mode : null", "parsed ? parsed.mode as QuestionHoldSetting : null", "the setting file: on and off", ["server/lib/question-hold-default.test.ts"]],
+  ["web-offer-ignores-flag", "server/web-control/app.js", "st === 'installed' && SX.hooksOffer", "st === 'installed'", "installed and not offered", ["server/web-control/question-wait-offer-web.test.ts"]],
+  ["web-offer-never-read", "server/web-control/app.js", "questionWait.offered === true)", "questionWait.offered === 'never')", "installed and offered: one plain line", ["server/web-control/question-wait-offer-web.test.ts"]],
+  ["web-offer-beside-problem", "server/web-control/app.js", "    if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) {\n      // 7.0.34", "    if (SX.hooksOffer || ['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) {\n      // 7.0.34", "a hooks problem plus an offer", ["server/web-control/question-wait-offer-web.test.ts"]],
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

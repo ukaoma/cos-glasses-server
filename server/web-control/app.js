@@ -2907,7 +2907,7 @@
     view: sxPref('view', 'sessions', ['sessions', 'usage', 'cost']),
     recency: sxPref('recency', 'newest', ['newest', 'oldest', 'match']),
     q: '', instant: [], remote: [], searching: false, searchError: '', ranFor: '', semantic: null, semanticReason: '', searchSeq: 0, searchTimer: null,
-    hooks: null, hooksAt: 0,
+    hooks: null, hooksAt: 0, hooksOffer: false,
     usage: null, usageAt: 0, usageLoading: false, usageError: '',
     uPeriod: 'Last 30 days', uTool: 'All tools', uModel: 'All models',
     // Usage on a wide screen (uWideModel): the custom range, the chart sentence, the chosen bar, the table's order.
@@ -4020,13 +4020,23 @@
     if (Date.now() - SX.hooksAt < 60000) { paintHooks(); return; }
     SX.hooksAt = Date.now();
     api('/api/session-hooks/status').then(function (d) {
-      SX.hooks = (d && d.sessionHooks && d.sessionHooks.state) || null; paintHooks();
-    }, function (err) { SX.hooks = err && err.status === 404 ? 'route_absent' : null; paintHooks(); });
+      SX.hooks = (d && d.sessionHooks && d.sessionHooks.state) || null;
+      // 7.0.34 (X1): the 8 hour question wait is on by default and offered until this Mac reinstalls its hooks.
+      SX.hooksOffer = !!(d && d.sessionHooks && d.sessionHooks.questionWait && d.sessionHooks.questionWait.offered === true);
+      paintHooks();
+    }, function (err) { SX.hooks = err && err.status === 404 ? 'route_absent' : null; SX.hooksOffer = false; paintHooks(); });
   }
   function paintHooks() {
     var el = $('sessions-hooks'); if (!el) return;
     var st = SX.hooks;
-    if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) { el.innerHTML = ''; return; }
+    if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) {
+      // 7.0.34 (X1): read-only, no dot. A hooks problem above already says Reinstall hooks, so this shows only
+      // when there is none (A8: each thing once). Installing hooks stays a Mac action.
+      el.innerHTML = st === 'installed' && SX.hooksOffer
+        ? '<div class="sx-hooks"><span>' + esc('Questions can now wait up to 8 hours.') + ' <span class="sx-hooks-where">' + esc('In COS Control on your Mac, choose Reinstall hooks.') + '</span></span></div>'
+        : '';
+      return;
+    }
     // 7.0.33 A8: plain words, then what to do.
     var text = st === 'route_absent' ? 'Whether a session is working or waiting needs a newer COS on your Mac.'
       : st === 'missing' ? 'COS cannot yet tell when a Claude Code session is working or waiting on you.'
