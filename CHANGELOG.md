@@ -12,8 +12,8 @@
   - **What's next:** we now record Safari's readings on every message opened, every fold and every keyboard close, to find out how often it happens.
   - **Seen once in the readings we have:** today, from 07:42, the only stranded push came after a keyboard in the message reader. After five keyboard uses in Sessions and one in the COS chat, which were already one screen, every following reading was back at the top, through folds that broke the height readings the same way. One day of readings proves nothing either way.
 - **On the open Duo with a question card showing**, a short message's Reply box starts just below the bottom of the screen, as in 7.0.30. The page stays one screen, and scrolling the message brings Reply up.
-- **Folding or unfolding while reading keeps your place.** The page holds on to the line at the top of what you are reading and puts it back after a fold, an unfold or a rotation, and when a question card or the sign-in notice appears or leaves above the message. 7.0.30 kept the page's position in pixels instead, so after a fold the text reflowed and you landed about 4 to 11 paragraphs earlier. At the very top of a message you stay at the top. It never moves the text while you scroll or touch, or just after: if you touch, scroll or type after a fold, the place is yours and it does nothing. The keyboard opening or closing, and Safari's bars showing or hiding, never trigger it.
-- **Phones and the folded Duo otherwise unchanged.** Under 600 px the message reader works as in 7.0.30, with the side rail on the folded Duo.
+- **Folding or unfolding while reading keeps your place.** A fold or an unfold moves the message between the page's own scroll (narrow) and the framed area (wide). On its own the new view would open at the top, so the line you were reading is put back at the top, once, after the fold. It waits until your finger is off the screen and the page is still. If you scroll first, your scroll wins and it does nothing. Nothing else moves the text: not the keyboard, not Safari's bars, not a question card or notice appearing.
+- **Phones and the folded Duo otherwise unchanged.** Under 600 px, with no fold, the message reader works as in 7.0.30, with the side rail on the folded Duo.
 - **The Reply section stays.** The "Reply. Continues this conversation" block above the box is where replies sent from that message appear. It is not a second Reply box.
 - **The rest of the app in the same Safari state** (Today, the Messages list, Meetings, Speakers, Work and Settings, at 600 px and wider): no pinned part has text under it, but the rail can end partway down with the page continuing below it. Sessions already stays inside one screen. Those panes are not changed in this hotfix.
 - **New numbers in the page's own layout reports**, numbers only, to the Mac's diagnostics log:
@@ -35,11 +35,11 @@
     These ran at 951x539 and 1119x787 at 85%, 382x557, 449x797, 1180x820 and 1440x900. The keyboard was simulated by shrinking the window, the way an Android keyboard does; an iPhone keyboard shifts the view instead, which was not simulated. A reply arriving while you read was not driven.
   - **Not yet:** a real phone. This counts as done only when Miles has looked at it on the Duo.
 
-**Default-on for every install:** yes, with no switch: from 600 px wide, an open message is one screen and the area under the top bar scrolls instead of the page; at every width, an open message keeps your reading place across a fold, a rotation or a card appearing above it.
+**Default-on for every install:** yes, with no switch, two things: on screens 600 px and wider, an open message is one screen and the area under the top bar scrolls instead of the page; and an open message keeps your reading place across a fold or an unfold. Nothing else changes under 600 px.
 
 ### If you roll back
 
-- To 7.0.30: an open message is the whole page again, and after the keyboard and folds its Reply box and the rail can stop partway down the screen with the message below them. A fold moves you a few paragraphs back.
+- To 7.0.30: an open message is the whole page again, and after the keyboard and folds its Reply box and the rail can stop partway down the screen with the message below them. A fold or an unfold moves you a few paragraphs back.
 - Further back: as in 7.0.30 below.
 
 ## 7.0.30 - Control Web: Back goes the way you came, a phone shows how you got here, a message shows who said what, Reply stays at the bottom, Meetings opens on today, and clearer copy buttons
