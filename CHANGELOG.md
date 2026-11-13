@@ -33,7 +33,7 @@
 - **The open Duo and wider screens: one way to get around.** Home and Settings left the bar at the top; the rail has Today and Settings.
 - **The trail (how you got here), the same rule at every size:**
   - a place picked from the rail, the pane menu or Ask's Go to starts a new trail;
-  - steps are named by what they show, a meeting or session by its title and a message by "Message #N", cut to 28 characters with "…"; the kind ("Meeting") shows only until the title loads;
+  - steps are named by what they show, a meeting or session by its title and a message by "Message #N", cut to 28 characters with "…"; the kind ("Meeting") shows only until the title loads; Naming voices keeps that name;
   - from 600 px the bar shows that trail ("Messages / Message #2"), no longer "COS Control › Messages › …".
 - **The pet: three choices** in Settings > Pet: On Today (the default; nobody's Today changes unless they pick), In the top bar, and Off.
   - In the top bar, on a phone: a small round pet beside Ask on every page, keeping its own animation. A tap opens a card with the pet, what it is doing, "I’ll wave when an agent starts." when nothing runs, Change pet and Hide.

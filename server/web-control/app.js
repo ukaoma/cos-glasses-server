@@ -653,6 +653,9 @@
   function trailName(hash, crumb) {
     var a = String(hash || '').replace(/^#\/?/, '').split('/').filter(function (x) { return x !== ''; }), p = ROOT_PANES.indexOf(a[0]) >= 0 ? a[0] : 'today';
     if (a.length < 2 || isTabRoute(a.slice(1))) return TITLES[p] || 'Today';
+    // Naming voices is a page of its own about a meeting; its crumb is the meeting's title, so by title it read the same
+    // as the meeting after it ("Speakers / Pricing review / Pricing review"). It keeps its name.
+    if (p === 'speakers' && a[1] === 'review') return 'Naming voices';
     if (crumb) return trailCap(crumb);
     if (p === 'meetings') return 'Meeting';
     if (p === 'sessions') return 'Session';
