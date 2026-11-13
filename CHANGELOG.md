@@ -51,6 +51,12 @@
 - the browser sign-in box takes the glasses' 14-character code;
 - a waiting question's time left reads hours and minutes past an hour.
 
+**Tested on this build** (the full suite on its parent 837fb6f0; this commit adds only these lines):
+- **The full server suite, alone:** 16,574 passed, 0 failed, type check clean.
+- **The tap-through, with real taps in a test browser (WebKit):** two taps where Ask was signed out every browser on the published 7.0.31 (a 390 x 844 phone and the folded Duo); on this build 15 of 15 checks pass, and a tap on the folded Duo's rail still lands.
+- **The Control Web layout checks against 7.0.32:** the same results as 7.0.32 (16 in the narrow-and-folded matrix and one short-page check fail as in 7.0.30). Changed on purpose: the folded Duo reader draws Back in its top bar, the bar from 600 px has no Home or Settings, and the trail names steps by title.
+- **Not on a real phone.**
+
 **Not in this release:** Work's Filter button and the one refresh control with pull to refresh (both wait for Miles's pick, for 7.0.34), and the pet's place on the Duo.
 
 ### If you roll back
