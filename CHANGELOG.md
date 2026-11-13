@@ -41,6 +41,11 @@
 - Codex has no question hook, so its questions are unchanged. COS does not hold Cursor's questions.
 - The glasses show "480m left" for a new question until a glasses update says "8h left". The Mac's question card shows no time left.
 
+**Tested on this build** (the full suite on its parent 9f3bd8c2; this commit adds only these lines):
+- **The full server suite, alone:** 16,604 passed, 0 failed, type check clean.
+- **The Control Web layout checks in a test browser (WebKit):** the same results as 7.0.33, with nothing new failing.
+- **Not on a real phone, and the real server has not held a question for 8 hours end to end** (as above).
+
 **Tests:**
 - `server/lib/question-hold-default.test.ts`: never reinstalled equals switch-off at every layer; reinstalled is the full hold; 0 is off and 1 is on; the environment beats the setting; the route's refusals. The questions route keys are also pinned in `session-questions-queue.test.ts`.
 - Mutation gate `question-hold-default-mutation-gate.mjs`, one mutant per branch. The 7.0.16 full-hold gate's 14 stale targets are repointed: 5 had gone stale with 7.0.32's 8 hour change, 9 with this change. One is retired because 7.0.32 shipped its mutant on purpose.
