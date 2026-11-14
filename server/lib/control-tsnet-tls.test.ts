@@ -312,6 +312,11 @@ describe('X1 7.0.42: a boot name miss no longer holds back the certificate', () 
     await tls.active()!.check()
     expect(lookups()).toBe(1)
     expect(calls).toEqual([])
+    // Lead 15:03: a miss in the first minute after start reads as starting; after it, the precise reason.
+    expect(tls.health()).toEqual({ state: 'starting', reason: null, renewalError: null, expiresAt: null })
+    clock.now += 59_000
+    expect(tls.health().state).toBe('starting')
+    clock.now += 2_000
     expect(tls.health()).toEqual({ state: 'not_serving', reason: 'tailnet_name_no_answer', renewalError: null, expiresAt: null })
     // Lead 14:59, question 2, from a real handshake: in that window the ts.net name gets the mkcert pair (a phone on
     // https would see a certificate warning; on http it sees nothing).
@@ -342,6 +347,39 @@ describe('X1 7.0.42: a boot name miss no longer holds back the certificate', () 
     expect(calls).toEqual([])
     expect(await served(port, NAME)).toBe(pair.fingerprint)
     expect(tls.health()).toMatchObject({ state: 'serving', reason: null, renewalError: 'tailnet_name_no_answer' })
+    tls.stop()
+  })
+
+  it('a health read never starts a check: no name lookup, no Tailscale call, no certificate request, however often it polls', async () => {
+    const { self } = bootMissedSelf()
+    await self.refresh()
+    let asked = 0
+    const calls: string[] = []
+    const clock = { now: Date.now() }
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true }, () => null,
+      { ...deps(pair, clock, calls), selfDnsName: () => { asked++; return self.refresh() } }, d => new SignerTls(d))!
+    tls.start()
+    await tls.active()!.check()
+    const after = asked
+    expect(after).toBeGreaterThan(0)
+    for (let i = 0; i < 10; i++) { clock.now += 20_000; tls.health() }
+    await tick()
+    expect(asked).toBe(after)
+    expect(calls).toEqual([])
+    tls.stop()
+  })
+
+  it('the start-up grace covers a name miss only: a certificate failure in the first minute reads as not_serving at once', async () => {
+    const calls: string[] = []
+    const clock = { now: Date.now() }
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true }, () => null, deps(pair, clock, calls, { r: fail() }), d => new SignerTls(d))!
+    tls.start()
+    await tls.active()!.check()
+    expect(calls).toEqual(['status', 'cert'])
+    const h = tls.health()
+    expect(h.state).toBe('not_serving')
+    expect(h.reason).not.toBeNull()
+    expect(h.reason).not.toMatch(/^tailnet_name/)
     tls.stop()
   })
 

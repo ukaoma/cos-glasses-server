@@ -35,6 +35,9 @@ import { readSwitch } from './env-switch.js'
 import { SignerTls, type SignerTlsDeps, type SignerTlsStatus } from './web-key-signer-tls.js'
 import type { TailnetNameMiss, TailnetSelfName } from './tailnet-self-name.js'
 
+/** Lead 15:03: a name miss this soon after start() reads as `starting`, not a fault. */
+export const CONTROL_TSNET_START_GRACE_MS = 60_000
+
 /** How long a 3143 check waits for a fresh name lookup (the lookup itself is bounded at 1.5 s). */
 export const TAILNET_NAME_CHECK_WAIT_MS = 5_000
 
@@ -83,6 +86,7 @@ export function controlTsnetHealthFrom(status: SignerTlsStatus | null, nameMiss:
 
 export class ControlTsnetTls {
   private own: SignerTls | null = null
+  private startedAt: number | null = null
 
   constructor(
     /** The phone key signer's instance, read at handshake time (it is made later in the listener loop, or never). */
@@ -107,6 +111,7 @@ export class ControlTsnetTls {
 
   /** After the listeners are up: makes and starts an own instance only when the signer's does not exist. */
   start(): void {
+    if (this.startedAt === null) this.startedAt = (this.deps.now ?? Date.now)()
     if (this.signer() !== null || this.own !== null) return
     this.own = this.make(this.deps)
     this.own.start()
@@ -116,11 +121,21 @@ export class ControlTsnetTls {
     this.own?.stop()
   }
 
-  /** The health field. statusRead (SR-04) may start one bounded re-check for failures a user fixes outside COS. */
+  /**
+   * The health field, read by the PUBLIC /api/health. Lead 15:03: it reads status() only and never starts a check, so no
+   * poller can drive a name lookup, a Tailscale call or a certificate request. Checks run only from start() and the
+   * instance's own timer (boot, then the backoff 60 s doubling to 1 h, then daily), and a certificate call also needs no
+   * valid pair (or under 30 days left) and stays under SIGNER_TLS_CERT_CALLS_PER_DAY, counted and saved before the call.
+   */
   health(): ControlTsnetHealth {
     const tls = this.active()
     if (!tls) return controlTsnetHealthFrom(null)
-    const status = tls.statusRead()
+    const status = tls.status()
+    // A name miss in the first minute after start() is the start-up, not a fault (lead 15:03).
+    const now = (this.deps.now ?? Date.now)()
+    if (!status.trusted && status.lastError === 'tailnet_name_unknown' && this.startedAt !== null && now - this.startedAt < CONTROL_TSNET_START_GRACE_MS) {
+      return controlTsnetHealthFrom(null)
+    }
     let miss: TailnetNameMiss | null = null
     try { miss = this.nameMiss() } catch { miss = null }
     return controlTsnetHealthFrom(status, miss)
