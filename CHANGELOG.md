@@ -22,6 +22,11 @@ Miles, 22:14 (two pictures on the open Duo): "the answer and the submit button a
 - **What the suite proves:** the layout test in the server suite pins the CSS source. The proof of the sizes on screen is F1's WebKit sweep, which runs outside the suite.
 - **Not on a real phone.** Measured in headless WebKit with his phone's sizes and a stand-in for the pan; it is ready for his check, not proven on the Duo.
 
+**Tested on this build** (the full suite on its parent f10adff7; this commit adds only these lines):
+- **The full server suite, alone:** 16,633 passed, 0 failed, type check clean.
+- **The layout sweep in a test browser (WebKit), quick set, on f10adff7:** 0 failing over 625 states (14 known: the rail in a stranded pan), the same as the reviewed head 87465b3e. The full set on 87465b3e: 0 failing over 2,781 states, against 31 on 7.0.34.
+- **Not on a real phone** (as above).
+
 ## 7.0.35 - Control Web: opening from the Home Screen never leaves a blank screen for good
 
 2026-11-13. 7.0.34 plus one change, the blank open fix. Everything in 7.0.34 is in this update too; see its entry below. Miles, 21:20: "I'm opening up the COS web application shortcut on the home screen and I'm being met with just a blank screen. The server never ends up loading." Scope: W1_blank_open_scope.md (the lead, 21:45).
