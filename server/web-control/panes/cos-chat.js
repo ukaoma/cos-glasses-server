@@ -130,6 +130,9 @@
       // 7.0.39 candidate 2 (S1, docs/cos-thread.md "Thread-only chats"): only /api/health's features.cosThreadOnly says the
       // server keeps a cosThread Ask in the thread. Absent (an older server): the Ask stays an ordinary numbered one.
       threadOnly: !!(h && h.features && h.features.cosThreadOnly === true),
+      // 7.0.41 candidate 3 (S1, docs/cos-thread.md "Timeline"): notes in the flow at timeline >= 1 (timelineOn also needs
+      // the history).
+      timeline: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1 && Number(drop.thread.timeline) >= 1),
       // 6.99.19: Prep (capabilities.prep, protocol 1). Absent on an older server: "Prep me" stays a plain Ask.
       prep: prepCapsOf(caps.prep),
       // 11/07: how many files a session turn takes (threadTurnAttachments). 0 (an older server): words only, and Today's
@@ -143,7 +146,11 @@
     if (next.prep && next.prep.serverInstanceId) PREP_INST = next.prep.serverInstanceId;
     var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread || C.caps.threadOnly !== next.threadOnly;
     var filesChanged = !!C.caps && C.caps.dropFiles !== next.dropFiles;
+    // The timeline answers with its own cursors (a chats-only one is refused there), so the history starts again when
+    // the timeline turns on or off; an answer still in flight from the other mode is dropped (histReset's generation).
+    var tlFlip = !!C.caps && !!C.caps.timeline !== next.timeline;
     C.caps = next;
+    if (tlFlip) { histReset(); changed = true; }
     if (!next.dropIt) { clearRail(); C.summary = null; }
     if (changed && C.onChange) C.onChange();
     else if (filesChanged) paintButtons(CHAT);
@@ -733,7 +740,16 @@
       var hist = historyOn();
       if (hist) {
         var live = {}; C.asks.forEach(function (a) { live['t:' + a.cid] = 1; });
-        C.hist.entries.forEach(function (e) { if (!live[e.id]) rows.push({ at: e.at, html: histHtml(e) }); });
+        // 7.0.41 candidate 3: a notification whose own card is in this chat (or in the open older questions) is that card;
+        // its note would say it twice.
+        var cards = {};
+        (C.items || []).forEach(function (it) { if (!it.archived) cards[it.id] = 1; });
+        if (C.archiveOpen && C.archive) C.archive.forEach(function (it) { cards[it.id] = 1; });
+        C.hist.entries.forEach(function (e) {
+          if (live[e.id]) return;
+          if (/^b:/.test(e.id)) { if (!(e.kind === 'notification' && e.ref && cards[e.ref.id])) rows.push({ at: e.at, html: noteHtml(e) }); return; }
+          rows.push({ at: e.at, html: histHtml(e) });
+        });
       }
       rows.sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
       var older = archiveHtml();
@@ -746,6 +762,8 @@
     feed.innerHTML = html;
     if (historyOn()) paintTrim(feed);
     if (stick || atBottom) scrollToEnd(feed);
+    // A note's link asked for a notification card that was filed under the older questions: once they are read, go to it.
+    if (C.focusItem && C.archiveOpen && C.archive !== null && !showFocusItem()) { C.focusItem = ''; W.toast('That notification is no longer kept in this chat.'); }
   }
   // From 860 px the chat column scrolls by itself; on a phone the page does.
   function scrollerOf(feed) { return wide() ? feed : document.scrollingElement; }
@@ -1215,9 +1233,21 @@
   // 7.0.39 candidate 2: an Ask from the thread's composer carries cosThread only when the server says it keeps it, and
   // only where the history can show it again (a thread-only chat is in no other list).
   function threadOnlyOn() { return historyOn() && !!(C.caps && C.caps.threadOnly); }
+  // 7.0.41 candidate 3: the notes in the flow (breadcrumbs) beside the chats, from the same history route with timeline=1.
+  function timelineOn() { return historyOn() && !!(C.caps && C.caps.timeline); }
   var HIST_PAGE = 40, HIST_POLL_MS = 30000, HIST_FILL_PAGES = 5, HIST_NEWER_PAGES = 5;
+  var NOTE_KINDS = { notification: 1, session_question: 1, meeting: 1, message: 1 };
   function histValid(e) {
-    return !!(e && typeof e.id === 'string' && /^t:/.test(e.id) && typeof e.at === 'string' && W.toDate(e.at) && e.kind === 'chat' && typeof e.question === 'string');
+    if (!e || typeof e.id !== 'string' || typeof e.at !== 'string' || !W.toDate(e.at)) return false;
+    if (/^t:/.test(e.id)) return e.kind === 'chat' && typeof e.question === 'string';
+    // A note: only in timeline mode, only a kind this page knows how to say, with its line and a reference to its source.
+    return timelineOn() && /^b:/.test(e.id) && NOTE_KINDS[e.kind] === 1 && typeof e.line === 'string' && !!e.ref && typeof e.ref === 'object';
+  }
+  /** The history starts again (the timeline turned on or off): nothing held, and any answer in flight is dropped. */
+  function histReset() {
+    var h = C.hist;
+    C.hist = { entries: [], older: null, newest: '', state: 'idle', olderState: 'idle', newerBusy: false, full: {}, fullState: {},
+      attach: h.attach, retrying: h.retrying, retryErr: h.retryErr, listening: h.listening, trim: 0 };
   }
   /** Entries into the list, by id: 'older' before, 'newer' after; one already held is replaced where it is. */
   function histMerge(list, where) {
@@ -1229,7 +1259,7 @@
     });
     C.hist.entries = where === 'older' ? fresh.concat(cur) : cur.concat(fresh);
   }
-  function histUrl(q) { return '/api/cos-thread/history?limit=' + HIST_PAGE + (q || ''); }
+  function histUrl(q) { return '/api/cos-thread/history?limit=' + HIST_PAGE + (timelineOn() ? '&timeline=1' : '') + (q || ''); }
   // Installed once, the first time the history is read (a server without it never gets these): the newer entries every
   // 30 s while the chat is on screen and on focus, and the older ones as he scrolls up (the column, or the page).
   function histListen() {
@@ -1243,8 +1273,11 @@
   function loadHistory() {
     if (!historyOn() || C.hist.state === 'loading') return;
     histListen();
+    if (timelineOn()) loadEra();
     C.hist.state = 'loading';
+    var H = C.hist;   // an answer for a history that was reset since (the timeline turned on or off) is dropped
     api(histUrl('')).then(function (d) {
+      if (H !== C.hist) return;
       C.hist.entries = []; histMerge(d && d.entries, 'newer');
       C.hist.older = d && typeof d.older === 'string' && d.older ? d.older : null;
       C.hist.newest = d && typeof d.newest === 'string' ? d.newest : '';
@@ -1252,7 +1285,7 @@
       paintFeed(true);
       fillUp(0);
       reattach();
-    }, function () { C.hist.state = 'error'; paintFeed(false); });
+    }, function () { if (H !== C.hist) return; C.hist.state = 'error'; paintFeed(false); });
   }
   // A short history does not fill the column, so no scroll can ask for more: read older pages until it does (bounded).
   function fillUp(n) {
@@ -1265,7 +1298,9 @@
   function loadOlder() {
     if (!historyOn() || !C.hist.older || C.hist.olderState === 'loading') return Promise.resolve(false);
     C.hist.olderState = 'loading'; paintHistTop();
+    var H = C.hist;
     return api(histUrl('&before=' + encodeURIComponent(C.hist.older))).then(function (d) {
+      if (H !== C.hist) return false;
       C.hist.olderState = 'idle';
       keepPlace(function () {
         histMerge(d && d.entries, 'older');
@@ -1273,7 +1308,7 @@
         paintFeed(false);
       });
       return true;
-    }, function () { C.hist.olderState = 'error'; paintHistTop(); return false; });
+    }, function () { if (H !== C.hist) return false; C.hist.olderState = 'error'; paintHistTop(); return false; });
   }
   // What arrived since the newest cursor (his own chats from another tab, and later the timeline), page by page.
   // Q1 10:08: the busy mark belongs to one run of pages, and every way out of that run clears it (the page cap included),
@@ -1284,7 +1319,9 @@
     var done = function () { C.hist.newerBusy = false; };
     if (!historyOn() || C.hist.state !== 'ready' || !C.hist.newest || n >= HIST_NEWER_PAGES) { if (n) done(); return; }
     C.hist.newerBusy = true;
+    var H = C.hist;
     api(histUrl('&after=' + encodeURIComponent(C.hist.newest))).then(function (d) {
+      if (H !== C.hist) return;
       var got = d && Array.isArray(d.entries) ? d.entries : [];
       if (d && typeof d.newest === 'string' && d.newest) C.hist.newest = d.newest;
       if (got.length || (d && Array.isArray(d.updated) && d.updated.length)) { histMerge(got.concat(d.updated || []), 'newer'); paintFeed(false); reattach(); }
@@ -1380,6 +1417,67 @@
       '<div class="cc-line cos" data-hist="' + esc(e.id) + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
       '<p class="cc-card-title"><span>COS</span><span class="cx-time">' + no + esc(t) + '</span></p>' +
       '<div class="cc-answer md">' + body + '</div>' + (acts ? '<div class="cc-acts">' + acts + '</div>' : '') + '</div></div>';
+  }
+  // ── notes in the flow (7.0.41 candidate 3; mock A, thread_A; S1's timeline, docs/cos-thread.md) ──
+  // One quiet line in the answer column, its time at the right like a chat's: no box, no mark, no label or chip. Each says
+  // what happened in plain words and links to its source. The server gives facts (a kind, a line, a reference, what he
+  // did); the words are the page's.
+  var NOTE_DONE = { replied: 'You replied.', acted: 'You acted on it.', dismissed: 'You dismissed it.', closed: 'It was closed.', seen: 'You saw it.' };
+  var QUESTION_DONE = { moved_on: 'The session moved on before an answer.', session_ended: 'The session ended before an answer.', aged_out: 'It went unanswered.' };
+  function noteLink(label, attrs, quiet) {
+    return '<button type="button" class="cc-note-link' + (quiet ? ' quiet' : '') + '" data-cos="tl-open" ' + attrs + '>' + label + '</button>';
+  }
+  function noteHtml(e) {
+    var r = e.ref || {}, s = '';
+    if (e.kind === 'notification') {
+      var q = '“' + esc(e.line) + '”';
+      s = 'COS sent ' + (r.id ? noteLink(q, 'data-kind="notification" data-id="' + esc(r.id) + '"') : q) + '.' + (NOTE_DONE[e.outcome] ? ' ' + NOTE_DONE[e.outcome] : '');
+    } else if (e.kind === 'session_question') {
+      s = 'A ' + (r.type === 'session' && r.id ? noteLink('session', 'data-kind="session" data-provider="' + esc(r.provider || 'claude') + '" data-sid="' + esc(r.id) + '"') : 'session') +
+        ' asked “' + esc(e.line) + '”.';
+      if (e.outcome === 'answered') s += typeof e.answer === 'string' && e.answer ? ' You answered “' + esc(e.answer) + '”.' : ' You answered.';
+      else if (QUESTION_DONE[e.outcome]) s += ' ' + QUESTION_DONE[e.outcome];
+    } else if (e.kind === 'meeting') {
+      s = 'Meeting recorded: ' + (r.domain && r.month && r.filename
+        ? noteLink(esc(e.line), 'data-kind="meeting" data-domain="' + esc(r.domain) + '" data-month="' + esc(r.month) + '" data-file="' + esc(r.filename) + '"') : esc(e.line));
+    } else if (e.kind === 'message') {
+      // Lead 11:5x: "Asked on glasses" only when the row says so; never a device the row does not carry. The number links
+      // to the message only in the era the Mac is on now (an older era's number names another message there).
+      var no = Number.isInteger(r.no) && r.no > 0 ? r.no : 0;
+      var num = !no ? '' : C.msgEra && r.era === C.msgEra ? noteLink('#' + no, 'data-kind="message" data-no="' + no + '"', true) : '<span class="cc-note-no">#' + no + '</span>';
+      s = (e.surface === 'glasses' ? 'Asked on glasses' : 'Asked in Messages') + ': “' + esc(e.line) + '”' + (num ? ' ' + num : '');
+    }
+    return '<p class="cc-note" data-hist="' + esc(e.id) + '"><span></span><span class="cc-note-text">' + s + '</span><span class="cc-note-t">' + esc(clockOnly(e.at)) + '</span></p>';
+  }
+  /** A note's link. A notification opens its own card in this chat (the older questions are opened if it is filed there). */
+  function openNote(t) {
+    var k = t.getAttribute('data-kind');
+    if (k === 'session') return W.go('sessions', [t.getAttribute('data-provider') || 'claude', t.getAttribute('data-sid')]);
+    if (k === 'meeting') return W.go('meetings', [t.getAttribute('data-domain'), t.getAttribute('data-month'), t.getAttribute('data-file')]);
+    if (k === 'message') return W.go('messages', ['m', t.getAttribute('data-no')]);
+    if (k === 'notification') {
+      C.focusItem = t.getAttribute('data-id') || '';
+      if (!showFocusItem() && !C.archiveOpen) toggleArchive();
+      else if (C.focusItem) { C.focusItem = ''; W.toast('That notification is no longer kept in this chat.'); }
+    }
+  }
+  /** Scroll to the card C.focusItem names, if it is drawn (his tap asked for it). True when it was. */
+  function showFocusItem() {
+    var id = C.focusItem;
+    var el = id && C.host && C.host.querySelector('[data-item-id="' + String(id).replace(/["\\]/g, '') + '"]');
+    if (!el) return false;
+    C.focusItem = '';
+    if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+    return true;
+  }
+  // The era the Mac's message numbers are in now (GET /api/message-counter), read once with the timeline.
+  function loadEra() {
+    if (C.msgEraLoading) return;
+    C.msgEraLoading = true;
+    api('/api/message-counter').then(function (d) {
+      C.msgEra = d && typeof d.era === 'string' && d.era ? d.era : '';
+      if (timelineOn()) paintFeed(false);
+    }, function () { C.msgEraLoading = false; });
   }
   // "Show all of it": the whole answer (S1's GET /api/cos-thread/entry/:id), drawn in place in its own card.
   function loadFull(id) {
@@ -2612,6 +2710,7 @@
     if (what === 'hist-older') { C.hist.olderState = 'idle'; return loadOlder(); }
     if (what === 'hist-retry') { C.hist.state = 'idle'; return loadHistory(); }
     if (what === 'hist-again') return retryEntry(t.getAttribute('data-id'));
+    if (what === 'tl-open') return openNote(t);
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -2887,6 +2986,7 @@
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
     _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
-    _steer: steer, _cancel: cancel
+    _steer: steer, _cancel: cancel,
+    _timelineOn: timelineOn, _noteHtml: noteHtml, _histReset: histReset
   };
 })();

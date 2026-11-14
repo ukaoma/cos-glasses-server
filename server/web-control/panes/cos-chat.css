@@ -355,3 +355,16 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .cc-hist-trim { height: 0; margin: 0; padding: 0; }
 /* A message number an older thread chat had, beside its time, quieter than the time itself (lead 10:09). */
 .cc .cc-hist-no { color: var(--tertiary); }
+
+/* 7.0.41 candidate 3: notes in the flow (mock A, thread_A). One quiet line in the answer column with its time at the
+   right like a chat's: no box, no mark, no label or chip. Its link reads as underlined text in the line's own colour, and
+   on a touch screen takes a taller tap without moving the line. */
+.cc .cc-note { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; align-items: baseline; margin: 0 0 10px;
+  font-size: 13.5px; line-height: 1.45; color: var(--sub); }
+.cc .cc-note-text { min-width: 0; overflow-wrap: anywhere; }
+.cc .cc-note-t { font: 400 11px/1.3 var(--mono); color: var(--tertiary); white-space: nowrap; }
+.cc .cc-note-link { position: relative; display: inline; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit;
+  cursor: pointer; text-align: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
+.cc .cc-note-link.quiet, .cc .cc-note-no { color: var(--tertiary); }
+@media (any-pointer: coarse) { .cc .cc-note-link::after { content: ''; position: absolute; inset: -12px -6px; } }
