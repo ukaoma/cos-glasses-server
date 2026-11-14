@@ -50,11 +50,16 @@ describe('Meetings: the picked day is filled with the primary colours, today kee
     expect(r.decls).not.toMatch(/color-mix|#[0-9a-f]{3,6}/i)
     expect(APPCSS).toMatch(/\.btn\.primary\s*\{[^}]*background:\s*var\(--accent\)[^}]*color:\s*var\(--on-accent\)/)
   })
-  it('its number and the meetings dot are --on-accent, and the number rule wins over the disabled grey (it comes after)', () => {
+  it('its number and the meetings dot are --on-accent; a picked and disabled day keeps the number by specificity, not order', () => {
     const num = find(".mt-day[aria-pressed='true'] .mt-dnum")!, dot = find(".mt-day[aria-pressed='true'] .mt-dot.on")!
     expect(num.decls).toMatch(/color:\s*var\(--on-accent\)/)
     expect(dot.decls).toMatch(/background:\s*var\(--on-accent\)/)
-    expect(num.at).toBeGreaterThan(find('.mt-day:disabled .mt-dnum')!.at)
+    // Q1 H7: the disabled grey must lose wherever it sits, so the picked rule carries a :disabled selector of its own
+    expect(num.sel.split(/\s*,\s*/)).toContain(".mt-day[aria-pressed='true']:disabled .mt-dnum")
+    const spec = (sel: string) => { const s2 = sel.replace(/::?[a-z-]+\([^)]*\)/g, ''); return (s2.match(/\.[a-z][\w-]*|\[[^\]]+\]|:(?!:)[a-z-]+/gi) || []).length }
+    const grey = TOP.filter(r => r.sel.split(/\s*,\s*/).includes('.mt-day:disabled .mt-dnum') && /color:/.test(r.decls))
+    expect(grey.length).toBeGreaterThan(0)
+    for (const g of grey) expect(spec(".mt-day[aria-pressed='true']:disabled .mt-dnum")).toBeGreaterThan(spec('.mt-day:disabled .mt-dnum'))
   })
   it('today keeps its ring exactly; picked and today together keep the ring with an --on-accent line inside it', () => {
     expect(find('.mt-day.mt-today')!.decls).toMatch(/box-shadow:\s*inset 0 0 0 1\.5px var\(--accent\)/)

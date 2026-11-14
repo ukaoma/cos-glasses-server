@@ -35,10 +35,11 @@
 /* 7.0.30 item 4: today is marked with a ring in the theme's accent (no fill, so a picked day still reads as picked). */
 .mt-day.mt-today { box-shadow: inset 0 0 0 1.5px var(--accent); }
 .mt-day.mt-today .mt-dnum { font-weight: 600; }
-/* The picked day's number and dot in --on-accent (after the disabled rule, which would grey the number); a focus ring
+/* The picked day's number and dot in --on-accent; a picked day with nothing to open (disabled) keeps it too, by a more
+   specific selector than the disabled grey, not by coming after it (Q1 H7). A focus ring
    in --on-accent, since --accent would vanish on the fill. Picked and today together: today's --accent ring sits on the
    same colour, so a thin --on-accent line inside it keeps "today" showing. */
-.mt-day[aria-pressed='true'] .mt-dnum { color: var(--on-accent); }
+.mt-day[aria-pressed='true'] .mt-dnum, .mt-day[aria-pressed='true']:disabled .mt-dnum { color: var(--on-accent); }
 .mt-day[aria-pressed='true'] .mt-dot.on { background: var(--on-accent); }
 .mt-day[aria-pressed='true']:focus-visible { outline-color: var(--on-accent); }
 .mt-day.mt-today[aria-pressed='true'] { box-shadow: inset 0 0 0 1.5px var(--accent), inset 0 0 0 3px var(--on-accent); }
