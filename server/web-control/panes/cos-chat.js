@@ -1288,7 +1288,9 @@
       var got = d && Array.isArray(d.entries) ? d.entries : [];
       if (d && typeof d.newest === 'string' && d.newest) C.hist.newest = d.newest;
       if (got.length || (d && Array.isArray(d.updated) && d.updated.length)) { histMerge(got.concat(d.updated || []), 'newer'); paintFeed(false); reattach(); }
-      if (d && d.more === true && got.length) return loadNewer(n + 1);
+      // S1 5632c3fb: when the byte cap cuts `updated`, `more` is true with no new chats, so a page of ends alone also
+      // reads on (bounded by HIST_NEWER_PAGES; `newest` moves with each page).
+      if (d && d.more === true && (got.length || (Array.isArray(d.updated) && d.updated.length))) return loadNewer(n + 1);
       done();
     }, done);
   }
@@ -1464,10 +1466,12 @@
   // invalid_cos_thread (400): the mark was not exactly true. This page never sends that, so it is an older copy of it.
   function threadOnlyError(err, fromBox) {
     var code = err && err.code, tail = fromBox ? ' Your words are still in the box.' : '';
-    if (code === 'thread_session_web_only') {
+    if (code === 'thread_session_web_only' || code === 'cos_thread_off') {
       C.capsLoading = null;
       api('/api/health').then(fromHealth, function () {});
-      return 'Not sent. This page asked outside your COS thread, so it checked your Mac again. Ask again.' + tail;
+      // S1 5632c3fb: cos_thread_off (409) is Drop it turned off on the Mac since this page last read it.
+      return (code === 'cos_thread_off' ? 'Not sent. Drop it is off on your Mac now, so this page checked again. Ask again.'
+        : 'Not sent. This page asked outside your COS thread, so it checked your Mac again. Ask again.') + tail;
     }
     if (code === 'invalid_cos_thread') return 'Not sent. Your Mac did not take this page’s thread mark (invalid_cos_thread). Reload the page, then ask again.' + tail;
     return '';

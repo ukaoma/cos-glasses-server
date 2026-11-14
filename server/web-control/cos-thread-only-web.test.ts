@@ -171,6 +171,13 @@ describe('7.0.39 thread candidate 2: an Ask from the thread', () => {
     expect(h.feed.innerHTML).toContain('Not sent. This page asked outside your COS thread, so it checked your Mac again. Ask again. Your words are still in the box.')
     expect(h.calls.filter(c => c.path === '/api/health').length).toBe(1)
   })
+  it('409 cos_thread_off (Drop it turned off since the last read): says so and reads /api/health again', async () => {
+    const h = load({ '/api/cos-thread?threadOnly=1': THREAD, 'POST /api/query-jobs': err(409, 'cos_thread_off'), '/api/health': HEALTH(false) })
+    h.chat._submitAsk('Hi', null, () => {}, {})
+    await flush()
+    expect(h.feed.innerHTML).toContain('Not sent. Drop it is off on your Mac now, so this page checked again. Ask again. Your words are still in the box.')
+    expect(h.calls.filter(c => c.path === '/api/health').length).toBe(1)
+  })
   it('400 invalid_cos_thread: says so in words, with the code', async () => {
     const h = load({ '/api/cos-thread?threadOnly=1': THREAD, 'POST /api/query-jobs': err(400, 'invalid_cos_thread', 'cosThread is true or absent.') })
     h.chat._submitAsk('Hi', null, () => {}, {})
@@ -273,6 +280,27 @@ describe('7.0.39 thread candidate 2: Ask again is the next generation of the sam
     expect(bodies[1]).not.toHaveProperty('sessionId')
     expect(h.chat._state.asks.length).toBe(1)
     expect(h.chat._state.asks[0].gen).toBe(2)
+  })
+})
+
+describe('7.0.39 thread candidate 2: ends cut by the byte cap (S1 5632c3fb)', () => {
+  it('a page with only ends and more: true reads on, until a page says no more', async () => {
+    const reads: string[] = []
+    const h = load({ [H]: page([entry('a', { status: 'running', answer: '', answerChars: null, full: false })], 'c1.1.0'),
+      [H + '&after=*']: (p: string) => {
+        reads.push(p)
+        if (p.indexOf('after=c1.1.0') >= 0) return { entries: [], updated: [entry('a', { status: 'completed', answer: 'First end', answerChars: 9 })], newest: 'c1.1.1', more: true }
+        return { entries: [], updated: [], newest: 'c1.1.1', more: false }
+      } })
+    h.chat._state.caps.jobs = false   // no reattach in this test: only the history reads
+    h.chat._loadHistory(); await flush()
+    h.chat._loadNewer(); await flush()
+    expect(reads.length).toBe(2)
+    expect(reads[1]).toContain('after=c1.1.1')
+    expect(h.feed.innerHTML).toContain('<p>First end</p>')
+    // The busy mark is cleared, so the next poll reads again.
+    h.chat._loadNewer(); await flush()
+    expect(reads.length).toBe(3)
   })
 })
 
