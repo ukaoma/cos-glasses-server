@@ -300,6 +300,31 @@ describe('X1 7.0.42: a boot name miss no longer holds back the certificate', () 
     tls.stop()
   })
 
+  it('the check waits for a fresh lookup that answers late (MagicDNS 50 ms after the ask), and serves (Q1: wait 0 gave up first)', async () => {
+    let lookups = 0
+    const self = createTailnetSelfName({
+      nudgerName: () => null,
+      tailscaleIpv4: () => '100.112.1.2',
+      reverse: async () => {
+        lookups++
+        if (lookups === 1) throw Object.assign(new Error('queryPtr ENOTFOUND'), { code: 'ENOTFOUND' })
+        await new Promise(r => setTimeout(r, 50))
+        return [`${NAME}.`]
+      },
+    })
+    expect(await self.refresh()).toBeNull()
+    const calls: string[] = []
+    const clock = { now: Date.now() }
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true, nameMiss: () => self.lastMiss?.() ?? null }, () => null,
+      { ...deps(pair, clock, calls), selfDnsName: controlTsnetSelfDnsName(self) }, d => new SignerTls(d))!
+    tls.start()
+    await tls.active()!.check()
+    expect(lookups).toBe(2)
+    expect(calls).toEqual(['status', 'cert'])
+    expect(tls.health()).toMatchObject({ state: 'serving' })
+    tls.stop()
+  })
+
   it('the 7.0.41 wiring (refresh) fails on the cached miss, and health now says what was wrong: tailnet_name_no_answer', async () => {
     const { self, lookups } = bootMissedSelf()
     await self.refresh()
