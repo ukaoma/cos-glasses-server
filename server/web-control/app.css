@@ -666,6 +666,25 @@ html { touch-action: manipulation; }
   .sheet-backdrop { padding-top: 0; }
   .sheet { max-width: none; border-radius: 0 0 20px 20px; padding: calc(var(--safe-top) + 10px) var(--gutter) 14px; max-height: calc(100dvh - 90px); box-shadow: none; }
 }
+/* F1 (Miles 2026-11-14 07:14): a framed pane (html.pg-frame, app.js pgFrameSync; Settings) from 600 px on touch, the
+   message reader's frame (cos-chat.css html.rd-frame) for a pane that scrolled the page. The page is one screen and
+   cannot scroll, the app shell is the visible box, the rail is a static column of it and scrolls by itself, and the pane
+   scrolls in the workspace. Before, the rail was sticky to the layout viewport: when Safari left the view stranded
+   (visual viewport height 0 after the keyboard closed, his rows 13:07:41Z to 13:09:00Z) the rail ended mid-screen
+   while Settings ran on below it. */
+@media (min-width: 600px) and (pointer: coarse) {
+  html.pg-frame, html.pg-frame body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+  html.pg-frame body { min-height: 0; }
+  html.pg-frame .app-shell { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh); min-height: 0;
+    grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  html.pg-frame .rail { position: static; top: auto; height: auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  html.pg-frame .main-col { min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  html.pg-frame .topbar, html.pg-frame .navbar { flex: none; position: relative; }
+  html.pg-frame .workspace { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 0; }
+  /* No bottom padding on the scroller: a sticky bar in it (the question card's footer) pins to the padding's edge, 40 px
+     above the screen's bottom (sweep, 699x548 and 951x539). The room at the end of the page is kept by this spacer. */
+  html.pg-frame .workspace::after { content: ''; display: block; height: calc(var(--safe-bottom) + 40px); }
+}
 /* 6.99.30 (QA): an element with the hidden attribute is hidden, whatever display its classes give it ("Retry image"
    showed under loaded images: .link-btn's inline-flex beat [hidden]). */
 [hidden] { display: none !important; }

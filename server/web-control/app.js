@@ -814,6 +814,7 @@
     var reading = r.args.length > 0 && !isTabRoute(r.args);
     if (typeof sxFrameSync === 'function') sxFrameSync();
     if (typeof rdFrameSync === 'function') rdFrameSync(r);
+    if (typeof pgFrameSync === 'function') pgFrameSync(r);
     var paneEl = $('pane-' + r.pane);
     if (paneEl) paneEl.classList.toggle('reading', reading);
     var split = paneEl && paneEl.querySelector('.split');
@@ -837,7 +838,8 @@
     $('section-name').textContent = TITLES[r.pane] || 'Today';
     if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();
-    if (changedPane) window.scrollTo(0, 0);
+    // F1: a framed pane scrolls the workspace, not the page, so a new pane starts at the workspace's top too.
+    if (changedPane) { window.scrollTo(0, 0); var wsTop = $('workspace'); if (wsTop && document.documentElement.classList.contains('pg-frame')) wsTop.scrollTop = 0; }
     // 7.0.33 A12 (Q1): through barShow, so a bar sliding back after a page change catches its first tap too.
     barShow($('topbar'));
     onScroll();
@@ -980,6 +982,7 @@
     // showShell's route() puts the frame back (sxFrameSync) when the shell returns.
     document.documentElement.classList.remove('sx-frame');
     document.documentElement.classList.remove('rd-frame');
+    document.documentElement.classList.remove('pg-frame');
     // A later 401 from a pane still polling (W.api passes no message) must not blank what the gate already says:
     // the reason it opened, or "That code did not match" while the person retypes.
     if (!message && alreadyOpen) return;
@@ -3173,6 +3176,55 @@
   function rdFrameOn(r) {
     var shell = $('app-shell'), wide = !!(window.matchMedia && window.matchMedia('(min-width: 600px)').matches);
     return !!(r && r.pane === 'messages' && r.args && r.args[0] === 'm' && r.args.length === 2 && wide && !(shell && shell.classList.contains('hidden')));
+  }
+  // F1 (Miles 2026-11-14 07:14, the open Duo: "our setting rail when opened [has] the same scrolling beyond the container
+  // height issue"): Settings in the reader's frame. His rows: the keyboard closed on Today at 13:07:41Z and the visual
+  // viewport read height 0 from then on (Safari's stranded view). Settings scrolls the page and the rail is sticky to
+  // the layout viewport, which that view has left, so the rail ended a quarter of the way down with its last items at
+  // the top. html.pg-frame makes the page one screen (app.css): the app shell is the visible box (--vv-top, --vv-h from
+  // viewportFit, which falls back to innerHeight when the reading is bad), Settings scrolls in the workspace and the
+  // rail is a static column, as on Sessions and the message reader. Gated in CSS to 600 px and up on touch; a class
+  // left on elsewhere does nothing. Panes are listed by name (own keys only).
+  var PG_FRAME_PANES = { settings: 1 };
+  function pgFrameOn(r) {
+    var shell = $('app-shell');
+    return !!(r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && !(shell && shell.classList.contains('hidden')));
+  }
+  function pgFrameSync(r) {
+    var de = document.documentElement, on = pgFrameOn(r || parseRoute()), was = !!(de && de.classList && de.classList.contains('pg-frame'));
+    if (de && de.classList) de.classList.toggle('pg-frame', on);
+    if (on) { pgFrameHook(); if (!was) pgFrameCrumb('open'); }
+    return on;
+  }
+  // One numbers-only web.layout row (pg-frame) when the frame comes on and after the keyboard closes (the trigger at
+  // 13:07:41Z), at most 8 a page: whether the frame applied (the rail static), the reading (fb: bad), the rail's and the
+  // shell's edges, the page's height and scroll (one screen and 0 when framed) and the workspace's. On his phone it tells
+  // whether the one-screen page was in force when a rail is reported mid-screen.
+  var PG_FRAME_LOG = { n: 0, hooked: false }, PG_FRAME_MAX = 8;
+  function pgFrameCrumb(why) {
+    if (PG_FRAME_LOG.n >= PG_FRAME_MAX || !document.documentElement.classList.contains('pg-frame') || typeof layoutCrumb !== 'function') return false;
+    try {
+      var v = viewportFit(), rail = document.querySelector('.rail'), ws = $('workspace'), shell = $('app-shell'), se = document.scrollingElement || document.documentElement;
+      var rr = rail && rail.getBoundingClientRect ? rail.getBoundingClientRect() : null, sr = shell && shell.getBoundingClientRect ? shell.getBoundingClientRect() : null;
+      var out = { why: String(why || '').slice(0, 24), fb: !!v.bad, framed: !!(rail && window.getComputedStyle && getComputedStyle(rail).position === 'static'),
+        boxT: v.top, boxB: v.top + v.height, railT: rr ? rr.top : -1, railB: rr ? rr.bottom : -1, shellT: sr ? sr.top : -1, shellB: sr ? sr.bottom : -1,
+        docH: se ? se.scrollHeight : -1, pageY: window.scrollY || 0, wsY: ws ? ws.scrollTop : -1, wsH: ws ? ws.scrollHeight : -1 };
+      if (layoutCrumb('pg-frame', out)) { PG_FRAME_LOG.n++; return true; }
+    } catch (_e) { /* a report never stops the page */ }
+    return false;
+  }
+  function pgFrameHook() {
+    if (PG_FRAME_LOG.hooked || !window.COSWeb || typeof window.COSWeb.onKeyboard !== 'function') return;
+    PG_FRAME_LOG.hooked = true;
+    window.COSWeb.onKeyboard(function (what) {
+      if (what === 'after') pgFrameCrumb('kb-after');
+      // The keyboard up in a framed pane: the field he tapped is brought into the workspace's view, 'nearest', so a field
+      // already in view moves nothing. Safari's own pan moves the visual viewport, not a scroller inside the page.
+      if ((what === 'open' || what === 'move') && document.documentElement.classList.contains('pg-frame')) {
+        var f = document.activeElement, ws = $('workspace');
+        if (f && ws && f !== document.body && ws.contains(f) && f.scrollIntoView) requestAnimationFrame(function () { if (document.activeElement === f) f.scrollIntoView({ block: 'nearest' }); });
+      }
+    });
   }
   var RD_FRAME = { hooked: false, n: 0 };
   function rdFrameSync(r) {
