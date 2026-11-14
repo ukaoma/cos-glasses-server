@@ -12,9 +12,10 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import * as turnEndAsk from './turn-end-ask.js'
 import { dataPath } from './data-dir.js'
 import { localDay } from './local-day.js'
-import { getActiveSessions, getSessionRaw } from './conversation.js'
+import { getActiveSessions, isWebAsk } from './conversation.js'
 import { getMeetingStore } from './meeting-store.js'
 import { DROP_LIMITS, parseFeedItem } from './drop-store.js'
+import { dropItEnabled } from './drop-settings.js'
 import { LEGACY_MESSAGE_ERA } from './message-era.js'
 import type { CosThread } from './cos-thread.js'
 import {
@@ -45,13 +46,14 @@ export function serverTimelineSources(): TimelineSources {
   const meetings = () => getMeetingStore()
   return {
     feed: () => readFeedFile(),
-    liveMessages: () => getActiveSessions().flatMap(s => {
-      const surface = getSessionRaw(s.id)?.surface
-      return s.exchanges
-        .filter(e => e.role === 'user' && Number.isSafeInteger(e.globalMsgNum))
-        .map(e => ({ no: e.globalMsgNum as number, era: (e as { messageEra?: string }).messageEra ?? LEGACY_MESSAGE_ERA, query: e.content, at: e.timestamp,
-          ...(surface === 'web' ? { surface: 'web' as const } : {}) }))
-    }),
+    // A turn is stamped `web` only when its own admission recorded it (conversation.ts isWebAsk), never by its conversation.
+    liveMessages: () => getActiveSessions().flatMap(s => s.exchanges
+      .filter(e => e.role === 'user' && Number.isSafeInteger(e.globalMsgNum))
+      .map(e => {
+        const no = e.globalMsgNum as number
+        const era = (e as { messageEra?: string }).messageEra ?? LEGACY_MESSAGE_ERA
+        return { no, era, query: e.content, at: e.timestamp, ...(isWebAsk(s.id, era, no) ? { surface: 'web' as const } : {}) }
+      })),
     archiveDays: () => archiveDayDates(archive),
     archiveDay: date => readArchiveDayTurns(archive, date),
     meetingMonths: () => meetings().listMonths(),
@@ -64,14 +66,32 @@ let started = false
 let timer: ReturnType<typeof setTimeout> | null = null
 let unsubscribe: (() => void) | null = null
 
-/** Starts the sweeper (and the session-question listener) once per process. Idempotent; never throws. */
-export function startTimeline(thread: CosThread, sources: TimelineSources = serverTimelineSources()): void {
-  if (started) return
+/** Drop it, read fresh each time. A switch that cannot be read reads as off. */
+const isOn = (enabled: () => boolean) => { try { return enabled() === true } catch { return false } }
+/** Off: no timer, no listener, and the next start begins again. */
+function stopTimeline(): void {
+  if (timer) clearTimeout(timer)
+  timer = null
+  unsubscribe?.()
+  unsubscribe = null
+  started = false
+}
+
+/**
+ * Starts the sweeper (and the session-question listener) once per process. Idempotent; never throws.
+ * Q1 / lead 13:0x: `enabled` (Drop it) is read on every sweep and every session question. Found off, the sweep reads and
+ * writes nothing, schedules nothing and drops the listener, so off means off without a restart. The thread routes call
+ * this on every request, and they answer only while Drop it is on, so turning it back on resumes on the next request.
+ */
+export function startTimeline(thread: CosThread, sources: TimelineSources = serverTimelineSources(), enabled: () => boolean = () => dropItEnabled()): void {
+  if (started || !isOn(enabled)) return
   started = true
   try {
     const store = thread.timeline()
     const sweeper = new TimelineSweeper(store, thread.dir(), sources, () => localDay())
     const run = () => {
+      timer = null
+      if (!isOn(enabled)) { stopTimeline(); return }
       let pending = false
       try { pending = sweeper.sweep().pending } catch (e) { console.error('[cos-thread] timeline sweep failed:', e instanceof Error ? e.name : 'error') }
       timer = setTimeout(run, pending ? SWEEP_BACKLOG_MS : SWEEP_IDLE_MS)
@@ -82,7 +102,10 @@ export function startTimeline(thread: CosThread, sources: TimelineSources = serv
     // X1's callback (turn-end-ask.ts onTurnAskEvent), only when this build has it. Replayed asks dedupe on their key.
     const subscribe = (turnEndAsk as unknown as { onTurnAskEvent?: (l: (e: TurnAskEventLike) => void) => () => void }).onTurnAskEvent
     if (typeof subscribe === 'function') {
-      unsubscribe = subscribe(e => { try { recordTurnAskEvent(store, e) } catch { /* the breadcrumb is lost, never the ask */ } })
+      unsubscribe = subscribe(e => {
+        if (!isOn(enabled)) return
+        try { recordTurnAskEvent(store, e) } catch { /* the breadcrumb is lost, never the ask */ }
+      })
     }
   } catch (e) {
     console.error('[cos-thread] timeline unavailable:', e instanceof Error ? e.name : 'error')
@@ -90,10 +113,4 @@ export function startTimeline(thread: CosThread, sources: TimelineSources = serv
 }
 
 /** Tests only. */
-export function __resetTimelineForTests(): void {
-  if (timer) clearTimeout(timer)
-  timer = null
-  unsubscribe?.()
-  unsubscribe = null
-  started = false
-}
+export function __resetTimelineForTests(): void { stopTimeline() }

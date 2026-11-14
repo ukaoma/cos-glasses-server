@@ -141,7 +141,7 @@ A `c1` cursor is refused here (`invalid_cursor`); unknown kinds are `invalid_kin
 | `notification` | the ping's or follow-up's title (or line) | `{ type: 'notification', id, threadId }` | `replied` (with `reply`), `acted` (a reminder button), `dismissed` (a ping closed unanswered), `closed` (a follow-up done; a newer one can retire it), `seen`, or none |
 | `session_question` | the question (80 characters), from turn-end-ask's callback when the build has it | `{ type: 'session', provider: 'claude', id }` | `answered` (with `answer`, 80 characters, and `by`), `moved_on`, `session_ended`, `aged_out` |
 | `meeting` | the meeting's title | `{ type: 'meeting', domain, month, filename }` (the web's `#/meetings/<domain>/<month>/<filename>`) | none |
-| `message` | the question's first 60 characters (the number is in the ref; the page writes the words) | `{ type: 'message', no, era }`, plus `surface` (`web`) only when the server knows: a conversation it made for a plain Control Web Ask. The glasses and the Mac app send nothing that says which they are, so their messages carry no surface | none |
+| `message` | the question's first 60 characters (the number is in the ref; the page writes the words) | `{ type: 'message', no, era }`, plus `surface` (`web`) only for a turn whose own admission was a plain Control Web Ask (recorded per turn, never per conversation). The glasses and the Mac app send nothing that says which they are, so their turns carry no surface, even in a conversation the web started | none |
 
 **Storage.** `cos-thread/timeline.jsonl`, append-only (one crumb per source key, one outcome row per change), and
 `timeline-state.json` for which archive and meeting days were swept. The words live only there; nothing is logged.
@@ -150,6 +150,12 @@ A `c1` cursor is refused here (`invalid_cursor`); unknown kinds are `invalid_kin
 backfill is behind and every 5 minutes after. Each pass reads, read only: the inbox feed file, the live conversations
 (thread ones left out), at most 10 archive days (files over 32 MB skipped) and at most 31 meeting days whose count
 changed. Older days are read once; today is read every pass. It backfills what the stores hold and invents nothing.
+
+**Drop it off.** The sweeper reads Drop it before every pass. Found off, the pass reads and writes nothing, schedules
+nothing and drops the session-question listener (a question arriving while off is ignored), so off means off without a
+restart. The thread routes answer only while it is on and start the sweeper on each request, so turning it back on
+resumes on the next one. An archive day that cannot be read or parsed is retried on the next passes and given up after
+three; a known skip (a link, over 32 MB, gone) is done at once.
 
 ## Not yet (later candidates)
 

@@ -182,7 +182,26 @@ describe('session questions through the turn-end-ask callback', () => {
 })
 
 describe('readers', () => {
-  it('readArchiveDayTurns: numbered user turns only; null for missing, too big, a link or bad JSON', () => {
+  it('an after= page cut inside the chat ends keeps its ends cursor at the last end it sent, so none is skipped (Q1 T6)', () => {
+    const dir = tmp()
+    const t = new CosThread({ dir, now: () => T0, context: () => ({ found: true, tokens: 1 }) })
+    const job = (n: number) => ({ clientJobId: `cccccccc-0000-4000-8000-${String(n).padStart(12, '0')}`, generation: 1, sessionId: 'thread01', query: `question ${n}` })
+    for (let n = 1; n <= 3; n++) t.recordJobStarted(job(n))
+    for (let n = 1; n <= 3; n++) t.recordJobEnd({ ...job(n), status: 'completed', text: `answer ${n}` })
+    const seen: string[] = []
+    let after = { chats: 3, ends: 0, crumbs: 0, outcomes: 0 }
+    for (let i = 0; i < 5; i++) {
+      const page = t.timelinePage({ after, limit: 40, maxBytes: 10 })
+      seen.push(...page.updated.map(e => (e as { question: string }).question))
+      const c = parseTimelineCursor(page.newest)
+      after = (c as { after: typeof after }).after
+      if (!page.more) break
+    }
+    expect(seen).toEqual(['question 1', 'question 2', 'question 3'])
+    expect(after).toEqual({ chats: 3, ends: 3, crumbs: 0, outcomes: 0 })
+  })
+
+  it('readArchiveDayTurns: numbered user turns only; null for missing, too big or a link; bad JSON throws (Q1: retried)', () => {
     const dir = tmp()
     const day = { chats: [{ exchanges: [
       { role: 'user', content: 'numbered', globalMsgNum: 5, messageEra: 'e2', timestamp: T0 },
@@ -194,9 +213,36 @@ describe('readers', () => {
     expect(readArchiveDayTurns(dir, '2026-11-13', 10)).toBeNull()
     expect(readArchiveDayTurns(dir, '2026-11-12')).toBeNull()
     writeFileSync(join(dir, '2026-11-11.json'), '{not json')
-    expect(readArchiveDayTurns(dir, '2026-11-11')).toBeNull()
+    expect(() => readArchiveDayTurns(dir, '2026-11-11')).toThrow()
     symlinkSync(join(dir, '2026-11-13.json'), join(dir, '2026-11-10.json'))
     expect(readArchiveDayTurns(dir, '2026-11-10')).toBeNull()
+  })
+
+  it('an archive day whose read fails is retried on later passes and given up after three; a known skip is done at once (Q1)', () => {
+    const dir = tmp()
+    const reads: Record<string, number> = {}
+    let healed = false
+    const sources: TimelineSources = {
+      archiveDays: () => ['2026-11-12', '2026-11-11', '2026-11-10'],
+      archiveDay: d => {
+        reads[d] = (reads[d] ?? 0) + 1
+        if (d === '2026-11-12') { if (!healed) throw new Error('torn'); return [{ no: 7, era: 'e1', query: 'healed', at: T0 }] }
+        if (d === '2026-11-11') throw new Error('always bad')
+        return null   // too big: a known skip
+      },
+    }
+    const store = new TimelineStore(dir)
+    const sweeper = () => new TimelineSweeper(store, dir, sources, () => '2026-11-14')
+    sweeper().sweep()
+    expect(reads).toEqual({ '2026-11-12': 1, '2026-11-11': 1, '2026-11-10': 1 })
+    healed = true
+    sweeper().sweep()   // a new sweeper reads the saved state: the retries survive a restart
+    expect(store.crumbs.map(c => c.line)).toEqual(['healed'])
+    expect(reads).toEqual({ '2026-11-12': 2, '2026-11-11': 2, '2026-11-10': 1 })
+    sweeper().sweep()
+    sweeper().sweep()
+    expect(reads).toEqual({ '2026-11-12': 2, '2026-11-11': 3, '2026-11-10': 1 })
+    expect(JSON.parse(readFileSync(join(dir, 'timeline-state.json'), 'utf8'))).not.toHaveProperty('archiveRetries')
   })
 
   it('readFeedFile: the store own rows, a bad row skipped; missing, a wrong version or bad JSON read as empty', () => {

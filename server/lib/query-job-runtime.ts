@@ -34,6 +34,7 @@ import { attachmentHistoryPrefix, defaultAttachmentRequest } from '../../shared/
 import {
   createSession,
   isCosThreadSession,
+  markWebAsk,
   getActiveSessions,
   getSessionRaw,
   findExchangesByJobIdentity,
@@ -117,6 +118,7 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
           return id
         },
         isThreadSession: isCosThreadSession,
+        markWebAsk,
         priorJob: async (clientJobId, generation) => {
           const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
           return job ? { sessionId: job.sessionId, globalMsgNum: job.globalMsgNum, messageEra: job.messageEra } : undefined

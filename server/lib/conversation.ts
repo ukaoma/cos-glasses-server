@@ -120,12 +120,15 @@ interface Session {
    */
   cosThread?: true
   /**
-   * 7.0.39 candidate 3 (lead 11:5x): where this conversation's chats were asked, only when the server knows. Today that is
-   * `web`, for the conversation the server makes for a plain Control Web Ask (source 'web'). Absent when unknown: the
-   * glasses and the Mac app send nothing that says which they are, so the server never guesses.
+   * 7.0.39 candidate 3 (Q1, lead 13:0x): the numbered turns of this conversation that were asked from Control Web, as
+   * `<era>:<number>`, each recorded at its own admission (web-ask-admission.ts). Per TURN, never per conversation: a
+   * glasses or Mac turn that continues a web-started conversation is not listed, so it carries no surface (they send
+   * nothing that says which they are, and a wrong device is worse than none). Newest WEB_ASKS_KEPT.
    */
-  surface?: 'web'
+  webAsks?: string[]
 }
+/** The most web turns one conversation remembers (it keeps at most MAX_EXCHANGES / 2 numbered turns anyway). */
+export const WEB_ASKS_KEPT = 100
 
 const MAX_EXCHANGES = 100             // 50 Q&A pairs — deep history for browsing
 const PROMPT_HISTORY_LIMIT = 20       // Only last 20 exchanges sent to Claude prompt
@@ -390,18 +393,33 @@ scheduleArchiveMirrorAtNextLocalDay()
 // Track whether session is brand new (for first-query notification)
 const newSessions = new Set<string>()
 
-export function createSession(options: { cosThread?: boolean; surface?: 'web' } = {}): string {
+export function createSession(options: { cosThread?: boolean } = {}): string {
   const now = Date.now()
   const id = randomUUID().slice(0, 8)
   sessions.set(id, {
     id, exchanges: [], lastActivity: now, createdAt: now, modelPreference: null, contextBreaks: [],
     ...(options.cosThread === true ? { cosThread: true as const } : {}),
-    ...(options.surface === 'web' ? { surface: 'web' as const } : {}),
   })
   newSessions.add(id)
   scheduleSave()
   scheduleCacheUpdate()
   return id
+}
+
+/** 7.0.39 candidate 3: this numbered turn was asked from Control Web (Session.webAsks). Called at its admission only. */
+export function markWebAsk(sessionId: string, era: string, no: number): void {
+  const session = sessions.get(sessionId)
+  if (!session || !Number.isSafeInteger(no) || no <= 0) return
+  const key = `${era}:${no}`
+  const list = Array.isArray(session.webAsks) ? session.webAsks : []
+  if (list.includes(key)) return
+  session.webAsks = [...list, key].slice(-WEB_ASKS_KEPT)
+  scheduleSave()
+}
+/** 7.0.39 candidate 3: whether this numbered turn of the conversation was asked from Control Web. */
+export function isWebAsk(sessionId: string, era: string, no: number): boolean {
+  const list = sessions.get(sessionId)?.webAsks
+  return Array.isArray(list) && list.includes(`${era}:${no}`)
 }
 
 /** 7.0.39: the conversation carries the pinned COS thread (see Session.cosThread). Exactly `true` only. */

@@ -118,8 +118,8 @@ describe('a chat sent with cosThread stays in the thread', () => {
     expect(plain.status).toBe(202)
     await h.waitEnd(plain.body.job.jobId)
     expect(h.busFor(plainId)).toEqual(['start', 'done'])
-    // The conversation the server made for a plain web Ask says so (the timeline's surface); nothing else is stamped.
-    expect(h.conversation.getSessionRaw(plain.body.job.sessionId)?.surface).toBe('web')
+    // The plain web Ask's own turn says so (the timeline's surface), recorded per turn at its admission.
+    expect(h.conversation.getSessionRaw(plain.body.job.sessionId)?.webAsks).toEqual([`${plain.body.job.messageEra}:${plain.body.job.globalMsgNum}`])
     const { serverTimelineSources } = await import('./cos-thread-timeline-sources.js')
     expect(serverTimelineSources().liveMessages!().map(m => [m.query, m.surface])).toEqual([['ok plain', 'web']])
     const before = await h.lists()
@@ -132,7 +132,7 @@ describe('a chat sent with cosThread stays in the thread', () => {
     const done = await h.waitEnd(admitted.body.job.jobId)
     expect(done.status).toBe('completed')
     expect(h.conversation.isCosThreadSession(done.sessionId)).toBe(true)
-    expect(h.conversation.getSessionRaw(done.sessionId)?.surface).toBeUndefined()
+    expect(h.conversation.getSessionRaw(done.sessionId)?.webAsks).toBeUndefined()
     expect(await h.lists()).toEqual(before)
     expect(h.busFor(ask.clientJobId)).toEqual([])
 
@@ -241,6 +241,33 @@ describe('a chat sent with cosThread stays in the thread', () => {
     expect(out.entries).toEqual([])
     expect(out.updated.map((e: any) => [e.id, e.status])).toEqual([[`t:${ask.clientJobId}`, 'completed']])
     expect((await h.getJson(`/cos-thread/history?after=${page.newest}`)).updated).toEqual([])
+  })
+
+  it('surface is per turn (Q1 T16, lead 13:0x): a web turn, then a glasses turn and a Mac turn in the same conversation, gives one web stamp and two absents', async () => {
+    const h = await harness()
+    const web = await h.post('/query-jobs', { clientJobId: randomUUID(), generation: 1, query: 'ok on the web', model: 'opus', source: 'web' })
+    expect(web.status).toBe(202)
+    await h.waitEnd(web.body.job.jobId)
+    const { sessionId, globalMsgNum, messageEra } = web.body.job
+    // The glasses and the Mac continue that conversation with their own numbers and no source (they send nothing that
+    // says which they are).
+    for (const [n, query] of [[1, 'ok from the glasses'], [2, 'ok from the Mac']] as const) {
+      const turn = await h.post('/query-jobs', { clientJobId: randomUUID(), generation: 1, query, model: 'opus', sessionId, globalMsgNum: globalMsgNum + n, messageEra })
+      expect(turn.status).toBe(202)
+      await h.waitEnd(turn.body.job.jobId)
+    }
+    const { serverTimelineSources } = await import('./cos-thread-timeline-sources.js')
+    const rows = serverTimelineSources().liveMessages!().filter(m => m.query.startsWith('ok '))
+    expect(rows.map(m => [m.query, m.surface])).toEqual([['ok on the web', 'web'], ['ok from the glasses', undefined], ['ok from the Mac', undefined]])
+    // A second web turn in the same conversation is stamped too; marking a turn twice keeps one entry.
+    const again = await h.post('/query-jobs', { clientJobId: randomUUID(), generation: 1, query: 'ok on the web again', model: 'opus', source: 'web', sessionId })
+    await h.waitEnd(again.body.job.jobId)
+    h.conversation.markWebAsk(sessionId, messageEra, globalMsgNum)
+    expect(h.conversation.getSessionRaw(sessionId)?.webAsks).toEqual([`${messageEra}:${globalMsgNum}`, `${messageEra}:${again.body.job.globalMsgNum}`])
+    // It keeps the newest WEB_ASKS_KEPT.
+    for (let n = 1; n <= h.conversation.WEB_ASKS_KEPT + 5; n++) h.conversation.markWebAsk(sessionId, 'cap', n)
+    const kept = h.conversation.getSessionRaw(sessionId)!.webAsks!
+    expect([kept.length, kept[0], kept.at(-1)]).toEqual([h.conversation.WEB_ASKS_KEPT, 'cap:6', `cap:${h.conversation.WEB_ASKS_KEPT + 5}`])
   })
 
   it('threadOnly: a thread whose conversation is not a thread one starts fresh with the digest; an older page continues as before', async () => {

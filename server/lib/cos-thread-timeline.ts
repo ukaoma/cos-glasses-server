@@ -240,7 +240,13 @@ export interface TimelineSources {
   meetingsOn?: (day: string) => Array<{ domain: string; month: string; filename: string; title: string; date: string; time?: string }>
 }
 
-interface SweepState { schema: 1; archiveDays: string[]; meetingDays: Record<string, number> }
+interface SweepState {
+  schema: 1; archiveDays: string[]; meetingDays: Record<string, number>
+  /** Q1: an archive day whose read failed (not a known skip), and how many passes it failed. Done after ARCHIVE_DAY_RETRIES. */
+  archiveRetries?: Record<string, number>
+}
+/** Passes an unreadable archive day is retried before it is marked done. */
+export const ARCHIVE_DAY_RETRIES = 3
 
 /** The facts, not a sentence (lead 11:5x): the question's start. The number is in the ref; the page writes the words. */
 export function messageLine(query: string): string {
@@ -305,13 +311,23 @@ export class TimelineSweeper {
       const done = new Set(this.state.archiveDays)
       // Today is never marked done, so it is read again every pass (more turns may land in it).
       const due = this.sources.archiveDays().filter(d => !done.has(d))
+      const retries = { ...(this.state.archiveRetries ?? {}) }
       for (const date of due.slice(0, ARCHIVE_DAYS_PER_SWEEP)) {
-        const rows = this.sources.archiveDay(date)
+        let rows: ReturnType<NonNullable<TimelineSources['archiveDay']>>
+        try { rows = this.sources.archiveDay(date) } catch {
+          // Q1: a read that failed (not a known skip) is tried again on later passes, then given up.
+          retries[date] = (retries[date] ?? 0) + 1
+          if (date !== today && retries[date]! >= ARCHIVE_DAY_RETRIES) { done.add(date); delete retries[date] }
+          continue
+        }
+        delete retries[date]
         if (rows) out.messages += this.store.add(messageCrumbs(rows))
-        if (date !== today) done.add(date)  // a skipped (too big) day is not retried every pass
+        if (date !== today) done.add(date)  // a known skip (too big, a link, gone) is not retried every pass
       }
       out.pending ||= due.length > ARCHIVE_DAYS_PER_SWEEP
       this.state.archiveDays = [...done].sort()
+      if (Object.keys(retries).length) this.state.archiveRetries = retries
+      else delete this.state.archiveRetries
     }
     // Meetings: a day is re-read only when its count changed (a filename scan, no file opened).
     if (this.sources.meetingMonths && this.sources.meetingDayCounts && this.sources.meetingsOn) {
@@ -354,12 +370,16 @@ export function recordTurnAskEvent(store: TimelineStore, e: TurnAskEventLike, pr
 export function archiveDayDates(dir: string): string[] {
   try { return readdirSync(dir).filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).map(f => f.slice(0, 10)).sort().reverse() } catch { return [] }
 }
-/** One archive day's numbered user turns, read only; null when the file is missing, a link, too big or unreadable. */
+/**
+ * One archive day's numbered user turns, read only. Null for a known skip (the file is gone, a link, or too big). Q1: a
+ * file that is there but cannot be read or parsed THROWS, so the sweeper retries it rather than marking it done.
+ */
 export function readArchiveDayTurns(dir: string, date: string, maxBytes = ARCHIVE_DAY_MAX_BYTES): Array<{ no: number; era: string; query: string; at: number }> | null {
   const file = join(dir, `${date}.json`)
-  try {
-    const stat = lstatSync(file)
-    if (!stat.isFile() || stat.size > maxBytes) return null
+  let stat
+  try { stat = lstatSync(file) } catch { return null }
+  if (!stat.isFile() || stat.size > maxBytes) return null
+  {
     const day = JSON.parse(readFileSync(file, 'utf8')) as { chats?: Array<{ exchanges?: Array<Record<string, unknown>> }> }
     const out: Array<{ no: number; era: string; query: string; at: number }> = []
     for (const chat of Array.isArray(day?.chats) ? day.chats : []) {
@@ -369,5 +389,5 @@ export function readArchiveDayTurns(dir: string, date: string, maxBytes = ARCHIV
       }
     }
     return out
-  } catch { return null }
+  }
 }

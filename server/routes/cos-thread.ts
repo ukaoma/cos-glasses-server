@@ -66,7 +66,8 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     const thread = deps.thread()
     if (!thread) return res.status(503).json({ error: { code: 'cos_thread_unavailable' } })
     // 7.0.39 candidate 3: the timeline sweeper starts with the first request that opens the store (Drop it on).
-    try { (deps.startTimeline ?? startTimeline)(thread) } catch { /* the thread works without its breadcrumbs */ }
+    // Q1 / lead 13:0x: the sweeper reads Drop it on every pass and stops itself when it is off; this restarts it.
+    try { (deps.startTimeline ?? (t => startTimeline(t, undefined, deps.enabled)))(thread) } catch { /* the thread works without its breadcrumbs */ }
     try { return fn(thread) } catch (e) { return fail(res, e) }
   }
 
