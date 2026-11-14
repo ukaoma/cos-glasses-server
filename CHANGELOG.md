@@ -38,9 +38,17 @@
 **Not covered, said plainly:**
 - **Not on a real phone.** Measured with route tests, Control Web tests on the real send path against fake routes, and the gates named below.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent 62245e6c, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 16,865 passed, 6 skipped (16,871) in 922 files (920 passed, 2 skipped); type check clean.
+- **The layout sweep in a test browser (WebKit), quick set, on 62245e6c (F1):** exit 0; 0 defect keys over 640 states in 1119 s (14 known keys, not failing: the rail in the pan state at 787 x 1022, one key per pane, as F1 classes them; no Control Web file changed since 7.0.39) (F1_evidence/sweep_gate_62245e6c.log).
+- **Not on a real phone, and neither switch was turned on:** the https piece was tested with a throwaway certificate authority and real TLS handshakes, the test ping with an injected fake sender; nothing requested a real certificate or sent to Apple.
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **Marker (X1, claude/server-marker-tighten to 146f369b):** tsc 0; gates run alone: answer-never-queued 40 of 40 (146f369b), turn-end-answer 26 of 26 and turn-end-ask 60 of 60 (62c1427e, same code). Q1 PASS 11:14.
+- **Work usage and provider order (U1, claude/server-usage-provider-order to 440ea76d, which holds the reader bd4e333d):** work-orchestrator gate 33 of 33 on a green baseline and key-lane census 5 of 5, tsc 0; 54 related files, 591 passed. Q1 PASS 11:58 (19430e21 PASS 11:30; the reader alone PASS 11:00).
+- **https on the ts.net name (X1, claude/server-tsnet-https-3143 to 34725799):** control-tsnet-https gate 16 of 16, tsc 0. Q1 PASS.
+- **Test ping sender (X1, 66b6aea0; stacked on 34725799 by W1 as a423c328):** web-push gate 46 of 46 on 66b6aea0, tsc 0. The stack changed only three append-only files (both lines kept); Q1 PASS 11:28 on a423c328 (199 green, its key mutants still killed in the merged tree).
+- **The cut:** every replayed commit's added and removed lines equal the passed heads (22 commits).
 
 ## 7.0.39 - Settings keeps the rail on screen on the open Duo, and the picked day in Meetings is clearly marked
 
