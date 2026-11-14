@@ -66,6 +66,12 @@
 .cc-sub { margin: 3px 0 0; font-size: 13px; line-height: 1.35; color: var(--sub); }
 .cc-head-acts { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .cc-head-acts .link-btn { min-height: 36px; font-size: 14px; font-weight: 500; }
+/* F1 Set D (Miles 2026-11-14): on touch, All messages and Mark all read take 44 px of tap height from an invisible layer
+   centred on the 36 px link; the row keeps its height and look. */
+@media (any-pointer: coarse) {
+  .cc-head-acts .link-btn { position: relative; }
+  .cc-head-acts .link-btn::before { content: ''; position: absolute; left: -4px; right: -4px; top: 50%; height: max(44px, 100%); transform: translateY(-50%); }
+}
 .cc-avatar { flex: none; width: 30px; height: 30px; border-radius: 8px; background: #2b211a; color: var(--gold); display: grid; place-items: center; }
 .cc-avatar .icon { width: 17px; height: 17px; }
 .cc-avatar.big { width: 42px; height: 42px; border-radius: 11px; }

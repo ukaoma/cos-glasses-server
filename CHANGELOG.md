@@ -1,3 +1,20 @@
+## 7.0.38 (unreleased) - Control Web: bigger tap areas for tabs and text buttons on touch screens
+
+Branch claude/server-tap-areas on 7.0.37 (F1, Set D; Miles 2026-11-14, "Yes, build it"). Nothing looks different: on a touch screen the small text controls the 44 px floor does not reach now take a tap at least 44 px tall.
+
+**On for everyone with a touch screen:**
+- **Tab words** (Recent and Archive on Messages, Work's tabs, Memories, Speakers, Sessions): the invisible tap area is at least 44 px tall, centred on the word. Before, the 27 px words gave 41 px of tap.
+- **All messages and Mark all read** (Messages): 44 px of tap, from 36.
+- **Work's text buttons** (Open decisions and results, a card's Start work, the card page's buttons) and **Mentioned**: 44 px of tap, from 30 to 36.
+- **Work's stage menu**, on a card and on the card page: 44 px of tap, from 28 to 36. The menu looks the same and its row keeps its height.
+- **A Work card's foot** is 8 px taller from 600 px wide (37 to 45 px), so a card's buttons get their 44 px inside the card. Folded (under 600 px) it was already 49 px and does not change.
+
+**Not covered, said plainly:**
+- **The chat's quote rows** are not in this change (they would add 263 px to the chat feed). Miles has not seen a picture of that.
+- Other small controls are unchanged (the list is in F1's notes): the Meetings calendar arrows and days, the Meetings sort menu, Memories' text links, the Speakers check boxes, Today's row actions, the quiet icon buttons.
+- **Not tried on a real phone.** Measured in a test browser (WebKit) by hit-testing out from each control's centre; the look by a pixel diff of each control's own box.
+- **The Mac app** (COS Control) is not changed.
+
 ## 7.0.37 - An answer tapped on a question is not lost when the session has moved on
 
 2026-11-14. 7.0.36 plus one fix and one small one. Everything in 7.0.36 is in this update too; see its entry below. Miles, 23:31 on 2026-11-13, after three answers were refused with "The session moved on before this reached it": "we also need a team to fix this".

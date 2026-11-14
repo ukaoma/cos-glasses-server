@@ -656,7 +656,9 @@ html { touch-action: manipulation; }
 @media (any-pointer: coarse) {
   .nav-btn, .btn.small, .cc-chip-retry, .sq-step, .mt-day { min-height: 44px !important; }
   .cc-chip-x, .cc-attach, .cc-camera { min-width: 44px !important; min-height: 44px !important; }
-  .cx-switch button::before { content: ''; position: absolute; inset: -7px -4px; }
+  /* F1 Set D (Miles 2026-11-14): at least 44 px of hit height whatever the word's box (27 px on Messages gave 41 px of tap),
+     centred on it; a taller switch keeps its 7 px above and below. The look does not change. */
+  .cx-switch button::before { content: ''; position: absolute; left: -4px; right: -4px; top: 50%; height: max(44px, calc(100% + 14px)); transform: translateY(-50%); }
 }
 /* 7.0.2 (A8): a short touch screen 600 px wide or more (the unfolded Duo, 951x539) keeps the phone Ask sheet: full width
    from the top, no centred desktop card with 8 % of a 539 px screen spent above it (app.js isPhone says phone too). */

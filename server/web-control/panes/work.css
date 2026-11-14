@@ -146,16 +146,16 @@
 .wk-card-foot { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--hairline); }
 .wk-card-foot .wk-text-btn { flex: none; }
 .wk-stage-lg { max-width: 200px; }
-.wk-stage { flex: 0 1 auto; width: auto; max-width: 132px; field-sizing: content; min-height: 28px; padding: 0 24px 0 9px; border-radius: 7px; border: 1px solid var(--panel-border); background: var(--btn-bg); color: var(--ink); font: 500 12.5px/1 var(--body);
+.wk-stage { flex: 0 1 auto; width: auto; max-width: 132px; field-sizing: content; min-height: 28px; padding: 0 24px 0 9px; border-radius: 7px; border: 1px solid var(--panel-border); background: var(--btn-bg); color: var(--ink); font: 500 12.5px/1 var(--body); --wk-stage-h: 28px; --wk-chev-y: 12px;
   appearance: none; -webkit-appearance: none; cursor: pointer;
   background-image: linear-gradient(45deg, transparent 50%, var(--sub) 50%), linear-gradient(135deg, var(--sub) 50%, transparent 50%);
   background-position: calc(100% - 13px) 12px, calc(100% - 9px) 12px; background-size: 4px 4px; background-repeat: no-repeat; }
 .wk-stage:disabled { opacity: 0.5; cursor: default; }
-.wk-stage-lg { min-height: 32px; font-size: 13.5px; background-position: calc(100% - 13px) 14px, calc(100% - 9px) 14px; }
+.wk-stage-lg { min-height: 32px; --wk-stage-h: 32px; --wk-chev-y: 14px; font-size: 13.5px; background-position: calc(100% - 13px) 14px, calc(100% - 9px) 14px; }
 .wk-confirm { margin: 8px 10px 10px; padding: 10px 12px; border-radius: 8px; background: var(--gold-bg); font-size: 13px; }
 .wk-confirm p { margin: 0 0 8px; overflow-wrap: anywhere; }
 @media (max-width: 599px) {
-  .wk-stage { min-height: 36px; font-size: 14px; background-position: calc(100% - 13px) 16px, calc(100% - 9px) 16px; }
+  .wk-stage { min-height: 36px; --wk-stage-h: 36px; --wk-chev-y: 16px; font-size: 14px; background-position: calc(100% - 13px) 16px, calc(100% - 9px) 16px; }
   .wk-card-title { font-size: 15px; }
   .wk-card-source, .wk-meeting { font-size: 12.5px; }
   .wk-status { font-size: 12.5px; }
@@ -326,3 +326,21 @@
 
 /* W1 (0.5.386 parity): the empty card's one-tap New session button wraps on a folded phone instead of running off the card. */
 .wk-start-new { white-space: normal; max-width: 100%; height: auto; min-height: 40px; text-align: center; line-height: 1.3; padding-top: 8px; padding-bottom: 8px; }
+
+/* F1 Set D (Miles 2026-11-14): 44 px of tap height on touch for Work's small controls, with the look kept.
+   - Text buttons and Mentioned: an invisible layer, 44 px tall, centred on the control.
+   - The stage menu (a select takes no layer): the box grows to 44 with a transparent top and bottom border, pulled back by
+     the same negative margin, so its row keeps its height; the visible edge is drawn inside (inset shadow), the menu's
+     look and its chevrons are where they were.
+   - A card's foot: the card clips (overflow hidden), so the foot is at least 44 px inside (37 to 45 px from 600 px wide;
+     folded it is already 49) rather than a layer reaching over the card above it. */
+@media (any-pointer: coarse) {
+  .wk-text-btn, .wk-menu-label { position: relative; }
+  .wk-text-btn::before, .wk-menu-label::before { content: ''; position: absolute; left: -4px; right: -4px; top: 50%; height: max(44px, 100%); transform: translateY(-50%); }
+  .wk-card-foot { min-height: 45px; }
+  .wk-stage { --wk-tap: max(0px, calc((44px - var(--wk-stage-h)) / 2)); min-height: 44px; margin-block: calc(-1 * var(--wk-tap));
+    border: solid transparent; border-width: var(--wk-tap) 0; border-radius: 7px / calc(7px + var(--wk-tap)); background-clip: padding-box;
+    box-shadow: inset 0 0 0 1px var(--panel-border); padding: 0 25px 0 10px;
+    background-position: calc(100% - 14px) calc(var(--wk-chev-y) + 1px), calc(100% - 10px) calc(var(--wk-chev-y) + 1px); }
+  .wk-stage:focus-visible { outline-offset: calc(-1 * var(--wk-tap)); }
+}
