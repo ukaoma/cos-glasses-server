@@ -139,7 +139,7 @@ const mutations = [
   ['po-low-swap', US, "  const lowSwap = usable(preference) && state(preference) === 'low' && state(other) === 'ok'\n", '  const lowSwap = false\n'],
   ['po-cursor-last', US, "{ provider: 'cursor', usable: false,", "{ provider: 'cursor', usable: true,"],
   ['po-answered-words', US, '    if (v?.answeredAt) return', '    if (false) return'],
-  ['po-answered-hook', QC, "if (result.applied && snapshot.status === 'completed') noteJobAnswered(", 'if (false) noteJobAnswered('],
+  ['po-answered-hook', QC, "if (snapshot.status === 'completed') noteJobAnswered(", 'if (false) noteJobAnswered('],
   ['po-key-lane-not-answered', UE, '    if (lane || isProfilePreference(model)) return\n', ''],
   ['po-route-order', 'server/routes/work-chat.ts', 'body={...prompt, providerOrder:providerOrder(merged,deps.now())}', 'body={...prompt}'],
   ['po-route-answered-merge', 'server/routes/work-chat.ts', 'answeredAt:s?.answeredAt ?? null', 'answeredAt:null'],

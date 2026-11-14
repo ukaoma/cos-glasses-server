@@ -47,3 +47,25 @@ it('a completed job reports its provider, model and lane as answered; a failed j
   expect((await coordinator.getSnapshot(job.job.jobId)).status).toBe('completed')
   expect(seen.answered).toEqual([['claude', 'opus', undefined]])
 })
+
+// Q1 N3/N4 (2026-11-14): a job that ends without completing is no proof its provider answers.
+it('a canceled plan-lane job leaves no answered time, even when its runner finishes after the cancel', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cos-usage-canceled-')); roots.push(root)
+  seen.answered.length = 0
+  let release!: () => void
+  const gate = new Promise<void>(r => { release = r })
+  const coordinator = new QueryJobCoordinator(new QueryJobStore({ root, bootId: randomUUID() }), async ctx => {
+    await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude' })
+    await gate
+    await ctx.callbacks.onDone({ text: 'Too late.' })
+  }, { resolveSessionId: () => 'resolved-session', partialFlushMs: 0 })
+  await coordinator.init()
+  const job = await coordinator.submit({ clientJobId: randomUUID(), generation: 1, query: 'hello', activityToolMode: 'preview', model: 'opus' })
+  const deadline = Date.now() + 3000
+  while ((await coordinator.getSnapshot(job.job.jobId)).status !== 'running' && Date.now() < deadline) await new Promise(r => setTimeout(r, 10))
+  await coordinator.cancel(job.job.jobId, 1)
+  release()
+  await new Promise(r => setTimeout(r, 100))
+  expect((await coordinator.getSnapshot(job.job.jobId)).status).toBe('canceled')
+  expect(seen.answered).toEqual([])
+})

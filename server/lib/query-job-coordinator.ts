@@ -815,8 +815,11 @@ export class QueryJobCoordinator {
       }
       const result = await this.store.complete(active.jobId, completion)
       snapshot = result.job
-      // 7.0.39+: a plan-lane job that completed is free proof its provider answers (Work's provider order uses it).
-      if (result.applied && snapshot.status === 'completed') noteJobAnswered(snapshot.provider, active.request.model, snapshot.lane)
+      // 7.0.39+: a plan-lane job that completed is free proof its provider answers (Work's provider order uses it). Today
+      // the status here is always 'completed': the job was marked answer_ready above, and the store lets answer_ready
+      // become only completed (query-job-store.ts ALLOWED_TRANSITIONS). The check keeps that true if the store changes.
+      // A failed or canceled job never reaches this line (failActive, and the terminal return above).
+      if (snapshot.status === 'completed') noteJobAnswered(snapshot.provider, active.request.model, snapshot.lane)
       const projected = isTerminalQueryJobStatus(snapshot.status)
         ? await this.projectTerminal(snapshot, active.request)
         : false
