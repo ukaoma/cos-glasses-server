@@ -26,9 +26,19 @@
 - **Not on a real phone:** the notes were measured with Control Web tests, route tests and WebKit on fake routes.
 - **A known older issue, not in this build:** archive.ts and conversation.ts import each other and the boot mirror starts during load, so a test that loads archive.ts first can fail to mirror. It is in 7.0.41 too and has not been seen in production (the server loads conversation first). The fix rides the build after.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent 0baac523, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 17,056 passed, 6 skipped (17,062) in 938 files (936 passed, 2 skipped); type check clean. In the same lease, first: the web set 1,784 passed, and the 11 server tests that read web-control source, the key-lane census, hazard invariants and every route suite 3,057 passed.
+- **The layout sweep in a test browser (WebKit), quick set, on 0baac523 (F1):** exit 0; 0 defect keys over 640 states in 1123 s (14 known keys, not failing: the rail in the pan state at 787 x 1022, one key per pane, as F1 classes them) (F1_evidence/sweep_gate_0baac523.log).
+- **Not on a real phone** (see above).
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **https on the ts.net name (X1, claude/server-tsnet-name-boot-race to 1341961e):** control-tsnet-https gate 35 of 35, focused suites 196 passed, tsc 0. Q1 PASS, final 15:42.
+- **Notes in the flow, server (S1, to 613c11d2):** Q1 PASS 14:13 with its owed tests in: 109 green on its 12 files; 32 of Q1's 33 mutants killed (the survivor is equivalent in production).
+- **Session-question notes (X1 hook, 999878e6 and be7e3a91):** Q1 PASS 14:25, run with S1's 613c11d2: 203 green on 14 files; 16 of 16 hook mutants killed.
+- **Notes in the flow, Control Web (W1, to 73d3cee1 and d8c29e66):** cos-thread-timeline-web.test.ts 27, web set 1,768, the 11 server tests that read web-control source 153, 29 of 29 mutants; WebKit, four older pages in a row at 951 x 539, 382 x 557 and 390 x 844, 0 px each time. Q1 PASS 14:01 (owed tests in d8c29e66).
+- **History test speed (S1, 0f9de4fe and 198a7b80):** test only.
+- **Look-back (S1, candidate 4 to 799a5fb5, the same tree as 60c9239f):** 67 files 591 passed, 35 of 36 mutants (the survivor equivalent), tsc 0. Q1 PASS with the security lens, final 15:45.
+- **The cut:** 21 picks on 14db40cf, every replayed commit's added and removed lines equal the passed heads.
 
 ## 7.0.41 - The COS chat is one thread with its history, and a chat sent in the thread stays in the thread
 
