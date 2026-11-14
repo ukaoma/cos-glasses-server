@@ -74,6 +74,10 @@ describe('the cursor', () => {
     expect(turnsSince(w, turnCursor(w[2]!))).toMatchObject({ gap: false, turns: [] })
     expect(turnsSince(w, 'c1..AAAAAAAAAAAAAAAA')).toMatchObject({ gap: true, turns: w })
     expect(turnsSince([], null)).toEqual({ turns: [], gap: true, cursor: null })
+    // Two identical turns (same role, words and time): the NEWEST match counts, so only what follows it is new.
+    const same = t(1, 'x')
+    const dup = [same, t(2, 'y'), { ...same }, t(3, 'z')]
+    expect(turnsSince(dup, turnCursor(same))).toMatchObject({ gap: false, turns: [dup[3]] })
   })
 })
 
