@@ -5247,7 +5247,7 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     expect(before).toContain('data-ta="turnend"')
   })
   it('this panel’s own delivered choice: when the row goes, its Sent line stays and the head says answered, never closed', async () => {
-    const m = model(), h = await opened(m)
+    const m = model(), h = await opened(m, { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live' } } })
     h.tap('turnend', '0')
     await flush()
     const sent = 'Sent “Yes, build it”. It reaches the session as a message from COS; it may ask you to confirm.'
@@ -5262,8 +5262,8 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     expect(meta).not.toContain('data-ta="turnend"')
     expect(h.els['ta-foot']!.hidden).toBe(false)
   })
-  it('this panel’s own answer typed in the box counts as sent too', async () => {
-    const m = model(), h = await opened(m)
+  it('this panel’s own answer typed in the box counts as sent too (delivered)', async () => {
+    const m = model(), h = await opened(m, { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live' } } })
     h.els['ta-input']!.value = 'Yes, and Set E after'
     h.tap('send')
     await flush()
@@ -5362,7 +5362,7 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     })
   }
   for (const o of ['refused', 'ambiguous']) it(`Q1 07:50 (7), closed first: the head says Answered, then the watch reports ${o} and the head turns to closed at once`, async () => {
-    const routes: Routes = { ...OK_ROUTES }
+    const routes: Routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live' } } }
     const m = model(), h = await opened(m, routes)
     h.tap('turnend', '0')
     await flush()
@@ -5375,6 +5375,32 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     expect(h.els['ta-status']!.textContent).toBe('Server says ' + o + '.')
     expect(h.els['ta-meta']!.innerHTML, 'no new Today read needed').toContain(esc(CLOSED))
     expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
+  // Lead 08:0x: Answered only on confirmed delivery. Queued (accepted, not yet in the session) or unknown is not Answered.
+  it('lead 08:0x: an answer only QUEUED: the head says no longer open, and the Sent line stays', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    const sent = h.els['ta-status']!.textContent
+    expect(sent).toContain('Sent “Yes, build it”')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+    expect(h.els['ta-status']!.textContent).toBe(sent)
+  })
+  it('lead 08:0x: queued, closed, then the watch reports completed: the head turns to Answered', async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
   })
   it('Q1 07:50 (7), the other side: a sent answer the watch reports completed still reads Answered when the row closes', async () => {
     const routes: Routes = { ...OK_ROUTES }

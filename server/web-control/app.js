@@ -2331,9 +2331,10 @@
     // 7.0.38 (lead 07:20): an answer the session was too busy to take now. It is never queued or held, and no button:
     // a bare busy refusal does not say whether the question was answered, so a button here could send a duplicate.
     busy: function (label) { return 'The session is working. \u201c' + label + '\u201d was not sent.'; },
-    // 7.0.38 (Q1 07:50 FIX FIRST): an answer a 7.0.37 page held behind COS's own turn, found on reopening. It is never
-    // sent late (no ask id would go with it); the words come back to the box.
-    late: function (label) { return '\u201c' + label + '\u201d was not sent. An answer is never sent later. Answer again if the question is still open.'; },
+    // 7.0.38 (Q1 07:50 FIX FIRST, lead 08:0x): an answer a 7.0.37 page held behind COS's own turn, found on reopening or
+    // by the timer. It is never sent late (no ask id would go with it). His words go back to the box only if it is empty.
+    late: 'An answer that was waiting was not sent. It is back in the box.',
+    lateKept: function (label) { return 'An answer that was waiting was not sent: \u201c' + label + '\u201d'; },
     /** The words of an answer, without the contract words in front, clipped for a status line. */
     bare: function (text) { var w = String(text || ''); return (w.indexOf(TURN_END_PREFIX) === 0 ? w.slice(TURN_END_PREFIX.length) : w).trim(); },
     label: function (text) { var w = TURN_END_QUOTE.bare(text); return w.length > 60 ? w.slice(0, 59).trim() + '\u2026' : w; }
@@ -5389,6 +5390,8 @@
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
           if (opts.held) settleHeld(r, opts.held, 'sent');
           else { view.pending(r, draft.text, b.replayed ? 'already sent' : 'sent'); view.clear(r, draft.text); }
+          // 7.0.38 (lead 08:0x): whether it is in the session now (completed) or only accepted (queued), for "Answered".
+          r.lastTurn = { key: draft.key, outcome: b.outcome, via: b.via || '' };
           view.status(r, b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
           view.watch(r, at.binding.bindingId, draft.key);
           // 6.99.29: a turn that went live is in the open session, which now works on it.
@@ -5682,11 +5685,18 @@
     continueSession(r, next.text, { held: next }).then(function () {}, function () { /* no answer: keep it, retry */ })
       .finally(function () { r.flushing = null; if (next.cancelled && r.held.indexOf(next) >= 0) settleHeld(r, next, 'cancelled'); });
   }
-  // 7.0.38 (Q1 07:50): a held answer never goes: his words (without the contract words) come back to the box, said so.
+  // 7.0.38 (Q1 07:50, lead 08:0x): a held answer never goes. It leaves the held store; his own words (not the contract
+  // sentence) go back to the box only when the box is empty, never over what he has typed; one line says so either way.
   function settleLateAnswer(r, h) {
-    var line = TURN_END_QUOTE.late(TURN_END_QUOTE.label(h.text));
-    h.text = TURN_END_QUOTE.bare(h.text);
-    settleHeld(r, h, 'refused', line);
+    r.held = r.held.filter(function (x) { return x !== h; });
+    saveHeld(r);
+    var bubble = heldBubble(h.key); if (bubble) bubble.remove();
+    if (!r.held.some(function (x) { return !x.cancelled; })) clearInterval(r.heldTimer);
+    var input = $('session-input'), words = TURN_END_QUOTE.bare(h.text);
+    if (input && !input.value.trim()) {
+      input.value = words; autoGrow(input); if (typeof unsentSave === 'function') unsentSave();
+      sessionStatus(TURN_END_QUOTE.late, 'error');
+    } else sessionStatus(TURN_END_QUOTE.lateKept(TURN_END_QUOTE.label(h.text)), 'error');
   }
   // Ends one held message: sent, refused, timed out or cancelled.
   function settleHeld(r, h, how, copy) {

@@ -1149,6 +1149,12 @@
   // 7.0.38 (lead 07:09): the panel's copy of a turn-end question follows Today's own reads. Nothing here sends.
   var TURN_END_CLOSED = 'This question is no longer open.';
   function answeredLine() { return (W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.'; }
+  // 7.0.38 (lead 08:0x): "Answered" only when delivery is confirmed: the turn came back completed, or the watch later
+  // reports it completed. Queued or unknown waits (pending); a refused or ambiguous watch clears both.
+  function markSent(r, key) {
+    if (r && r.lastTurn && r.lastTurn.outcome === 'completed') { O.teSent = key; O.teSentPending = ''; }
+    else O.teSentPending = key;
+  }
   /** Which ask a Needs you row names: its session, and the server's id or (an older server) its words. */
   function teKey(w) { return !w ? '' : String(w.key || '') + (w.askId ? '|id:' + w.askId : '|ask:' + String(w.ask || '').trim()); }
   /** Today painted its Needs you again (app.js paintNeeds). An open turn-end panel redraws from it: the same ask stays,
@@ -1204,7 +1210,7 @@
       done();
       if (O.r !== r) return;
       var Q = K.turnEndQuote;
-      if (how === 'sent') { O.teSent = sentKey; O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' }; }
+      if (how === 'sent') { markSent(r, sentKey); O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' }; }
       else if (how === 'answered') { r.teRefusal = null; O.note = { text: Q.answered(label), kind: 'error' }; }
       else if (how === 'unconfirmed') { r.teRefusal = null; O.note = { text: Q.unconfirmed(), kind: 'error' }; }
       else if (how === 'busy') O.note = { text: Q.busy(label), kind: 'error' };
@@ -1528,7 +1534,7 @@
     var sending = K.send(r, text, opts || {});
     // continueSession picks the key at once (draftFor): keep it until the Mac takes the words.
     if (r.draft) keepDraft(r, text, r.draft);
-    return sending.then(function (how) { done(); if (how === 'sent' && teAnswer && O.r === r) O.teSent = teAnswer; }, function (err) {
+    return sending.then(function (how) { done(); if (how === 'sent' && teAnswer && O.r === r) markSent(r, teAnswer); }, function (err) {
       done();
       if (O.r !== r) return;
       var why = err && err.name === 'AbortError'
@@ -1576,13 +1582,14 @@
         if (o === 'completed') {
           clearInterval(O.watch);
           // 6.99.29: a turn delivered LIVE is in the open session, which now works on it; it is not done.
+          if (O.teSentPending) { O.teSent = O.teSentPending; O.teSentPending = ''; paintMeta(); }
           if (s.body.via === 'live') { K.feed.noteGate(r, true); O.note = { text: 'Sent into the open session. It is working on it now.', kind: '' }; }
           else { O.note = { text: 'Done. The reply is below.', kind: '' }; loadLast(r); }
           paintNote(); VIEW.stateChanged(r);
         }
         // 7.0.38 (Q1 07:50): an answer the session then refused, or whose landing COS cannot tell, is not "Answered".
-        else if (o === 'refused') { clearInterval(O.watch); O.teSent = ''; O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); paintMeta(); }
-        else if (o === 'ambiguous') { clearInterval(O.watch); O.teSent = ''; O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); paintMeta(); }
+        else if (o === 'refused') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = ''; O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); paintMeta(); }
+        else if (o === 'ambiguous') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = ''; O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); paintMeta(); }
       }).catch(function () {});
     }, 3000);
   }

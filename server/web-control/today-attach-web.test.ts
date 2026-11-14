@@ -1233,8 +1233,18 @@ describe('7.0.38: a held answer (from before the update, or any source) is never
     expect(turnPosts(t)).toHaveLength(0)
     expect(t.r.held).toHaveLength(0)
     expect(t.els['session-input']!.value).toBe('Yes, build it')
-    expect(t.status()).toContain('“Yes, build it” was not sent. An answer is never sent later. Answer again if the question is still open.')
+    expect(t.status()).toContain('An answer that was waiting was not sent. It is back in the box.')
     expect(JSON.stringify([...t.store.entries()])).not.toContain('k-old')
+  })
+  it('lead 08:0x: the box already has his typing: it is never overwritten; the line names the answer that was not sent', async () => {
+    const t = readerPage({ routes: READER_ROUTES })
+    t.page.paint()
+    t.els['session-input']!.value = 'something new he is typing'
+    t.r.held = [{ text: ANSWER, key: 'k-old', since: Date.now() }] as any
+    t.page.flushHeld(); await flush()
+    expect(turnPosts(t)).toHaveLength(0)
+    expect(t.els['session-input']!.value).toBe('something new he is typing')
+    expect(t.status()).toContain('An answer that was waiting was not sent: “Yes, build it”')
   })
   it('an answer behind an ordinary held message: the message goes, then the answer comes back unsent', async () => {
     const t = readerPage({ routes: READER_ROUTES })
