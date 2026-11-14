@@ -26,11 +26,22 @@
    readable. */
 .mt-day:disabled .mt-dnum { color: var(--sub); }
 .mt-day:not(:disabled):hover { background: var(--qopen); }
-.mt-day[aria-pressed='true'] { background: color-mix(in srgb, var(--tint) 18%, transparent); font-weight: 600; }
+/* F1 (Miles 2026-11-14 08:20, "a better indicator of when a certain date is selected ... more of a dark accent"): the
+   picked day is filled with the primary button's colours (.btn.primary: --accent, --on-accent), in both themes and at
+   every width. Before it was an 18 % tint, hard to tell from today's ring. Number on the fill: 5.25:1 light, 9.18:1
+   dark. It holds under hover. */
+.mt-day[aria-pressed='true'], .mt-day[aria-pressed='true']:not(:disabled):hover { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 .mt-day:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* 7.0.30 item 4: today is marked with a ring in the theme's accent (no fill, so a picked day still reads as picked). */
 .mt-day.mt-today { box-shadow: inset 0 0 0 1.5px var(--accent); }
 .mt-day.mt-today .mt-dnum { font-weight: 600; }
+/* The picked day's number and dot in --on-accent (after the disabled rule, which would grey the number); a focus ring
+   in --on-accent, since --accent would vanish on the fill. Picked and today together: today's --accent ring sits on the
+   same colour, so a thin --on-accent line inside it keeps "today" showing. */
+.mt-day[aria-pressed='true'] .mt-dnum { color: var(--on-accent); }
+.mt-day[aria-pressed='true'] .mt-dot.on { background: var(--on-accent); }
+.mt-day[aria-pressed='true']:focus-visible { outline-color: var(--on-accent); }
+.mt-day.mt-today[aria-pressed='true'] { box-shadow: inset 0 0 0 1.5px var(--accent), inset 0 0 0 3px var(--on-accent); }
 .mt-jump-row { margin: 0 2px 12px; }
 .mt-dot { width: 5px; height: 5px; border-radius: 50%; background: transparent; }
 .mt-dot.on { background: var(--tint); }
