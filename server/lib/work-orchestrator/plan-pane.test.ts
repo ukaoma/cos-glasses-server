@@ -46,6 +46,15 @@ describe('the ruler draws only a live, stated reading', () => {
     expect(ended).toMatchObject({ state: 'not_read', usedPct: null, gonePct: null, short: 'Not read today' })
     expect(ended.long).toBe('Not read since its window ended (last read Oct 23, 9:18 AM). Refresh to read it.')
   })
+  it('Q1 edges: a read with no window to draw says so; a live window with no reset keeps its share used and says the week is not known', () => {
+    const noSize = blank('codex', { observedAt: NOW - 30 * 60_000, source: 'probe', reading: { plan: null, allowed: true, available: true, windows: [{ kind: 'primary', usedPct: 40, resetsAt: '2026-11-15T04:31:03Z' }] } })
+    expect(planLine(noSize, NOW, TZ)).toMatchObject({ state: 'not_read', usedPct: null, short: 'No week to draw', long: 'Read 30 min ago; Codex gave no window COS can draw. No number is shown.' })
+    const keyLogin = blank('claude', { observedAt: NOW, source: 'probe', reading: { plan: null, allowed: null, available: false, windows: [] } })
+    expect(planLine(keyLogin, NOW, TZ).long).toBe('Read 0 min ago; this login has no plan limits. No number is shown.')
+    const noReset = blank('claude', { observedAt: NOW, source: 'probe', reading: { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct: 30, resetsAt: null }] } })
+    expect(planLine(noReset, NOW, TZ)).toMatchObject({ state: 'fresh', usedPct: 30, gonePct: null, windowWords: 'Week not known', short: '30% used',
+      long: '30% used. Week not known: Claude gave no reset time.', estimate: null })
+  })
   it('Cursor: no plan reading, never a ruler', () => {
     expect(planLine(blank('cursor'), NOW, TZ)).toMatchObject({ state: 'no_plan', usedPct: null, short: 'No plan reading', quiet: 'Cursor no plan reading' })
   })

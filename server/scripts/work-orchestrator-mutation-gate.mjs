@@ -159,6 +159,8 @@ const mutations = [
   ['pp-claude-week', PP, "windows.find(x => x.kind === 'weekly_all')", "windows.find(x => x.kind === 'session')"],
   ['pp-failure-words', PP, "    case 'no_limits': return `refused by ${NAME[provider]}`\n", "    case 'no_limits': return 'unexpected error'\n"],
   ['pp-route-refresh', OR, "return res.json(await deps.plan(req.query.refresh === '1'))", 'return res.json(await deps.plan(true))'],
+  ['pp-read-no-window', PP, '  if (e.reading && !found) {\n', '  if (false) {\n'],
+  ['pp-live-no-reset', PP, '  if (found && windowLive(found.w, now) && !found.w.resetsAt) {\n', '  if (false) {\n'],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],

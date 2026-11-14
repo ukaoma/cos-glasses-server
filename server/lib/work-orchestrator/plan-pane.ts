@@ -146,6 +146,21 @@ export function planLine(e: UsageEntry, now: number, tz?: string): PlanLine {
     return { ...base, ...none, state: 'failed', windowWords: 'Week not known', short: `Read failed, ${w}`, shortLong: `Read failed, ${w}`,
       long: `Read failed: ${w}. No number is shown until a read succeeds.`, quiet: `${name} read failed` }
   }
+  const readWords = e.observedAt ? `read ${ageWords(new Date(e.observedAt).toISOString(), now, tz)}` : ''
+  // Read, but with no window COS can draw (Q1 b): say so, never "not read".
+  if (e.reading && !found) {
+    const why = e.reading.available ? `${name} gave no window COS can draw` : 'this login has no plan limits'
+    return { ...base, ...none, state: 'not_read', windowWords: 'Week not known', short: 'No week to draw', shortLong: 'No week to draw',
+      long: `${readWords ? `${readWords[0]!.toUpperCase()}${readWords.slice(1)}; ` : ''}${why}. No number is shown.`, quiet: `${name} no week to draw` }
+  }
+  // A live window that states no reset (Q1 a): its share used is real; the week's span is not known, so no "now" line.
+  if (found && windowLive(found.w, now) && !found.w.resetsAt) {
+    const used = Math.max(0, Math.min(100, Math.round(found.w.usedPct)))
+    const readLongAgo = !e.observedAt || now - e.observedAt > USAGE_STALE_MS
+    return { ...base, usedPct: used, gonePct: null, windowStart: null, resetsAt: null, state: readLongAgo ? 'older' : 'fresh', windowWords: 'Week not known',
+      short: readLongAgo ? `${used}% used, ${readWords || 'read earlier'}` : `${used}% used`, shortLong: readLongAgo ? `${used}% used, ${readWords || 'read earlier'}` : `${used}% used`,
+      long: `${used}% used. Week not known: ${name} gave no reset time.`, quiet: `${name} ${used}% used` }
+  }
   if (!live) {
     return { ...base, ...none, state: 'not_read', windowWords: 'Week not known', short: 'Not read today', shortLong: 'Not read today',
       long: found ? `Not read since its window ended${e.observedAt ? ` (last read ${dateTime(new Date(e.observedAt).toISOString(), tz)})` : ''}. Refresh to read it.` : 'Not read yet. Refresh to read it.',
