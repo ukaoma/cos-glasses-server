@@ -128,6 +128,12 @@ describe('Set D: Work text buttons, Mentioned, the stage menu and the card foot'
     }
     expect(rule(b!.body, '.wk-stage')).toMatch(/background-position:\s*calc\(100% - 14px\) calc\(var\(--wk-chev-y\) \+ 1px\), calc\(100% - 10px\) calc\(var\(--wk-chev-y\) \+ 1px\)/)
   })
+  it('the text and chevrons sit where they did: the 1 px side border is now drawn inside, so each moves 1 px in', () => {
+    const base = rule(WORK, '.wk-stage', 'min-height')
+    expect(base).toMatch(/padding:\s*0 24px 0 9px/)
+    expect(base).toMatch(/border:\s*1px solid var\(--panel-border\)/)
+    expect(rule(b!.body, '.wk-stage')).toMatch(/padding:\s*0 25px 0 10px/)
+  })
   it('a focused stage menu draws its ring at the visible edge, not around the 44 px box', () => {
     expect(rule(b!.body, '.wk-stage:focus-visible')).toMatch(/outline-offset:\s*calc\(-1 \* var\(--wk-tap\)\)/)
   })

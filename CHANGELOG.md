@@ -1,6 +1,6 @@
 ## 7.0.38 (unreleased) - Control Web: bigger tap areas for tabs and text buttons on touch screens
 
-Branch claude/server-tap-areas on 7.0.37 (F1, Set D; Miles 2026-11-14, "Yes, build it"). Nothing looks different: on a touch screen the small text controls the 44 px floor does not reach now take a tap at least 44 px tall.
+Branch claude/server-setd on 7.0.37 (F1, Set D; Miles 2026-11-14, "Yes, build it"). Nothing looks different: on a touch screen the small text controls the 44 px floor does not reach now take a tap at least 44 px tall.
 
 **On for everyone with a touch screen:**
 - **Tab words** (Recent and Archive on Messages, Work's tabs, Memories, Speakers, Sessions): the invisible tap area is at least 44 px tall, centred on the word. Before, the 27 px words gave 41 px of tap.
