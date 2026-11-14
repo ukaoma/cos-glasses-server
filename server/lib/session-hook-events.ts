@@ -20,6 +20,7 @@ import { profileIdForCodexPath } from './codex-homes.js'
 import { isKeyProfileId } from '../../shared/key-preference.js'
 import { keyLanesEnabled } from './key-lanes.js'
 import { keyedSessionProfile } from './keyed-sessions.js'
+import { personTurnMarker } from './turn-footer.js'
 
 /** Events the installer subscribes and the reducer understands. Anything else is dropped. */
 export const HOOK_EVENT_NAMES = [
@@ -238,6 +239,35 @@ function turnAskProjection(event: HookEventName, toolName: string, toolInput: un
 /** Text fields kept from a payload. Everything else is dropped before the ledger sees it. */
 export const HOOK_TEXT_MAX = 400
 
+/**
+ * X1 (7.0.38): a prompt no person typed, as a whole: nothing but the blocks Claude Desktop and its harness write (another
+ * session's message, a background task's notice, a reminder, a scheduled task, an agent's message). Such a prompt
+ * starts a new turn without answering what the session asked. Typed text can arrive bundled after those blocks (on
+ * Miles's ledger, 11/14: 25 prompts were blocks only, 4 had text after the blocks, 857 were clipped too short to tell),
+ * so a prompt counts only when no text at all is left outside the blocks. An unclosed block, text before or after,
+ * clipped words, or any mark COS puts on a person's turn (a G2 or web verify footer, the turn-end answer's words)
+ * anywhere all read as typed: when in doubt it is his answer.
+ */
+const MACHINE_BLOCK_OPEN_RE = /^\s*<(cross-session-message|task-notification|system-reminder|scheduled-task|agent-message)(?=[\s>])[^>]*>/
+export function isMachineOnlyPrompt(prompt: unknown): boolean {
+  if (typeof prompt !== 'string') return false
+  // Lead 08:02 (from Q1's G2 finding): a turn Miles made through COS is never machine only, whatever wraps it. A G2
+  // dictation arrives inside another session's message with its verify footer; the marks are looked for anywhere,
+  // first, before any block is read (lib/turn-footer.ts personTurnMarker lists them).
+  if (personTurnMarker(prompt) !== null) return false
+  let rest = prompt
+  let blocks = 0
+  for (;;) {
+    const open = MACHINE_BLOCK_OPEN_RE.exec(rest)
+    if (!open) break
+    const close = rest.indexOf(`</${open[1]}>`, open[0].length)
+    if (close < 0) return false
+    rest = rest.slice(close + open[1].length + 3)
+    blocks += 1
+  }
+  return blocks > 0 && rest.trim().length === 0
+}
+
 export function clipText(value: unknown, max = HOOK_TEXT_MAX): string {
   if (typeof value !== 'string') return ''
   const text = value.trim()
@@ -268,7 +298,9 @@ export function projectHookPayload(event: HookEventName, payload: Record<string,
     case 'SessionEnd':
       return { ...base, reason: str('reason') }
     case 'UserPromptSubmit':
-      return { ...base, prompt: clipText(payload.prompt) }
+      // X1 (7.0.38): whether the WHOLE prompt was machine blocks, decided here where the full text is, so a replay of
+      // the clipped words still knows. A boolean only, never more of the text.
+      return { ...base, prompt: clipText(payload.prompt), ...(isMachineOnlyPrompt(payload.prompt) ? { prompt_machine_only: true } : {}) }
     case 'Stop':
       return { ...base, last_assistant_message: clipText(payload.last_assistant_message), stop_hook_active: payload.stop_hook_active === true }
     case 'StopFailure':

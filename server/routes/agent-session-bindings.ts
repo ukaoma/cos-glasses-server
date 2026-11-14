@@ -134,7 +134,7 @@ import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, QUEUED_TURN_TAMPERED_COPY, sealMatches, TURN_CARRY_HEADER, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict, type QueueSeal } from '../lib/g2-turn-provenance.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
 import { TURN_END_ASK_ID_RE, turnEndAskId } from '../lib/session-state-derive.js'
-import { turnAskAnswerSurface, type VisibleTurnAsk } from '../lib/turn-end-ask.js'
+import { isTurnEndAnswerPrompt, turnAskAnswerSurface, type VisibleTurnAsk } from '../lib/turn-end-ask.js'
 import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -812,14 +812,9 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'The assistant needs you to sign in again on this Mac before COS can copy this conversation.',
 }
 
-/**
- * X1 (7.0.36): the words COS puts on a turn-end answer (contract v1.2, "Answer sent from <SURFACE> through COS, not
- * typed in this session: <label>"). Only such a turn may name an ask; a typed message keeps the head check whole.
- */
-const TURN_END_ANSWER_RE = /^Answer sent from [^\n]{1,60} through COS, not typed in this session: /
-export function isTurnEndAnswerPrompt(prompt: unknown): boolean {
-  return typeof prompt === 'string' && TURN_END_ANSWER_RE.test(prompt)
-}
+// X1 (7.0.36): the contract words' test lives with the tracker (lib/turn-end-ask.ts) since 7.0.38, so the queue
+// route can refuse an answer without importing this route. Re-exported for the callers that read it from here.
+export { isTurnEndAnswerPrompt }
 
 export function writeReasonCopy(reason: WriteRefusal): string {
   if (Object.prototype.hasOwnProperty.call(REASON_COPY, reason)) {
@@ -1792,6 +1787,41 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   // is an outcome that may or may not have landed (lead 00:58), or one not settled yet.
   const answeredAsks = new Map<string, { at: number; by: string; state: 'delivered' | 'unconfirmed' }>()
   const ANSWERED_ASKS_MAX = 512
+  /**
+   * X1 (7.0.36; 7.0.38 lead 07:20): what a turn-end answer naming `namedAsk` meets on this thread, read from the tracker
+   * and this router's first-answer marks. Called twice per named turn: before the busy gates, so a closed ask is told
+   * apart from a busy session, and again after them, where an open ask is marked. Reads only, except that a mark whose
+   * ask is no longer open is dropped (the mark never outlives its ask).
+   */
+  type NamedAskVerdict = { open: true; askKey: string } | { open: false; refusal: Record<string, unknown> }
+  const judgeNamedAsk = (threadId: string, namedAsk: string): NamedAskVerdict => {
+    let open: VisibleTurnAsk | null = null
+    try { open = deps.openTurnEndAsk ? deps.openTurnEndAsk(threadId) : null } catch { open = null }
+    const askKey = `claude:${threadId.toLowerCase()}:${namedAsk}`
+    const mark = answeredAsks.get(askKey)
+    if (open && turnEndAskId(open.stoppedAt) === namedAsk && mark) {
+      // Another surface's answer to this same ask was accepted first. The first answer counts. If that turn's
+      // delivery was not proven, say so: "unconfirmed", never "already answered" (lead 00:58).
+      return { open: false, refusal: { answered: mark.state === 'delivered' ? true : 'unconfirmed', answeredBy: mark.by, askNow: null } }
+    }
+    // The mark never outlives its ask: once the ask is no longer open (the session's hook cleared it, or a newer ask
+    // opened), any mark for it is gone, whatever its state.
+    if (mark && !(open && turnEndAskId(open.stoppedAt) === namedAsk)) answeredAsks.delete(askKey)
+    if (open && turnEndAskId(open.stoppedAt) === namedAsk) {
+      return { open: true, askKey }
+    }
+    // Answered already (a prompt cleared this very ask: typed at the Mac, or another surface's answer)? The first
+    // answer counts, so this one comes back as answered, never delivered as a second answer.
+    let answeredBy: string | null = null
+    try { answeredBy = deps.turnEndAskAnswered?.(threadId, Number(namedAsk.slice('turn_end:'.length)))?.by ?? null } catch { answeredBy = null }
+    return {
+      open: false,
+      refusal: {
+            askNow: open ? { id: turnEndAskId(open.stoppedAt), ask: open.ask, choices: [...open.choices] } : null,
+            ...(answeredBy !== null ? { answered: true, answeredBy } : {}),
+      },
+    }
+  }
   const cancelDeps: CancelDeps = deps?.cancel ?? {}
   /** A throwing or absent probe reads as the cautious answer, never as a thrown route. */
   const cancelProbe = <T>(read: (() => T) | undefined, fallback: T): T => {
@@ -3120,6 +3150,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (namedAsk !== undefined && namedAsk !== null && (typeof namedAsk !== 'string' || !TURN_END_ASK_ID_RE.test(namedAsk))) {
         return refuseTurn('invalid_request')
       }
+      // X1 (7.0.38): Control Web's Send anyway tap marks itself (`turnEndSendAnyway: true`), for the queue's door. It is
+      // never an answer to a named ask: the two together are a client defect, refused rather than guessed at.
+      const sendAnyway = body.turnEndSendAnyway
+      if (sendAnyway !== undefined && sendAnyway !== null && sendAnyway !== true) return refuseTurn('invalid_request')
+      if (sendAnyway === true && namedAsk !== undefined && namedAsk !== null) return refuseTurn('invalid_request')
       const boundTo = body.boundTo
       if (boundTo !== undefined && boundTo !== null && !isOpaque(boundTo)) return refuseTurn('invalid_request')
 
@@ -3298,6 +3333,22 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseTurn(fenced, { retryable: false, deliveryState: 'unknown' })
       }
 
+      // X1 (7.0.36): only a Claude turn in the contract's words, naming an ask, is judged against that ask.
+      const namesAsk = typeof namedAsk === 'string' && binding.provider === 'claude' && isTurnEndAnswerPrompt(prompt) && typeof deps.openTurnEndAsk === 'function'
+      // X1 (7.0.38, lead 07:20): the ask BEFORE the busy gates. A tap on a question that is no longer open (answered,
+      // moved on, aged out) or whose first answer is still in flight is told so whether or not the session is working,
+      // instead of the claim or the occupancy gate answering "busy" first. Read only: nothing delivered, no mark set,
+      // nothing used up; the revision is read on this refusal path alone. An open ask goes on to the gates as before,
+      // with no await added before the claim's check-and-set.
+      if (namesAsk) {
+        const early = judgeNamedAsk(binding.nativeThreadId, namedAsk as string)
+        if (!early.open) {
+          let earlyRevision: string | null = null
+          try { earlyRevision = (await readHead(binding.provider, binding.nativeThreadId))?.digest ?? null } catch { earlyRevision = null }
+          return refuseTurn('turn_end_ask_moved', { changed: true, revision: earlyRevision, ...early.refusal })
+        }
+      }
+
       // Check-and-set in ONE synchronous call. Awaits come before it (the files above,
       // QA 6.99.27) and after it, never between the check and the set: with an await
       // between them, two turns admitted in the same tick both see a free target and
@@ -3343,20 +3394,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // head check is waived for this turn below. Not open: refused, with what the session asks now, if anything,
       // and the revision a quoted send carries. Only a Claude turn in the contract's words, naming an ask, takes it.
       let answersOpenAsk = false
-      if (typeof namedAsk === 'string' && binding.provider === 'claude' && isTurnEndAnswerPrompt(prompt) && typeof deps.openTurnEndAsk === 'function') {
-        let open: VisibleTurnAsk | null = null
-        try { open = deps.openTurnEndAsk(binding.nativeThreadId) } catch { open = null }
-        const askKey = `${binding.provider}:${binding.nativeThreadId.toLowerCase()}:${namedAsk}`
-        const mark = answeredAsks.get(askKey)
-        if (open && turnEndAskId(open.stoppedAt) === namedAsk && mark) {
-          // Another surface's answer to this same ask was accepted first. The first answer counts. If that turn's
-          // delivery was not proven, say so: "unconfirmed", never "already answered" (lead 00:58).
-          return refuseTurn('turn_end_ask_moved', { changed: true, revision: head.digest, answered: mark.state === 'delivered' ? true : 'unconfirmed', answeredBy: mark.by, askNow: null })
-        }
-        // The mark never outlives its ask: once the ask is no longer open (the session's hook cleared it, or a newer ask
-        // opened), any mark for it is gone, whatever its state.
-        if (mark && !(open && turnEndAskId(open.stoppedAt) === namedAsk)) answeredAsks.delete(askKey)
-        if (open && turnEndAskId(open.stoppedAt) === namedAsk) {
+      if (namesAsk) {
+        const verdict = judgeNamedAsk(binding.nativeThreadId, namedAsk as string)
+        if (verdict.open) {
+          const askKey = verdict.askKey
           answersOpenAsk = true
           answeredAsks.set(askKey, { at: Date.now(), by: turnAskAnswerSurface(prompt, true), state: 'unconfirmed' })
           while (answeredAsks.size > ANSWERED_ASKS_MAX) {
@@ -3366,15 +3407,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           }
           answeredAskKey = askKey
         } else {
-          // Answered already (a prompt cleared this very ask: typed at the Mac, or another surface's answer)? The first
-          // answer counts, so this one comes back as answered, never delivered as a second answer.
-          let answeredBy: string | null = null
-          try { answeredBy = deps.turnEndAskAnswered?.(binding.nativeThreadId, Number(namedAsk.slice('turn_end:'.length)))?.by ?? null } catch { answeredBy = null }
           return refuseTurn('turn_end_ask_moved', {
             changed: true,
             revision: head.digest,
-            askNow: open ? { id: turnEndAskId(open.stoppedAt), ask: open.ask, choices: [...open.choices] } : null,
-            ...(answeredBy !== null ? { answered: true, answeredBy } : {}),
+            ...verdict.refusal,
           })
         }
       }

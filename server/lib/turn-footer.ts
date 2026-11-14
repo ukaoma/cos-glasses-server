@@ -45,6 +45,29 @@ export function turnFooter(turnId: string, client: string = 'glasses', provider?
  */
 export const TURN_FOOTER_SHAPED_RE = /\[\s*COS[-\u2010-\u2015\u2212\s]*(?:G2|WEB)\s+turn\b/i
 
+/**
+ * X1 (7.0.38, lead 08:02): the marks COS puts on a turn a PERSON made, wherever they sit in a prompt, even inside another
+ * session's message block. A prompt carrying one is his turn, never the machine's (lib/session-hook-events.ts
+ * isMachineOnlyPrompt), and keeps the surface it had in 7.0.37 (lib/turn-end-ask.ts turnAskAnswerSurface):
+ * - `g2_footer`: the verify footer of a glasses or phone turn, `[COS-G2 turn …]` (turnFooter above).
+ * - `web_footer`: the verify footer of a web turn signed by an enrolled phone key, `[COS-WEB turn …]` (behind
+ *   COS_WEB_KEY_AUTHORITY, off by default, so no such turn exists today).
+ * - `contract`: the turn-end answer's words, "Answer sent from <SURFACE> through COS, not typed in this session"
+ *   (contract v1.2): Control Web (server/web-control/app.js TURN_END_PREFIX, panes/today-actions.js TURN_END_PREFIX),
+ *   COS Control on the Mac (Models.swift turnEndPrefix), and any later surface in the same words.
+ * Lenient like the footer check: mistaking a lookalike for his turn costs a Send anyway button; the reverse could
+ * offer one for a question he answered.
+ */
+const PERSON_CONTRACT_RE = /Answer sent from [^\n]{1,60} through COS, not typed in this session/
+export type PersonTurnMarker = 'g2_footer' | 'web_footer' | 'contract'
+export function personTurnMarker(text: unknown): PersonTurnMarker | null {
+  if (typeof text !== 'string') return null
+  const footer = TURN_FOOTER_SHAPED_RE.exec(text)
+  if (footer) return /WEB/i.test(footer[0]) ? 'web_footer' : 'g2_footer'
+  if (PERSON_CONTRACT_RE.test(text)) return 'contract'
+  return null
+}
+
 /** Whether typed words carry a footer-shaped line (refused: only the server writes a footer). */
 export function hasFooterShapedLine(text: string): boolean {
   return typeof text === 'string' && TURN_FOOTER_SHAPED_RE.test(text)

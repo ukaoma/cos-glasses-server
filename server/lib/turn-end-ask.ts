@@ -25,7 +25,7 @@
 
 import { readSwitch } from './env-switch.js'
 import { questionRowText } from './full-hold.js'
-import type { HookEnvelope } from './session-hook-events.js'
+import { isMachineOnlyPrompt, type HookEnvelope } from './session-hook-events.js'
 
 /** The default when COS_TURN_END_ASKS is unset. One constant, per the lead (Miles chooses the value). */
 export const TURN_END_ASKS_DEFAULT = true
@@ -116,6 +116,17 @@ export type TurnAskAnswerSurface = 'mac' | 'web' | 'glasses' | 'mac_app' | 'cos'
 export const TURN_ASK_ANSWERED_KEEP_MS = 120_000
 
 /**
+ * X1 (7.0.36): the words COS puts on a turn-end answer (contract v1.2, "Answer sent from <SURFACE> through COS, not
+ * typed in this session: <label>"). Only such a turn may name an ask; a typed message keeps the head check whole.
+ * 7.0.38: also the rule "an answer is never queued": the queue's doors refuse these words and its drain never
+ * delivers them, because a parked answer lands after the session has moved on, whatever it answered.
+ */
+const TURN_END_ANSWER_RE = /^Answer sent from [^\n]{1,60} through COS, not typed in this session: /
+export function isTurnEndAnswerPrompt(prompt: unknown): boolean {
+  return typeof prompt === 'string' && TURN_END_ANSWER_RE.test(prompt)
+}
+
+/**
  * X1: where a reply that cleared a turn-end ask came from, read from the words COS itself puts on it (contract
  * v1.2: "Answer sent from <SURFACE> through COS, not typed in this session"; a dictated reply carries the
  * `[COS-G2 turn` footer). A COS-spawned Continue child is COS. Anything else was typed at the Mac. Only the
@@ -190,8 +201,17 @@ export class TurnEndAskTracker {
     if (str(p.agent_id)) return
     const sessionId = env.sessionId.toLowerCase()
     const current = this.asks.get(sessionId)
-    // Any prompt, from the desk or a COS-spawned Continue child, is a reply: the question is answered.
+    // Any prompt, from the desk or a COS-spawned Continue child, is a reply: the question is answered. 7.0.38: except a
+    // prompt that is machine blocks and nothing else (another session's message, a task notice, a reminder, a scheduled
+    // task, `isMachineOnlyPrompt`): that starts a new turn without answering, so the ask is cleared as moved on, never
+    // recorded as answered at the Mac. Live the whole prompt is read; a replayed row carries the boolean the ledger
+    // stamped from the whole prompt (a row from before 7.0.38 has only clipped words, which read as typed).
     if (env.event === 'UserPromptSubmit') {
+      if (current && !child && (p.prompt_machine_only === true || isMachineOnlyPrompt(p.prompt))) {
+        this.asks.delete(sessionId)
+        this.counters.clearedByTurn++
+        return
+      }
       if (current) {
         this.asks.delete(sessionId)
         this.counters.clearedByReply++

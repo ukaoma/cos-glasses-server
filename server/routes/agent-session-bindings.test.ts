@@ -66,6 +66,10 @@ import { fallbackContinueNote } from '../lib/continue-plan.js'
 import { EventEmitter } from 'node:events'
 import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
 import { CosSpawnLedger } from '../lib/agent-session-ownership-store.js'
+import { TurnEndAskTracker, WRAP_UP_TOOL, __setTurnEndAsksForTests } from '../lib/turn-end-ask.js'
+import { SessionHookLedger } from '../lib/session-hook-ledger.js'
+import type { HookEnvelope } from '../lib/session-hook-events.js'
+import { __setTurnEndAskTrackerForTests, openTurnEndAsk as runtimeOpenTurnEndAsk, turnEndAskAnswered as runtimeTurnEndAskAnswered } from '../lib/session-hooks-runtime.js'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -5046,7 +5050,8 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(timing).not.toContain('readiness')
     expect(h.calls).toHaveLength(1)
     expect(h.calls[0]!.prompt).toContain('Yes, check readiness')
-    expect(h.seen).toEqual([SID])
+    // 7.0.38: read twice, before the busy gates (a closed ask is told apart from busy) and after them (an open ask is marked).
+    expect(h.seen).toEqual([SID, SID])
   })
 
   it('the session took another turn (a newer ask is open): refused turn_end_ask_moved with the new ask and a revision; the quoted send with that revision delivers', async () => {
@@ -5270,5 +5275,313 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
       expect(res.status).toBe(400)
     }
     expect(h.calls).toHaveLength(0)
+  })
+})
+
+// X1 (7.0.38): the ask check over the REAL tracker, not a stub. The lead's 07:12 pins: an aged-out ask, the switch off,
+// and a server restart (the ledger replay rebuilds open asks and who answered; the route's first-answer marks do not
+// survive, which the last case pins as the known window until they are kept on disk).
+describe('X1 7.0.38: the ask check over the real tracker (age-out, switch off, restart)', () => {
+  const ANSWER = 'Answer sent from COS Control Web through COS, not typed in this session: Yes, check readiness'
+  const P = 'p-ask-0001'
+  const T0 = 1_794_633_000_000
+  const STOPPED = T0 + 4_700
+  const ID = `turn_end:${STOPPED}`
+  const EIGHT_HOURS = 8 * 60 * 60_000
+  const trackers: TurnEndAskTracker[] = []
+  let dir = ''
+  beforeEach(() => { __setTurnEndAsksForTests(true); dir = mkdtempSync(join(tmpdir(), 'x1-real-tracker-')) })
+  afterEach(() => {
+    for (const t of trackers.splice(0)) t.stop()
+    __setTurnEndAskTrackerForTests(null)
+    __setTurnEndAsksForTests(null)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const env = (event: HookEnvelope['event'], ts: number, payload: Record<string, unknown> = {}): HookEnvelope =>
+    ({ ts, ppid: 4242, event, sessionId: SID, payload: { session_id: SID, ...payload } })
+  const asked = (): HookEnvelope[] => [
+    env('UserPromptSubmit', T0 - 10_000, { prompt: 'go', prompt_id: P }),
+    env('PostToolUse', T0, { tool_name: WRAP_UP_TOOL, prompt_id: P, tool_input: { recap: 'r', ask: 'Run a read-only readiness check?', actions: [{ label: 'Yes, check readiness' }, { label: 'Not tonight' }] } }),
+    env('Stop', STOPPED, { last_assistant_message: 'done', prompt_id: P }),
+  ]
+  /** One server's tracker, its clock, and the ledger it writes (the hook runtime appends every event it applies). */
+  function rig(ledger: SessionHookLedger | null) {
+    const clock = { now: T0 + 200_000 }
+    const tracker = new TurnEndAskTracker({ now: () => clock.now, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    trackers.push(tracker)
+    const feed = (events: HookEnvelope[]) => { for (const e of events) { ledger?.append(`${e.ts}-1-${e.event}.json`, e); tracker.observe(e, false) } }
+    const head = { value: 'h1' }
+    const calls: AttachedTurnRequest[] = []
+    const deps = writeDeps({
+      nativeHead: () => head.value,
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: head.value } },
+      openTurnEndAsk: (sid: string) => tracker.visibleAsk(sid, clock.now),
+      turnEndAskAnswered: (sid: string, at: number) => tracker.answeredAsk(sid, at, clock.now),
+    })
+    return { clock, tracker, feed, head, calls, deps }
+  }
+  /** One tap. `bound`: the binding the page remembers (the registry outlives a restart, so the page reuses it). */
+  async function answer(r: ReturnType<typeof rig>, clientTurnId: string, bound?: Awaited<ReturnType<typeof attached>>) {
+    const base = await start(r.deps)
+    const a = bound ?? await attached(base)
+    expect(a.bindingId).toMatch(/^bnd-/)
+    r.head.value = `moved-${clientTurnId}`
+    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId, turnEndAskId: ID })
+    return Object.assign(res, { binding: a })
+  }
+
+  it('an ask just inside its 8 hours is still answered', async () => {
+    const r = rig(null)
+    r.feed(asked()); await r.tracker.tick()
+    r.clock.now = STOPPED + EIGHT_HOURS - 1
+    const res = await answer(r, 'ct-rt-0001')
+    expect(res.body.outcome).toBe('completed')
+    expect(r.calls).toHaveLength(1)
+  })
+
+  it('an aged-out ask (past 8 hours): refused turn_end_ask_moved, askNow null, no answered, nothing delivered', async () => {
+    const r = rig(null)
+    r.feed(asked()); await r.tracker.tick()
+    r.clock.now = STOPPED + EIGHT_HOURS + 1
+    const res = await answer(r, 'ct-rt-0002')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+    expect(r.calls).toHaveLength(0)
+  })
+
+  it('COS_TURN_END_ASKS off (no tracker), wired as index.ts wires it: every named answer is refused, askNow null, never delivered', async () => {
+    __setTurnEndAskTrackerForTests(null)
+    const head = { value: 'h1' }
+    const calls: AttachedTurnRequest[] = []
+    const base = await start(writeDeps({
+      nativeHead: () => head.value,
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: head.value } },
+      openTurnEndAsk: sessionId => runtimeOpenTurnEndAsk(sessionId),
+      turnEndAskAnswered: (sessionId, stoppedAt) => runtimeTurnEndAskAnswered(sessionId, stoppedAt),
+    }))
+    const a = await attached(base)
+    for (const [id, moved] of [['ct-rt-0003', false], ['ct-rt-0004', true]] as const) {
+      if (moved) head.value = 'h2'
+      const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: id, turnEndAskId: ID })
+      expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    }
+    expect(calls).toHaveLength(0)
+  })
+
+  /** The server restarts: a new tracker replays the ledger the old one wrote (as startSessionHooksRuntime does), and a new router has no marks. */
+  async function restarted(ledger: SessionHookLedger) {
+    const r = rig(null)
+    ledger.replay(0, (e, _k, child) => r.tracker.observe(e, child))
+    await r.tracker.tick()
+    return r
+  }
+
+  it('restart, the ask still open: the replay rebuilds it, and the named answer is delivered', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed(asked())
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0005')
+    expect(res.body.outcome).toBe('completed')
+    expect(after.calls).toHaveLength(1)
+  })
+
+  it('restart, the ask answered at the Mac before it: still refused as answered by the Mac, never sent again', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: 'Commands run, go', prompt_id: 'p-next' })])
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0006')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'mac', askNow: null })
+    expect(after.calls).toHaveLength(0)
+  })
+
+  it('restart, the session moved on with tool work after its Stop: still refused, askNow null, no answered', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed([...asked(), env('PreToolUse', STOPPED + 60_000, { tool_name: 'Bash', prompt_id: 'p-other' })])
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0007')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+    expect(after.calls).toHaveLength(0)
+  })
+
+  it('a peer session\'s message moved the session on (last night\'s case 1): refused as moved, NOT answered, so the page keeps Send anyway', async () => {
+    const r = rig(null)
+    r.feed(asked()); await r.tracker.tick()
+    r.feed([env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<cross-session-message from="local_c45644bf">Lead to X1: run a readiness check</cross-session-message>', prompt_id: 'p-peer' })])
+    const res = await answer(r, 'ct-rt-0010')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+    expect(typeof res.body.revision).toBe('string')
+    expect(r.calls).toHaveLength(0)
+  })
+
+  it('a G2 dictation wrapped in another session\'s message (lead 08:02): answered by the glasses, never moved, no Send anyway', async () => {
+    const r = rig(null)
+    r.feed(asked()); await r.tracker.tick()
+    r.feed([env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<cross-session-message from="local_glasses">Yes, check readiness\n[COS-G2 turn ctg2-00000009 · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ctg2-00000009 --session <your session id> --provider claude]</cross-session-message>', prompt_id: 'p-g2' })])
+    const res = await answer(r, 'ct-rt-0013')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'glasses' })
+    expect(r.calls).toHaveLength(0)
+  })
+
+  it('the same through a restart: the replayed peer message still reads as moved on, never answered at the Mac', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<task-notification>\n<task-id>b1</task-id> ' + 'done '.repeat(150) + '</task-notification>', prompt_id: 'p-task' })])
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0011')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+  })
+
+  it('through a restart, his typed words after a reminder block are still his answer: answered by the Mac, no Send anyway', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<system-reminder>\n' + 'r'.repeat(600) + '\n</system-reminder>\nCommands run, go', prompt_id: 'p-typed' })])
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0012')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'mac' })
+  })
+
+  it('KNOWN WINDOW (not fixed here): a first answer accepted before the restart whose prompt never reached the ledger leaves the ask open, so a second answer after the restart is delivered too', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    const before = rig(ledger)
+    before.feed(asked()); await before.tracker.tick()
+    before.head.value = 'h1'
+    const first = await answer(before, 'ct-rt-0008')
+    expect(first.body.outcome).toBe('completed')
+    // The session's UserPromptSubmit for that answer is not in the ledger when the server restarts.
+    const after = await restarted(ledger)
+    const second = await answer(after, 'ct-rt-0009', first.binding)
+    // When the first-answer marks are kept across a restart, this becomes turn_end_ask_moved (answered or unconfirmed).
+    expect(second.body.outcome).toBe('completed')
+    expect(after.calls).toHaveLength(1)
+  })
+})
+
+// X1 (7.0.38, lead 07:20): the ask is read BEFORE the busy gates. A tap on a closed question while the session works came
+// back as plain busy, so the page could not tell "already answered" from "moved on"; and a second tap during an
+// in-flight first answer read busy instead of "unconfirmed". An open ask still meets the gates exactly as before.
+describe('X1 7.0.38: the ask is read before the busy gates', () => {
+  const ANSWER = 'Answer sent from COS Control Web through COS, not typed in this session: Approved'
+  const ASKED_AT = 1_794_640_000_000
+  const ID = `turn_end:${ASKED_AT}`
+  const theAsk = { ask: 'Approve the plan?', choices: ['Approved', 'Not yet'], stoppedAt: ASKED_AT }
+  function harness(opts: { ask: typeof theAsk | null; answeredBy?: string; held?: ReturnType<typeof heldDelivery> }) {
+    const state = { busy: false, ask: opts.ask }
+    const free = freeProbes(), working = workingProbes()
+    const toggled = new Proxy({} as OccupancyProbes, { get: (_t, k) => (state.busy ? working : free)[k as keyof OccupancyProbes] })
+    const calls: AttachedTurnRequest[] = []
+    const deps = writeDeps({
+      probes: toggled,
+      nativeHead: () => 'h-moved',
+      deliverAttachedTurn: opts.held ? opts.held.deliver : async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: 'h-moved' } },
+      openTurnEndAsk: () => state.ask,
+      turnEndAskAnswered: (_sid: string, at: number) => (opts.answeredBy && at === ASKED_AT ? { by: opts.answeredBy } : null),
+    })
+    return { state, calls, deps }
+  }
+  const tap = (base: string, a: Awaited<ReturnType<typeof attached>>, clientTurnId: string, extra: Record<string, unknown> = { turnEndAskId: ID }) =>
+    post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId, ...extra })
+
+  it('answered at the Mac, tapped while the session works: answered true, not busy, nothing delivered', async () => {
+    const h = harness({ ask: null, answeredBy: 'mac' })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.state.busy = true
+    const res = await tap(base, a, 'ct-early-0001')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'mac', askNow: null })
+    expect(typeof res.body.revision).toBe('string')
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('moved on, tapped while the session works: moved with askNow null and no answered, not busy', async () => {
+    const h = harness({ ask: null })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.state.busy = true
+    const res = await tap(base, a, 'ct-early-0002')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('a second tap during an in-flight first answer: unconfirmed, not native_turn_in_progress; it sets no mark and delivers nothing', async () => {
+    const held = heldDelivery()
+    const h = harness({ ask: theAsk, held })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    const first = tap(base, a, 'ct-early-0003')
+    while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
+    // The second tap comes from the Mac app, so a mark it set would name mac_app; the first answer's mark names web.
+    const MAC = 'Answer sent from COS Control on the Mac through COS, not typed in this session: Not yet'
+    const second = await post(base, turnsPath(a.bindingId), { prompt: MAC, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-early-0004', turnEndAskId: ID })
+    expect(second.status).toBe(409)
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: 'unconfirmed', answeredBy: 'web', askNow: null, deliveryState: 'not_delivered' })
+    expect(held.calls).toHaveLength(1)
+    held.open()
+    expect((await first).body.outcome).toBe('completed')
+    // The mark is still the first answer's, now proven delivered: the refused tap neither set nor replaced it.
+    const third = await tap(base, a, 'ct-early-0012')
+    expect(third.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'web' })
+    expect(held.calls).toHaveLength(1)
+    expect(held.calls[0]!.prompt).toContain('Approved')
+  })
+
+  it('an open ask with the session busy still gets the busy reason, and the refused tap uses nothing up: the next one goes', async () => {
+    const h = harness({ ask: theAsk })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.state.busy = true
+    const busy = await tap(base, a, 'ct-early-0005')
+    expect(busy.body.reason).toBe('native_thread_working')
+    expect(h.calls).toHaveLength(0)
+    h.state.busy = false
+    const again = await tap(base, a, 'ct-early-0006')
+    expect(again.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('an open ask behind another COS turn in flight still gets native_turn_in_progress', async () => {
+    const held = heldDelivery()
+    const h = harness({ ask: theAsk, held })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    const typed = post(base, turnsPath(a.bindingId), { prompt: 'a typed follow-up', epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-early-0007' })
+    while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
+    const res = await tap(base, a, 'ct-early-0008')
+    expect(res.body.reason).toBe('native_turn_in_progress')
+    held.open()
+    await typed
+  })
+
+  it('the ask closes DURING the busy gates (open at the early check, gone after): refused as moved after the gates, never delivered', async () => {
+    // The early check runs before the claim, the occupancy probe and the head read; a prompt the session takes in those
+    // milliseconds closes the ask. The second judge, after the gates, is what refuses it then (gate: moved-not-refused).
+    const h = harness({ ask: theAsk })
+    let reads = 0
+    const deps = { ...h.deps, openTurnEndAsk: () => (++reads === 1 ? theAsk : null) }
+    const base = await start(deps)
+    const a = await attached(base)
+    const res = await tap(base, a, 'ct-early-0013')
+    expect(reads).toBe(2)
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null, revision: opaqueRevision('h-moved') })
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('the Send anyway mark: refused with an ask id or as anything but true; with the revision and no id it is an ordinary send', async () => {
+    const h = harness({ ask: null })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    expect((await tap(base, a, 'ct-early-0009', { turnEndAskId: ID, turnEndSendAnyway: true })).body.reason).toBe('invalid_request')
+    expect((await tap(base, a, 'ct-early-0010', { turnEndSendAnyway: 'yes' })).body.reason).toBe('invalid_request')
+    const quoted = await tap(base, a, 'ct-early-0011', { turnEndSendAnyway: true, acknowledgedRevision: opaqueRevision('h-moved') })
+    expect(quoted.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
   })
 })

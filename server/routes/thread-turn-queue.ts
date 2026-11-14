@@ -24,12 +24,12 @@ import {
   admitToQueue, drainDecision, holdReasonFor, queueableRefusal, queuePosition,
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
   queueReconcileEnabled, queueResendEnabled, queuedTurnReasonCopy, sessionSteerAvailability, sessionSteerEnabled,
-  steerMidturnEnabled, type SessionSteerAvailability,
-} from '../lib/thread-turn-queue.js'
+  steerMidturnEnabled, type SessionSteerAvailability, TURN_END_ANSWER_NOT_QUEUED, TURN_END_ANSWER_NOT_QUEUED_COPY } from '../lib/thread-turn-queue.js'
 import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queue-store.js'
 import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
 import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import { isTurnEndAnswerPrompt } from '../lib/turn-end-ask.js'
 import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, sealMatches, stripG2TurnFooter, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
 import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 
@@ -438,6 +438,19 @@ export async function drainThread(
     if (!turn) continue
     if (turn.status === 'delivering') midTurnOrderHeld = true
     if (turn.status !== 'waiting') continue
+    // X1 (7.0.38): a row in the answer's words, parked before the doors refused them, is settled here and never
+    // delivered, mid-turn or after: it would answer whatever the session asks by now. Settled, so it reads "Not sent".
+    // A Send anyway row (`turnEndSendAnyway`) goes on like any other: he chose to send it late.
+    if (isTurnEndAnswerPrompt(turn.prompt) && turn.turnEndSendAnyway !== true) {
+      turn.status = 'refused'
+      turn.reason = TURN_END_ANSWER_NOT_QUEUED
+      turn.settledAt = deps.now()
+      retired += 1; persist(turn, true)
+      forgetIfSettled(turn)
+      holdCheckedAt.delete(turn.clientTurnId)
+      console.warn(`[thread-turn-queue] turn-end answer settled, never delivered late provider=${provider} clientTurnId=${turn.clientTurnId}`)
+      continue
+    }
 
     // Reuse only refusal within this synchronous pass. Rechecking a busy thread
     // for every queued row repeats a whole-process descriptor scan. A refusal
@@ -885,6 +898,14 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!queueableRefusal(gate.reason)) {
       return res.status(423).json({ error: gate.reason ?? 'probe_failed', queueable: false })
     }
+    // X1 (7.0.38): an answer is never queued. Here, after the gate, so a free thread still answers thread_free and the
+    // client sends the answer now through the turns route, where its ask is checked; and before the steer, which would
+    // put it into the running turn just as late. The one exception (lead 07:20) is the Send anyway button's tap, which
+    // says so with `turnEndSendAnyway: true` and whose words name the earlier question; never inferred from the words.
+    const sendAnyway = body.turnEndSendAnyway === true
+    if (isTurnEndAnswerPrompt(prompt) && !sendAnyway) {
+      return res.status(409).json({ error: TURN_END_ANSWER_NOT_QUEUED, reasonCopy: TURN_END_ANSWER_NOT_QUEUED_COPY })
+    }
 
     // 11/07: every file must be readable now, and is kept past the 4 hour staged TTL while the turn waits. A file
     // that is gone refuses the park here, where the words are still in the box, never later at the drain.
@@ -901,6 +922,8 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       queuedAt: now, status: 'waiting', attempts: 0,
       // 6.62.0 /qa (Q3): the acknowledgement travels with the row to its drain.
       ...(continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]) ? { continueNoteAck: true as const } : {}),
+      // X1 (7.0.38): the Send anyway mark rides with the row to its drain, and only on words that need it.
+      ...(sendAnyway && isTurnEndAnswerPrompt(prompt) ? { turnEndSendAnyway: true as const } : {}),
       ...(attach.ids.length > 0 ? { attachmentIds: attach.ids } : {}),
     }
 
@@ -992,6 +1015,10 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (deps.provenance && hasFooterShapedLine(original.prompt)) {
       return res.status(400).json({ error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
     }
+    // X1 (7.0.38): Send again copies the words into a NEW waiting row: an answer is never queued, so never copied either.
+    if (isTurnEndAnswerPrompt(original.prompt)) {
+      return res.status(409).json({ error: TURN_END_ANSWER_NOT_QUEUED, reasonCopy: TURN_END_ANSWER_NOT_QUEUED_COPY })
+    }
     if (deps.provenance && deps.provenance.holds(newId)) return res.status(409).json({ error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
     // Judged now, from THIS request (Codex re-audit of 910eb90, P1): never inherited from the row.
     const resendVerdict = deps.provenance ? deps.provenance.resendVerdict(req) : null
@@ -1064,6 +1091,10 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     // G2 authority Tier 1 (QA 6.99.29): an edit is typed words like any other.
     if (deps.provenance && hasFooterShapedLine(prompt)) {
       return res.status(400).json({ error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
+    }
+    // X1 (7.0.38): an edit cannot turn a waiting row into an answer: an answer is never queued.
+    if (isTurnEndAnswerPrompt(prompt)) {
+      return res.status(409).json({ error: TURN_END_ANSWER_NOT_QUEUED, reasonCopy: TURN_END_ANSWER_NOT_QUEUED_COPY })
     }
     if (provider === 'codex' && id.startsWith('codex-native:')) {
       try {
