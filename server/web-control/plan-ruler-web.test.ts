@@ -10,6 +10,10 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import express from 'express'
+import { type Server } from 'node:http'
+import { createWorkOrchestratorRouter, readPlan } from '../routes/work-orchestrator.js'
+import { UsageMonitor, parseClaudeUsage, parseCodexUsage } from '../lib/work-orchestrator/usage.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCE = readFileSync(join(HERE, 'panes', 'plan-ruler.js'), 'utf8')
@@ -121,6 +125,57 @@ describe('the plan ruler on Control Web (Miles: "Collapsed, tap to open")', () =
     t.p.mount(box, false)
     expect(box.children).toEqual([other])
   })
+  it('Q1 e3c3bb9e: one read at a time; Refresh is disabled and the read time hidden while reading', async () => {
+    const t = load()
+    void t.p.open(false); void t.p.open(false)
+    expect(t.calls).toEqual(['/api/usage/plan'])
+    expect(t.el().innerHTML).toContain('<button class="up-refresh" type="button" disabled>Refresh</button>')
+    t.click('up-refresh')
+    expect(t.calls).toEqual(['/api/usage/plan'])
+    t.answer(PANE); await flush()
+    expect(t.el().innerHTML).toContain('Read ')
+    expect(t.el().innerHTML).toContain('<button class="up-refresh" type="button">Refresh</button>')
+    t.click('up-refresh')
+    expect(t.el().innerHTML).not.toMatch(/Read \d/)
+    expect(t.calls).toEqual(['/api/usage/plan', '/api/usage/plan?refresh=1'])
+  })
+  it('Q1 e3c3bb9e: an answer with no lines is not a pane; it says it was not read and draws nothing', async () => {
+    const t = load({ 'cos.usage.planOpen': '1' })
+    void t.p.open(false); t.answer({ protocolVersion: 1, closest: 'codex', others: '' }); await flush()
+    expect(t.p._state.pane).toBeNull()
+    expect(t.el().innerHTML).toContain('Plan use was not read.')
+    expect(t.el().innerHTML).not.toMatch(/up-mini|up-track/)
+  })
+  it('Q1 e3c3bb9e: every server word is escaped, open and closed', async () => {
+    const bad = '<img src=x onerror=alert(1)>'
+    const evil = { ...PANE, others: bad, lines: PANE.lines.map(l => ({ ...l, name: bad, windowWords: l.windowWords && bad, short: bad, shortLong: bad, long: bad,
+      estimate: l.estimate && { text: bad, arithmetic: bad } })) }
+    const t = load()
+    void t.p.open(false); t.answer(evil); await flush()
+    expect(t.el().innerHTML).not.toContain('<img')
+    t.click('up-toggle')
+    const html = t.el().innerHTML
+    expect(html).not.toContain('<img')
+    expect(html.match(/&lt;img src=x onerror=alert\(1\)&gt;/g)!.length).toBeGreaterThanOrEqual(9)
+  })
+  it('Q1 e3c3bb9e: the ruler holds its fill to 0 to 100, a reached limit fills in the warning colour, and no estimate says why', async () => {
+    const t = load({ 'cos.usage.planOpen': '1' })
+    const lines = [PANE.lines[0], { ...PANE.lines[1], usedPct: 130, estimate: null }, { ...PANE.lines[2], usedPct: -5, state: 'limit', provider: 'cursor' }]
+    void t.p.open(false); t.answer({ ...PANE, lines }); await flush()
+    const html = t.el().innerHTML
+    expect(html).toContain('width:100%;background:var(--u-codex)')
+    expect(html).toContain('width:0%;background:var(--up-warn)')
+    expect(html).toContain('No estimate: no plan is far enough into its week to project.')
+  })
+  it('Q1 e3c3bb9e: mounting paints the closed row at once, and the toggle keeps focus after a tap', () => {
+    const t = load()
+    const box = new FakeEl()
+    t.p.mount(box, true)
+    expect(t.el().innerHTML).toContain('aria-expanded="false"')
+    expect(t.el().innerHTML).toContain('Plan use was not read.')
+    t.click('up-toggle')
+    expect(t.el().focused).toBe(1)
+  })
   it('index.html loads it and the Usage view mounts it after each paint', () => {
     const index = readFileSync(join(HERE, 'index.html'), 'utf8'), app = readFileSync(join(HERE, 'app.js'), 'utf8')
     expect(index).toContain('"planRuler": "/control/panes/plan-ruler.js"')
@@ -129,5 +184,88 @@ describe('the plan ruler on Control Web (Miles: "Collapsed, tap to open")', () =
     expect(index).not.toContain('plan-ruler.css')
     expect(app).toContain("if (SX.view === 'usage') ensurePane('planRuler')")
     expect(app.match(/mountPlanRuler\(\)/g)?.length).toBe(4)
+  })
+  it("Q1 e3c3bb9e: opening Usage asks plainly (the 10-minute rule) and only the view's Refresh asks for a fresh read; runs app.js's renderUsageView", async () => {
+    const app = readFileSync(join(HERE, 'app.js'), 'utf8')
+    const start = app.indexOf('  function renderUsageView(force) {'), end = app.indexOf('  // background: a refresh or a breakpoint change')
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
+    const run = async (view: string, force: unknown) => {
+      const opens: unknown[] = [], mounts: number[] = []
+      const ctx: Record<string, any> = {
+        SX: { view, usage: { ok: 1 }, usageAt: Date.now(), usageLoading: false },
+        $: () => ({ innerHTML: '' }), uLoadPrefs() {}, uWire() {}, paintUsage() {}, paintSessionsHero() {},
+        api: () => new Promise(() => {}), mountPlanRuler: () => { mounts.push(1) },
+        ensurePane: () => Promise.resolve({ open: (refresh: unknown) => { opens.push(refresh) } }), Date,
+      }
+      vm.createContext(ctx)
+      vm.runInContext(app.slice(start, end) + '\n;this.__ = renderUsageView;', ctx)
+      ctx.__(force); await flush()
+      return { opens, mounts: mounts.length }
+    }
+    expect(await run('usage', undefined)).toEqual({ opens: [false], mounts: 1 })
+    expect(await run('usage', false)).toEqual({ opens: [false], mounts: 1 })
+    expect(await run('usage', true)).toEqual({ opens: [true], mounts: 1 })
+    expect(await run('usage', 'yes')).toEqual({ opens: [false], mounts: 1 })
+    expect(await run('cost', true)).toEqual({ opens: [], mounts: 0 })
+  })
+})
+
+// Lead 13:00 (blocking for the ruler): Miles's rule, "read when I open Usage, at most once every 10 minutes", proved by
+// execution. app.js's own renderUsageView and mountPlanRuler, the real pane, the real route over HTTP and the real
+// UsageMonitor, with a fake clock and counting probes. Counted: every request the page sends, which carry ?refresh=1, and
+// every read of the plan endpoints.
+describe("Miles's rule on Control Web: a read when Usage opens, at most once every 10 minutes; Refresh reads one over 2", () => {
+  it('open, many repaints, reopen inside 10 minutes, Refresh twice, reopen at 9 and 11 minutes: exact requests and reads', async () => {
+    const FIX = join(HERE, '..', 'lib', 'work-orchestrator', '__fixtures__')
+    const fixture = (name: string) => JSON.parse(readFileSync(join(FIX, name), 'utf8'))
+    let now = Date.parse('2026-10-21T03:10:00Z')
+    const reads = { claude: 0, codex: 0 }
+    const monitor = new UsageMonitor({ now: () => now, pollEnabled: false, probes: {
+      claude: async () => { reads.claude++; return parseClaudeUsage(fixture('claude-get-usage-2026-10-20.json'))! },
+      codex: async () => { reads.codex++; return parseCodexUsage(fixture('codex-rate-limits-2026-10-20.json'))! } } })
+    const server = express()
+    server.use('/api', createWorkOrchestratorRouter({ plan: refresh => readPlan(refresh, monitor, () => now) }))
+    const s = await new Promise<Server>(resolve => { const x = server.listen(0, '127.0.0.1', () => resolve(x)) })
+    const base = `http://127.0.0.1:${(s.address() as any).port}`
+    try {
+      // The real pane, its api over HTTP to the real route.
+      const sent: string[] = []
+      const panes: Record<string, any> = {}
+      const W = { esc: (v: unknown) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'),
+        api: (url: string) => { sent.push(url); return fetch(base + url).then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status)))) },
+        registerPane: (n: string, d: any) => { panes[n] = d } }
+      vm.runInNewContext(SOURCE, { window: { COSWeb: W }, document: { createElement: () => new FakeEl(), activeElement: null }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} } })
+      // app.js's renderUsageView and mountPlanRuler, run as they are; the Usage table's own reads are stubbed.
+      const app = readFileSync(join(HERE, 'app.js'), 'utf8')
+      const slice = (from: string, to: string) => { const i = app.indexOf(from), j = app.indexOf(to, i); expect(i).toBeGreaterThan(0); expect(j).toBeGreaterThan(i); return app.slice(i, j) }
+      const box = new FakeEl()
+      const ctx: Record<string, any> = { SX: { view: 'usage', usage: { ok: 1 }, usageAt: now, usageLoading: false }, PANES: panes, Date,
+        $: (id: string) => id === 'sessions-usage' ? box : null, uLoadPrefs() {}, uWire() {}, paintUsage() {}, paintSessionsHero() {},
+        api: () => new Promise(() => {}), ensurePane: (n: string) => Promise.resolve(panes[n]) }
+      vm.createContext(ctx)
+      vm.runInContext(slice('  function renderUsageView(force) {', '  // background: a refresh or a breakpoint change') +
+        slice('  function mountPlanRuler() {', '\n') + '\n;this.open = renderUsageView; this.repaint = mountPlanRuler;', ctx)
+      const settle = async () => { for (let i = 0; i < 40 && panes.planRuler?._state.loading !== false; i++) await new Promise(r => setTimeout(r, 5)); await flush() }
+      const step = async (what: () => void) => { what(); await flush(); await settle() }
+
+      await step(() => ctx.open(false))                                       // opens Usage at 0:00
+      expect([sent, reads]).toEqual([['/api/usage/plan'], { claude: 1, codex: 1 }])
+      expect(box.firstChild).toBe(panes.planRuler._state.el)
+      for (let i = 0; i < 25; i++) ctx.repaint()                              // the Usage table repaints 25 times
+      await flush()
+      expect(sent.length).toBe(1)
+      now += 5 * 60_000; await step(() => ctx.open(false))                     // reopens at 5:00
+      expect(reads).toEqual({ claude: 1, codex: 1 })
+      await step(() => ctx.open(true))                                         // Refresh at 5:00: the reading is 5 min old
+      expect(reads).toEqual({ claude: 2, codex: 2 })
+      now += 60_000; await step(() => ctx.open(true))                          // Refresh at 6:00: 1 min old, not read again
+      expect(reads).toEqual({ claude: 2, codex: 2 })
+      now += 8 * 60_000; await step(() => ctx.open(false))                     // reopens at 14:00: 9 min old
+      expect(reads).toEqual({ claude: 2, codex: 2 })
+      now += 2 * 60_000; await step(() => ctx.open(false))                     // reopens at 16:00: 11 min old
+      expect(reads).toEqual({ claude: 3, codex: 3 })
+      expect(sent).toEqual(['/api/usage/plan', '/api/usage/plan', '/api/usage/plan?refresh=1', '/api/usage/plan?refresh=1', '/api/usage/plan', '/api/usage/plan'])
+      expect(panes.planRuler._state.pane.lines.find((l: any) => l.provider === 'codex').usedPct).not.toBeNull()
+    } finally { s.close() }
   })
 })

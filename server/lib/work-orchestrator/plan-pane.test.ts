@@ -55,8 +55,17 @@ describe('the ruler draws only a live, stated reading', () => {
     expect(planLine(noReset, NOW, TZ)).toMatchObject({ state: 'fresh', usedPct: 30, gonePct: null, windowWords: 'Week not known', short: '30% used',
       long: '30% used. Week not known: Claude gave no reset time.', estimate: null })
   })
+  it('Q1 e3c3bb9e: a live window with no reset read long ago says how old it is, and its share is held to 0 to 100', () => {
+    const noReset = (usedPct: number, observedAt: number) => blank('claude', { observedAt, source: 'probe', reading: { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct, resetsAt: null }] } })
+    expect(planLine(noReset(30, NOW - 3 * 3_600_000), NOW, TZ)).toMatchObject({ state: 'older', usedPct: 30, gonePct: null, short: '30% used, read 3 h ago', shortLong: '30% used, read 3 h ago' })
+    expect(planLine(noReset(30, NOW - 10 * 60_000), NOW, TZ)).toMatchObject({ state: 'fresh', short: '30% used' })
+    expect(planLine(noReset(130, NOW), NOW, TZ)).toMatchObject({ usedPct: 100, short: '100% used' })
+    expect(planLine(noReset(-5, NOW), NOW, TZ)).toMatchObject({ usedPct: 0, short: '0% used' })
+  })
   it('Cursor: no plan reading, never a ruler', () => {
-    expect(planLine(blank('cursor'), NOW, TZ)).toMatchObject({ state: 'no_plan', usedPct: null, short: 'No plan reading', quiet: 'Cursor no plan reading' })
+    expect(planLine(blank('cursor'), NOW, TZ)).toMatchObject({ state: 'no_plan', usedPct: null, short: 'No plan reading', windowWords: '', quiet: 'Cursor no plan reading' })
+    // No span line for Cursor: its row's own words already say it does not report a plan (Q1 e3c3bb9e question).
+    expect(planLine(blank('cursor'), NOW, TZ).long).toBe('No plan reading. Cursor does not report its plan to COS.')
   })
   it('a failure is named in plain words, never the exception text', () => {
     expect(planLine(blank('codex', { lastFailure: 'error', lastError: 'spawn /Users/someone/x ENOENT' }), NOW, TZ).short).toBe('Read failed, unexpected error')
