@@ -129,14 +129,24 @@ export class WebPushStore {
 
   /**
    * Counts one test ping BEFORE it is sent, or refuses it. Kept in push/test-pings.json (0600), so a restart keeps
-   * both limits. A clock that went backwards reads as too soon. A failed write throws: no count, no send.
+   * both limits. A clock that went backwards reads as too soon, for at most one gap. A failed write throws: no count,
+   * no send.
    */
   claimTestPing(): { ok: true } | { ok: false; reason: 'too_soon' | 'daily_cap' } {
     const now = this.now()
     const stored = this.read('test-pings.json') as { day?: unknown; count?: unknown; lastAt?: unknown } | null
     const day = localDay(now)
-    const count = stored?.day === day && typeof stored.count === 'number' && Number.isInteger(stored.count) ? stored.count : 0
-    const lastAt = typeof stored?.lastAt === 'number' ? stored.lastAt : null
+    const storedDay = typeof stored?.day === 'string' ? stored.day : null
+    const storedCount = typeof stored?.count === 'number' && Number.isInteger(stored.count) && stored.count >= 0 ? stored.count : 0
+    // Lead 10:4x: a day stamp in the future (a clock set back, a damaged file) counts as TODAY, never as a fresh day.
+    const count = storedDay !== null && (storedDay === day || storedDay > day) ? storedCount : 0
+    const lastAt = typeof stored?.lastAt === 'number' && Number.isFinite(stored.lastAt) ? stored.lastAt : null
+    // Lead 10:4x: a lastAt more than one gap ahead is a bad record. Refuse this one send and reset lastAt to now, so the
+    // lock after any clock change or damaged file lasts at most one gap, never until real time catches up.
+    if (lastAt !== null && lastAt - now > TEST_PING_GAP_MS) {
+      this.write('test-pings.json', { day, count, lastAt: now })
+      return { ok: false, reason: 'too_soon' }
+    }
     if (lastAt !== null && now - lastAt < TEST_PING_GAP_MS) return { ok: false, reason: 'too_soon' }
     if (count >= TEST_PINGS_PER_DAY) return { ok: false, reason: 'daily_cap' }
     this.write('test-pings.json', { day, count: count + 1, lastAt: now })

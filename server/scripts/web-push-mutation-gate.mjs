@@ -50,12 +50,14 @@ const mutations = [
   ["cap-gap-off", "server/lib/web-push-store.ts", "    if (lastAt !== null && now - lastAt < TEST_PING_GAP_MS) return { ok: false, reason: 'too_soon' }\n", "", "one test ping every 10 seconds", ["server/routes/web-push.test.ts"]],
   ["cap-daily-off", "server/lib/web-push-store.ts", "    if (count >= TEST_PINGS_PER_DAY) return { ok: false, reason: 'daily_cap' }\n", "", "20 a day: the 21st is refused", ["server/routes/web-push.test.ts"]],
   ["cap-not-kept", "server/lib/web-push-store.ts", "    this.write('test-pings.json', { day, count: count + 1, lastAt: now })\n", "", "one test ping every 10 seconds", ["server/routes/web-push.test.ts"]],
-  ["cap-day-never-resets", "server/lib/web-push-store.ts", "stored?.day === day && typeof stored.count", "typeof stored.count", "20 a day: the 21st is refused", ["server/routes/web-push.test.ts"]],
+  ["cap-day-never-resets", "server/lib/web-push-store.ts", "const count = storedDay !== null && (storedDay === day || storedDay > day) ? storedCount : 0", "const count = storedCount", "20 a day: the 21st is refused", ["server/routes/web-push.test.ts"]],
   ["route-skips-cap", "server/routes/web-push.ts", "if (!claim.ok) return res.status(429)", "if (false) return res.status(429)", "one test ping every 10 seconds", ["server/routes/web-push.test.ts"]],
   ["unknown-device-counted", "server/routes/web-push.ts", "    if (!deps.store.get(id)) return res.status(404).json({ ok: false, status: 0, reason: 'unknown_device', removed: false })\n", "", "an unknown device is not counted", ["server/routes/web-push.test.ts"]],
   ["cap-copy-changed", "server/routes/web-push.ts", "too_soon: 'Not sent. A test ping was just sent.',", "too_soon: 'too_soon',", "one test ping every 10 seconds", ["server/routes/web-push.test.ts"]],
   ["cap-backwards-clock-ok", "server/lib/web-push-store.ts", "if (lastAt !== null && now - lastAt < TEST_PING_GAP_MS) return", "if (lastAt !== null && now >= lastAt && now - lastAt < TEST_PING_GAP_MS) return", "a clock that went backwards after a ping", ["server/routes/web-push.test.ts"]],
-  ["cap-write-failure-sends", "server/routes/web-push.ts", "try { claim = deps.store.claimTestPing() } catch { return res.status(503).json({ ok: false, status: 0, reason: 'cap_unavailable', removed: false }) }", "try { claim = deps.store.claimTestPing() } catch { claim = { ok: true } }", "a count that cannot be written sends nothing", ["server/routes/web-push.test.ts"]]
+  ["cap-write-failure-sends", "server/routes/web-push.ts", "try { claim = deps.store.claimTestPing() } catch { return res.status(503).json({ ok: false, status: 0, reason: 'cap_unavailable', removed: false }) }", "try { claim = deps.store.claimTestPing() } catch { claim = { ok: true } }", "a count that cannot be written sends nothing", ["server/routes/web-push.test.ts"]],
+  ["bad-lastat-kept", "server/lib/web-push-store.ts", "      this.write('test-pings.json', { day, count, lastAt: now })\n", "", "a far-future lastAt", ["server/routes/web-push.test.ts"]],
+  ["future-day-fresh", "server/lib/web-push-store.ts", "(storedDay === day || storedDay > day)", "(storedDay === day)", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

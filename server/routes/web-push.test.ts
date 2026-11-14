@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import express from 'express'
 import { createDecipheriv, createECDH, hkdfSync, verify } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -341,9 +341,34 @@ describe('X1 web push: the test-ping cap and the key behind the sign-in (lead 10
     const r = rig()
     const base = await app(r.store, r.post)
     expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
-    r.clock.now -= 30_000
+    r.clock.now -= 5_000
     expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'too_soon' })
     expect(r.sent).toHaveLength(1)
+  })
+
+  it('a far-future lastAt (the clock set back an hour, or a damaged file) locks for at most one gap, never until real time catches up (lead 10:4x)', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    r.clock.now -= 60 * 60_000
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'too_soon' })
+    r.clock.now += TEST_PING_GAP_MS
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    // A damaged file a year ahead: the same, one refusal, then free after one gap.
+    writeFileSync(join(r.dir, 'test-pings.json'), JSON.stringify({ day: '2026-11-14', count: 3, lastAt: r.clock.now + 365 * 24 * 60 * 60_000 }))
+    r.clock.now += 60_000
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'too_soon' })
+    r.clock.now += TEST_PING_GAP_MS
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    expect(r.sent).toHaveLength(3)
+  })
+
+  it('a day stamp in the future counts as today: a full count stays full, never a fresh 20 (lead 10:4x)', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    writeFileSync(join(r.dir, 'test-pings.json'), JSON.stringify({ day: '2099-01-01', count: TEST_PINGS_PER_DAY, lastAt: r.clock.now - 60_000 }))
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'daily_cap' })
+    expect(r.sent).toHaveLength(0)
   })
 
   it('a count that cannot be written sends nothing: 503 cap_unavailable, no POST (Q1 Q5)', async () => {
