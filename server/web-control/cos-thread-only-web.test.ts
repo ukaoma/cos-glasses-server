@@ -283,6 +283,54 @@ describe('7.0.39 thread candidate 2: Ask again is the next generation of the sam
   })
 })
 
+describe('7.0.41 thread candidate 2: Q1 12:58, the generation on every job call of a retried chat', () => {
+  // A retried chat at generation 2: Q1's owed tests.
+  async function retried(extra: Record<string, unknown> = {}) {
+    const h = load({ [H]: page([entry('g', { status: 'failed', answer: 'x', answerChars: 1, full: false, clientJobId: 'g', generation: 1 })]), ...extra })
+    h.chat._loadHistory(); await flush()
+    return h
+  }
+  it('a lost answer on a retry asks by-client at the retry\'s own generation', async () => {
+    const h = await retried({ 'POST /api/query-jobs': err(0, 'timeout'), '/api/query-jobs/by-client/g?generation=2': job({ jobId: 'jg' }) })
+    h.tap('hist-again', { 'data-id': 't:g' }); await flush()
+    expect(h.calls.some(c => c.path === '/api/query-jobs/by-client/g?generation=2')).toBe(true)
+    expect(h.calls.some(c => c.path === '/api/query-jobs/by-client/g?generation=1')).toBe(false)
+    expect(h.chat._state.asks[0].jobId).toBe('jg')
+  })
+  it('cancel and steer name the retry\'s generation', async () => {
+    const h = await retried({ 'POST /api/query-jobs': job({ jobId: 'jg' }) })
+    h.tap('hist-again', { 'data-id': 't:g' }); await flush()
+    h.chat._cancel('g'); h.chat._steer('g', 'shorter please'); await flush()
+    expect(h.posts('/api/query-jobs/jg/cancel')).toEqual([{ generation: 2 }])
+    expect(h.posts('/api/query-jobs/jg/steer')[0]).toMatchObject({ generation: 2, text: 'shorter please' })
+  })
+  it('this page\'s own card, refused on Ask again, is put back with why and keeps its button', async () => {
+    let n = 0
+    const h = load({ '/api/cos-thread?threadOnly=1': THREAD,
+      'POST /api/query-jobs': () => { n++; return n === 1 ? job({ jobId: 'j1' }) : err(409, 'cos_thread_off') }, '/api/health': HEALTH(true),
+      '/api/query-jobs/j1?generation=1&trail=1': job({ jobId: 'j1', status: 'failed', error: { code: 'provider_timeout' } }) })
+    h.chat._submitAsk('Retry me', null, () => {}, {})
+    await flush(); h.run(); await flush()
+    const a = h.chat._state.asks[0]
+    await h.chat._askAgain(a.cid); await flush()
+    expect(h.chat._state.asks.length).toBe(1)
+    expect(h.chat._state.asks[0]).toBe(a)
+    expect(a.retried).toBe(false)
+    expect(h.feed.innerHTML).toContain('Not sent. Drop it is off on your Mac now, so this page checked again. Ask again.')
+    expect(h.feed.innerHTML).toContain('data-cos="again" data-cid="' + a.cid + '"')
+  })
+  it('an Ask again that returns early (already being retried) leaves this page\'s card with its button', async () => {
+    const h = load({ '/api/cos-thread?threadOnly=1': THREAD, 'POST /api/query-jobs': job({ jobId: 'j1' }),
+      '/api/query-jobs/j1?generation=1&trail=1': job({ jobId: 'j1', status: 'failed' }) })
+    h.chat._submitAsk('Stuck?', null, () => {}, {})
+    await flush(); h.run(); await flush()
+    const a = h.chat._state.asks[0]
+    h.chat._state.hist.retrying[a.cid] = true
+    expect(await h.chat._askAgain(a.cid)).toBe(null)
+    expect(a.retried).toBe(false)
+  })
+})
+
 describe('7.0.39 thread candidate 2: ends cut by the byte cap (S1 5632c3fb)', () => {
   it('a page with only ends and more: true reads on, until a page says no more', async () => {
     const reads: string[] = []

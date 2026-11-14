@@ -1449,16 +1449,18 @@
       Number.isInteger(e.generation) && e.generation >= 1;
   }
   // POST /api/query-jobs, and on a lost answer the job by its client id and generation before anything is called failed.
+  // Named `attempt`, not `admit`: two server canaries (drop-canary-11, web-parity-canary-12) read submitAsk's request out
+  // of this file from submitAsk's start to its own admit line, so no line above submitAsk may define (or quote) it.
   function admitJob(a, body) {
-    var admit = function (retry) {
+    var attempt = function (retry) {
       return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 }).catch(function (err) {
         if (err && err.code === 'timeout') {
-          return api('/api/query-jobs/by-client/' + a.cid + '?generation=' + (a.gen || 1)).catch(function () { if (retry) return admit(false); throw err; });
+          return api('/api/query-jobs/by-client/' + a.cid + '?generation=' + (a.gen || 1)).catch(function () { if (retry) return attempt(false); throw err; });
         }
         throw err;
       });
     };
-    return admit(true);
+    return attempt(true);
   }
   // The two refusals a thread-only Ask can meet (S1's contract), in words; '' for any other.
   // thread_session_web_only (409): an Ask without the thread mark named the thread's conversation. This page's read of the
@@ -1481,7 +1483,8 @@
    *  why when the Retry is not taken; without one (a history card), the why is drawn on that card. */
   function retryJob(src) {
     var R = C.hist;
-    if (!askOn() || R.retrying[src.cid]) return Promise.resolve(null);
+    // Not sent: this page's own card keeps its Ask again (Q1 12:58: `retried` stayed set on an early return).
+    if (!askOn() || R.retrying[src.cid]) { if (src.old) src.old.retried = false; return Promise.resolve(null); }
     R.retrying[src.cid] = true; delete R.retryErr[src.cid];
     var a = threadAsk(src.cid, src.gen + 1, src.query, src.at, src.threadId, src.attachmentIds, src.atts);
     C.asks = C.asks.filter(function (x) { return x.cid !== src.cid; });
@@ -1625,6 +1628,7 @@
     if (opts.attachmentIds && opts.attachmentIds.length) body.attachmentIds = opts.attachmentIds.slice(0, MAX_ATTS);
     if (C.caps && C.caps.steer) body.steerable = true;
     // A lost answer: the job may exist. admitJob asks for it by its client id before saying anything failed.
+    var admit = function () { return admitJob(a, body); };
     var prepare = (a.threaded ? threadPlan().then(function (plan) {
       a.conv.threadId = threadIdOf(C.thread);
       if (plan.sessionId) { body.sessionId = plan.sessionId; C.threadSession = plan.sessionId; }
@@ -1637,7 +1641,7 @@
       if (opts.expect && !sameConversation(opts.expect, a)) throw Object.assign(new Error(MOVED_ON), { code: 'conversation_moved' });
       withContext(body, opts.context, opts.contextRef);
     });
-    prepare.then(function () { return admitJob(a, body); }).then(function (d) {
+    prepare.then(admit).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
       take(a, job);
       var before = defaultSession();
@@ -2882,6 +2886,7 @@
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
-    _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread
+    _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
+    _steer: steer, _cancel: cancel
   };
 })();
