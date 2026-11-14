@@ -5407,6 +5407,27 @@ describe('X1 7.0.38: the ask check over the real tracker (age-out, switch off, r
     expect(after.calls).toHaveLength(0)
   })
 
+  it('a peer session\'s message moved the session on (last night\'s case 1): refused as moved, NOT answered, so the page keeps Send anyway', async () => {
+    const r = rig(null)
+    r.feed(asked()); await r.tracker.tick()
+    r.feed([env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<cross-session-message from="local_c45644bf">Lead to X1: run a readiness check</cross-session-message>', prompt_id: 'p-peer' })])
+    const res = await answer(r, 'ct-rt-0010')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+    expect(typeof res.body.revision).toBe('string')
+    expect(r.calls).toHaveLength(0)
+  })
+
+  it('the same through a restart: the replayed peer message still reads as moved on, never answered at the Mac', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<task-notification>\n<task-id>b1</task-id> done</task-notification>', prompt_id: 'p-task' })])
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0011')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+  })
+
   it('KNOWN WINDOW (not fixed here): a first answer accepted before the restart whose prompt never reached the ledger leaves the ask open, so a second answer after the restart is delivered too', async () => {
     const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
     const before = rig(ledger)

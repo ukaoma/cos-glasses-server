@@ -674,6 +674,39 @@ describe('the runtime: deriveForRow and the counters', () => {
     }
   })
 
+  it('X1 7.0.38: a prompt the machine wrote clears the ask as moved on, never as answered; one he typed is still his answer', async () => {
+    const tracker = new TurnEndAskTracker({ now: () => T0 + 200_000, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    trackers.push(tracker)
+    __setTurnEndAskTrackerForTests(tracker)
+    const off = sessionSignalStore.subscribe((signal, e, child) => tracker.observe(e, child, signal))
+    try {
+      for (const machine of [
+        '<cross-session-message from="local_1">Lead to X1: go</cross-session-message>',
+        '<task-notification>\n<task-id>b1</task-id></task-notification>',
+        '<system-reminder>\nThe session was compacted.</system-reminder>',
+        '<scheduled-task name="nightly">run</scheduled-task>',
+        '<agent-message from="a1">done</agent-message>',
+      ]) {
+        feed(); await tracker.tick()
+        const open = openTurnEndAsk(SID, T0 + 200_000)
+        expect(open).not.toBeNull()
+        const before = turnEndAskStats()!
+        sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: machine, prompt_id: 'p-machine' }), false)
+        expect(openTurnEndAsk(SID, T0 + 210_000)).toBeNull()
+        expect(turnEndAskAnswered(SID, open!.stoppedAt, T0 + 211_000)).toBeNull()
+        expect(turnEndAskStats()).toMatchObject({ clearedByTurn: before.clearedByTurn + 1, clearedByReply: before.clearedByReply })
+      }
+      for (const typed of ['<bash-input>ls</bash-input>', 'Commands run, go', 'Note <cross-session-message from="x"> quoted mid-text']) {
+        feed(); await tracker.tick()
+        const open = openTurnEndAsk(SID, T0 + 200_000)
+        sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: typed, prompt_id: 'p-typed' }), false)
+        expect(turnEndAskAnswered(SID, open!.stoppedAt, T0 + 211_000)).toMatchObject({ by: 'mac' })
+      }
+    } finally {
+      off()
+    }
+  })
+
   it('X1 7.0.36: openTurnEndAsk names the same ask the row shows (waiting_ask_id), and a new prompt clears it', async () => {
     expect(openTurnEndAsk(SID)).toBeNull()
     const tracker = new TurnEndAskTracker({ now: () => T0 + 200_000, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
