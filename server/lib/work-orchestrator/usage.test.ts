@@ -279,6 +279,11 @@ describe('7.0.39: an exception\'s own text never reaches a client', () => {
       const saved = { provider: 'claude' as const, reading: null, observedAt: null, source: 'probe' as const, lastError: raw, failures: 1, pausedUntil: null, limitUntil: null, limitSource: null, warning: false }
       expect(viewOf(saved, NOW).note).toBe('not read: unexpected error')
       expect(viewOf({ ...saved, lastError: 'exited 1 before answering' }, NOW).note).toBe('not read: exited 1 before answering')
+      // Q1 W4: only "exited <code> before answering" passes; a raw message that merely starts with "exited " does not.
+      expect(viewOf({ ...saved, lastError: 'exited /Users/someone/.local/bin/claude ENOENT' }, NOW).note).toBe('not read: unexpected error')
+      // Q1 W3: the window-ended note checks an older saved reason too.
+      const ended = { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct: 23, resetsAt: '2026-10-20T00:00:00Z' }] }
+      expect(viewOf({ ...saved, reading: ended }, NOW).note).toBe('not read since its window ended; last read failed: unexpected error')
     } finally { warn.mockRestore() }
   })
 })
