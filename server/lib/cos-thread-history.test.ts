@@ -254,13 +254,23 @@ describe('archivedAnswer: the day archive, read only and bounded', () => {
   })
 
   it('archiveDays steps by calendar day through both 2026 daylight-saving changes: no day repeated, none skipped (Q1 nit 3)', () => {
-    // Just after local midnight, where a 24-hour step lands on the same local day again when the clock falls back.
-    for (const start of [new Date(2026, 10, 1, 0, 30), new Date(2026, 2, 7, 23, 30), new Date(2026, 2, 8, 0, 30), new Date(2026, 9, 31, 23, 45)]) {
-      const days = archiveDays(start.getTime(), 5)
-      expect(days[0]).toBe(localDay(start.getTime()))
-      for (let i = 1; i < days.length; i++) {
-        expect(Date.parse(days[i] + 'T00:00:00Z') - Date.parse(days[i - 1]! + 'T00:00:00Z'), `${days.join(',')}`).toBe(86_400_000)
+    // Pinned to a zone with daylight saving, so the test guards on any machine, a UTC one included (Node applies a
+    // runtime TZ change at once, in a vitest worker too; checked 2026-11-14). Restored after.
+    const saved = process.env.TZ
+    process.env.TZ = 'America/Chicago'
+    try {
+      expect(new Date(2026, 10, 1, 0, 30).getTimezoneOffset()).not.toBe(new Date(2026, 10, 2, 0, 30).getTimezoneOffset())
+      // Just after local midnight, where a 24-hour step lands on the same local day again when the clock falls back.
+      for (const start of [new Date(2026, 10, 1, 0, 30), new Date(2026, 2, 7, 23, 30), new Date(2026, 2, 8, 0, 30), new Date(2026, 9, 31, 23, 45)]) {
+        const days = archiveDays(start.getTime(), 5)
+        expect(days[0]).toBe(localDay(start.getTime()))
+        for (let i = 1; i < days.length; i++) {
+          expect(Date.parse(days[i] + 'T00:00:00Z') - Date.parse(days[i - 1]! + 'T00:00:00Z'), `${days.join(',')}`).toBe(86_400_000)
+        }
       }
+    } finally {
+      if (saved === undefined) delete process.env.TZ
+      else process.env.TZ = saved
     }
   })
 
