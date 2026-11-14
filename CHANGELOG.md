@@ -1,6 +1,6 @@
-## 7.0.35 (unreleased) - Control Web: opening from the Home Screen never leaves a blank screen for good
+## 7.0.35 - Control Web: opening from the Home Screen never leaves a blank screen for good
 
-2026-11-13. Not published; the release bump drops "(unreleased)". Miles, 21:20: "I'm opening up the COS web application shortcut on the home screen and I'm being met with just a blank screen. The server never ends up loading." Scope: W1_blank_open_scope.md (the lead, 21:45).
+2026-11-13. 7.0.34 plus one change, the blank open fix. Everything in 7.0.34 is in this update too; see its entry below. Miles, 21:20: "I'm opening up the COS web application shortcut on the home screen and I'm being met with just a blank screen. The server never ends up loading." Scope: W1_blank_open_scope.md (the lead, 21:45).
 
 **On for everyone:**
 - **The mark draws at once.** The ten stylesheets no longer hold the first paint: theme.js adds them so they never block it, and each turns on when it arrives. The app starts only once every stylesheet and script has arrived or failed. A stylesheet that failed is asked for again in the background, and until it comes back the app shows without it, the same as 7.0.34. With JavaScript off, the stylesheets load as before.
