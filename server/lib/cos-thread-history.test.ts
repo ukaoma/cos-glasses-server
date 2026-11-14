@@ -7,7 +7,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSy
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  ANSWER_HEAD_CHARS, archivedAnswer, CosThread, cursorOf, HISTORY_MAX_BYTES, HISTORY_MAX_LIMIT, parseCursor,
+  ANSWER_HEAD_CHARS, archiveDays, archivedAnswer, CosThread, cursorOf, HISTORY_MAX_BYTES, HISTORY_MAX_LIMIT, parseCursor,
   type CosThreadChatEntry,
 } from './cos-thread.js'
 import { localDay } from './local-day.js'
@@ -176,6 +176,28 @@ describe('history pages', () => {
     expect(ids(h.make().historyPage({ limit: 40 }).entries)).toEqual([1, 2, 3].map(n => 't:' + cid(n)))
   })
 
+  it('rows written by someone else, or torn mid-row, never shift a later chat: offsets come from the file (Q1 nit 4)', () => {
+    const h = harness(); const t = h.make()
+    ask(t, 1)
+    const file = join(h.dir, 'ledger.jsonl')
+    appendFileSync(file, '{"kind":"foreign","at":"x"}\n')          // a whole row the store did not write
+    ask(t, 2)
+    appendFileSync(file, '{"kind":"turn","threadId":"th_0001","seg')  // a write torn mid-row
+    ask(t, 3)
+    expect(t.historyPage({ limit: 40 }).entries.map(e => e.question)).toEqual(['question 1', 'question 2', 'question 3'])
+    expect(h.make().historyPage({ limit: 40 }).entries.map(e => e.question)).toEqual(['question 1', 'question 2', 'question 3'])
+  })
+
+  it('a ledger swapped for a symlink after load is refused as unsafe, a 503 (Q1 T18)', () => {
+    const h = harness(); const t = h.make()
+    ask(t, 1)
+    const file = join(h.dir, 'ledger.jsonl')
+    const elsewhere = join(h.root, 'elsewhere.jsonl')
+    writeFileSync(elsewhere, readFileSync(file))
+    rmSync(file); symlinkSync(elsewhere, file)
+    expect(() => t.historyPage({ limit: 40 })).toThrow(expect.objectContaining({ code: 'cos_thread_unsafe', status: 503 }))
+  })
+
   it('a ledger changed under the index is a 503, never another chat', () => {
     const h = harness(); const t = h.make()
     ask(t, 1); ask(t, 2)
@@ -221,6 +243,27 @@ describe('archivedAnswer: the day archive, read only and bounded', () => {
     expect(archivedAnswer(dir, lookup, T0)).toBeUndefined()
     expect(archivedAnswer(dir, { ...lookup, messageNo: null }, T0)).toBe('by the words')
   })
+  it('the total budget: two files that each fit but not together; the second is not read (Q1 T9)', () => {
+    const later = day(T0 + 2 * 86_400_000)
+    const first = JSON.stringify({ chats: [], pad: 'p'.repeat(200) })
+    const body = JSON.stringify(chatDay('sess-0001', [['question 1', 'found', 101]]))
+    const dir = archive({ [day(T0)]: first, [later]: body })
+    const both = Buffer.byteLength(first) + Buffer.byteLength(body)
+    expect(archivedAnswer(dir, lookup, T0 + 9 * 86_400_000, { fileMax: 10_000, totalMax: both })).toBe('found')
+    expect(archivedAnswer(dir, lookup, T0 + 9 * 86_400_000, { fileMax: 10_000, totalMax: both - 1 })).toBeUndefined()
+  })
+
+  it('archiveDays steps by calendar day through both 2026 daylight-saving changes: no day repeated, none skipped (Q1 nit 3)', () => {
+    // Just after local midnight, where a 24-hour step lands on the same local day again when the clock falls back.
+    for (const start of [new Date(2026, 10, 1, 0, 30), new Date(2026, 2, 7, 23, 30), new Date(2026, 2, 8, 0, 30), new Date(2026, 9, 31, 23, 45)]) {
+      const days = archiveDays(start.getTime(), 5)
+      expect(days[0]).toBe(localDay(start.getTime()))
+      for (let i = 1; i < days.length; i++) {
+        expect(Date.parse(days[i] + 'T00:00:00Z') - Date.parse(days[i - 1]! + 'T00:00:00Z'), `${days.join(',')}`).toBe(86_400_000)
+      }
+    }
+  })
+
   it('never reads past today, past the lookahead, a file over its cap, past the total budget, a symlink or bad JSON', () => {
     const later = day(T0 + 3 * 86_400_000)
     const body = chatDay('sess-0001', [['question 1', 'found', 101]])

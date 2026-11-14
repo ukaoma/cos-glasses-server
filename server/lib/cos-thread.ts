@@ -387,7 +387,6 @@ export class CosThread {
   /** Every turn row, in ledger order: the history index. Never trimmed. */
   private readonly history: HistoryRef[] = []
   private readonly historyByClient = new Map<string, number>()
-  private ledgerBytes = 0
 
   constructor(private readonly deps: CosThreadDeps) {
     this.now = deps.now ?? Date.now
@@ -406,7 +405,6 @@ export class CosThread {
     const rows = this.readLedger()
     for (const { row, place } of rows) this.apply(row, place)
     this.ledgerRows = rows.length
-    this.ledgerBytes = existsSync(this.ledgerFile) ? lstatSync(this.ledgerFile).size : 0
     if (!this.order.length) {
       this.append({ kind: 'thread', id: this.newId(), at: this.iso() })
       return
@@ -422,7 +420,7 @@ export class CosThread {
     if (stat.isSymbolicLink() || !stat.isFile()) throw new CosThreadError('cos_thread_unsafe', 503)
     const bytes = readFileSync(this.ledgerFile)
     // A torn last row (a crash mid-append) must not swallow the next one: end the file with a newline first.
-    if (bytes.length && bytes[bytes.length - 1] !== 0x0a) this.appendRaw('\n')
+    if (bytes.length && bytes[bytes.length - 1] !== 0x0a) this.appendRaw('')  // appendRaw adds the missing newline
     const rows: Array<{ row: LedgerRow; place: RowPlace }> = []
     // Split on the newline BYTE so each row's place is its byte offset in the file (7.0.39 history index).
     let start = 0
@@ -495,22 +493,31 @@ export class CosThread {
     }
   }
 
-  private appendRaw(text: string): void {
-    const fd = openSync(this.ledgerFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
+  /**
+   * Appends `text` and answers where it starts, read from the file itself (7.0.39). The history index takes its offsets
+   * from this, so a short, failed or foreign write never shifts a later row. A file that does not end with a newline
+   * (a write torn mid-row) gets one first, so the new rows never join the torn one.
+   */
+  private appendRaw(text: string): { start: number } {
+    const fd = openSync(this.ledgerFile, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
     try {
       fchmodSync(fd, 0o600)
-      writeSync(fd, text)
+      const size = fstatSync(fd).size
+      let lead = ''
+      if (size > 0) {
+        const last = Buffer.alloc(1)
+        if (readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) lead = '\n'
+      }
+      writeSync(fd, lead + text)
       fsyncSync(fd)
+      return { start: size + lead.length }
     } finally { closeSync(fd) }
   }
   /** Ledger first, then memory, then the snapshot: a crash between them leaves a ledger the next open rebuilds from. */
   private append(...rows: LedgerRow[]): void {
     const lines = rows.map(r => JSON.stringify(r))
     const text = lines.join('\n') + '\n'
-    const base = this.ledgerBytes
-    this.appendRaw(text)
-    this.ledgerBytes = base + Buffer.byteLength(text)
-    let offset = base
+    let offset = this.appendRaw(text).start
     rows.forEach((row, i) => {
       const length = Buffer.byteLength(lines[i]!)
       this.apply(row, { offset, length })
@@ -612,7 +619,11 @@ export class CosThread {
    * changed under us) is a 503, never a wrong entry. */
   private readTurns(indexes: number[]): TurnRow[] {
     if (!indexes.length) return []
-    const fd = openSync(this.ledgerFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    let fd: number
+    // O_NOFOLLOW: a ledger swapped for a symlink is refused (ELOOP), and reads as unsafe, never as a 500.
+    try { fd = openSync(this.ledgerFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) } catch {
+      throw new CosThreadError('cos_thread_unsafe', 503)
+    }
     try {
       if (!fstatSync(fd).isFile()) throw new CosThreadError('cos_thread_unsafe', 503)
       return indexes.map(i => {
@@ -745,6 +756,17 @@ export function parseCursor(raw: unknown): number | null {
 }
 
 /**
+ * The turn's own local day and the `lookahead` calendar days after it, in order. Stepped by calendar day (noon local),
+ * never by 24 hours, so a daylight-saving change neither repeats a day nor skips one (Q1 2026-11-14).
+ */
+export function archiveDays(atMs: number, lookahead: number): string[] {
+  const start = new Date(atMs)
+  const out: string[] = []
+  for (let d = 0; d <= lookahead; d++) out.push(localDay(new Date(start.getFullYear(), start.getMonth(), start.getDate() + d, 12).getTime()))
+  return out
+}
+
+/**
  * 7.0.39: a chat's whole answer from the day archive, for a turn the live conversation no longer holds. Read only: a
  * day file is parsed only when it is a plain file under ARCHIVE_FILE_MAX_BYTES, all of them together stay under
  * ARCHIVE_TOTAL_MAX_BYTES, and nothing is quarantined or created. A session is archived on the day it was last used,
@@ -761,8 +783,7 @@ export function archivedAnswer(
   if (!Number.isFinite(atMs)) return undefined
   const today = localDay(now)
   let budget = limits.totalMax ?? ARCHIVE_TOTAL_MAX_BYTES
-  for (let d = 0; d <= lookahead; d++) {
-    const date = localDay(atMs + d * DAY_MS)
+  for (const date of archiveDays(atMs, lookahead)) {
     if (date > today) break
     const file = join(archiveDir, `${date}.json`)
     let size: number
