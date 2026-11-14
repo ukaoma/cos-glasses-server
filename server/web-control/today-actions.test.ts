@@ -5615,6 +5615,16 @@ describe('7.0.38: Today’s panel never queues or holds an answer', () => {
       expect((h.ta as any)._state.quote, 'no button either way').toBeNull()
     })
   }
+  it('X1 7.0.38: moved, but the server could not read the head (revision null): the moved line and NO Send anyway', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: null, askNow: null } } })
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session took another turn. Your answer to “Build Set D?” was not sent.')
+    expect((h.ta as any)._state.quote, 'nothing for a button to carry').toBeNull()
+    expect((h.ta as any)._state.note.quote ?? '').toBe('')
+    h.tap('te-quote'); await flush()
+    expect(turns(h)).toHaveLength(1)
+  })
   it('X1’s "session" surface: moved on because of a peer message (no answered field) reads as moved, with Send anyway', async () => {
     const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev5', askNow: null, answeredBy: 'session' } } })
     h.tap('turnend', '0')

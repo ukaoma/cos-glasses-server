@@ -185,6 +185,15 @@ describe('the reader’s card and its send', () => {
     expect(h.optsSent[0]).toEqual({ turnEndAskId: 'turn_end:7' })
     expect(h.status.at(-1)!.text).toBe('Already answered on another screen. “COS Control pane” was not sent.')
   })
+  it('X1 7.0.38: moved with revision null: the reader shows the moved line and NO Send anyway', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => { (h.r as any).teRefusal = { revision: null, askNow: null }; return Promise.resolve('moved') })
+    h.fns.readerMacPaint(h.r, false)
+    h.fns.sendTurnEndChoice(h.r, 0)
+    await flush()
+    expect(h.status.at(-1)!.text).toBe('The session took another turn. Your answer to “Where should the overnight mail intel show up first?” was not sent.')
+    expect(h.status.at(-1)!.action ?? '').toBe('')
+    expect((h.r as any).teQuote).toBeNull()
+  })
   it('7.0.38: a busy session: the reader’s line names the choice, with no button', async () => {
     const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => Promise.resolve('busy'))
     h.fns.readerMacPaint(h.r, false)
