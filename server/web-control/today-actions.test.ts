@@ -5493,7 +5493,7 @@ describe('7.0.38: Today’s panel never queues or holds an answer', () => {
     state_source: 'hook', waiting_kind: 'question', waiting_source: 'turn_end', waiting_detail: ASK, waiting_choices: ['Yes, build it', 'Not now'], waiting_ask_id: 'turn_end:1' }
   const model = () => ({ rows: [{ kind: 'session', key: 'claude|' + SID, title: 'Orchestrator asked: ' + ASK, why: 'Tap a choice or reply here', where: 'turnend',
     ask: ASK, choices: ['Yes, build it', 'Not now'], askId: 'turn_end:1' }] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true })
-  const turns = (h: { calls: Array<{ path: string }> }) => h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
+  const turns = (h: { calls: Array<{ method?: string; path: string; body?: any }> }) => h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
   const queued = (h: { calls: Array<{ method?: string; path: string }> }) => h.calls.filter(c => c.method === 'POST' && c.path === P('/queued-turns'))
   const opened = async (routes: Routes) => {
     const h = load({ data: { sessions: [TROW] }, routes, model: model(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
