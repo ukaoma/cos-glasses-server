@@ -1194,7 +1194,7 @@
   function sendQuoted() {
     var r = O.r, q = O.quote; if (!r || !q || r.sending) return;
     O.quote = null;
-    return choiceSend(r, K.turnEndQuote.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
+    return choiceSend(r, K.turnEndQuote.text(q.label, q.ask), { acknowledgedRevision: q.revision, turnEndSendAnyway: true }, q.label, q.ask);
   }
   function choiceSend(r, text, opts, label, ask) {
     var sentKey = teKey(O.wait);
@@ -1207,6 +1207,7 @@
       if (how === 'sent') { O.teSent = sentKey; O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' }; }
       else if (how === 'answered') { r.teRefusal = null; O.note = { text: Q.answered(label), kind: 'error' }; }
       else if (how === 'unconfirmed') { r.teRefusal = null; O.note = { text: Q.unconfirmed(), kind: 'error' }; }
+      else if (how === 'busy') O.note = { text: Q.busy(label), kind: 'error' };
       else if (how === 'moved' || how === 'changed') {
         // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
         var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;

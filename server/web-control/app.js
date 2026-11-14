@@ -2305,8 +2305,6 @@
   // the Mac's prompt, a reply IS the answer here, so Today and the reader offer the choices and the reply box. What is
   // sent is the contract's exact text: it never reads as typed at the desk, and the session may ask him to confirm.
   var TURN_END_PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: ';
-  // 7.0.38 (lead 07:16): an answer that would have waited for the session is not sent, and says so. No button.
-  var TURN_END_BUSY = 'Not sent. The session is working.';
   var TURN_END_LINE = 'A choice or a reply here reaches the session as a message from COS, not typed in the session, and the session may ask you to confirm.';
   /** The turn-end ask on a session row, or null: any other row, an older server, or the switch off. */
   function turnEndOf(s) {
@@ -2329,7 +2327,10 @@
     },
     answered: function (label) { return 'Already answered on another screen. \u201c' + label + '\u201d was not sent.'; },
     // Lead 00:54: an earlier answer to this ask went out and its delivery is unknown. Not "already answered", no button.
-    unconfirmed: function () { return 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.'; }
+    unconfirmed: function () { return 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.'; },
+    // 7.0.38 (lead 07:20): an answer the session was too busy to take now. It is never queued or held, and no button:
+    // a bare busy refusal does not say whether the question was answered, so a button here could send a duplicate.
+    busy: function (label) { return 'The session is working. \u201c' + label + '\u201d was not sent.'; }
   };
   /** The exact words a choice or a reply sends (contract v1): attributed to COS Control Web, never to the desk. */
   function turnEndPrompt(text) { return TURN_END_PREFIX + turnEndBare(text); }
@@ -2459,7 +2460,7 @@
     var q = r && r.teQuote;
     if (!q || r.sending) return;
     r.teQuote = null;
-    return turnEndSend(r, TURN_END_QUOTE.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
+    return turnEndSend(r, TURN_END_QUOTE.text(q.label, q.ask), { acknowledgedRevision: q.revision, turnEndSendAnyway: true }, q.label, q.ask);
   }
   function turnEndSend(r, text, opts, label, ask) {
     r.sending = true; r.teSending = true; readerMacPaint(r, r.waitingNow);
@@ -2480,6 +2481,7 @@
     if (how === 'sent') return sessionStatus(TURN_END_SENT(label));
     if (how === 'answered') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.answered(label), 'error'); }
     if (how === 'unconfirmed') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.unconfirmed(), 'error'); }
+    if (how === 'busy') return sessionStatus(TURN_END_QUOTE.busy(label), 'error');
     if (how === 'moved' || how === 'changed') {
       // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
       var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;
@@ -4405,6 +4407,7 @@
   function targetKey(provider, id) { return provider.length + ':' + provider + ':' + id.length + ':' + id; }
   var BINDING_REUSE_MS = 25 * 60000; // the server keeps a binding 30 min
   var PARKABLE_REFUSALS = /^(native_thread_working|native_target_busy|target_busy)$/;
+  var BINDING_LOST = 'COS lost its link to this session. Send again. Your message is still in the box.';
   // A binding is kept per browser, across reloads: the server allows one live binding per
   // thread, so a reload that forgot it would read its own binding as "target busy".
   var BINDINGS_KEY = 'cos_web_bindings';
@@ -5328,11 +5331,18 @@
     // Files go only to a server that said it takes them (threadTurnAttachments); the caller shows no clip otherwise.
     var files = draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {};
     if (!opts.held) view.status(r, 'Sending');
-    // 7.0.38 (lead 07:16, X1 07:12): an answer to a turn-end question is never queued and never held. It lands now or
-    // it is not sent: a queued or held answer went later with no ask id, whatever happened to the question. A tapped
-    // choice, the box's own answer and Send anyway all carry the contract words in front.
+    // 7.0.38 (lead 07:16 and 07:20, X1 07:12): an answer to a turn-end question is never held, and never queued except
+    // Send anyway. It lands now or it is not sent: a queued or held answer went later with no ask id, whatever happened
+    // to the question. A tapped choice, the box's own answer and Send anyway all carry the contract words in front.
+    // Send anyway (his deliberate tap; its words say the session has moved on) may wait in line, marked so the server's
+    // queue takes it; never behind COS's own turn, which only a timer would send.
     var answer = !opts.held && String(draft.text || '').indexOf(TURN_END_PREFIX) === 0;
-    var busy = function () { view.status(r, TURN_END_BUSY, 'error'); return 'busy'; };
+    var busy = function () {
+      var w = String(draft.text).slice(TURN_END_PREFIX.length).trim();
+      view.status(r, TURN_END_QUOTE.busy(w.length > 60 ? w.slice(0, 59).trim() + '\u2026' : w), 'error');
+      return 'busy';
+    };
+    var parkable = !answer || !!opts.turnEndSendAnyway;
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
       // 201 Created on success; any 2xx that says attached counts.
@@ -5349,7 +5359,7 @@
       // Any other refusal is permanent for this thread, and a parked message would never go.
       if (!at.ok) {
         var why = (at.refusal && at.refusal.reason) || '';
-        if (PARKABLE_REFUSALS.test(why)) return answer ? busy() : parkTurn(r, draft, at.refusal, opts);
+        if (PARKABLE_REFUSALS.test(why)) return parkable ? parkTurn(r, draft, at.refusal, opts) : busy();
         var copy = ((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.';
         if (opts.held) settleHeld(r, opts.held, 'refused', copy);
         else {
@@ -5365,7 +5375,7 @@
       r.stoppedAt = null;
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
         method: 'POST', timeoutMs: 25000,
-        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}, opts.turnEndAskId ? { turnEndAskId: opts.turnEndAskId } : {}),
+        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}, opts.turnEndAskId ? { turnEndAskId: opts.turnEndAskId } : {}, opts.turnEndSendAnyway ? { turnEndSendAnyway: true } : {}),
       }).then(function (t) {
         var b = t.body || {};
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
@@ -5378,7 +5388,7 @@
           return 'sent';
         }
         var reason = b.reason || '';
-        if (reason === 'native_thread_working') return answer ? busy() : parkTurn(r, draft, b, opts);
+        if (reason === 'native_thread_working') return parkable ? parkTurn(r, draft, b, opts) : busy();
         // COS's own reply is still running on this thread. The server's queue counts that
         // thread as free (the running child is COS's), so it cannot park this; the page holds
         // it under the same key and sends it the moment the reply ends.
@@ -5416,9 +5426,17 @@
         // 7.0.38 (Miles 11/14 07:14): binding_detached too. Every attach per send (the queue drain, the lens, the Mac)
         // takes the target from an idle binding past 90 s (registry IDLE_LEASE_YIELD_MS), and the page kept sending on
         // the one it remembered (localStorage, 25 min, so a reload did not help). Once per send, like the others.
-        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding|binding_detached)$/.test(reason) && !opts.reattached) {
+        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding|binding_detached)$/.test(reason)) {
+          // Forgotten in localStorage too (rememberBinding), also after the one retry, so the next tap starts clean.
           rememberBinding(provider, id, null);
-          return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
+          if (!opts.reattached) return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
+          // Lead (P1 accepted, 11/14): the fresh binding was taken too. The server's "Attach again" names a control this page does not
+          // have; say what to do here instead (matched by the reason code, never the server's sentence).
+          if (reason === 'binding_detached') {
+            if (opts.held) settleHeld(r, opts.held, 'refused', BINDING_LOST);
+            else view.status(r, BINDING_LOST, 'error');
+            return 'refused';
+          }
         }
         var refusedCopy = b.reasonCopy || 'The session did not take that message.';
         if (opts.held) settleHeld(r, opts.held, 'refused', refusedCopy);
@@ -5684,7 +5702,9 @@
     var view = viewOf(r);
     return apiAnswer(sessionPath(r.provider, r.id, '/queued-turns'), {
       method: 'POST', timeoutMs: 15000,
-      body: Object.assign({ cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text }, draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {}),
+      body: Object.assign({ cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text }, draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {},
+        // 7.0.38: only Send anyway's tap marks an answer the queue may take (X1's guard refuses any other).
+        opts && opts.turnEndSendAnyway ? { turnEndSendAnyway: true } : {}),
     }).then(function (q) {
       var b = q.body || {};
       if (b.queued === true || b.error === 'duplicate_turn') {

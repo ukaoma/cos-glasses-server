@@ -19,7 +19,7 @@ const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const TE_WORDS = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
   // eslint-disable-next-line no-new-func
-  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_BUSY: TURN_END_BUSY };')() as { TURN_END_PREFIX: string; TURN_END_BUSY: string }
+  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any }
 })()
 const TE_QUOTE = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
@@ -102,7 +102,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
     // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
     TURN_END_QUOTE: TE_QUOTE,
-    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_BUSY: TE_WORDS.TURN_END_BUSY,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -5434,6 +5434,7 @@ describe('7.0.38: binding_detached re-attaches once, through the normal attach p
     expect((turnsOn(h, 'b2')[0] as any).body.clientTurnId, 'the same key, so a send that did land is never repeated').toBe((turnsOn(h, 'b1')[1] as any).body.clientTurnId)
     expect(h.els['ta-status']!.textContent).toBe('Sent. Watching for the reply.')
     expect(h.els['ta-status']!.textContent).not.toContain('detached')
+    expect(JSON.parse(h.store.get('cos_web_bindings') || '{}')['claude|' + SID]?.bindingId, 'the retired one replaced in localStorage').toBe('b2')
     await send(h, 'Third')
     expect(turnsOn(h, 'b2'), 'the new binding is remembered for the next send').toHaveLength(2)
     expect(attaches(h)).toHaveLength(2)
@@ -5449,6 +5450,11 @@ describe('7.0.38: binding_detached re-attaches once, through the normal attach p
     expect(turnsOn(h, 'b2'), 'one try on the fresh binding').toHaveLength(1)
     expect(attaches(h), 'one re-attach, never two').toHaveLength(2)
     expect(h.els['ta-input']!.value).toBe('Second')
+    // Lead (P1 accepted): the page's own line, never the server's "Attach again" (there is no attach control here).
+    expect(h.els['ta-status']!.textContent).toBe('COS lost its link to this session. Send again. Your message is still in the box.')
+    expect(h.els['ta-status']!.textContent).not.toContain('Attach again')
+    // The dead binding is gone from localStorage too, so the next tap attaches fresh and a reload starts clean.
+    expect(JSON.parse(h.store.get('cos_web_bindings') || '{}')['claude|' + SID], 'no stored binding left').toBeUndefined()
     for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
     expect(turnsOn(h, 'b1').length + turnsOn(h, 'b2').length, 'nothing resends without a tap').toBe(3)
   })
@@ -5472,6 +5478,19 @@ describe('7.0.38: binding_detached re-attaches once, through the normal attach p
     expect(h.els['ta-verdict']!.innerHTML).toContain('Send into an open session?')
     expect(turnsOn(h, 'b2'), 'nothing sent before he answers').toHaveLength(1)
   })
+  it('after a double detach, the next tap attaches fresh and delivers (it recovers on the first tap after)', async () => {
+    let attachN = 0
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: () => ({ status: 201, body: { attached: true, bindingId: ['b1', 'b2', 'b3'][attachN++] || 'b9', epoch: 3 + attachN } }),
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: DETACHED,
+      ['POST /api/agent-sessions/bindings/b3/turns']: { status: 202, body: { outcome: 'queued' } } }
+    const h = await opened(routes)
+    await send(h, 'First'); await send(h, 'Second')
+    expect(h.els['ta-status']!.textContent).toContain('COS lost its link')
+    h.tap('send'); await flush()
+    expect(turnsOn(h, 'b3')).toHaveLength(1)
+    expect(h.els['ta-status']!.textContent).toBe('Sent. Watching for the reply.')
+  })
   it('the other five reasons still re-attach once (unchanged)', async () => {
     for (const reason of ['stale_epoch', 'binding_expired', 'binding_not_active', 'binding_unusable', 'unknown_binding']) {
       const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
@@ -5487,7 +5506,7 @@ describe('7.0.38: binding_detached re-attaches once, through the normal attach p
 // ── 7.0.38 (lead 07:16): in Today's panel too, an answer lands now or is not sent ──
 describe('7.0.38: Today’s panel never queues or holds an answer', () => {
   const PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: '
-  const BUSY = 'Not sent. The session is working.'
+  const BUSY = 'The session is working. “Yes, build it” was not sent.'
   const ASK = 'Build Set D?'
   const TROW = { session_id: SID, provider: 'claude', display_label: 'Orchestrator', alive: true, running: true, running_active: false, agent_state: 'waiting',
     state_source: 'hook', waiting_kind: 'question', waiting_source: 'turn_end', waiting_detail: ASK, waiting_choices: ['Yes, build it', 'Not now'], waiting_ask_id: 'turn_end:1' }
@@ -5532,26 +5551,76 @@ describe('7.0.38: Today’s panel never queues or holds an answer', () => {
     await flush()
     expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'Yes, and Set E')
     expect(queued(h)).toHaveLength(0)
-    expect(h.els['ta-status']!.textContent).toBe(BUSY)
+    expect(h.els['ta-status']!.textContent).toBe('The session is working. “Yes, and Set E” was not sent.')
     expect(h.els['ta-input']!.value).toBe('Yes, and Set E')
   })
-  it('Send anyway on a busy session: not queued, the line, and the button is spent', async () => {
-    const MOVED = { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', askNow: null } }
+  // 7.0.38 (lead 07:20, item 4): Send anyway is his deliberate tap and its words say the session moved on, so it may
+  // wait in line, once per tap, marked so the server's queue takes it. Never behind COS's own turn (only a timer would send it).
+  const MOVED = { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', askNow: null } }
+  it('Send anyway on a busy session: one queued turn with the marker and no ask id, the ordinary waiting status, once per tap', async () => {
     const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED : { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })
     h.tap('turnend', '0')
     await flush()
     expect(h.els['ta-status']!.innerHTML).toContain('data-ta="te-quote"')
-    h.tap('te-quote')
+    h.tap('te-quote'); h.tap('te-quote')
     await flush()
     expect(turns(h)).toHaveLength(2)
-    expect(queued(h)).toHaveLength(0)
-    expect(h.els['ta-status']!.textContent).toBe(BUSY)
-    // (The fake element keeps its old innerHTML when textContent is set; the page's own state is the evidence.)
-    expect((h.ta as any)._state.quote, 'no button behind the line').toBeNull()
-    expect((h.ta as any)._state.note.quote ?? '').toBe('')
+    expect(turns(h)[1]!.body.turnEndSendAnyway).toBe(true)
+    expect('turnEndAskId' in turns(h)[1]!.body).toBe(false)
+    expect(queued(h), 'one queued turn').toHaveLength(1)
+    const q = queued(h)[0] as any
+    expect(q.body.turnEndSendAnyway).toBe(true)
+    expect('turnEndAskId' in q.body).toBe(false)
+    expect(q.body.prompt.indexOf(PREFIX)).toBe(0)
+    expect(h.els['ta-status']!.textContent).not.toContain('was not sent')
+    h.tap('te-quote')
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(queued(h), 'the button is spent; nothing more by timer').toHaveLength(1)
+  })
+  it('Send anyway behind COS’s own turn (native_turn_in_progress): not held, the busy line with its label, no button', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED : { status: 409, body: { outcome: 'refused', reason: 'native_turn_in_progress' } } })
+    h.tap('turnend', '0')
+    await flush()
     h.tap('te-quote')
     await flush()
-    expect(turns(h), 'the button is spent').toHaveLength(2)
+    expect(h.els['ta-status']!.textContent).toBe(BUSY)
+    expect((h.ta as any)._state.quote).toBeNull()
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(turns(h)).toHaveLength(2)
+    expect(queued(h)).toHaveLength(0)
+  })
+  it('a plain answer (no marker) is never queued even if a caller passed a revision', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })
+    h.els['ta-input']!.value = 'Yes'
+    ;(h.ta as any)._send({ acknowledgedRevision: 'rev1' })
+    await flush()
+    expect(queued(h)).toHaveLength(0)
+  })
+  // His exact 07:01 sequence (sent, the session working, a second tap), under both server orders.
+  for (const order of ['busy gates first (7.0.37)', 'ask check first (X1 7.0.38)']) {
+    it(`his exact sequence, ${order}: the second tap sends nothing more and says why`, async () => {
+      let n = 0
+      const second = order.startsWith('busy') ? { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } }
+        : { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, answeredBy: 'web', askNow: null } }
+      const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: () => (++n === 1 ? { status: 200, body: { outcome: 'completed', via: 'live' } } : second) })
+      h.tap('turnend', '0')
+      await flush()
+      expect(h.els['ta-status']!.textContent).toContain('Sent “Yes, build it”')
+      h.tap('turnend', '0')
+      await flush()
+      for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+      expect(turns(h), 'one more try, refused').toHaveLength(2)
+      expect(queued(h), 'nothing queued').toHaveLength(0)
+      expect(h.els['ta-status']!.textContent).toBe(order.startsWith('busy') ? BUSY : 'Already answered on another screen. “Yes, build it” was not sent.')
+      expect((h.ta as any)._state.quote, 'no button either way').toBeNull()
+    })
+  }
+  it('X1’s "session" surface: moved on because of a peer message (no answered field) reads as moved, with Send anyway', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev5', askNow: null, answeredBy: 'session' } } })
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session took another turn. Your answer to “Build Set D?” was not sent.')
+    expect((h.ta as any)._state.quote).toEqual({ label: 'Yes, build it', ask: 'Build Set D?', revision: 'rev5' })
   })
   it('an ordinary message from the box once the question is closed is still queued (unchanged)', async () => {
     const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })

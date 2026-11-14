@@ -185,6 +185,14 @@ describe('the reader’s card and its send', () => {
     expect(h.optsSent[0]).toEqual({ turnEndAskId: 'turn_end:7' })
     expect(h.status.at(-1)!.text).toBe('Already answered on another screen. “COS Control pane” was not sent.')
   })
+  it('7.0.38: a busy session: the reader’s line names the choice, with no button', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => Promise.resolve('busy'))
+    h.fns.readerMacPaint(h.r, false)
+    h.fns.sendTurnEndChoice(h.r, 0)
+    await flush()
+    expect(h.status.at(-1)).toEqual({ text: 'The session is working. “Good Morning + Today” was not sent.', kind: 'error' })
+    expect((h.r as any).teQuote ?? null).toBeNull()
+  })
   it('7.0.38: a card WITHOUT an id still reads the row (unchanged), even when one was drawn', () => {
     const h = reader(ROW)
     h.fns.readerMacPaint(h.r, false)
@@ -225,7 +233,7 @@ describe('the reader’s card and its send', () => {
     h.fns.sendTurnEndQuoted(h.r); h.fns.sendTurnEndQuoted(h.r)
     await flush()
     expect(h.sent).toEqual([PREFIX + 'Good Morning + Today', PREFIX + 'Good Morning + Today. This answers your earlier question “Where should the overnight mail intel show up first?”. You have taken a turn since asking it.'])
-    expect(h.optsSent[1]).toEqual({ acknowledgedRevision: 'rev9' })
+    expect(h.optsSent[1], '7.0.38: the tap’s own marker, so the queue may take it').toEqual({ acknowledgedRevision: 'rev9', turnEndSendAnyway: true })
     expect(h.status.at(-1)).toEqual({ text: 'Sent “Good Morning + Today”. It reaches the session as a message from COS; it may ask you to confirm.', kind: undefined })
     h.fns.sendTurnEndQuoted(h.r)
     expect(h.sent, 'the button is spent').toHaveLength(2)

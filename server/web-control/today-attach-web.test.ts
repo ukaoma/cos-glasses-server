@@ -21,7 +21,7 @@ const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const TE_WORDS = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
   // eslint-disable-next-line no-new-func
-  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_BUSY: TURN_END_BUSY };')() as { TURN_END_PREFIX: string; TURN_END_BUSY: string }
+  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any }
 })()
 const TE_QUOTE = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
@@ -102,7 +102,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
     // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
     TURN_END_QUOTE: TE_QUOTE,
-    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_BUSY: TE_WORDS.TURN_END_BUSY,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -961,7 +961,7 @@ function readerPage(o: { routes?: Routes; health?: Record<string, unknown> } = {
     clock: () => '9:00', fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0,
     document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } }, window: { COSWeb: { cosChat: c.chat }, scrollTo: () => {} }, loadSessions: () => {},
-    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_BUSY: TE_WORDS.TURN_END_BUSY,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_QUOTE: TE_WORDS.TURN_END_QUOTE,
   }
   // eslint-disable-next-line no-new-func
   const page = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) +
@@ -1162,7 +1162,7 @@ describe('6.99.27: the Sessions reader’s box (Fork and Send) takes photos and 
 
 // ── 7.0.38 (lead 07:16, X1 07:12): an answer to a turn-end question is never queued and never held ──
 describe('7.0.38: the reader never queues or holds an answer; an ordinary message still waits as before', () => {
-  const BUSY = 'Not sent. The session is working.'
+  const BUSY = 'The session is working. “Yes, build it” was not sent.'
   const ANSWER = TE_WORDS.TURN_END_PREFIX + 'Yes, build it'
   const queued = (t: ReturnType<typeof readerPage>) => t.calls.filter(x => x.method === 'POST' && x.path === P('/queued-turns'))
   for (const reason of ['native_thread_working', 'native_target_busy', 'target_busy']) {
