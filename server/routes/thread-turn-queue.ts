@@ -440,7 +440,8 @@ export async function drainThread(
     if (turn.status !== 'waiting') continue
     // X1 (7.0.38): a row in the answer's words, parked before the doors refused them, is settled here and never
     // delivered, mid-turn or after: it would answer whatever the session asks by now. Settled, so it reads "Not sent".
-    if (isTurnEndAnswerPrompt(turn.prompt)) {
+    // A Send anyway row (`turnEndSendAnyway`) goes on like any other: he chose to send it late.
+    if (isTurnEndAnswerPrompt(turn.prompt) && turn.turnEndSendAnyway !== true) {
       turn.status = 'refused'
       turn.reason = TURN_END_ANSWER_NOT_QUEUED
       turn.settledAt = deps.now()
@@ -899,8 +900,10 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     }
     // X1 (7.0.38): an answer is never queued. Here, after the gate, so a free thread still answers thread_free and the
     // client sends the answer now through the turns route, where its ask is checked; and before the steer, which would
-    // put it into the running turn just as late.
-    if (isTurnEndAnswerPrompt(prompt)) {
+    // put it into the running turn just as late. The one exception (lead 07:20) is the Send anyway button's tap, which
+    // says so with `turnEndSendAnyway: true` and whose words name the earlier question; never inferred from the words.
+    const sendAnyway = body.turnEndSendAnyway === true
+    if (isTurnEndAnswerPrompt(prompt) && !sendAnyway) {
       return res.status(409).json({ error: TURN_END_ANSWER_NOT_QUEUED, reasonCopy: TURN_END_ANSWER_NOT_QUEUED_COPY })
     }
 
@@ -919,6 +922,8 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       queuedAt: now, status: 'waiting', attempts: 0,
       // 6.62.0 /qa (Q3): the acknowledgement travels with the row to its drain.
       ...(continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]) ? { continueNoteAck: true as const } : {}),
+      // X1 (7.0.38): the Send anyway mark rides with the row to its drain, and only on words that need it.
+      ...(sendAnyway && isTurnEndAnswerPrompt(prompt) ? { turnEndSendAnyway: true as const } : {}),
       ...(attach.ids.length > 0 ? { attachmentIds: attach.ids } : {}),
     }
 

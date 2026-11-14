@@ -162,6 +162,36 @@ describe('X1 7.0.38: an answer is never queued', () => {
     expect(readQueue('claude', threadId, clock)[0]).toMatchObject({ status: 'refused', reason: TURN_END_ANSWER_NOT_QUEUED })
   })
 
+  it('Send anyway (lead 07:20): the button\'s mark lets its quoted answer wait in line, and the drain delivers it', async () => {
+    await start()
+    const quoted = WEB + '. This answers your earlier question “Approve the plan?”. You have taken a turn since asking it.'
+    const res = await http('POST', POST, { clientTurnId: 'ct-anq-sa-0001', cosSessionId: 'cos-1', prompt: quoted, turnEndSendAnyway: true })
+    expect(res.status).toBe(202)
+    expect(readQueue('claude', threadId, clock)[0]).toMatchObject({ clientTurnId: 'ct-anq-sa-0001', status: 'waiting', turnEndSendAnyway: true })
+    gate = { attachable: true, reason: null }; ended = true; activity = 'idle'
+    await drainThread('claude', threadId, deps())
+    expect(delivered).toEqual(['ct-anq-sa-0001'])
+  })
+
+  it('the mark is never inferred, never truthy-ish, and never copied: words alone, "true" as a string, and Send again all refuse', async () => {
+    await start()
+    const quoted = WEB + '. This answers your earlier question “Approve the plan?”. You have taken a turn since asking it.'
+    for (const [id, extra] of [['ct-anq-sa-0002', {}], ['ct-anq-sa-0003', { turnEndSendAnyway: 'true' }], ['ct-anq-sa-0004', { turnEndSendAnyway: 1 }]] as const) {
+      const res = await http('POST', POST, { clientTurnId: id, cosSessionId: 'cos-1', prompt: quoted, ...extra })
+      expect(res.json.error).toBe(TURN_END_ANSWER_NOT_QUEUED)
+    }
+    writeQueue('claude', threadId, [row('ct-anq-sa-0005', quoted, { status: 'refused', reason: 'delivery_attempts_exhausted', settledAt: clock, turnEndSendAnyway: true })])
+    const again = await http('POST', `${POST}/ct-anq-sa-0005/resend`, { clientTurnId: 'ct-anq-sa-0006', cosSessionId: 'cos-1' })
+    expect(again.json.error).toBe(TURN_END_ANSWER_NOT_QUEUED)
+  })
+
+  it('the mark on a typed message is dropped, not stored: only words that need it carry it', async () => {
+    await start()
+    const res = await http('POST', POST, { clientTurnId: 'ct-anq-sa-0007', cosSessionId: 'cos-1', prompt: 'typed', turnEndSendAnyway: true })
+    expect(res.status).toBe(202)
+    expect('turnEndSendAnyway' in readQueue('claude', threadId, clock)[0]!).toBe(false)
+  })
+
   it('the row\'s reason line fits the queue column', () => {
     expect(TURN_END_ANSWER_NOT_QUEUED_COPY.length).toBeLessThanOrEqual(QUEUED_TURN_REASON_COPY_MAX)
     expect(queuedTurnReasonCopy(TURN_END_ANSWER_NOT_QUEUED)!.length).toBeLessThanOrEqual(QUEUED_TURN_REASON_COPY_MAX)

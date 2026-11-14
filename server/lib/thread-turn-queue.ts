@@ -95,6 +95,12 @@ export interface QueuedThreadTurn {
    * only for a client that said it would show it. Absent: the 6.61 Ask posture.
    */
   continueNoteAck?: true
+  /**
+   * X1 (7.0.38, lead 07:20): set only by Control Web's Send “<label>” anyway button (`turnEndSendAnyway: true` on the
+   * park). The one turn in the answer's words that may wait in line: its words name the earlier question. Without it the
+   * doors refuse the words and the drain never delivers them.
+   */
+  turnEndSendAnyway?: true
   // ---------------------------------------------------------------- 6.78.0 (P3)
   // Every field below is OPTIONAL and written only while its flag is on, so with
   // COS_QUEUE_RECONCILE, COS_QUEUE_RESEND and COS_SESSION_STEER all off a queue file is

@@ -5050,7 +5050,8 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(timing).not.toContain('readiness')
     expect(h.calls).toHaveLength(1)
     expect(h.calls[0]!.prompt).toContain('Yes, check readiness')
-    expect(h.seen).toEqual([SID])
+    // 7.0.38: read twice, before the busy gates (a closed ask is told apart from busy) and after them (an open ask is marked).
+    expect(h.seen).toEqual([SID, SID])
   })
 
   it('the session took another turn (a newer ask is open): refused turn_end_ask_moved with the new ask and a revision; the quoted send with that revision delivers', async () => {
@@ -5421,7 +5422,7 @@ describe('X1 7.0.38: the ask check over the real tracker (age-out, switch off, r
 
   it('the same through a restart: the replayed peer message still reads as moved on, never answered at the Mac', async () => {
     const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
-    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<task-notification>\n<task-id>b1</task-id> done</task-notification>', prompt_id: 'p-task' })])
+    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<task-notification>\n<task-id>b1</task-id> ' + 'done '.repeat(150) + '</task-notification>', prompt_id: 'p-task' })])
     const after = await restarted(ledger)
     const res = await answer(after, 'ct-rt-0011')
     expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
@@ -5449,5 +5450,108 @@ describe('X1 7.0.38: the ask check over the real tracker (age-out, switch off, r
     // When the first-answer marks are kept across a restart, this becomes turn_end_ask_moved (answered or unconfirmed).
     expect(second.body.outcome).toBe('completed')
     expect(after.calls).toHaveLength(1)
+  })
+})
+
+// X1 (7.0.38, lead 07:20): the ask is read BEFORE the busy gates. A tap on a closed question while the session works came
+// back as plain busy, so the page could not tell "already answered" from "moved on"; and a second tap during an
+// in-flight first answer read busy instead of "unconfirmed". An open ask still meets the gates exactly as before.
+describe('X1 7.0.38: the ask is read before the busy gates', () => {
+  const ANSWER = 'Answer sent from COS Control Web through COS, not typed in this session: Approved'
+  const ASKED_AT = 1_794_640_000_000
+  const ID = `turn_end:${ASKED_AT}`
+  const theAsk = { ask: 'Approve the plan?', choices: ['Approved', 'Not yet'], stoppedAt: ASKED_AT }
+  function harness(opts: { ask: typeof theAsk | null; answeredBy?: string; held?: ReturnType<typeof heldDelivery> }) {
+    const state = { busy: false, ask: opts.ask }
+    const free = freeProbes(), working = workingProbes()
+    const toggled = new Proxy({} as OccupancyProbes, { get: (_t, k) => (state.busy ? working : free)[k as keyof OccupancyProbes] })
+    const calls: AttachedTurnRequest[] = []
+    const deps = writeDeps({
+      probes: toggled,
+      nativeHead: () => 'h-moved',
+      deliverAttachedTurn: opts.held ? opts.held.deliver : async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: 'h-moved' } },
+      openTurnEndAsk: () => state.ask,
+      turnEndAskAnswered: (_sid: string, at: number) => (opts.answeredBy && at === ASKED_AT ? { by: opts.answeredBy } : null),
+    })
+    return { state, calls, deps }
+  }
+  const tap = (base: string, a: Awaited<ReturnType<typeof attached>>, clientTurnId: string, extra: Record<string, unknown> = { turnEndAskId: ID }) =>
+    post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId, ...extra })
+
+  it('answered at the Mac, tapped while the session works: answered true, not busy, nothing delivered', async () => {
+    const h = harness({ ask: null, answeredBy: 'mac' })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.state.busy = true
+    const res = await tap(base, a, 'ct-early-0001')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'mac', askNow: null })
+    expect(typeof res.body.revision).toBe('string')
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('moved on, tapped while the session works: moved with askNow null and no answered, not busy', async () => {
+    const h = harness({ ask: null })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.state.busy = true
+    const res = await tap(base, a, 'ct-early-0002')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in res.body).toBe(false)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('a second tap during an in-flight first answer: unconfirmed, not native_turn_in_progress, never delivered twice', async () => {
+    const held = heldDelivery()
+    const h = harness({ ask: theAsk, held })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    const first = tap(base, a, 'ct-early-0003')
+    while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
+    const second = await tap(base, a, 'ct-early-0004')
+    expect(second.status).toBe(409)
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: 'unconfirmed', answeredBy: 'web', askNow: null })
+    expect(held.calls).toHaveLength(1)
+    held.open()
+    await first
+    expect(held.calls).toHaveLength(1)
+  })
+
+  it('an open ask with the session busy still gets the busy reason, and the refused tap uses nothing up: the next one goes', async () => {
+    const h = harness({ ask: theAsk })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.state.busy = true
+    const busy = await tap(base, a, 'ct-early-0005')
+    expect(busy.body.reason).toBe('native_thread_working')
+    expect(h.calls).toHaveLength(0)
+    h.state.busy = false
+    const again = await tap(base, a, 'ct-early-0006')
+    expect(again.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('an open ask behind another COS turn in flight still gets native_turn_in_progress', async () => {
+    const held = heldDelivery()
+    const h = harness({ ask: theAsk, held })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    const typed = post(base, turnsPath(a.bindingId), { prompt: 'a typed follow-up', epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-early-0007' })
+    while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
+    const res = await tap(base, a, 'ct-early-0008')
+    expect(res.body.reason).toBe('native_turn_in_progress')
+    held.open()
+    await typed
+  })
+
+  it('the Send anyway mark: refused with an ask id or as anything but true; with the revision and no id it is an ordinary send', async () => {
+    const h = harness({ ask: null })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    expect((await tap(base, a, 'ct-early-0009', { turnEndAskId: ID, turnEndSendAnyway: true })).body.reason).toBe('invalid_request')
+    expect((await tap(base, a, 'ct-early-0010', { turnEndSendAnyway: 'yes' })).body.reason).toBe('invalid_request')
+    const quoted = await tap(base, a, 'ct-early-0011', { turnEndSendAnyway: true, acknowledgedRevision: opaqueRevision('h-moved') })
+    expect(quoted.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
   })
 })
