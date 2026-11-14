@@ -64,6 +64,11 @@
    reads 0), so the page's viewport is not the screen and a sticky footer would draw mid-screen over the questions. It
    scrolls with the card instead, as with a keyboard up. */
 .sq-host.sq-vv-lost .sq-foot { position: static; }
+/* F1 (11/14, lead 16:46, W1's OK): in the Sessions reader the card scrolls inside #session-body, which is smaller than the
+   card at every size (110 px folded, 265 to 270 px wider, against about 356 px), so a sticky footer pinned itself over the
+   question and its options, and folded the reader opened showing only the footer. Here the footer scrolls with the card:
+   question, options, then Submit. Today's page and sheet keep the sticky footer. */
+#session-questions .sq-foot { position: static; }
 /* The Mac not answering: Submit, Allow and Deny wait, and say why (questions.js offline). */
 .sq-offline { margin: 8px 0 0; font-size: 13px; color: var(--sub); }
 /* 6.99.30 (canary): folded, a waiting question is one line over the pane (it filled the first screen of every pane);

@@ -1,3 +1,8 @@
+## 7.0.43 (unreleased)
+
+**On for everyone, one line each:**
+- Control Web: in a session's reader on a phone, a waiting question's card no longer draws "Not answered yet", Submit and Leave for the Mac on top of the question and its options. The reader's scroll area is smaller than the card (110 px folded), so the sticky footer pinned itself over them; in the reader the card now scrolls in order (question, options, then Submit). Today's page and sheet keep the sticky footer. (F1, lead 16:46, W1's OK; reader-qfoot-web.test.ts; measured on 7.0.42 in lanes/F1_evidence/reader_qcard_finding.md)
+
 ## 7.0.42 - Notes in the COS thread, COS's look-back by day, and https on the ts.net name that holds across a restart
 
 2026-11-14. 7.0.41 plus the changes below; everything in 7.0.41 is in this update too (see its entry).
