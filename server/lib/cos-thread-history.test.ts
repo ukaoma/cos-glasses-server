@@ -95,7 +95,7 @@ describe('history pages', () => {
     expect(t.historyPage({ limit: 0 }).entries).toHaveLength(1)
     for (let n = 4; n <= 105; n++) ask(t, n)
     expect(t.historyPage({ limit: 1000 }).entries).toHaveLength(HISTORY_MAX_LIMIT)
-  })
+  }, 30_000)   // 105 durable writes: about 5 s alone, more under a loaded counted suite (Q1 14:13)
 
   it('the same pages and cursors after a restart: the index is rebuilt from the ledger bytes, multibyte words included', () => {
     const h = harness(); const t = h.make()
