@@ -1,3 +1,37 @@
+## 7.0.41 - The COS chat is one thread with its history, and a chat sent in the thread stays in the thread
+
+2026-11-14. 7.0.40 plus the changes below; everything in 7.0.40 is in this update too (see its entry).
+
+**On for everyone, one line each:**
+- Control Web and server: the pinned COS chat is one running thread that shows its history, with a line for each day and a time on each chat. It opens on the latest chats and loads older ones as he scrolls up without moving what he is reading. New thread is gone. On for anyone with Drop it on; it has no switch of its own.
+- Control Web and server: a chat sent from the pinned COS chat stays in the thread and takes no message number: it is not in Messages or Recent and not on the glasses' list. The header reads "One running thread. What you ask here stays here." Replies from a message, and chats from the glasses, stay numbered messages as before.
+
+**In detail:**
+- **The pinned COS chat keeps its history.** (S1 server, W1 Control Web; Miles's pick A, "notes in flow".)
+  - It opens on the latest stretch: his words with their time, then COS's answer, with a line wherever the day changes ("Today, Saturday, November 14"). Older chats load as he scrolls up, and what he is reading stays exactly where it is (0 px in WebKit at 1x, 2x and 3x).
+  - A long answer shows its start with "Show all of it"; one whose rest was not kept says "Only the start of this answer was kept." A chat that had a message number shows it quietly beside the time ("#472"), so it matches Recent.
+  - The top says "This is the start of your COS thread." only at the true start; while loading, "Loading earlier entries."; a failed read says so with Try again.
+  - New thread is gone (Miles 11/13, his pick). The Mac app keeps its own New thread until 0.5.394.
+  - Server: `GET /api/cos-thread/history` and `GET /api/cos-thread/entry/:id` over the thread's existing ledger, advertised as `capabilities.dropIt.thread.history: 1`.
+- **A chat sent in the thread stays in the thread.** (S1 server, W1 Control Web; the same mock, thread A.)
+  - An Ask from the pinned chat's own box takes no message number, so the glasses' list has no gap and the message counter does not move. It is kept out of Messages, Recent, the archive and the glasses' list. A Reply from a message, and every chat from the glasses, is a numbered message as before.
+  - The server keeps the chat: the question when it starts, and the answer when it ends, in any status. A long answer is kept whole beside the thread, so "Show all of it" reads it from there. A crash between the end and the write is repaired at the next start.
+  - The card waits in place until the thread has the chat. A failed or stopped one shows what came through, says "This ask did not finish." or "This ask was stopped before it finished.", and offers Ask again, which retries the same chat (one entry, not two). A chat still running when the page opens (another tab, or after a reload) is followed live.
+  - The first chat after this update starts a fresh conversation that carries a short summary of the thread, because the thread's older conversation was a numbered one.
+  - A page or app older than this build still sends numbered chats; the page sends a thread-only one only when the server says it can (`features.cosThreadOnly`, on with durable jobs and Drop it). Refusals are said in words: "Drop it is off on your Mac now", and "This page asked outside your COS thread", each with his words kept in the box.
+  - The Mac app's and the glasses' own reads answer exactly as in 7.0.38 (a test holds them to the bytes).
+
+**Not seen on his phone yet (measured with route tests, Control Web tests against fake routes, and WebKit in a test browser):**
+- The thread's history on his real data at phone and Duo widths, and scrolling up through older days.
+- A chat sent from the thread on his phone: its card waiting until the thread has it, Ask again on a failed one, and following a chat still running after a reload.
+
+**Not covered, said plainly:**
+- **Glasses and Mac chats in the thread:** the timeline (notifications, session questions, meetings and glasses chats as one-line entries) is a later candidate; this build shows chats sent from the thread only.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+
 ## 7.0.40 - A quoted mark is no longer read as his answer, Work offers Claude first and stops trusting a usage reading whose window has ended, https for Control Web on the Mac's ts.net name (off), and the sender for one test ping to his iPhone (off)
 
 2026-11-14. 7.0.39 plus the changes below; everything in 7.0.39 is in this update too (see its entry).
