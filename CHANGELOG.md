@@ -7,7 +7,7 @@ Branch claude/server-tap-areas on 7.0.37 (F1, Set D; Miles 2026-11-14, "Yes, bui
 - **All messages and Mark all read** (Messages): 44 px of tap, from 36.
 - **Work's text buttons** (Open decisions and results, a card's Start work, the card page's buttons) and **Mentioned**: 44 px of tap, from 30 to 36.
 - **Work's stage menu**, on a card and on the card page: 44 px of tap, from 28 to 36. The menu looks the same and its row keeps its height.
-- **A Work card's foot** is 8 px taller from 600 px wide (37 to 45 px), so a card's buttons get their 44 px inside the card. Folded (under 600 px) it was already 49 px and does not change.
+- **A Work card's foot** is 2 px taller from 600 px wide (43 to 45 px), so a card's buttons get their 44 px inside the card (a card 112 to 114 px). Folded (under 600 px) it does not change.
 
 **Not covered, said plainly:**
 - **The chat's quote rows** are not in this change (they would add 263 px to the chat feed). Miles has not seen a picture of that.

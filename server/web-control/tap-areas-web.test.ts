@@ -86,6 +86,13 @@ describe('Set D: Work text buttons, Mentioned, the stage menu and the card foot'
     expect(rule(b!.body, '.wk-text-btn, .wk-menu-label')).toMatch(/position:\s*relative/)
     centredLayer(rule(b!.body, '.wk-text-btn::before, .wk-menu-label::before'))
   })
+  it('the board button above Mentioned reaches up, not down, so the two layers do not overlap (10 px apart)', () => {
+    const d = rule(b!.body, 'section.wk-board > .wk-text-btn::before')
+    expect(d).toMatch(/top:\s*auto/)
+    expect(d).toMatch(/bottom:\s*-3px/)
+    expect(d).toMatch(/transform:\s*none/)
+    expect(b!.body.indexOf('section.wk-board > .wk-text-btn::before')).toBeGreaterThan(b!.body.indexOf('.wk-text-btn::before, .wk-menu-label::before'))
+  })
   it('the card foot is at least 44 px inside its 1 px top rule, so the layer is not cut by the card edge', () => {
     expect(rule(WORK, '.wk-card')).toMatch(/overflow:\s*hidden/)
     expect(rule(WORK, '.wk-card-foot')).toMatch(/border-top:\s*1px/)

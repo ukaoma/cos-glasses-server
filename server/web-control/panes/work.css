@@ -332,11 +332,14 @@
    - The stage menu (a select takes no layer): the box grows to 44 with a transparent top and bottom border, pulled back by
      the same negative margin, so its row keeps its height; the visible edge is drawn inside (inset shadow), the menu's
      look and its chevrons are where they were.
-   - A card's foot: the card clips (overflow hidden), so the foot is at least 44 px inside (37 to 45 px from 600 px wide;
+   - A card's foot: the card clips (overflow hidden), so the foot is at least 44 px inside (43 to 45 px from 600 px wide;
      folded it is already 49) rather than a layer reaching over the card above it. */
 @media (any-pointer: coarse) {
   .wk-text-btn, .wk-menu-label { position: relative; }
   .wk-text-btn::before, .wk-menu-label::before { content: ''; position: absolute; left: -4px; right: -4px; top: 50%; height: max(44px, 100%); transform: translateY(-50%); }
+  /* The board's "Open decisions and results" sits 10 px above Mentioned, whose layer (later in the page) would take the
+     bottom 3 px of its own: this one reaches up instead, into the muted line above it, not down. */
+  section.wk-board > .wk-text-btn::before { top: auto; bottom: -3px; transform: none; }
   .wk-card-foot { min-height: 45px; }
   .wk-stage { --wk-tap: max(0px, calc((44px - var(--wk-stage-h)) / 2)); min-height: 44px; margin-block: calc(-1 * var(--wk-tap));
     border: solid transparent; border-width: var(--wk-tap) 0; border-radius: 7px / calc(7px + var(--wk-tap)); background-clip: padding-box;
