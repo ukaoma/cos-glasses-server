@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import {
   MAX_TURN_ASKS, TURN_ASK_BUSY_GRACE_MS, TURN_ASK_DESK_IDLE_MIN_S, TURN_ASK_MAX_AGE_MS, TURN_ASK_UNREADABLE_RETRY_MS, TURN_END_ASKS_DEFAULT,
   TurnEndAskTracker, WRAP_UP_TOOL, __setTurnEndAsksForTests, captureTurnAsk, projectedTurnAsk, turnEndAsksEnabled,
+  onTurnAskEvent, type TurnAskEvent,
 } from './turn-end-ask.js'
 import { isMachineOnlyPrompt, projectHookPayload, type HookEnvelope } from './session-hook-events.js'
 import { SessionSignalStore } from './session-signal-store.js'
@@ -896,6 +897,20 @@ describe('the runtime: deriveForRow and the counters', () => {
       }
     })
 
+    it('candidate 3: an ask replayed from the ledger at boot emits its breadcrumb with replay true, and live ones after with replay false', () => {
+      __setTurnEndAsksForTests(true)
+      const stoppedAt = ledgerWithAsk()
+      const seen: TurnAskEvent[] = []
+      const off = onTurnAskEvent(e => seen.push(e))
+      const runtime = startSessionHooksRuntime({ port: 3141 })
+      try {
+        expect(seen).toEqual([expect.objectContaining({ type: 'asked', sessionId: SID, at: stoppedAt, replay: true, question: 'Canary: which color?' })])
+      } finally {
+        off()
+        runtime.stop()
+      }
+    })
+
     it('on: the ask asked before the restart is armed and stopped again from the ledger', () => {
       __setTurnEndAsksForTests(true)
       ledgerWithAsk()
@@ -906,5 +921,129 @@ describe('the runtime: deriveForRow and the counters', () => {
         runtime.stop()
       }
     })
+  })
+})
+
+// X1 (candidate 3, S1 11:37): the COS thread's session-question breadcrumbs.
+describe('candidate 3: onTurnAskEvent, one asked and one settled per stopped ask', () => {
+  const PID2 = 'bebe20a1-0000-4000-8000-00000000c018'
+  let seen: TurnAskEvent[] = []
+  let off: () => void = () => {}
+  beforeEach(() => { seen = []; off = onTurnAskEvent(e => seen.push(e)) })
+  afterEach(() => off())
+  const key = `${SID}:${PROMPT}`
+  function asked(r: Rig) {
+    r.store.apply(env('UserPromptSubmit', T0 - 10_000, { prompt: 'go', prompt_id: PROMPT }), false)
+    r.store.apply(wrapUp(T0), false)
+    r.store.apply(stop(T0 + 4_700), false)
+  }
+
+  it('asked once at the stop; a web answer settles it with by web and the reply\'s own words, contract words and footer off', () => {
+    const r = rig()
+    r.store.apply(env('UserPromptSubmit', T0 - 10_000, { prompt: 'go', prompt_id: PROMPT }), false)
+    r.store.apply(wrapUp(T0), false)
+    expect(seen).toEqual([])
+    r.store.apply(stop(T0 + 4_700), false)
+    expect(seen).toEqual([{ type: 'asked', askKey: key, sessionId: SID, at: T0 + 4_700, replay: false, question: 'Canary: which color?', choices: ['Red', 'Blue'] }])
+    r.store.apply(env('UserPromptSubmit', T0 + 60_000, { prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Green, actually\n[COS-G2 turn ctg2-00000001 · verify: x]', prompt_id: PID2 }), false)
+    expect(seen[1]).toEqual({ type: 'settled', askKey: key, sessionId: SID, at: T0 + 60_000, replay: false, question: 'Canary: which color?', choices: ['Red', 'Blue'], outcome: 'answered', by: 'web', answer: 'Green, actually' })
+    expect(seen).toHaveLength(2)
+  })
+
+  it('an answer that is one of the choices carries answer null (the choice is already known)', () => {
+    const r = rig()
+    asked(r)
+    r.store.apply(env('UserPromptSubmit', T0 + 60_000, { prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Red', prompt_id: PID2 }), false)
+    expect(seen[1]).toMatchObject({ type: 'settled', outcome: 'answered', by: 'web', answer: null })
+  })
+
+  it('an ask that never stopped emits nothing, even when it is replied to or disarmed', () => {
+    const r = rig()
+    r.store.apply(wrapUp(T0), false)
+    r.store.apply(env('UserPromptSubmit', T0 + 1_000, { prompt: 'never mind', prompt_id: PID2 }), false)
+    r.store.apply(wrapUp(T0 + 2_000, C17_INPUT, { prompt_id: PID2 }), false)
+    r.store.apply(wrapUp(T0 + 3_000, { recap: 'no ask' }, { prompt_id: PID2 }), false)
+    expect(seen).toEqual([])
+  })
+
+  it('moved_on: a machine-only prompt, tool work of another turn, or a new ask replacing the stopped one', () => {
+    for (const next of [
+      env('UserPromptSubmit', T0 + 60_000, { prompt: '<cross-session-message from="local_1">Lead to X1: go</cross-session-message>', prompt_id: PID2 }),
+      env('PreToolUse', T0 + 60_000, { tool_name: 'Bash', prompt_id: PID2 }),
+      wrapUp(T0 + 60_000, C17_INPUT, { prompt_id: PID2 }),
+    ]) {
+      seen = []
+      const r = rig()
+      asked(r)
+      r.store.apply(next, false)
+      expect(seen[1]).toMatchObject({ type: 'settled', askKey: key, outcome: 'moved_on', at: T0 + 60_000 })
+      expect(seen[1]).not.toHaveProperty('answer')
+    }
+  })
+
+  it('session_ended: a session reset, or the row ending', () => {
+    for (const end of ['reset', 'row'] as const) {
+      seen = []
+      const r = rig()
+      asked(r)
+      if (end === 'reset') r.store.apply(env('SessionEnd', T0 + 60_000, { reason: 'exit' }), false)
+      else { r.clock.now = T0 + 70_000; r.tracker.sessionRowEnded(SID) }
+      expect(seen[1]).toMatchObject({ type: 'settled', askKey: key, outcome: 'session_ended' })
+    }
+  })
+
+  it('aged_out: read past 8 hours, or pruned past 8 hours when another session asks', () => {
+    const r = rig()
+    asked(r)
+    r.clock.now = T0 + 4_700 + TURN_ASK_MAX_AGE_MS + 1
+    expect(r.tracker.visibleAsk(SID)).toBeNull()
+    expect(seen[1]).toMatchObject({ type: 'settled', askKey: key, outcome: 'aged_out', at: r.clock.now })
+    seen = []
+    const r2 = rig()
+    asked(r2)
+    r2.clock.now = T0 + 4_700 + TURN_ASK_MAX_AGE_MS + 1
+    const OTHER = '8b2f1d66-2222-4333-8444-555566667777'
+    r2.store.apply(env('PostToolUse', r2.clock.now, { tool_name: WRAP_UP_TOOL, tool_input: C17_INPUT, prompt_id: PID2 }, OTHER), false)
+    expect(seen.filter(e => e.type === 'settled')).toEqual([expect.objectContaining({ askKey: key, outcome: 'aged_out' })])
+  })
+
+  it('a stop that came first: asked when the late wrap_up arms it, at the stop\'s time', () => {
+    const r = rig()
+    r.store.apply(stop(T0 + 4_700), false)
+    r.store.apply(wrapUp(T0), false)
+    expect(seen).toEqual([expect.objectContaining({ type: 'asked', askKey: key, at: T0 + 4_700 })])
+  })
+
+  it('words off (COS_WAITING_QUESTION_WORDS=0): no question, no choices, no answer', () => {
+    const r = rig()
+    r.words.on = false
+    asked(r)
+    r.store.apply(env('UserPromptSubmit', T0 + 60_000, { prompt: 'Green, actually', prompt_id: PID2 }), false)
+    expect(seen[0]).toMatchObject({ type: 'asked', question: null, choices: [] })
+    expect(seen[1]).toMatchObject({ type: 'settled', outcome: 'answered', by: 'mac', question: null, choices: [], answer: null })
+  })
+
+  it('during replay: replay true, and a reply carries no answer', () => {
+    const r = rig()
+    r.tracker.replaying = true
+    asked(r)
+    r.store.apply(env('UserPromptSubmit', T0 + 60_000, { prompt: 'Green, actually', prompt_id: PID2 }), false)
+    expect(seen.map(e => e.replay)).toEqual([true, true])
+    expect(seen[1]).toMatchObject({ outcome: 'answered', answer: null })
+  })
+
+  it('listeners run in order, a throwing one never stops the others or the tracker, and unsubscribe works', () => {
+    const order: string[] = []
+    const offA = onTurnAskEvent(() => { order.push('a'); throw new Error('boom') })
+    const offB = onTurnAskEvent(() => { order.push('b') })
+    try {
+      const r = rig()
+      asked(r)
+      expect(order).toEqual(['a', 'b'])
+      expect(r.tracker.visibleAsk(SID, T0 + 5_000)).toBeNull()
+      offA()
+      r.store.apply(env('SessionEnd', T0 + 60_000, { reason: 'exit' }), false)
+      expect(order).toEqual(['a', 'b', 'b'])
+    } finally { offA(); offB() }
   })
 })

@@ -160,6 +160,7 @@
     "!server/scripts/control-tsnet-https-mutation-gate.mjs",
     "!server/scripts/web-push-mutation-gate.mjs",
     "!server/scripts/answer-never-queued-mutation-gate.mjs",
+    "!server/scripts/turn-ask-events-mutation-gate.mjs",
     "!server/scripts/question-hold-default-mutation-gate.mjs",
     "!server/scripts/live-cues-v3-mutation-gate.mjs",
     "!server/scripts/mac-voice-assignment-6930-mutation-gate.mjs",

@@ -298,16 +298,23 @@ export function startSessionHooksRuntime(options: { port: number }): SessionHook
   // than the store's window go to the tracker only, never into the store, so every other signal replays as before.
   const trackerSince = tracker ? since - turnAskReplayExtraMs() : since
   let trackerOnly = 0
-  const replay = ledger.replay(trackerSince, (env, _key, child, entrypoint) => {
-    if (!enabled) return
-    if (env.ts < since) {
-      trackerOnly++
-      tracker?.observe(env, child, { entrypoint })
-      return
-    }
-    sessionSignalStore.apply(env, child)
-    if (entrypoint) sessionSignalStore.setEntrypoint(env.sessionId, entrypoint)
-  })
+  // X1 (candidate 3): breadcrumbs emitted during the replay say so (`replay: true`); S1 dedupes on askKey.
+  if (tracker) tracker.replaying = true
+  let replay: ReturnType<typeof ledger.replay>
+  try {
+    replay = ledger.replay(trackerSince, (env, _key, child, entrypoint) => {
+      if (!enabled) return
+      if (env.ts < since) {
+        trackerOnly++
+        tracker?.observe(env, child, { entrypoint })
+        return
+      }
+      sessionSignalStore.apply(env, child)
+      if (entrypoint) sessionSignalStore.setEntrypoint(env.sessionId, entrypoint)
+    })
+  } finally {
+    if (tracker) tracker.replaying = false
+  }
   replayed = { rows: replay.rows, applied: replay.applied - trackerOnly }
   ingester = startSpoolIngester({
     dir,

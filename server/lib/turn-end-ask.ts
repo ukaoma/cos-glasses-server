@@ -26,6 +26,7 @@
 import { readSwitch } from './env-switch.js'
 import { questionRowText } from './full-hold.js'
 import { isMachineOnlyPrompt, type HookEnvelope } from './session-hook-events.js'
+import { stripG2TurnFooter } from './turn-footer.js'
 
 /** The default when COS_TURN_END_ASKS is unset. One constant, per the lead (Miles chooses the value). */
 export const TURN_END_ASKS_DEFAULT = true
@@ -140,6 +141,48 @@ export function turnAskAnswerSurface(prompt: unknown, child: boolean): TurnAskAn
   return child ? 'cos' : 'mac'
 }
 
+/**
+ * X1 (candidate 3, S1 11:37): the COS thread's session-question breadcrumbs. Two events per ask, keyed alike:
+ *   'asked'   once, when the ask gets its stoppedAt (the turn ended asking): not at capture, not at the desk latch;
+ *   'settled' once, where the tracker drops a STOPPED ask: a reply (answered, with `by`), a machine-only prompt or a new
+ *             turn (moved_on), a session reset or its row ending (session_ended), the 8 h age-out or the size cap
+ *             (aged_out).
+ * An ask that never stopped emits nothing. Words follow COS_WAITING_QUESTION_WORDS: off, question and answer are null
+ * and choices empty. `answer` is a LIVE reply's first 80 characters after the contract words and any verify footer are
+ * taken off, or null on replay, when words are off, or when it is one of the choices. Listeners are called
+ * synchronously, each in try/catch, logging nothing.
+ */
+export interface TurnAskEvent {
+  type: 'asked' | 'settled'
+  askKey: string
+  sessionId: string
+  at: number
+  replay: boolean
+  question: string | null
+  choices: string[]
+  outcome?: 'answered' | 'moved_on' | 'session_ended' | 'aged_out'
+  by?: TurnAskAnswerSurface
+  answer?: string | null
+}
+const turnAskListeners = new Set<(e: TurnAskEvent) => void>()
+/** Subscribe to the breadcrumbs; returns the unsubscribe. */
+export function onTurnAskEvent(listener: (e: TurnAskEvent) => void): () => void {
+  turnAskListeners.add(listener)
+  return () => { turnAskListeners.delete(listener) }
+}
+function emitTurnAsk(e: TurnAskEvent): void {
+  for (const listener of [...turnAskListeners]) {
+    try { listener(e) } catch { /* a listener's failure never reaches the tracker */ }
+  }
+}
+/** The reply's own words: the contract words and any verify footer off, 80 characters, or null. */
+function replyWords(prompt: unknown): string | null {
+  if (typeof prompt !== 'string') return null
+  const bare = stripG2TurnFooter(prompt.replace(TURN_END_ANSWER_RE, '')).text
+  const words = rowText(bare, TURN_ASK_MAX_CHARS)
+  return words.length > 0 ? words : null
+}
+
 interface AskState {
   sessionId: string
   promptId: string | null
@@ -190,6 +233,33 @@ export class TurnEndAskTracker {
     this.deps = deps
   }
 
+  /** X1 (candidate 3): true while the hook ledger is replayed at boot (session-hooks-runtime sets it around replay). */
+  replaying = false
+
+  private askKey(state: AskState): string {
+    return `${state.sessionId}:${state.promptId ?? state.armedAt}`
+  }
+
+  private eventBase(state: AskState, at: number): Omit<TurnAskEvent, 'type'> {
+    const words = this.deps.words()
+    return { askKey: this.askKey(state), sessionId: state.sessionId, at, replay: this.replaying, question: words ? state.capture.ask : null, choices: words ? [...state.capture.choices] : [] }
+  }
+
+  private emitAsked(state: AskState, at: number): void {
+    if (turnAskListeners.size === 0) return
+    emitTurnAsk({ type: 'asked', ...this.eventBase(state, at) })
+  }
+
+  /** Only a STOPPED ask settles; one that never stopped was never asked. */
+  private emitSettled(state: AskState, at: number, outcome: NonNullable<TurnAskEvent['outcome']>, reply?: { by: TurnAskAnswerSurface; prompt: unknown }): void {
+    if (state.stoppedAt === null || turnAskListeners.size === 0) return
+    const base = this.eventBase(state, at)
+    if (outcome !== 'answered' || !reply) { emitTurnAsk({ type: 'settled', ...base, outcome }); return }
+    const words = this.replaying || !this.deps.words() ? null : replyWords(reply.prompt)
+    const answer = words !== null && state.capture.choices.includes(words) ? null : words
+    emitTurnAsk({ type: 'settled', ...base, outcome, by: reply.by, answer })
+  }
+
   /**
    * One applied hook event (the signal store's subscriber: the raw envelope live, the ledger's projection
    * on replay). `signal` is the store's signal after the event; only its registry `entrypoint` is read.
@@ -210,11 +280,13 @@ export class TurnEndAskTracker {
       if (current && !child && (p.prompt_machine_only === true || isMachineOnlyPrompt(p.prompt))) {
         this.asks.delete(sessionId)
         this.counters.clearedByTurn++
+        this.emitSettled(current, env.ts, 'moved_on')
         return
       }
       if (current) {
         this.asks.delete(sessionId)
         this.counters.clearedByReply++
+        this.emitSettled(current, env.ts, 'answered', { by: turnAskAnswerSurface(p.prompt, child), prompt: p.prompt })
         if (current.stoppedAt !== null) {
           this.lastAnswered.delete(sessionId)
           this.lastAnswered.set(sessionId, { stoppedAt: current.stoppedAt, answeredAt: env.ts, by: turnAskAnswerSurface(p.prompt, child) })
@@ -233,7 +305,7 @@ export class TurnEndAskTracker {
     // A COS-spawned child's other events are not the session's own turn.
     if (child) return
     if (SESSION_RESETS.has(env.event) || (env.event === 'SessionStart' && p.source !== 'compact')) {
-      if (current) { this.asks.delete(sessionId); this.counters.clearedByTurn++ }
+      if (current) { this.asks.delete(sessionId); this.counters.clearedByTurn++; this.emitSettled(current, env.ts, 'session_ended') }
       this.lastStop.delete(sessionId)
       return
     }
@@ -242,6 +314,7 @@ export class TurnEndAskTracker {
       this.rememberStop(sessionId, env.ts, promptId)
       if (current && current.stoppedAt === null && env.ts >= current.armedAt && (current.promptId === null || promptId === null || current.promptId === promptId)) {
         current.stoppedAt = env.ts
+        this.emitAsked(current, env.ts)
         this.ensurePolling()
       }
       return
@@ -259,8 +332,12 @@ export class TurnEndAskTracker {
       }
       const stop = this.lastStop.get(sessionId)
       const stoppedAlready = !!stop && env.ts <= stop.at && (stop.promptId === null || promptId === null || stop.promptId === promptId)
-      this.asks.set(sessionId, { sessionId, promptId, capture, armedAt: env.ts, stoppedAt: stoppedAlready ? stop!.at : null, visibleAt: null })
+      // A new ask replacing one that had stopped: the session moved on from it.
+      if (current) this.emitSettled(current, env.ts, 'moved_on')
+      const armed: AskState = { sessionId, promptId, capture, armedAt: env.ts, stoppedAt: stoppedAlready ? stop!.at : null, visibleAt: null }
+      this.asks.set(sessionId, armed)
       this.counters.armed++
+      if (stoppedAlready) this.emitAsked(armed, stop!.at)
       this.prune()
       if (stoppedAlready) this.ensurePolling()
       return
@@ -271,6 +348,7 @@ export class TurnEndAskTracker {
       if (promptId === null || current.promptId === null || promptId !== current.promptId) {
         this.asks.delete(sessionId)
         this.counters.clearedByTurn++
+        this.emitSettled(current, env.ts, 'moved_on')
       }
     }
   }
@@ -293,6 +371,7 @@ export class TurnEndAskTracker {
     if (now - state.stoppedAt > TURN_ASK_MAX_AGE_MS) {
       this.asks.delete(state.sessionId)
       this.counters.agedOut++
+      this.emitSettled(state, now, 'aged_out')
       return null
     }
     if (state.visibleAt === null) return null
@@ -329,19 +408,21 @@ export class TurnEndAskTracker {
   sessionRowEnded(sessionId: string): void {
     const key = sessionId.toLowerCase()
     for (const state of [...this.asks.values()]) {
-      if (state.sessionId === key || (key.length < 36 && state.sessionId.startsWith(key))) { this.asks.delete(state.sessionId); this.counters.clearedByTurn++ }
+      if (state.sessionId === key || (key.length < 36 && state.sessionId.startsWith(key))) { this.asks.delete(state.sessionId); this.counters.clearedByTurn++; this.emitSettled(state, this.deps.now(), 'session_ended') }
     }
   }
 
   private prune(): void {
     const now = this.deps.now()
     for (const state of [...this.asks.values()]) {
-      if (state.stoppedAt !== null && now - state.stoppedAt > TURN_ASK_MAX_AGE_MS) { this.asks.delete(state.sessionId); this.counters.agedOut++ }
+      if (state.stoppedAt !== null && now - state.stoppedAt > TURN_ASK_MAX_AGE_MS) { this.asks.delete(state.sessionId); this.counters.agedOut++; this.emitSettled(state, now, 'aged_out') }
     }
     while (this.asks.size > MAX_TURN_ASKS) {
       const oldest = [...this.asks.values()].sort((a, b) => a.armedAt - b.armedAt)[0]
       if (!oldest) break
       this.asks.delete(oldest.sessionId)
+      // Dropped for room (MAX_TURN_ASKS): reported as aged out, the oldest going first.
+      this.emitSettled(oldest, now, 'aged_out')
     }
   }
 
