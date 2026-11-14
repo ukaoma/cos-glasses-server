@@ -1,19 +1,50 @@
-## 7.0.38 (unreleased) - Control Web: bigger tap areas for tabs and text buttons on touch screens
+## 7.0.38 - Answers that land now or say why, a session link that recovers, and bigger tap areas
 
-Branch claude/server-setd on 7.0.37 (F1, Set D; Miles 2026-11-14, "Yes, build it"). Nothing looks different: on a touch screen the small text controls the 44 px floor does not reach now take a tap at least 44 px tall.
+2026-11-14. 7.0.37 plus the changes below; everything in 7.0.37 is in this update too (see its entry). Miles, 2026-11-14: 07:01 (a second tap on an answered question in Today's panel), 07:14 ("The continutaiton thing seems like the same bug under a new name?"), 07:47 ("I just need the pings as well"); Set D "Yes, build it" (07:01).
 
-**On for everyone with a touch screen:**
-- **Tab words** (Recent and Archive on Messages, Work's tabs, Memories, Speakers, Sessions): the invisible tap area is at least 44 px tall, centred on the word. Before, the 27 px words gave 41 px of tap.
-- **All messages and Mark all read** (Messages): 44 px of tap, from 36.
-- **Work's text buttons** (Open decisions and results, a card's Start work, the card page's buttons) and **Mentioned**: 44 px of tap, from 30 to 36.
-- **Work's stage menu**, on a card and on the card page: 44 px of tap, from 28 to 36. The menu looks the same and its row keeps its height.
-- **A Work card's foot** is 2 px taller from 600 px wide (43 to 45 px), so a card's buttons get their 44 px inside the card (a card 112 to 114 px). Folded (under 600 px) it does not change.
+**Every default-on change since npm 7.0.34, one line each (for the publish go):**
+- 7.0.35: the Home Screen app draws its mark at once and, if loading takes over 7 s, shows a card with Try again (it never reloads by itself); a numbers-only `open-lost` report.
+- 7.0.36: a question card's footer no longer lands mid-screen after a fold; the Messages header stays in its column; **Today's summary is smaller and full width for every user on first open** (Settings has a size choice); buttons and fields are at least 44 px tall on every touch screen; Meetings' "Go to <day>" keeps its own row.
+- 7.0.37: a tapped answer names its question and lands while that question is open; if the session moved on, the page says so and offers one Send anyway; the first answer counts for the question's whole life.
+- 7.0.38, Control Web: a session whose link the server retired reconnects on the next send instead of refusing every send for 25 minutes.
+- 7.0.38, Control Web: Today's panel stops offering a question once it is answered or closed.
+- 7.0.38, Control Web and server: an answer is never queued or held; a busy session says so at once (Send anyway is the one exception, by his tap).
+- 7.0.38, server: a tap on a closed question is told "already answered" or "moved on" even while the session works.
+- 7.0.38, server: a session moved on by another session's message reads "moved on" (with Send anyway), not "answered at the Mac".
+- 7.0.38, Control Web: tab words, text buttons, Mentioned and Work's stage menu take a tap at least 44 px tall on touch screens (no visual change); a Work card's foot is 2 px taller from 600 px wide.
+- 7.0.38, Control Web: one numbers-only diagnostic row per open (`caps`) saying what this browser could do for notifications.
+- **A step backward on the Mac (needs his name on it):** a question answered from the Mac app while the session is busy now shows "COS could not queue this message (turn_end_answer_not_queued)." It keeps his text and does not retry. Before, the Mac queued it, and it could land after the session moved on. Plain words need a Mac release (0.5.394).
+
+**Not seen on his phone yet:** the 7.0.38 changes above, except the answer from the folded Sessions reader (07:01, worked on 7.0.37). Specifically not seen: Send anyway after a real move, an answer started from Today, the busy line, the reconnect after a retired link, the closed panel, and Set D's tap areas. 7.0.36's layout fixes and 7.0.35's slow-load card were measured in a test browser only.
+
+**On for everyone, in detail:**
+- **A session link the server retired no longer refuses every send.** (Miles 07:14; W1, X1.)
+  - Cause: the queue delivered his 13:02 message on a fresh link at 13:03:21, which took over the page's idle link (by design: an idle link yields after 90 s). The page kept sending on the old one, which it remembers for 25 minutes in the browser (a reload did not clear it), and every send was refused with "That continuation was detached. Attach again." There is no attach control. Between 13:04 and 13:12 he tapped Send 48 times into that refusal.
+  - Now the page forgets the old link, attaches once, and sends the same words under the same key. If the fresh link is taken too, it says "COS lost its link to this session. Send again. Your message is still in the box." Any of the six link refusals removes the stored link, so the next tap starts clean. The "Send into an open session?" check before a send is unchanged.
+- **Today's panel follows Today.** When Today reads again, an open panel redraws its question: a closed one reads "This question is no longer open." (or "Answered. The session carries on." when this panel's answer was delivered and not refused), a new question draws in place, and the reply box and his words stay. Once closed, the box sends an ordinary message. Nothing is sent by a redraw and the panel does not move him.
+- **An answer lands now, or says why.**
+  - A tapped choice, his own words in answer, and Send anyway are never held for later on this page, and only Send anyway may wait in the session's queue. A busy session says "The session is working. “<label>” was not sent." with no button.
+  - An answer a 7.0.37 page held, still in this browser after the update, is never sent. On reopening it leaves the held store; his own words come back to the box only if the box is empty, with "An answer that was waiting was not sent. It is back in the box." (if he is typing, his words stay and the line names the answer that was not sent).
+  - With the question's id, the page asks the server instead of guessing, so a second tap on an answered question reads "Already answered on another screen. “<label>” was not sent." (his 07:01 case). An older server keeps the old catch-all line.
+  - The server refuses an answer in its queue with "Not sent. The session is working." unless it carries Send anyway's own mark (`turnEndSendAnyway: true`), and an answer already waiting there from before is never delivered.
+- **A tap on a closed question is told so while the session works.** The server reads the question before its busy checks: already answered, moved on, or (while a first answer is still being delivered) "An answer was just sent and COS could not confirm it arrived." An open question with a busy session still says busy.
+- **A session moved on by another session's message is not "answered at the Mac".** A message that is only harness blocks (another session's message, a task notice, a reminder) counts as the session moving on, so the page shows "The session took another turn" with Send anyway. Typed words, alone or after the blocks, still count as his answer.
+- **Set D: bigger tap areas, nothing looks different** (F1). On a touch screen: tab words at least 44 px of tap (from 41), All messages and Mark all read 44 (from 36), Work's text buttons and Mentioned 44 (from 30 to 36), Work's stage menu 44 (from 28 to 36). A Work card's foot is 2 px taller from 600 px wide.
+- **One diagnostic row for notifications.** Once per open, numbers and fixed words only: secure context, the URL's scheme, the kind of host (an IP address, a Tailscale name, or other; never the host itself), whether it runs as an installed app, whether service workers, PushManager, window.pushManager (push with no service worker, iOS 18.4 and later) and notifications exist, and the notification permission. No host, address or token; no permission prompt; nothing registered; no version read from the user agent.
+- **For developers:** `turnEndSendAnyway: true` on /turns and /queued-turns (never with `turnEndAskId`); `/queued-turns` refuses the contract words with `turn_end_answer_not_queued` otherwise; the hook ledger keeps one more boolean, `prompt_machine_only`; web.layout row `caps`.
 
 **Not covered, said plainly:**
-- **The chat's quote rows** are not in this change (they would add 263 px to the chat feed). Miles has not seen a picture of that.
-- Other small controls are unchanged (the list is in F1's notes): the Meetings calendar arrows and days, the Meetings sort menu, Memories' text links, the Speakers check boxes, Today's row actions, the quiet icon buttons.
-- **Not tried on a real phone.** Measured in a test browser (WebKit) by hit-testing out from each control's centre; the look by a pixel diff of each control's own box.
-- **The Mac app** (COS Control) is not changed.
+- **The Mac app** shows the queue refusal as a code (above), and does not name the question when it answers.
+- **The first restart after this upgrade:** messages logged before it keep no machine-only mark, so a question cleared by one of them reads as answered at the Mac, as in 7.0.37.
+- **A server restart forgets the first-answer marks:** a first answer accepted just before a restart can leave the question open, so a second answer after it is delivered. Scoped for after this release.
+- **The Settings frame (the rail staying on screen on the open Duo) is not in 7.0.38;** it waits for its review and rides 7.0.39.
+- **The 23:16 burst on 2026-11-13** stays unexplained. The 48 refusals this morning were his taps (one send at a time, about one round trip apart, human pauses between runs).
+- **"Answered. The session carries on."** shows only when this panel's answer is confirmed delivered (the turn came back completed, or the watch later reports it completed); queued or unknown shows "This question is no longer open." with the Sent line kept.
+- **Not on a real phone** (above). Measured with route tests, Control Web tests on the real send path against fake routes, and the layout sweep in a test browser.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: web 1,671+ and gates 48/48, 2/2, 5/5, 14/14 (W1); server gates 30, 26, 60 and route tests (X1); Set D sweep (F1)>
 
 ## 7.0.37 - An answer tapped on a question is not lost when the session has moved on
 
