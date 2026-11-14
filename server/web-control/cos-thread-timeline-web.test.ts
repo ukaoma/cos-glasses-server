@@ -227,6 +227,59 @@ describe('7.0.41 thread candidate 3: notes in the chat', () => {
   })
 })
 
+describe('7.0.41 thread candidate 3: Q1 14:01 owed tests', () => {
+  it('(N4) a notification whose card is in the OPEN older questions is not said twice', async () => {
+    const h = load({ [HT]: page([note('n', at(14, 9), 'notification')]) })
+    h.chat._state.archiveOpen = true
+    h.chat._state.archive = [{ id: 'r_n', kind: 'followup', line: 'old', state: 'live', createdAt: at(1, 9), threadId: 't', archived: true }]
+    h.chat._loadHistory(); await flush()
+    expect(h.feed.innerHTML).not.toContain('data-kind="notification" data-id="r_n"')
+  })
+  it('(N5) an archived card with the older questions CLOSED leaves the note, so it shows somewhere', async () => {
+    const h = load({ [HT]: page([note('n', at(14, 9), 'notification')]) })
+    h.chat._state.items = [{ id: 'r_n', kind: 'followup', line: 'old', state: 'live', createdAt: at(1, 9), threadId: 't', archived: true }]
+    h.chat._state.archiveOpen = false
+    h.chat._loadHistory(); await flush()
+    expect(h.feed.innerHTML).toContain('data-kind="notification" data-id="r_n"')
+  })
+  it('(N11) an older page landing after a flip is dropped', async () => {
+    let release: (v: unknown) => void = () => {}
+    const h = load({ [HT]: page([chatE('b', at(14, 14))], 'c2.1.0'), [HT + '&before=*']: () => new Promise(r => { release = r }) })
+    h.chat._loadHistory(); await flush()
+    const p = h.chat._loadOlder()
+    h.chat._setCaps(HEALTH(undefined))
+    release(page([chatE('late', at(14, 8))]))
+    expect(await p).toBe(false)
+    expect(h.chat._state.hist.entries).toEqual([])
+  })
+  it('(N12) a newer page landing after a flip is dropped', async () => {
+    let release: (v: unknown) => void = () => {}
+    const h = load({ [HT]: page([chatE('b', at(14, 14))]), [HT + '&after=*']: () => new Promise(r => { release = r }) })
+    h.chat._loadHistory(); await flush()
+    h.chat._loadNewer()
+    h.chat._setCaps(HEALTH(undefined))
+    release({ entries: [chatE('late', at(14, 15))], updated: [], newest: 'c3.9', more: false })
+    await flush()
+    expect(h.chat._state.hist.entries).toEqual([])
+    expect(h.chat._state.hist.newest).toBe('')
+  })
+  it('(N16) the notification id in the link is escaped', () => {
+    const h = load({})
+    const html = h.chat._noteHtml({ ...note('n', at(14, 9), 'notification'), ref: { type: 'notification', id: 'a"b<c', threadId: 't' } })
+    expect(html).toContain('data-id="a&quot;b&lt;c"')
+    expect(html).not.toContain('data-id="a"b')
+  })
+  it('(N29) a flip keeps the retry and reattach state', () => {
+    const h = load({})
+    h.chat._setCaps(HEALTH(1))
+    h.chat._state.hist.attach.x = 'on'; h.chat._state.hist.retrying.y = true; h.chat._state.hist.retryErr.z = 'why'
+    h.chat._setCaps(HEALTH(undefined))
+    expect(h.chat._state.hist.attach.x).toBe('on')
+    expect(h.chat._state.hist.retrying.y).toBe(true)
+    expect(h.chat._state.hist.retryErr.z).toBe('why')
+  })
+})
+
 describe('7.0.41 thread candidate 3: each note opens its source', () => {
   it('a session, a meeting and a message go to their own pages', () => {
     const h = load({})
