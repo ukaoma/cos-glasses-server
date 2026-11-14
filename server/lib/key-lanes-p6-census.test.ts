@@ -85,6 +85,7 @@ export const CENSUS: CensusRow[] = [
   ["server/lib/handoff-store.ts", "isCodexModel", 1, "model: normalizedModel && isCodexModel(normalizedModel)", "closed", "plan 5.2 Closed"],
   ["server/lib/key-profile-rejects.ts", "isProfilePreference", 1, "const applies = isProfilePreference(value) && keyLanesEnabled()", "reject", "the reject predicate (P11 adds its log line)"],
   ["server/lib/work-orchestrator/usage-events.ts", "isProfilePreference", 1, "if (code !== 'provider_limit' || lane || isProfilePreference(model)) return", "reject", "6.83.0: a key-profile job's limit never marks the plan exhausted"],
+  ["server/lib/work-orchestrator/usage-events.ts", "isProfilePreference", 1, "if (lane || isProfilePreference(model)) return", "reject", "7.0.39: a key-profile job that completes never counts as its plan provider answering (Work's provider order)"],
   ["server/lib/query-job-types.ts", "isProfilePreference", 1, "...(input.keyTurnOnly === true && isProfilePreference(model) ? { keyTurnOnly: true as const } : {}),", "accept", "P11 QA U9: keyTurnOnly is kept only with a profile model"],
   ["server/routes/query.ts", "isProfilePreference", 1, "...(req.body.keyTurnOnly === true && isProfilePreference(model) ? { keyTurnOnly: true } : {}),", "accept", "P11 QA U9: keyTurnOnly is kept only with a profile model"],
   ["server/lib/key-profile-routing.ts", "isProfilePreference", 1, "if (!envProfileWarned && isProfilePreference(raw?.trim())) {", "closed", "closedEnvDefaultModel: the env default stays closed"],
