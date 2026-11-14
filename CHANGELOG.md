@@ -1,3 +1,35 @@
+## 7.0.42 - Notes in the COS thread, COS's look-back by day, and https on the ts.net name that holds across a restart
+
+2026-11-14. 7.0.41 plus the changes below; everything in 7.0.41 is in this update too (see its entry).
+
+**On for everyone with Drop it on, one line each:**
+- Control Web and server: the pinned COS chat shows notes in the flow beside the chats: notifications (and what he did with each), questions sessions asked him (and his answer), meetings recorded, and messages asked elsewhere ("Asked on glasses" only when the server knows it was the glasses, otherwise "Asked in Messages"). Each note is one quiet line that links to its source.
+- server: to make those notes, a sweeper reads the inbox feed, the live conversations, the day archives and the meetings (read only), 5 s after the thread's first use, then every 60 s while it catches up and every 5 minutes after. It writes only cos-thread/timeline.jsonl and timeline-state.json. With Drop it off it reads and writes nothing, at once, without a restart. No model is called.
+- server: COS can read the thread back by local day ("what did we say a week ago"): one read-only route behind the /api token gate, every text cut to 300 characters. COS learns of it from one fixed server line on a fresh stretch of the thread (about 140 input tokens, once per fresh stretch); a continued chat costs the same as before.
+
+**Where https on the Mac's ts.net name is turned on (COS_CONTROL_TSNET_HTTPS; off unless turned on):**
+- server: a restart serves the stored 3143 certificate at once, the name lookup no longer reads a cached miss from boot, and /api/health no longer starts a check when read. A name not found in the first minute after a restart reads "starting", then a precise reason.
+
+**In detail:**
+- **Notes in the flow.** (S1 server, X1 session-question hook, W1 Control Web; mock A, thread_A.)
+  - The history reads with `timeline=1` only when the server advertises `capabilities.dropIt.thread.timeline: 1`; an older page or server shows chats only, as 7.0.41.
+  - A notification says "COS sent “…”." and what he did with it (replied, acted on it, dismissed, closed, saw it), or nothing when he did nothing. A notification whose own card is already in the chat is not said twice. It opens its card; one filed under the older questions opens them.
+  - A session question says "A session asked “…”." and his answer, or that the session moved on, ended, or it went unanswered. It opens the session.
+  - A meeting says "Meeting recorded: <title>" and opens the meeting.
+  - A message says "Asked on glasses" only when the row carries surface glasses (today the server only knows a plain Control Web Ask, so most read "Asked in Messages"), then the question; its number is quiet text that links to the message only in the Mac's current message era.
+  - Loading older entries with notes mixed in moves what he is reading 0 px (WebKit, three sizes).
+  - The backfill S1 counted on Miles's Mac today: 396 notifications (from Nov 5), 1,922 messages (from Mar 14), 897 meetings (from Jul 27).
+- **COS's look-back.** (S1.) `GET /api/cos-thread/timeline?from&to&kinds&limit&before`, local days, the last seven by default, at most 200 entries and 64 KB per answer; no full long answer and no message body. The server line naming it is printed after the quoted digest, never inside it, and only on a thread conversation's first chat that carries the digest.
+- **https on the ts.net name.** (X1.) The 3143 check no longer trusts a cached boot miss of the tailnet name; a restart serves the stored pair at once and health says so truly; reading health starts nothing.
+
+**Not covered, said plainly:**
+- **Not on a real phone:** the notes were measured with Control Web tests, route tests and WebKit on fake routes.
+- **A known older issue, not in this build:** archive.ts and conversation.ts import each other and the boot mirror starts during load, so a test that loads archive.ts first can fail to mirror. It is in 7.0.41 too and has not been seen in production (the server loads conversation first). The fix rides the build after.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+
 ## 7.0.41 - The COS chat is one thread with its history, and a chat sent in the thread stays in the thread
 
 2026-11-14. 7.0.40 plus the changes below; everything in 7.0.40 is in this update too (see its entry).
