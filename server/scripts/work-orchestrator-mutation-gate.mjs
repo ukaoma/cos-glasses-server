@@ -112,6 +112,8 @@ const mutations = [
   ['usage-rejected-frame', US, "    if (info.status === 'rejected') {", "    if (false) {"],
   // 7.0.39 (U1): a window past its reset no longer counts; a warning holds only until its window resets.
   ['usage-window-live-rule', US, '  return Number.isNaN(t) || t > now\n', '  return true\n'],
+  ['usage-window-boundary', US, '  return Number.isNaN(t) || t > now\n', '  return Number.isNaN(t) || t >= now\n'],
+  ['usage-window-unparsable-live', US, '  return Number.isNaN(t) || t > now\n', '  return !Number.isNaN(t) && t > now\n'],
   ['usage-window-expiry-headroom', US, 'BINDING[provider](w.kind) && windowLive(w, now))', 'BINDING[provider](w.kind))'],
   ['usage-window-expiry-view', US, '  const bind = allBind.filter(w => windowLive(w, now))\n', '  const bind = allBind\n'],
   ['usage-window-ended-unknown', US, '  if (e.reading?.available && allBind.length && !bind.length) {', '  if (false) {'],

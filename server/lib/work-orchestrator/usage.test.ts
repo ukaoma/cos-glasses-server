@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, probeClaudeUsage, probeCodexUsage,
+import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, windowLive, probeClaudeUsage, probeCodexUsage,
   CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines,
   classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS } from './usage.js'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -146,6 +146,17 @@ describe('7.0.39: a window that has reset no longer counts', () => {
   it('only the windows past their reset drop out: a reset 5-hour window does not bind, the live week still does', () => {
     const mixed = { ...oct23, windows: [{ kind: 'session', usedPct: 99, resetsAt: '2026-11-14T15:00:00Z' }, { kind: 'weekly_all', usedPct: 30, resetsAt: '2026-11-16T08:00:00Z' }] }
     expect(viewOf(entry({ reading: mixed, warning: false }), LATER)).toMatchObject({ state: 'ok', headroomPct: 70, resetsAt: '2026-11-16T08:00:00Z' })
+  })
+  it('the boundary: a window resetting exactly now, or a second ago, has ended; one resetting a second from now still counts', () => {
+    const at = (ms: number) => ({ kind: 'weekly_all', usedPct: 40, resetsAt: new Date(ms).toISOString() })
+    expect([windowLive(at(LATER), LATER), windowLive(at(LATER - 1000), LATER), windowLive(at(LATER + 1000), LATER)]).toEqual([false, false, true])
+    expect(viewOf(entry({ reading: { ...oct23, windows: [at(LATER)] }, warning: false }), LATER)).toMatchObject({ state: 'unknown', headroomPct: null })
+    expect(viewOf(entry({ reading: { ...oct23, windows: [at(LATER + 1000)] }, warning: false }), LATER)).toMatchObject({ state: 'ok', headroomPct: 60 })
+  })
+  it('a reset COS cannot parse counts as live (the same as no reset given): the percentage is not thrown away on a bad date', () => {
+    const odd = { kind: 'weekly_all', usedPct: 40, resetsAt: 'next Sunday' }
+    expect([windowLive(odd, LATER), windowLive({ ...odd, resetsAt: null }, LATER)]).toEqual([true, true])
+    expect(viewOf(entry({ reading: { ...oct23, windows: [odd] }, warning: false }), LATER)).toMatchObject({ state: 'ok', headroomPct: 60 })
   })
   it('a stated limit still wins over windows that have reset; a warning stops counting once the window it warned about resets', () => {
     expect(viewOf(entry({ limitUntil: LATER + 60_000, limitSource: 'rate_limit_event' }), LATER)).toMatchObject({ state: 'exhausted', headroomPct: 0 })
