@@ -61,6 +61,10 @@ describe('the closed row and the estimate', () => {
     expect(pane).toMatchObject({ protocolVersion: 1, closest: 'codex', others: 'Claude read failed. Cursor no plan reading.', readAt: new Date(NOW).toISOString() })
     expect(pane.lines.map(l => l.provider)).toEqual(['claude', 'codex', 'cursor'])
     expect(planPane([blank('claude'), blank('codex'), blank('cursor')], NOW, TZ)).toMatchObject({ closest: null, readAt: null })
+    // Two rulers: the higher share used leads the closed row, whichever provider it is.
+    const both = planPane([claudeWeek(23, '2026-11-16T08:00:00Z'), codexWeek(96), blank('cursor')], NOW, TZ)
+    expect(both).toMatchObject({ closest: 'codex', others: 'Claude 23% used. Cursor no plan reading.' })
+    expect(planPane([claudeWeek(80, '2026-11-16T08:00:00Z'), codexWeek(30), blank('cursor')], NOW, TZ).closest).toBe('claude')
   })
   it('the estimate is labelled by the client and carries its arithmetic: 96% in 6 days 11.5 hours of 7 days', () => {
     expect(planLine(codexWeek(96), NOW, TZ).estimate).toEqual({
