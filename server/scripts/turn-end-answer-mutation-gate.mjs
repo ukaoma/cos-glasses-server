@@ -25,6 +25,7 @@ const mutations = [
   ["id-not-the-stop", "server/lib/session-state-derive.ts", "return `turn_end:${Math.trunc(stoppedAt)}`", "return `turn_end:0`", "AFTER: naming the ask that is still open", ["server/routes/agent-session-bindings.test.ts"]],
   ["runtime-accessor-dead", "server/lib/session-hooks-runtime.ts", "return turnEndAskTracker ? turnEndAskTracker.visibleAsk(sessionId, now) : null", "return null", "openTurnEndAsk names the same ask", ["server/lib/turn-end-ask.test.ts"]],
   ["index-unwired", "server/index.ts", "  openTurnEndAsk: sessionId => openTurnEndAsk(sessionId),\n", "", "index.ts wires the tracker into the route", ["server/routes/agent-session-bindings.test.ts"]],
+  ["timing-line-anonymous", "server/routes/agent-session-bindings.ts", "${stages.join(' ')} at=${turnAt} bindingId=${turnBindingId} clientTurnId=${turnClientKey} turnEndAsk=${turnNamedAsk}`", "${stages.join(' ')}`", "AFTER: naming the ask that is still open", ["server/routes/agent-session-bindings.test.ts"]],
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

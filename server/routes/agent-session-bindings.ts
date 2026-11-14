@@ -2910,8 +2910,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       stages.push(`${name}=${Number((now - lastStage) / 1_000_000n)}ms`)
       lastStage = now
     }
+    // X1 (7.0.36): WHEN, on which binding, from which client key, and whether it named a turn-end ask. On 2026-11-13
+    // about 40 refusals in four minutes could not be traced to a page or a tap because this line carried none of these.
+    // Ids only, never the prompt.
+    const turnAt = new Date().toISOString()
+    const turnBindingId = String(req.params.bindingId ?? '').slice(0, 64)
+    const rawBody = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>
+    const turnClientKey = typeof rawBody.clientTurnId === 'string' ? rawBody.clientTurnId.slice(0, 64) : '-'
+    const turnNamedAsk = typeof rawBody.turnEndAskId === 'string' ? 'named' : 'none'
     const turnTiming = (outcome: string): string =>
-      `[agent-session-bindings] turn timing turnId=${turnId} outcome=${outcome} total=${Number((process.hrtime.bigint() - stageClock) / 1_000_000n)}ms ${stages.join(' ')}`
+      `[agent-session-bindings] turn timing turnId=${turnId} outcome=${outcome} total=${Number((process.hrtime.bigint() - stageClock) / 1_000_000n)}ms ${stages.join(' ')} at=${turnAt} bindingId=${turnBindingId} clientTurnId=${turnClientKey} turnEndAsk=${turnNamedAsk}`
     /** The target we hold a claim on, released in the finally. */
     let claimedKey: string | null = null
     /** 6.53.0: this turn's cancel. Registered in `inFlight` at the claim, deleted in the finally. */

@@ -5030,8 +5030,19 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     const base = await start(h.deps)
     const a = await attached(base)
     h.head.value = 'h2: the session replied and ended its turn by asking'
-    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0002', turnEndAskId: ID })
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(' ')) })
+    let res: PostResult
+    try {
+      res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0002', turnEndAskId: ID })
+    } finally { spy.mockRestore() }
     expect(res.body.outcome).toBe('completed')
+    // The timing line now says when, on which binding, from which client key, and that it named an ask; never the words.
+    const timing = logged.find(l => l.includes('turn timing') && l.includes('outcome=completed'))
+    expect(timing).toMatch(/ at=\d{4}-\d\d-\d\dT/)
+    expect(timing).toContain(`bindingId=${a.bindingId}`)
+    expect(timing).toContain('clientTurnId=ct-te-0002 turnEndAsk=named')
+    expect(timing).not.toContain('readiness')
     expect(h.calls).toHaveLength(1)
     expect(h.calls[0]!.prompt).toContain('Yes, check readiness')
     expect(h.seen).toEqual([SID])
