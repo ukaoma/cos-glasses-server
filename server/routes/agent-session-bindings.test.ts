@@ -5428,6 +5428,14 @@ describe('X1 7.0.38: the ask check over the real tracker (age-out, switch off, r
     expect('answered' in res.body).toBe(false)
   })
 
+  it('through a restart, his typed words after a reminder block are still his answer: answered by the Mac, no Send anyway', async () => {
+    const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
+    rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<system-reminder>\n' + 'r'.repeat(600) + '\n</system-reminder>\nCommands run, go', prompt_id: 'p-typed' })])
+    const after = await restarted(ledger)
+    const res = await answer(after, 'ct-rt-0012')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'mac' })
+  })
+
   it('KNOWN WINDOW (not fixed here): a first answer accepted before the restart whose prompt never reached the ledger leaves the ask open, so a second answer after the restart is delivered too', async () => {
     const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
     const before = rig(ledger)

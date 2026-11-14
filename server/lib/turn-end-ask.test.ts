@@ -674,6 +674,16 @@ describe('the runtime: deriveForRow and the counters', () => {
     }
   })
 
+  it('X1 7.0.38: the ledger keeps one boolean, set from the WHOLE prompt, so a replay of clipped words still knows', () => {
+    const blocksOnly = '<cross-session-message from="local_1">' + 'x'.repeat(900) + '</cross-session-message>'
+    const typedAfter = '<system-reminder>' + 'y'.repeat(900) + '</system-reminder>\nYes, ship it'
+    expect(projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: blocksOnly })).toMatchObject({ prompt_machine_only: true })
+    const typed = projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: typedAfter })
+    expect('prompt_machine_only' in typed).toBe(false)
+    expect(String(typed.prompt).length).toBeLessThan(typedAfter.length)
+    expect('prompt_machine_only' in projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: 'Commands run, go' })).toBe(false)
+  })
+
   it('X1 7.0.38: a prompt the machine wrote clears the ask as moved on, never as answered; one he typed is still his answer', async () => {
     const tracker = new TurnEndAskTracker({ now: () => T0 + 200_000, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
     trackers.push(tracker)
@@ -681,6 +691,7 @@ describe('the runtime: deriveForRow and the counters', () => {
     const off = sessionSignalStore.subscribe((signal, e, child) => tracker.observe(e, child, signal))
     try {
       for (const machine of [
+        '<system-reminder>a</system-reminder>\n<system-reminder>b</system-reminder>\n',
         '<cross-session-message from="local_1">Lead to X1: go</cross-session-message>',
         '<task-notification>\n<task-id>b1</task-id></task-notification>',
         '<system-reminder>\nThe session was compacted.</system-reminder>',
@@ -696,7 +707,17 @@ describe('the runtime: deriveForRow and the counters', () => {
         expect(turnEndAskAnswered(SID, open!.stoppedAt, T0 + 211_000)).toBeNull()
         expect(turnEndAskStats()).toMatchObject({ clearedByTurn: before.clearedByTurn + 1, clearedByReply: before.clearedByReply })
       }
-      for (const typed of ['<bash-input>ls</bash-input>', 'Commands run, go', 'Note <cross-session-message from="x"> quoted mid-text']) {
+      // The lead's condition (07:29): his own words bundled after harness blocks are still his answer, and so is anything
+      // that cannot be shown to be blocks only (an unclosed or clipped block, text before the first block).
+      for (const typed of [
+        '<bash-input>ls</bash-input>',
+        'Commands run, go',
+        'Note <cross-session-message from="x"> quoted mid-text',
+        '<system-reminder>\nThe session was compacted.</system-reminder>\nYes, ship it',
+        '<system-reminder>a</system-reminder><task-notification>b</task-notification> Approved',
+        '<cross-session-message from="local_1">Lead to X1: clipped mid-blo…',
+        'Approved <system-reminder>x</system-reminder>',
+      ]) {
         feed(); await tracker.tick()
         const open = openTurnEndAsk(SID, T0 + 200_000)
         sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: typed, prompt_id: 'p-typed' }), false)
