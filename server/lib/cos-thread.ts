@@ -28,9 +28,9 @@
  * the n-th turn), stable across restarts because the ledger is append-only. Nothing here logs words.
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, writeSync, fsyncSync, fchmodSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { localDay } from './local-day.js'
 import { securePrivateDirectory } from './secure-user-config.js'
@@ -65,7 +65,8 @@ export const ARCHIVE_TOTAL_MAX_BYTES = 96 * 1024 * 1024
 export const DIGEST_HEADER = 'Earlier in this COS thread (a summary carried over; ask COS to search History or Messages for more):'
 const DAY_MS = 24 * 60 * 60_000
 
-export type NextReason = 'continue' | 'empty' | 'size' | 'missing_session' | 'manual'
+/** thread_only (7.0.39): the next Ask is a cosThread one and the thread's conversation is not a thread conversation yet. */
+export type NextReason = 'continue' | 'empty' | 'size' | 'missing_session' | 'manual' | 'thread_only'
 export interface CosThreadView {
   id: string
   startedAt: string
@@ -124,9 +125,20 @@ export interface CosThreadChatEntry {
   answerChars: number | null
   full: boolean
   threadId: string
-  status: 'completed'
+  /** 7.0.39 candidate 2: a chat the server recorded from its job (cosThread) carries its job status; a running one is the
+   * page's cue to reattach through /api/query-jobs/by-client. Rows from before candidate 2 read 'completed'. */
+  status: CosThreadChatStatus
   messageNo: number | null
+  /** Present on a chat the server recorded from its job: the job's identity, for reattach and Retry. */
+  clientJobId?: string
+  generation?: number
 }
+export type CosThreadChatStatus = 'running' | 'completed' | 'failed' | 'interrupted'
+/** What the job runtime hands the thread at a job's start and end (lib/query-job-runtime.ts). */
+export interface CosThreadJobInput { clientJobId: string; generation: number; sessionId: string; query: string; provider?: string }
+export interface CosThreadJobEnd extends CosThreadJobInput { status: 'completed' | 'failed' | 'canceled' | 'interrupted'; text: string }
+/** A running chat with no end recorded this long after it started reads 'interrupted' (its job is long gone). */
+export const RUNNING_STALE_MS = 6 * 60 * 60_000
 /** A page of history: entries oldest to newest. `older` reads further back (null: this is the start). `newest` is the
  * cursor for `after=`. `more`: an `after=` page stopped at its limit or its byte cap and more entries follow. */
 export interface CosThreadHistoryPage {
@@ -139,7 +151,7 @@ export interface CosThreadHistoryPage {
   updated: CosThreadChatEntry[]
 }
 /** `maxBytes` exists for tests only (the route never sends it): one entry is at most about 120 KB, under the cap. */
-export interface CosThreadHistoryQuery { before?: number; after?: number; limit: number; maxBytes?: number }
+export interface CosThreadHistoryQuery { before?: number; after?: number; afterAnswers?: number; limit: number; maxBytes?: number }
 /** What a full-answer read needs to look the answer up elsewhere. */
 export interface CosThreadEntryLookup { sessionId: string; clientId: string; messageNo: number | null; at: string; query: string }
 /** A drop as the digest carries it: its words and where it was filed. */
@@ -156,10 +168,19 @@ interface ThreadRow { kind: 'thread'; id: string; at: string; from?: string }
 interface TurnRow {
   kind: 'turn'; threadId: string; segment: number; sessionId: string; clientId: string; at: string
   query: string; answerHead: string; messageNo: number | null; provider: string | null; native?: string
+  /** 7.0.39: written by the server from a cosThread job (its generation at the first record). */
+  job?: { generation: number }
 }
+/** 7.0.39: a job's end for a thread chat. The whole answer of a completed one is in answers/<YYYY-MM>.jsonl at `ref`. */
+interface AnswerRow {
+  kind: 'answer'; clientId: string; generation: number; at: string; status: CosThreadChatStatus
+  answerHead: string; answerChars: number; ref?: AnswerRef
+}
+interface AnswerRef { file: string; offset: number; length: number; sha256: string }
+interface AnswerState { seq: number; generation: number; status: CosThreadChatStatus; answerHead: string; answerChars: number; ref?: AnswerRef }
 interface RolloverRow { kind: 'rollover'; threadId: string; at: string; reason: NextReason; fromSessionId: string | null; digest: string | null }
 interface CloseRow { kind: 'close'; threadId: string; at: string; reason: string }
-type LedgerRow = ThreadRow | TurnRow | RolloverRow | CloseRow
+type LedgerRow = ThreadRow | TurnRow | RolloverRow | CloseRow | AnswerRow
 
 interface CurrentThread {
   id: string
@@ -387,6 +408,9 @@ export class CosThread {
   /** Every turn row, in ledger order: the history index. Never trimmed. */
   private readonly history: HistoryRef[] = []
   private readonly historyByClient = new Map<string, number>()
+  /** 7.0.39 candidate 2: the latest job end per chat, and how many ends were recorded (the `after` cursor's second part). */
+  private readonly answers = new Map<string, AnswerState>()
+  private answerSeq = 0
 
   constructor(private readonly deps: CosThreadDeps) {
     this.now = deps.now ?? Date.now
@@ -490,6 +514,16 @@ export class CosThread {
     if (row.kind === 'close') {
       const summary = this.threads.get(row.threadId)
       if (summary) summary.endedAt = row.at
+      return
+    }
+    if (row.kind === 'answer') {
+      const prior = this.answers.get(row.clientId)
+      if (prior && supersededBy(prior, row) === false) return
+      this.answerSeq += 1
+      this.answers.set(row.clientId, {
+        seq: this.answerSeq, generation: row.generation, status: row.status, answerHead: row.answerHead, answerChars: row.answerChars,
+        ...(row.ref ? { ref: row.ref } : {}),
+      })
     }
   }
 
@@ -498,8 +532,8 @@ export class CosThread {
    * from this, so a short, failed or foreign write never shifts a later row. A file that does not end with a newline
    * (a write torn mid-row) gets one first, so the new rows never join the torn one.
    */
-  private appendRaw(text: string): { start: number } {
-    const fd = openSync(this.ledgerFile, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
+  private appendRaw(text: string, file = this.ledgerFile): { start: number } {
+    const fd = openSync(file, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
     try {
       fchmodSync(fd, 0o600)
       const size = fstatSync(fd).size
@@ -545,7 +579,7 @@ export class CosThread {
     if (!turns.length && thread.from) turns = this.turnsOf(thread.from)
     const recent = turns.slice(-DIGEST_TURNS).map(t => ({
       query: t.query,
-      answerHead: t.answerHead || this.safeAnswerFor(t) || '',
+      answerHead: t.answerHead || this.answers.get(t.clientId)?.answerHead || this.safeAnswerFor(t) || '',
       messageNo: t.messageNo,
     }))
     const since = Math.min(Date.parse(thread.startedAt) || this.now(), this.now() - DAY_MS)
@@ -558,8 +592,15 @@ export class CosThread {
     try { return this.deps.answerFor?.(t.sessionId, t.clientId, t.messageNo)?.slice(0, ANSWER_HEAD_CHARS) } catch { return undefined }
   }
 
-  view(): CosThreadAnswer {
+  /**
+   * The thread and what the next Ask should do. 7.0.39: with `isThreadSession` (GET /cos-thread?threadOnly=1, a page that
+   * sends cosThread), a conversation that is not a thread conversation (one from before the update, numbered, in
+   * Messages) is never continued: the next Ask starts a thread conversation carrying the digest. Without it, as before.
+   */
+  view(options: { isThreadSession?: (sessionId: string) => boolean } = {}): CosThreadAnswer {
     const { reason, tokens } = this.evaluate()
+    const sid = this.current.sessionId
+    if (reason === 'continue' && sid && options.isThreadSession && !options.isThreadSession(sid)) return this.answer('thread_only', tokens)
     return this.answer(reason, tokens)
   }
   private answer(reason: NextReason, tokens: number | null): CosThreadAnswer {
@@ -592,7 +633,7 @@ export class CosThread {
   }
 
   /** One Ask. Idempotent on clientId. A different session than the thread's is a rollover onto a new segment. */
-  recordTurn(input: CosThreadTurnInput): CosThreadAnswer {
+  recordTurn(input: CosThreadTurnInput, jobGeneration?: number): CosThreadAnswer {
     if (this.clientIds.has(input.clientId)) return this.view()
     const t = this.current
     const at = this.iso()
@@ -609,9 +650,67 @@ export class CosThread {
       kind: 'turn', threadId: t.id, segment, sessionId: input.sessionId, clientId: input.clientId, at,
       query: input.query, answerHead: (input.answer ?? '').slice(0, ANSWER_HEAD_CHARS), messageNo: input.messageNo ?? null,
       provider: input.provider ?? null, ...(native ? { native } : {}),
+      ...(jobGeneration !== undefined ? { job: { generation: jobGeneration } } : {}),
     })
     this.append(...rows)
     return this.view()
+  }
+
+  // ── thread jobs (7.0.39 candidate 2) ────────────────
+  /** A cosThread job started: its question becomes the thread's turn (idempotent on clientJobId, so a replay, a Retry or a
+   * page's own POST /cos-thread/turn never adds a second). */
+  recordJobStarted(job: CosThreadJobInput): void {
+    if (this.clientIds.has(job.clientJobId)) return
+    this.recordTurn({ clientId: job.clientJobId, sessionId: job.sessionId, query: job.query, ...(job.provider ? { provider: job.provider } : {}) }, job.generation)
+  }
+
+  /**
+   * A cosThread job ended (any terminal status). The turn is written first when the start never was (a crash before it,
+   * or the boot re-projection), then one answer row per generation. A completed answer goes whole into
+   * answers/<YYYY-MM>.jsonl; the ledger keeps its first 2,000 characters and where the whole one is. A failed, cancelled
+   * or interrupted one keeps only its partial answer's first 2,000 characters (the whole partial stays in the job).
+   * Idempotent: the coordinator's boot re-projection calls this again for every retained terminal job.
+   */
+  recordJobEnd(end: CosThreadJobEnd): void {
+    this.recordJobStarted(end)
+    const status: CosThreadChatStatus = end.status === 'completed' ? 'completed' : end.status === 'failed' ? 'failed' : 'interrupted'
+    const text = typeof end.text === 'string' ? end.text : ''
+    const prior = this.answers.get(end.clientJobId)
+    if (prior && supersededBy(prior, { generation: end.generation, status, answerChars: text.length }) === false) return
+    const at = this.iso()
+    let ref: AnswerRef | undefined
+    if (status === 'completed' && text.length > ANSWER_HEAD_CHARS) ref = this.writeAnswer(end.clientJobId, end.generation, at, text)
+    this.append({ kind: 'answer', clientId: end.clientJobId, generation: end.generation, at, status, answerHead: text.slice(0, ANSWER_HEAD_CHARS), answerChars: text.length, ...(ref ? { ref } : {}) })
+  }
+
+  /** The whole answer, appended to this month's answer file (0600, folder 0700); where it is and its hash. */
+  private writeAnswer(clientId: string, generation: number, at: string, text: string): AnswerRef {
+    const file = `answers/${localDay(Date.parse(at)).slice(0, 7)}.jsonl`
+    const path = join(this.deps.dir, file)
+    securePrivateDirectory(dirname(path))
+    const line = JSON.stringify({ clientId, generation, at, text })
+    const { start } = this.appendRaw(line + '\n', path)
+    return { file, offset: start, length: Buffer.byteLength(line), sha256: createHash('sha256').update(text).digest('hex') }
+  }
+
+  /** A whole answer back from its file, checked against its hash; undefined when it cannot be read as written. */
+  private readAnswer(ref: AnswerRef, clientId: string): string | undefined {
+    if (!/^answers\/\d{4}-\d{2}\.jsonl$/.test(ref.file)) return undefined
+    let fd: number
+    try { fd = openSync(join(this.deps.dir, ref.file), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) } catch { return undefined }
+    try {
+      if (!fstatSync(fd).isFile()) return undefined
+      const buffer = Buffer.alloc(ref.length)
+      let read = 0
+      while (read < ref.length) {
+        const n = readSync(fd, buffer, read, ref.length - read, ref.offset + read)
+        if (n <= 0) break
+        read += n
+      }
+      const row = JSON.parse(buffer.subarray(0, read).toString('utf8')) as { clientId?: unknown; text?: unknown }
+      if (row.clientId !== clientId || typeof row.text !== 'string') return undefined
+      return createHash('sha256').update(row.text).digest('hex') === ref.sha256 ? row.text : undefined
+    } catch { return undefined } finally { closeSync(fd) }
   }
 
   // ── history (7.0.39) ─────────────────────────────────
@@ -644,14 +743,30 @@ export class CosThread {
   }
 
   private chatEntry(row: TurnRow): CosThreadChatEntry {
+    const base = { id: `t:${row.clientId}`, at: row.at, kind: 'chat' as const, question: row.query, threadId: row.threadId, messageNo: row.messageNo }
+    const ended = this.answers.get(row.clientId)
+    if (row.job || ended) {
+      // Recorded from a job (7.0.39 candidate 2): its end decides the status and the answer.
+      const job = { clientJobId: row.clientId, generation: ended?.generation ?? row.job?.generation ?? 1 }
+      if (!ended) {
+        const stale = this.now() - Date.parse(row.at) > RUNNING_STALE_MS
+        return { ...base, answer: '', answerChars: null, full: false, status: stale ? 'interrupted' : 'running', ...job }
+      }
+      const whole = ended.status === 'completed' && ended.answerChars === ended.answerHead.length
+      return { ...base, answer: ended.answerHead, answerChars: ended.answerChars, full: whole, status: ended.status, ...job }
+    }
     // The ledger keeps the first ANSWER_HEAD_CHARS of the answer. Shorter than that, it is the whole answer; at the cap
     // or empty (a turn recorded without its answer), the whole one has to be looked up (entry()).
     const whole = row.answerHead.length > 0 && row.answerHead.length < ANSWER_HEAD_CHARS
-    return {
-      id: `t:${row.clientId}`, at: row.at, kind: 'chat', question: row.query, answer: row.answerHead,
-      answerChars: whole ? row.answerHead.length : null, full: whole, threadId: row.threadId, status: 'completed',
-      messageNo: row.messageNo,
-    }
+    return { ...base, answer: row.answerHead, answerChars: whole ? row.answerHead.length : null, full: whole, status: 'completed' }
+  }
+
+  /** The whole answer the thread store itself holds for a chat (a completed cosThread job), when it has one. */
+  storedAnswer(clientId: string): string | undefined {
+    const ended = this.answers.get(clientId)
+    if (!ended || ended.status !== 'completed') return undefined
+    if (!ended.ref) return ended.answerChars === ended.answerHead.length ? ended.answerHead : undefined
+    return this.readAnswer(ended.ref, clientId)
   }
 
   /** The number of chats in the whole history (every thread). */
@@ -680,7 +795,21 @@ export class CosThread {
         entries.push(e); bytes += b
       }
       const stop = from + entries.length
-      return { protocol: 1, entries, older: from > 0 ? cursorOf(from) : null, newest: cursorOf(stop), more: stop < n, updated: [] }
+      // Chats already sent (before `from`) whose job ended since the cursor was given: the page replaces them by id.
+      const updated: CosThreadChatEntry[] = []
+      if (query.afterAnswers !== undefined) {
+        const changed = [...this.answers.entries()]
+          .filter(([clientId, a]) => a.seq > query.afterAnswers! && (this.historyByClient.get(clientId) ?? Infinity) < from)
+          .sort((a, b) => a[1].seq - b[1].seq)
+          .map(([clientId]) => this.historyByClient.get(clientId)!)
+        for (const row of this.readTurns(changed)) {
+          const e = this.chatEntry(row)
+          const b = size(e)
+          if (entries.length + updated.length && bytes + b > cap) break
+          updated.push(e); bytes += b
+        }
+      }
+      return { protocol: 1, entries, older: from > 0 ? cursorOf(from) : null, newest: cursorOf(stop, this.answerSeq), more: stop < n, updated }
     }
     const end = Math.min(Math.max(0, query.before ?? n), n)
     const start = Math.max(0, end - limit)
@@ -695,7 +824,7 @@ export class CosThread {
     }
     kept.reverse()
     const first = end - kept.length
-    return { protocol: 1, entries: kept, older: first > 0 ? cursorOf(first) : null, newest: cursorOf(end), more: end < n, updated: [] }
+    return { protocol: 1, entries: kept, older: first > 0 ? cursorOf(first) : null, newest: cursorOf(end, this.answerSeq), more: end < n, updated: [] }
   }
 
   /** One chat by its clientId, with what a full-answer lookup needs. Null when the history has no such chat. */
@@ -721,8 +850,10 @@ export class CosThread {
     for (let i = this.turns.length - 1; i >= 0 && hits.length < limit; i--) {
       const t = this.turns[i]!
       scanned += 1
-      if (t.query.toLowerCase().includes(needle) || t.answerHead.toLowerCase().includes(needle)) {
-        hits.push({ threadId: t.threadId, sessionId: t.sessionId, at: t.at, query: t.query, answerHead: t.answerHead, messageNo: t.messageNo })
+      // 7.0.39: a cosThread chat's answer is on its answer row, not its turn row.
+      const answerHead = t.answerHead || this.answers.get(t.clientId)?.answerHead || ''
+      if (t.query.toLowerCase().includes(needle) || answerHead.toLowerCase().includes(needle)) {
+        hits.push({ threadId: t.threadId, sessionId: t.sessionId, at: t.at, query: t.query, answerHead, messageNo: t.messageNo })
       }
     }
     return { hits, scanned }
@@ -740,19 +871,33 @@ export class CosThread {
   }
 }
 
+/**
+ * Whether a job end replaces the one already recorded for a chat. A later generation (a Retry) always does; an earlier
+ * one never does. The SAME generation does when its status or length differs: a boot ends a job caught mid-start
+ * `interrupted` and then resumes that generation to `completed` (canary (a), cos-thread-never-lost.test.ts). An identical
+ * end (the boot's re-projection of a job already recorded) is skipped, so re-projection is idempotent.
+ */
+function supersededBy(prior: { generation: number; status: CosThreadChatStatus; answerChars: number }, next: { generation: number; status: CosThreadChatStatus; answerChars: number }): boolean {
+  if (next.generation !== prior.generation) return next.generation > prior.generation
+  return next.status !== prior.status || next.answerChars !== prior.answerChars
+}
+
 function range(from: number, to: number): number[] {
   const out: number[] = []
   for (let i = from; i < to; i++) out.push(i)
   return out
 }
-/** A history cursor: the place before the n-th chat. Opaque to clients. */
-export function cursorOf(place: number): string { return `c1.${place}` }
-const CURSOR_RE = /^c1\.(\d{1,9})$/
+/** A history cursor: the place before the n-th chat, and (on `newest`, 7.0.39 candidate 2) how many job ends were
+ * recorded then, so `after=` can return chats that ended since. Opaque to clients. */
+export function cursorOf(place: number, answers?: number): string { return answers === undefined ? `c1.${place}` : `c1.${place}.${answers}` }
+const CURSOR_RE = /^c1\.(\d{1,9})(?:\.(\d{1,9}))?$/
 /** The place a cursor names, or null when it is not one of ours. */
-export function parseCursor(raw: unknown): number | null {
+export function parseCursor(raw: unknown): number | null { return parseCursorParts(raw)?.place ?? null }
+/** Both parts; `answers` is absent on a cursor without one (an `older` cursor, or one from candidate 1). */
+export function parseCursorParts(raw: unknown): { place: number; answers?: number } | null {
   if (typeof raw !== 'string') return null
   const m = CURSOR_RE.exec(raw)
-  return m ? Number(m[1]) : null
+  return m ? { place: Number(m[1]), ...(m[2] !== undefined ? { answers: Number(m[2]) } : {}) } : null
 }
 
 /**
@@ -823,13 +968,17 @@ function isRow(row: unknown): row is LedgerRow {
   if (r.kind === 'turn') return typeof r.threadId === 'string' && typeof r.sessionId === 'string' && typeof r.clientId === 'string'
     && typeof r.query === 'string' && typeof r.answerHead === 'string' && Number.isInteger(r.segment)
   if (r.kind === 'rollover' || r.kind === 'close') return typeof r.threadId === 'string'
+  if (r.kind === 'answer') return typeof r.clientId === 'string' && Number.isSafeInteger(r.generation) && (r.generation as number) >= 1
+    && typeof r.answerHead === 'string' && Number.isSafeInteger(r.answerChars)
+    && (r.status === 'completed' || r.status === 'failed' || r.status === 'interrupted')
   return false
 }
 
-/** Opens the store once, on the first request that needs it (Drop it on). Null while it cannot open. */
+/** Opens the store once, on the first request that needs it (Drop it on). Null while it cannot open. 7.0.39: the opener
+ * is also what the job runtime records thread jobs through (cosThreadStore), so there is one store per process. */
 export function lazyCosThread(open: () => CosThread): () => CosThread | null {
   let thread: CosThread | null = null
-  return () => {
+  const get = () => {
     if (thread) return thread
     try { thread = open() } catch (e) {
       console.error('[cos-thread] store unavailable:', e instanceof CosThreadError ? e.code : e instanceof Error ? e.name : 'error')
@@ -837,4 +986,11 @@ export function lazyCosThread(open: () => CosThread): () => CosThread | null {
     }
     return thread
   }
+  registeredStore = get
+  return get
 }
+let registeredStore: (() => CosThread | null) | null = null
+/** The process's thread store for the job runtime (7.0.39): the one lazyCosThread opened, or null when none is set up. */
+export function cosThreadStore(): CosThread | null { return registeredStore?.() ?? null }
+/** Tests only. */
+export function __resetCosThreadStoreForTests(): void { registeredStore = null }

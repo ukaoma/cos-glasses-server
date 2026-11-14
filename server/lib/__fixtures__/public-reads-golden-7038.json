@@ -1,0 +1,394 @@
+{
+ "/sessions/today/all-messages": {
+  "status": 200,
+  "body": {
+   "messages": [
+    {
+     "query": "question 30",
+     "text": "answer 30",
+     "timestamp": 1794420001000,
+     "queryTimestamp": 1794420000000,
+     "chatIndex": 0,
+     "sessionId": "b6666666",
+     "no": 30,
+     "globalMsgNum": 30,
+     "source": "archive"
+    },
+    {
+     "query": "question 35",
+     "text": "answer 35",
+     "timestamp": 1794506401000,
+     "queryTimestamp": 1794506400000,
+     "chatIndex": 0,
+     "sessionId": "b7777777",
+     "no": 35,
+     "globalMsgNum": 35,
+     "source": "archive"
+    },
+    {
+     "query": "question thirty-nine",
+     "text": "answer thirty-nine",
+     "timestamp": 1794585601000,
+     "queryTimestamp": 1794585600000,
+     "chatIndex": -1,
+     "sessionId": "a3333333",
+     "source": "live",
+     "no": 39,
+     "globalMsgNum": 39
+    },
+    {
+     "query": "question forty-one",
+     "text": "answer forty-one",
+     "timestamp": 1794668401000,
+     "queryTimestamp": 1794668400000,
+     "chatIndex": -1,
+     "sessionId": "a1111111",
+     "source": "live",
+     "no": 41,
+     "globalMsgNum": 41
+    },
+    {
+     "query": "question forty-two",
+     "text": "answer forty-two",
+     "timestamp": 1794672001000,
+     "queryTimestamp": 1794672000000,
+     "chatIndex": -1,
+     "sessionId": "a1111111",
+     "source": "live",
+     "no": 42,
+     "globalMsgNum": 42
+    },
+    {
+     "query": "question without a number",
+     "text": "answer without a number",
+     "timestamp": 1794675601000,
+     "queryTimestamp": 1794675600000,
+     "chatIndex": -1,
+     "sessionId": "a2222222",
+     "source": "live"
+    }
+   ],
+   "date": "2026-11-14",
+   "window": {
+    "kind": "recent",
+    "limit": 30
+   }
+  }
+ },
+ "/sessions/today/all-messages?limit=100": {
+  "status": 200,
+  "body": {
+   "messages": [
+    {
+     "query": "question 30",
+     "text": "answer 30",
+     "timestamp": 1794420001000,
+     "queryTimestamp": 1794420000000,
+     "chatIndex": 0,
+     "sessionId": "b6666666",
+     "no": 30,
+     "globalMsgNum": 30,
+     "source": "archive"
+    },
+    {
+     "query": "question 35",
+     "text": "answer 35",
+     "timestamp": 1794506401000,
+     "queryTimestamp": 1794506400000,
+     "chatIndex": 0,
+     "sessionId": "b7777777",
+     "no": 35,
+     "globalMsgNum": 35,
+     "source": "archive"
+    },
+    {
+     "query": "question thirty-nine",
+     "text": "answer thirty-nine",
+     "timestamp": 1794585601000,
+     "queryTimestamp": 1794585600000,
+     "chatIndex": -1,
+     "sessionId": "a3333333",
+     "source": "live",
+     "no": 39,
+     "globalMsgNum": 39
+    },
+    {
+     "query": "question forty-one",
+     "text": "answer forty-one",
+     "timestamp": 1794668401000,
+     "queryTimestamp": 1794668400000,
+     "chatIndex": -1,
+     "sessionId": "a1111111",
+     "source": "live",
+     "no": 41,
+     "globalMsgNum": 41
+    },
+    {
+     "query": "question forty-two",
+     "text": "answer forty-two",
+     "timestamp": 1794672001000,
+     "queryTimestamp": 1794672000000,
+     "chatIndex": -1,
+     "sessionId": "a1111111",
+     "source": "live",
+     "no": 42,
+     "globalMsgNum": 42
+    },
+    {
+     "query": "question without a number",
+     "text": "answer without a number",
+     "timestamp": 1794675601000,
+     "queryTimestamp": 1794675600000,
+     "chatIndex": -1,
+     "sessionId": "a2222222",
+     "source": "live"
+    }
+   ],
+   "date": "2026-11-14",
+   "window": {
+    "kind": "recent",
+    "limit": 100
+   }
+  }
+ },
+ "/sessions/today/live-chats": {
+  "status": 200,
+  "body": {
+   "chats": [
+    {
+     "index": -1,
+     "summary": "[LIVE] question forty-one",
+     "exchangeCount": 4,
+     "startedAt": 1794671940000,
+     "isLive": true,
+     "sessionId": "a1111111"
+    },
+    {
+     "index": -1,
+     "summary": "[LIVE] question without a number",
+     "exchangeCount": 2,
+     "startedAt": 1794675540000,
+     "isLive": true,
+     "sessionId": "a2222222"
+    }
+   ]
+  }
+ },
+ "/sessions/recent": {
+  "status": 200,
+  "body": {
+   "sessions": [
+    {
+     "id": "a2222222",
+     "exchangeCount": 2,
+     "lastActivity": 1794675601000,
+     "createdAt": 1794675540000,
+     "modelPreference": null,
+     "lastQuery": "question without a number"
+    },
+    {
+     "id": "a1111111",
+     "exchangeCount": 4,
+     "lastActivity": 1794672001000,
+     "createdAt": 1794671940000,
+     "modelPreference": null,
+     "lastQuery": "question forty-two"
+    }
+   ]
+  }
+ },
+ "/archive": {
+  "status": 200,
+  "body": {
+   "archives": [
+    {
+     "date": "2026-11-13",
+     "summary": "question thirty-nine",
+     "chatCount": 1,
+     "exchangeCount": 2
+    },
+    {
+     "date": "2026-11-12",
+     "summary": "placeholder day",
+     "chatCount": 1,
+     "exchangeCount": 2
+    },
+    {
+     "date": "2026-11-11",
+     "summary": "placeholder day",
+     "chatCount": 1,
+     "exchangeCount": 2
+    }
+   ],
+   "index": {
+    "rebuilt": 3,
+    "fromCache": 0
+   }
+  }
+ },
+ "/archive/search?q=question": {
+  "status": 200,
+  "body": {
+   "query": "question",
+   "hits": [
+    {
+     "date": "2026-11-13",
+     "matches": 3,
+     "snippets": [
+      "{ \"date\": \"2026-11-13\", \"summary\": \"question thirty-nine\", \"chats\": [ { \"id\": 0, \"sessionId\": \"a3333333\", \"exchanges\": [ {",
+      "\"id\": 0, \"sessionId\": \"a3333333\", \"exchanges\": [ { \"role\": \"user\", \"content\": \"question thirty-nine\", \"timestamp\": 1794585600000, \"globalMsgNum\": 39 }, { \"role\":",
+      "], \"startedAt\": 1794585600000, \"endedAt\": 1794585601000, \"exchangeCount\": 2, \"summary\": \"question thirty-nine\" } ], \"archivedAt\": \"2026-11-14T18:00:00.000Z\" }"
+     ]
+    },
+    {
+     "date": "2026-11-12",
+     "matches": 1,
+     "snippets": [
+      ",\"archivedAt\":\"2026-11-12T19:00:00.000Z\",\"chats\":[{\"id\":0,\"sessionId\":\"b7777777\",\"exchanges\":[{\"role\":\"user\",\"content\":\"question 35\",\"timestamp\":1794506400000,\"globalMsgNum\":35},{\"role\":\"assistant\",\"content\":\"answer 35\",\"timestamp\":1794506401000,\"g"
+     ]
+    },
+    {
+     "date": "2026-11-11",
+     "matches": 1,
+     "snippets": [
+      ",\"archivedAt\":\"2026-11-11T19:00:00.000Z\",\"chats\":[{\"id\":0,\"sessionId\":\"b6666666\",\"exchanges\":[{\"role\":\"user\",\"content\":\"question 30\",\"timestamp\":1794420000000,\"globalMsgNum\":30},{\"role\":\"assistant\",\"content\":\"answer 30\",\"timestamp\":1794420001000,\"g"
+     ]
+    }
+   ],
+   "scannedDays": 3,
+   "bytesScanned": 1497,
+   "truncated": false,
+   "elapsedMs": 0
+  }
+ },
+ "/archive/2026-11-13": {
+  "status": 200,
+  "body": {
+   "date": "2026-11-13",
+   "summary": "question thirty-nine",
+   "chats": [
+    {
+     "id": 0,
+     "sessionId": "a3333333",
+     "exchanges": [
+      {
+       "role": "user",
+       "content": "question thirty-nine",
+       "timestamp": 1794585600000,
+       "globalMsgNum": 39
+      },
+      {
+       "role": "assistant",
+       "content": "answer thirty-nine",
+       "timestamp": 1794585601000,
+       "globalMsgNum": 39
+      }
+     ],
+     "startedAt": 1794585600000,
+     "endedAt": 1794585601000,
+     "exchangeCount": 2,
+     "summary": "question thirty-nine"
+    }
+   ],
+   "archivedAt": "2026-11-14T18:00:00.000Z"
+  }
+ },
+ "/archive/2026-11-13/chats": {
+  "status": 200,
+  "body": {
+   "chats": [
+    {
+     "index": 0,
+     "summary": "question thirty-nine",
+     "exchangeCount": 2,
+     "startedAt": 1794585600000
+    }
+   ]
+  }
+ },
+ "/archive/2026-11-13/chats/0/messages": {
+  "status": 200,
+  "body": {
+   "messages": [
+    {
+     "query": "question thirty-nine",
+     "text": "answer thirty-nine",
+     "timestamp": 1794585601000,
+     "no": 39
+    }
+   ]
+  }
+ },
+ "/archive/2026-11-13/messages": {
+  "status": 200,
+  "body": {
+   "messages": [
+    {
+     "query": "question thirty-nine",
+     "text": "answer thirty-nine",
+     "timestamp": 1794585601000,
+     "queryTimestamp": 1794585600000,
+     "chatIndex": 0,
+     "sessionId": "a3333333",
+     "no": 39,
+     "globalMsgNum": 39
+    }
+   ]
+  }
+ },
+ "/archive/2026-11-12/messages": {
+  "status": 200,
+  "body": {
+   "messages": [
+    {
+     "query": "question 35",
+     "text": "answer 35",
+     "timestamp": 1794506401000,
+     "queryTimestamp": 1794506400000,
+     "chatIndex": 0,
+     "sessionId": "b7777777",
+     "no": 35,
+     "globalMsgNum": 35
+    }
+   ]
+  }
+ },
+ "/archive/2026-11-11/chats/0/messages": {
+  "status": 200,
+  "body": {
+   "messages": [
+    {
+     "query": "question 30",
+     "text": "answer 30",
+     "timestamp": 1794420001000,
+     "no": 30
+    }
+   ]
+  }
+ },
+ "/message-counter": {
+  "status": 200,
+  "body": {
+   "max": 42,
+   "era": "legacy"
+  }
+ },
+ "/message/41": {
+  "status": 200,
+  "body": {
+   "globalMsgNum": 41,
+   "date": "2026-11-14",
+   "query": "question forty-one",
+   "response": "answer forty-one"
+  }
+ },
+ "/message/30": {
+  "status": 200,
+  "body": {
+   "globalMsgNum": 30,
+   "date": "2026-11-11",
+   "query": "question 30",
+   "response": "answer 30"
+  }
+ }
+}

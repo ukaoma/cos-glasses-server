@@ -50,7 +50,7 @@ function walkBack(t: CosThread, limit: number): string[] {
 describe('history pages', () => {
   it('an empty thread: no entries, no older page, the cursor at the start', () => {
     const t = harness().make()
-    expect(t.historyPage({ limit: 40 })).toEqual({ protocol: 1, entries: [], older: null, newest: 'c1.0', more: false, updated: [] })
+    expect(t.historyPage({ limit: 40 })).toEqual({ protocol: 1, entries: [], older: null, newest: 'c1.0.0', more: false, updated: [] })
   })
 
   it('the newest page, oldest to newest, then older pages back to the first chat, across New thread, with no gap or repeat', () => {
@@ -62,7 +62,7 @@ describe('history pages', () => {
     const page = t.historyPage({ limit: 3 })
     expect(ids(page.entries)).toEqual(['t:' + cid(5), 't:' + cid(6), 't:' + cid(7)])
     expect(page.older).toBe('c1.4')
-    expect(page.newest).toBe('c1.7')
+    expect(page.newest).toBe('c1.7.0')
     expect(page.more).toBe(false)
     const back = t.historyPage({ before: 4, limit: 3 })
     expect(ids(back.entries)).toEqual(['t:' + cid(2), 't:' + cid(3), 't:' + cid(4)])
@@ -77,7 +77,7 @@ describe('history pages', () => {
     const h = harness(); const t = h.make()
     ask(t, 1)
     const newest = t.historyPage({ limit: 40 }).newest
-    expect(t.historyPage({ after: parseCursor(newest)!, limit: 40 })).toEqual({ protocol: 1, entries: [], older: 'c1.1', newest: 'c1.1', more: false, updated: [] })
+    expect(t.historyPage({ after: parseCursor(newest)!, limit: 40 })).toEqual({ protocol: 1, entries: [], older: 'c1.1', newest: 'c1.1.0', more: false, updated: [] })
     for (let n = 2; n <= 5; n++) ask(t, n)
     const next = t.historyPage({ after: parseCursor(newest)!, limit: 3 })
     expect(ids(next.entries)).toEqual([2, 3, 4].map(n => 't:' + cid(n)))

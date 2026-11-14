@@ -22,10 +22,11 @@
  */
 import { Router, type Response } from 'express'
 import {
-  archivedAnswer, CosThread, CosThreadError, ENTRY_MAX_ANSWER_CHARS, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, parseCursor,
+  archivedAnswer, CosThread, CosThreadError, ENTRY_MAX_ANSWER_CHARS, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, parseCursorParts,
   parseTurnInput, type CosThreadEntryLookup,
 } from '../lib/cos-thread.js'
 import { dataPath } from '../lib/data-dir.js'
+import { isCosThreadSession } from '../lib/conversation.js'
 
 export interface CosThreadRouterDependencies {
   enabled: () => boolean
@@ -62,7 +63,8 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     try { return fn(thread) } catch (e) { return fail(res, e) }
   }
 
-  router.get('/cos-thread', (_req, res) => withThread(res, t => res.json(t.view())))
+  // 7.0.39: ?threadOnly=1 from a page that sends cosThread (lib/cos-thread.ts view()).
+  router.get('/cos-thread', (req, res) => withThread(res, t => res.json(t.view(req.query.threadOnly === '1' ? { isThreadSession: isCosThreadSession } : {}))))
 
   router.post('/cos-thread/new', (req, res) => {
     const b = req.body
@@ -92,9 +94,11 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     const { before, after } = req.query
     if (before !== undefined && after !== undefined) return res.status(400).json({ error: { code: 'invalid_cursor', message: 'Send before or after, not both.' } })
     const raw = before ?? after
-    const place = raw === undefined ? undefined : parseCursor(raw)
-    if (place === null) return res.status(400).json({ error: { code: 'invalid_cursor' } })
-    return withThread(res, t => res.json(t.historyPage(after !== undefined ? { after: place, limit } : { before: place, limit })))
+    const parts = raw === undefined ? undefined : parseCursorParts(raw)
+    if (parts === null) return res.status(400).json({ error: { code: 'invalid_cursor' } })
+    return withThread(res, t => res.json(t.historyPage(after !== undefined
+      ? { after: parts!.place, ...(parts!.answers !== undefined ? { afterAnswers: parts!.answers } : {}), limit }
+      : { before: parts?.place, limit })))
   })
 
   router.get('/cos-thread/entry/:id', (req, res) => {
@@ -105,6 +109,13 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
       if (!found) return res.status(404).json({ error: { code: 'entry_not_found' } })
       const { entry, lookup } = found
       if (entry.full) return res.json({ entry, source: 'ledger' })
+      // 7.0.39 candidate 2: a completed cosThread chat's whole answer is in the thread store itself.
+      const stored = t.storedAnswer(lookup.clientId)
+      if (typeof stored === 'string') {
+        const cut = stored.length > ENTRY_MAX_ANSWER_CHARS
+        return res.json({ entry: { ...entry, answer: cut ? stored.slice(0, ENTRY_MAX_ANSWER_CHARS) : stored, answerChars: stored.length, full: !cut }, source: 'ledger' })
+      }
+      if (entry.status !== 'completed') return res.json({ entry, source: 'preview' })
       let source: 'live' | 'archive' = 'live'
       let whole = t.liveAnswer(lookup)
       if (typeof whole !== 'string' || !whole) {

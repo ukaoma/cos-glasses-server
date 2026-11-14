@@ -24,6 +24,7 @@ vi.mock('./display-bus.js', () => ({ emitDisplay: mocks.emitDisplay }))
 vi.mock('./query-attachments.js', () => ({ resolveQueryAttachments: mocks.resolveAttachments }))
 vi.mock('./media-store.js', () => ({ getMediaStore: () => ({ associate: mocks.associate }) }))
 vi.mock('./conversation.js', () => ({
+  isCosThreadSession: () => false,  // 7.0.39: no COS thread conversations in this suite
   getOrCreateSession: (requested?: string) => requested ?? 'runtime-session',
   findExchangesByJobIdentity: mocks.findExchanges,
   reconcileExchangeByJobIdentity: mocks.reconcileExchange,

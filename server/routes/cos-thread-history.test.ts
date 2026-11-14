@@ -65,14 +65,14 @@ describe('GET /cos-thread/history', () => {
     expect(page.body.entries).toHaveLength(40)
     expect(page.body.entries[0].id).toBe(id(6))
     expect(page.body.entries[39].id).toBe(id(45))
-    expect(page.body).toMatchObject({ protocol: 1, older: 'c1.5', newest: 'c1.45', more: false, updated: [] })
+    expect(page.body).toMatchObject({ protocol: 1, older: 'c1.5', newest: 'c1.45.0', more: false, updated: [] })
     const back = await h.call('GET', `/cos-thread/history?before=${page.body.older}&limit=10`)
     expect(back.body.entries.map((e: any) => e.id)).toEqual([1, 2, 3, 4, 5].map(id))
     expect(back.body.older).toBeNull()
     await h.turn(46)
     const ahead = await h.call('GET', `/cos-thread/history?after=${page.body.newest}`)
     expect(ahead.body.entries.map((e: any) => e.id)).toEqual([id(46)])
-    expect(ahead.body.newest).toBe('c1.46')
+    expect(ahead.body.newest).toBe('c1.46.0')
   })
 
   it('refuses a bad limit, a bad cursor and both cursors at once', async () => {

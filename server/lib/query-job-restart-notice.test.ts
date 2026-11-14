@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./conversation.js', () => ({
+  isCosThreadSession: () => false,  // 7.0.39: no COS thread conversations in this suite
   getOrCreateSession: () => 'restart-notice-session',
 }))
 

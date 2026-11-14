@@ -330,6 +330,10 @@ healthRouter.get('/health', async (_req, res) => {
     // durableQueryJobs is false. Absent on older servers, which answer that path 400.
     activeQueryJobs: true,
     activeQueryJobsProtocol: ACTIVE_QUERY_JOBS_PROTOCOL,
+    // 7.0.39 (persistent COS thread, candidate 2; docs/cos-thread.md): POST /api/query-jobs takes `cosThread: true` with
+    // source 'web' (no message number, no display bus, kept out of every list). A page sends it only when this is true,
+    // so on an older server a thread chat stays an ordinary numbered Ask and is never lost.
+    cosThreadOnly: durableJobs.enabled,
     // Static: this build carries the scheduler. The live schedule is under
     // capabilities.morningBrief and may be absent while the runtime boots.
     morningBrief: true,

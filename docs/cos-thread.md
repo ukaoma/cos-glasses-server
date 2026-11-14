@@ -70,8 +70,49 @@ One chat, `t:<clientId>`, with its whole answer:
 - **Answer cap:** an answer over 1,000,000 characters is cut and reads `full: false`.
 - **Errors:** 400 `invalid_entry` for an id that is not `t:<clientId>`; 404 `entry_not_found` for one the history does not hold.
 
+## Thread-only chats (7.0.39 candidate 2)
+
+`POST /api/query-jobs` with `source: 'web'` and `cosThread: true` is an Ask from the pinned thread. The page sends it only
+when `/api/health` says `features.cosThreadOnly: true`; on an older server the Ask stays an ordinary numbered one and is
+never lost.
+
+| What | Rule |
+| --- | --- |
+| Number | none: nothing minted, nothing reserved, so the lens list has no gap and `/api/message-counter` does not move |
+| Conversation | a thread conversation (`Session.cosThread`), kept when the asked `sessionId` is one, else a new one; a Retry (next generation) stays in its first try's conversation; saved durably before the job is admitted |
+| Lists | absent from `all-messages`, `live-chats`, `sessions/recent`, the archive routes, the session cache and `/api/message/:n` (they all read `getActiveSessions` or the archive) |
+| Archive | a thread conversation is never written to a day file (daily mirror, clear, end, `POST /archive/now`) |
+| Display bus | no `start`, `done` or `error` event, so the lens never lists it |
+| Model | unchanged: the conversation's history builds the prompt like any other |
+| Refusals | `cosThread` without `source: 'web'`: 400 `cos_thread_web_only`. A non-thread Ask naming a thread conversation: 409 `thread_session_web_only`. `cosThread` other than `true`: 400 `invalid_cos_thread` |
+
+**The thread keeps it.** When the job starts, the question becomes the thread's turn. When it ends, in any status, an
+answer row is appended: the status, the first 2,000 characters, the length, and, for a completed answer longer than that,
+where the whole answer is in `cos-thread/answers/YYYY-MM.jsonl` (with its SHA-256). `GET /cos-thread/entry/:id` reads it
+from there (`source: 'ledger'`).
+
+**Entry fields for a job chat:** `status` (`running`, `completed`, `failed`, `interrupted`; `canceled` reads `interrupted`),
+`clientJobId` and `generation` (reattach through `/api/query-jobs/by-client`, Retry with the next generation), and for a
+failed or interrupted one the partial answer's first 2,000 characters. A running chat with no end after 6 hours reads
+`interrupted`.
+
+**Never lost.** The job journal is the authority. The thread's answer row is written inside the terminal projection, which
+the coordinator runs for every terminal job and again at every boot for each retained one, so a crash between the
+journal's terminal fsync and the thread write is repaired on the next boot. A later end of the same generation replaces
+an earlier one (a boot ends a job caught mid-start `interrupted`, then resumes it to `completed`); an identical end is
+skipped. Tested by killing the process at each step (`server/lib/cos-thread-never-lost.test.ts`).
+
+**Cursors.** `newest` is `c1.<chats>.<ends>`. `after=<newest>` answers new chats in `entries` and, in `updated`, chats
+already sent whose job ended since. A cursor without the second part (candidate 1, or `older`) still works.
+
+**`GET /api/cos-thread?threadOnly=1`.** A page that sends `cosThread` reads the thread this way. When the thread's
+conversation is not a thread conversation (one from before the update, numbered, in Messages), the next Ask starts fresh
+with the digest (`reason: 'thread_only'`) instead of continuing it. Without the parameter, as before.
+
+**Public apps unchanged.** `server/routes/public-reads-golden.test.ts` holds the reads the Mac app and the glasses app make
+to the bytes 7.0.38 (1737c815) answered, with and without thread conversations on disk.
+
 ## Not yet (later candidates)
 
-- **Thread-only chats** (`cosThread: true` on `POST /api/query-jobs`): no message number, nothing on the display bus, kept out of Recent and the archive, and the whole answer kept at the job's end.
 - **Timeline entries:** notifications, session questions, meetings and glasses chats.
 - **COS's own look-back read** by time window.

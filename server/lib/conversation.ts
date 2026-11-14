@@ -112,6 +112,13 @@ interface Session {
   createdAt: number
   modelPreference: SessionModelBinding | null
   contextBreaks: number[]  // timestamps where user said "new chat" — prompt history only sees exchanges after last break
+  /**
+   * 7.0.39 (persistent COS thread, candidate 2; docs/cos-thread.md): this conversation carries the pinned COS thread's
+   * chats. They live in the thread store, not in Messages: such a session is left out of every list a client reads
+   * (getActiveSessions, getRecentSessions) and is never written to a day archive. The model path is unchanged: its
+   * exchanges still build the prompt history like any session's. Set only by createSession({ cosThread: true }).
+   */
+  cosThread?: true
 }
 
 const MAX_EXCHANGES = 100             // 50 Q&A pairs — deep history for browsing
@@ -294,6 +301,7 @@ async function runDailyArchiveMirror(): Promise<void> {
 
   for (const session of sessions.values()) {
     if (session.exchanges.length === 0) continue
+    if (session.cosThread === true) continue // 7.0.39: the thread store holds these, never a day archive
     const sessionDay = localDay(session.lastActivity)
     if (sessionDay >= todayLocal) continue // today's sessions are still live — skip
 
@@ -376,14 +384,22 @@ scheduleArchiveMirrorAtNextLocalDay()
 // Track whether session is brand new (for first-query notification)
 const newSessions = new Set<string>()
 
-export function createSession(): string {
+export function createSession(options: { cosThread?: boolean } = {}): string {
   const now = Date.now()
   const id = randomUUID().slice(0, 8)
-  sessions.set(id, { id, exchanges: [], lastActivity: now, createdAt: now, modelPreference: null, contextBreaks: [] })
+  sessions.set(id, {
+    id, exchanges: [], lastActivity: now, createdAt: now, modelPreference: null, contextBreaks: [],
+    ...(options.cosThread === true ? { cosThread: true as const } : {}),
+  })
   newSessions.add(id)
   scheduleSave()
   scheduleCacheUpdate()
   return id
+}
+
+/** 7.0.39: the conversation carries the pinned COS thread (see Session.cosThread). Exactly `true` only. */
+export function isCosThreadSession(sessionId: string): boolean {
+  return sessions.get(sessionId)?.cosThread === true
 }
 
 /** Get raw session object — needed for contextBreaks access */
@@ -710,7 +726,8 @@ export function reconcileExchangeByJobIdentity(
  *  unconditionally even on archive failure — silent data loss. */
 export async function clearSession(sessionId: string): Promise<void> {
   const session = sessions.get(sessionId)
-  if (session && session.exchanges.length > 0) {
+  // 7.0.39: a COS thread conversation is never archived (the thread store holds it).
+  if (session && session.exchanges.length > 0 && session.cosThread !== true) {
     const dateStr = localDay(session.lastActivity)
     try {
       await appendToArchive(dateStr, {
@@ -894,6 +911,7 @@ export function getRecentSessions(withinMs: number): SessionSummary[] {
 
   for (const session of sessions.values()) {
     if (now - session.lastActivity > withinMs) continue
+    if (session.cosThread === true) continue // 7.0.39: COS thread chats are not in any client's lists
     const lastUserExchange = [...session.exchanges].reverse().find(e => e.role === 'user')
     results.push({
       id: session.id,
@@ -927,7 +945,8 @@ export async function endSession(sessionId: string): Promise<{ logged: boolean; 
   const durationMin = Math.round((session.lastActivity - session.createdAt) / 60_000)
   const exchangeCount = session.exchanges.length
 
-  if (session.exchanges.length > 0) {
+  // 7.0.39: a COS thread conversation is never archived (the thread store holds it).
+  if (session.exchanges.length > 0 && session.cosThread !== true) {
     const dateStr = localDay(session.lastActivity)
     try {
       await appendToArchive(dateStr, {
@@ -1045,6 +1064,9 @@ export function getActiveSessions(): SessionToArchive[] {
   const result: SessionToArchive[] = []
   for (const session of sessions.values()) {
     if (session.exchanges.length === 0) continue
+    // 7.0.39: every list a client reads (all-messages, live-chats, the archive snapshot, the session cache, message
+    // lookups) comes through here, and none of them shows the pinned COS thread's chats. The thread store does.
+    if (session.cosThread === true) continue
     result.push({
       id: session.id,
       exchanges: session.exchanges,

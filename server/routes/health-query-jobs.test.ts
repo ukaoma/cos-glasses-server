@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../lib/conversation.js', () => ({
+  isCosThreadSession: () => false,  // 7.0.39: no COS thread conversations in this suite
   getOrCreateSession: () => 'health-session',
 }))
 
@@ -63,6 +64,8 @@ describe('public durable-query capability health', () => {
     // 6.84.1: GET /api/query-jobs/active is detectable from health (docs/active-query-jobs.md).
     expect(body.features.activeQueryJobs).toBe(true)
     expect(body.features.activeQueryJobsProtocol).toBe(1)
+    // 7.0.39: the page sends cosThread only when this is true (docs/cos-thread.md).
+    expect(body.features.cosThreadOnly).toBe(true)
     expect(body.cursor_models).toMatchObject({
       source: expect.any(String),
       options: [

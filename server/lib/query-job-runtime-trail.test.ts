@@ -25,6 +25,7 @@ vi.mock('./query-attachments.js', () => ({
 }))
 vi.mock('./media-store.js', () => ({ getMediaStore: () => ({ associate: vi.fn(async () => {}) }) }))
 vi.mock('./conversation.js', () => ({
+  isCosThreadSession: () => false,  // 7.0.39: no COS thread conversations in this suite
   getOrCreateSession: (requested?: string) => requested ?? 'runtime-session',
   findExchangesByJobIdentity: () => [],
   reconcileExchangeByJobIdentity: mocks.reconcileExchange,

@@ -23,6 +23,7 @@ vi.mock('./display-bus.js', () => ({ emitDisplay: mocks.emitDisplay }))
 vi.mock('./query-attachments.js', () => ({ resolveQueryAttachments: vi.fn(async () => ({ ids: [], refs: [], inputs: [] })) }))
 vi.mock('./media-store.js', () => ({ getMediaStore: () => ({ associate: vi.fn() }) }))
 vi.mock('./conversation.js', () => ({
+  isCosThreadSession: () => false,  // 7.0.39: no COS thread conversations in this suite
   getOrCreateSession: (requested?: string) => requested ?? 'runtime-session',
   findExchangesByJobIdentity: () => [],
   reconcileExchangeByJobIdentity: mocks.reconcileExchange,

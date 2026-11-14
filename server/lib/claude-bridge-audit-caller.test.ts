@@ -42,6 +42,7 @@ vi.mock('./context-builder.js', () => ({
   getCachedContextInstant: vi.fn(() => ''),
 }))
 vi.mock('./conversation.js', () => ({
+  isCosThreadSession: () => false,  // 7.0.39: no COS thread conversations in this suite
   getHistory: () => [],
   addExchange: () => ({ id: 'exchange' }),
   setExchangeAttachments: vi.fn(),

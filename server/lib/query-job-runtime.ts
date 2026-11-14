@@ -8,11 +8,12 @@ import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { acquireModelSessionRunLock, callModelStreaming } from './model-router.js'
 import { emitDisplay } from './display-bus.js'
+import { cosThreadStore } from './cos-thread.js'
 import { resolveQueryAttachments } from './query-attachments.js'
 import { getMediaStore } from './media-store.js'
 import { dataPath } from './data-dir.js'
 import { currentMessageEra, exchangeBelongsToEra, LEGACY_MESSAGE_ERA } from './message-era.js'
-import { isWebAsk, prepareWebAsk } from './web-ask-admission.js'
+import { isThreadAsk, isWebAsk, prepareWebAsk, WebAskAdmissionError } from './web-ask-admission.js'
 import { maxGlobalMsgNumInDir } from '../routes/message-ref.js'
 import { durableQueryJobsEnabled, messagesSteerEnabled, messagesTrailEnabled } from './query-job-feature.js'
 import { claudeSupportsSteer } from './claude-cli-support.js'
@@ -31,6 +32,7 @@ import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
 import { attachmentHistoryPrefix, defaultAttachmentRequest } from '../../shared/media-attachment.js'
 import {
   createSession,
+  isCosThreadSession,
   getActiveSessions,
   getSessionRaw,
   findExchangesByJobIdentity,
@@ -96,16 +98,37 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
   // 6.99.10: Ask from COS Control Web (`source: 'web'`): the server picks the conversation and mints the message
   // number (lib/web-ask-admission.ts). Every other caller is untouched.
   if (isWebAsk(input) && !carriesBoundTo(input)) {
-    input = await prepareWebAsk(input, {
-      currentMax: webAskCurrentMax,
-      activeEra: currentMessageEra,
-      sessionExists: id => !!getSessionRaw(id),
-      createSession,
-      priorJob: async (clientJobId, generation) => {
-        const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
-        return job ? { sessionId: job.sessionId, globalMsgNum: job.globalMsgNum, messageEra: job.messageEra } : undefined
-      },
-    })
+    try {
+      input = await prepareWebAsk(input, {
+        currentMax: webAskCurrentMax,
+        activeEra: currentMessageEra,
+        sessionExists: id => !!getSessionRaw(id),
+        // 7.0.39: a thread conversation's flag must be on disk before its job is admitted. The usual save is coalesced
+        // (500 ms); a crash inside that window would bring the job back in an unflagged conversation, into Recent.
+        createSession: options => {
+          const id = createSession(options)
+          if (options?.cosThread) flushConversationToDisk()
+          return id
+        },
+        isThreadSession: isCosThreadSession,
+        priorJob: async (clientJobId, generation) => {
+          const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
+          return job ? { sessionId: job.sessionId, globalMsgNum: job.globalMsgNum, messageEra: job.messageEra } : undefined
+        },
+      })
+    } catch (error) {
+      if (error instanceof WebAskAdmissionError) throw new QueryJobAdmissionPreparationError(error.status, error.code, error.message)
+      throw error
+    }
+  } else {
+    // 7.0.39: the pinned COS thread is a Control Web Ask only. Anything else that names it, or carries the marker, is
+    // refused rather than run into a conversation no list shows (or, unmarked, quietly numbered).
+    if (isThreadAsk(input) || input.cosThread !== undefined) {
+      throw new QueryJobAdmissionPreparationError(400, 'cos_thread_web_only', 'Only Control Web asks from the pinned COS thread can carry cosThread.')
+    }
+    if (typeof input.sessionId === 'string' && isCosThreadSession(input.sessionId)) {
+      throw new QueryJobAdmissionPreparationError(409, 'thread_session_web_only', 'That conversation is the pinned COS thread. Ask from the thread.')
+    }
   }
 
   // Plan 4.2: an attached turn must NEVER silently degrade into an ordinary COS
@@ -219,6 +242,7 @@ export async function projectPublicConversationTerminal(
   if (job.status !== 'completed') {
     removeExchangesByJobIdentity(request.sessionId, identity)
     flushConversationToDisk()
+    recordCosThreadEnd(job, request)
     return
   }
 
@@ -256,6 +280,36 @@ export async function projectPublicConversationTerminal(
     request.origin,
   )
   flushConversationToDisk()
+  recordCosThreadEnd(job, request)
+}
+
+/**
+ * 7.0.39 (persistent COS thread, candidate 2): a job in the pinned thread's conversation ends in the thread store too,
+ * whatever its status, with the whole answer. Inside the terminal projection on purpose: the coordinator runs that for
+ * every terminal job and again at every boot for each retained one, so a crash between the journal's terminal fsync and
+ * this write is repaired on the next boot. A failure THROWS, so the coordinator counts the projection as failed (and the
+ * boot retries it); the conversation projection above has already happened.
+ */
+function recordCosThreadEnd(job: QueryJobSnapshot, request: QueryJobRequest): void {
+  if (!isCosThreadSession(request.sessionId)) return
+  const store = cosThreadStore()
+  if (!store) throw new Error('cos_thread_unavailable')
+  store.recordJobEnd({
+    clientJobId: request.clientJobId, generation: request.generation, sessionId: request.sessionId, query: request.query,
+    status: job.status as 'completed' | 'failed' | 'canceled' | 'interrupted',
+    // The store sets `response` only when a job completes (query-job-store.ts complete()); any other end keeps what
+    // arrived in `partialText`.
+    text: (job.status === 'completed' ? job.response : job.partialText) ?? '',
+  })
+}
+
+/** 7.0.39: a thread job's start, in the thread store. Never throws: the end (above) writes the turn when this could not. */
+function recordCosThreadStart(request: QueryJobRequest): void {
+  try {
+    cosThreadStore()?.recordJobStarted({ clientJobId: request.clientJobId, generation: request.generation, sessionId: request.sessionId, query: request.query })
+  } catch (error) {
+    console.error('[cos-thread] start not recorded:', error instanceof Error ? error.name : 'error')
+  }
 }
 
 /**
@@ -315,6 +369,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           ollamaRunId: metadata?.ollamaRunId,
         } as const
         await callbacks.onStart({ sessionId, ...linkage })
+        // 7.0.39: a pinned COS thread chat never goes on the display bus (the lens would list it as a message).
+        if (isCosThreadSession(request.sessionId)) { recordCosThreadStart(request); return }
         emitDisplay({ type: 'start', data: {
           jobId,
           clientJobId: request.clientJobId,
@@ -405,6 +461,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
             }).catch(error => console.error('[query-jobs] attachment association failed:', error))
           }
           const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
+          if (isCosThreadSession(request.sessionId)) return  // 7.0.39: never on the display bus
           emitDisplay({ type: 'done', data: {
             jobId,
             clientJobId: request.clientJobId,
@@ -428,6 +485,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       onError: async error => {
         const terminalOwned = await callbacks.onError(error)
         if (!terminalOwned) return
+        if (isCosThreadSession(request.sessionId)) return  // 7.0.39: never on the display bus
         emitDisplay({ type: 'error', data: {
           jobId,
           clientJobId: request.clientJobId,
