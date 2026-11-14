@@ -93,9 +93,17 @@ describe('history pages', () => {
     expect(ids(t.historyPage({ before: 999, limit: 40 }).entries)).toHaveLength(3)
     expect(t.historyPage({ after: 999, limit: 40 }).entries).toEqual([])
     expect(t.historyPage({ limit: 0 }).entries).toHaveLength(1)
-    for (let n = 4; n <= 105; n++) ask(t, n)
-    expect(t.historyPage({ limit: 1000 }).entries).toHaveLength(HISTORY_MAX_LIMIT)
-  }, 30_000)   // 105 durable writes: about 5 s alone, more under a loaded counted suite (Q1 14:13)
+    // 102 more chats as ONE append of rows cloned from a real one, then the store reopened from the ledger: the same
+    // index and reads as 102 recordTurn calls, without 102 durable writes (Q1 14:13: 5.3 s against vitest's 5 s).
+    const ledger = join(h.dir, 'ledger.jsonl')
+    const real = readFileSync(ledger, 'utf8').trim().split('\n').map(l => JSON.parse(l)).find(r => r.kind === 'turn' && r.clientId === cid(3))
+    appendFileSync(ledger, Array.from({ length: 102 }, (_, i) => JSON.stringify({ ...real, clientId: cid(i + 4), query: `question ${i + 4}`, messageNo: 104 + i }) + '\n').join(''))
+    rmSync(join(h.dir, 'state.json'), { force: true })
+    const reopened = h.make()
+    expect(reopened.historySize()).toBe(105)
+    expect(reopened.historyPage({ limit: 1000 }).entries).toHaveLength(HISTORY_MAX_LIMIT)
+    expect(reopened.historyPage({ limit: 1000 }).entries.at(-1)!.question).toBe('question 105')
+  })
 
   it('the same pages and cursors after a restart: the index is rebuilt from the ledger bytes, multibyte words included', () => {
     const h = harness(); const t = h.make()
