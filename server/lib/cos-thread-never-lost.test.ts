@@ -113,8 +113,11 @@ describe('a cosThread chat is never lost', () => {
     // Two outcomes, both right, decided by whether the first process had reached its provider before the crash: still
     // `accepted`, the boot requeues and runs it (completed); already starting, the boot ends it `interrupted`, resumable
     // (the page offers Resume). Either way the question is kept and the thread says what the journal says.
-    const e = await second.until(second.entry, v => !!v && v.status !== 'running', 'the thread end after reboot')
-    const job = (await second.getJson(`/query-jobs/${admitted.body.job.jobId}?generation=1`)).job
+    // The boot may end it `interrupted` and then resume the same generation, so a single read can catch the thread and
+    // the journal between the two. Wait until both are at an end and say the same thing, then judge that end.
+    const both = async () => ({ e: await second.entry(), job: (await second.getJson(`/query-jobs/${admitted.body.job.jobId}?generation=1`)).job })
+    const { e, job } = await second.until(both, v => !!v.e && ['completed', 'failed', 'canceled', 'interrupted'].includes(v.job?.status)
+      && v.e.status === (v.job.status === 'canceled' ? 'interrupted' : v.job.status), 'the thread and the journal agreeing on an end')
     expect(e).toMatchObject({ id: `t:${ask.clientJobId}`, question: 'asked just before a crash', generation: 1 })
     expect(['completed', 'interrupted']).toContain(job.status)
     if (job.status === 'completed') expect(e).toMatchObject({ status: 'completed', answer: ANSWER, full: true })
