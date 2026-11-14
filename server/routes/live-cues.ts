@@ -11,7 +11,9 @@
 // POST /live-cues/v2/settings { enabled } -> same shape; 409 { error: 'env_forced' } when env forces v2 on
 //   ?v=2 / {v: 2}: the spend limits (6.79.2). ?v=3 / {v: 3}: the cue mode, grounded cues and the general-cue limits (live cues v3).
 // POST /live-cues/feedback { sessionId, cueId, verdict, note? } -> { ok, cueId, verdict, vote }                 (6.79.0)
-// GET  /live-cues/history?days=7&sessionId=a,b&unrated=1&limit=200 -> { v: 1, cues, counts, truncated, skipped, maxCuesPerMeeting, meetings? } (6.79.0)
+// GET  /live-cues/history?days=7&sessionId=a,b&unrated=1&limit=200 -> { v: 1, cues, counts, truncated, skipped, maxCuesPerMeeting, meetings?, skips } (6.79.0)
+// POST /live-cues/skip { sessionId } -> { ok, sessionId, skippedAt }; POST /live-cues/skip/clear { sessionId } -> { ok, sessionId, skippedAt: null }
+//      (the build after 7.0.42, Memories C "Skip this meeting": lib/live-cue-skips.ts)
 
 import { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
@@ -29,6 +31,7 @@ import {
 } from '../lib/live-cues-v2-settings.js'
 import { LiveCuesV2ArmError, resolveLiveCuesV2Limits, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled, liveCuesV2MeetingCounters, liveCuesV2SettingsView, peekLiveCuesV2, setLiveCuesV2Enabled } from '../lib/live-cues-v2.js'
 import { LIVE_CUE_VERDICTS_PROTOCOL, LIVE_CUE_VERDICT_LIMITS, VerdictsUnreadableError, isCueVerdict, liveCueVerdicts } from '../lib/live-cue-verdicts.js'
+import { SkipsUnreadableError } from '../lib/live-cue-skips.js'
 
 const SESSION_ID = /^[A-Za-z0-9:_-]{3,96}$/
 const CUE_ID = /^[A-Za-z0-9-]{8,64}$/
@@ -190,12 +193,35 @@ liveCuesRouter.get('/live-cues/history', (req, res) => {
       const counters = liveCuesV2MeetingCounters(id)
       return [id, { cues: counters?.cues ?? verdicts.loggedCues(id), cap: capNow, writerCalls: counters?.writerCalls ?? null, writerCap: writerCapNow }]
     })) : undefined
-    return res.json({ ...history, maxCuesPerMeeting: capNow, ...(meetings ? { meetings } : {}) })
+    // Memories C: every device draws the same meetings to rate. Null when the skips file cannot be read (the list is
+    // still served; a client then shows no skips rather than wrong ones).
+    let skips: Record<string, number> | null
+    try { skips = verdicts.liveSkips(sessionIds) } catch (error) { if (!(error instanceof SkipsUnreadableError)) throw error; skips = null }
+    return res.json({ ...history, maxCuesPerMeeting: capNow, ...(meetings ? { meetings } : {}), skips })
   } catch (error) {
     if (error instanceof VerdictsUnreadableError) return res.status(503).json({ error: 'the verdicts file is unreadable', reason: error.code })
     return res.status(500).json({ error: 'history_unavailable' })
   }
 })
+
+// The build after 7.0.42 (Memories C, lead 15:58 and 16:03): "Skip this meeting" and its undo. Only a meeting with a shown cue
+// in the cue log's 7-day window (404 unknown_meeting); at most MAX_MEETING_SKIPS live skips (409 skips_full, nothing written).
+for (const [path, clear] of [['/live-cues/skip', false], ['/live-cues/skip/clear', true]] as const) {
+  liveCuesRouter.post(path, (req, res) => {
+    const sessionId = bodySessionId(req.body)
+    if (!SESSION_ID.test(sessionId)) return res.status(400).json({ error: 'sessionId required', reason: 'invalid_request' })
+    try {
+      const verdicts = liveCueVerdicts()
+      const result = clear ? verdicts.clearSkip(sessionId) : verdicts.skipMeeting(sessionId)
+      if (!result.ok && result.error === 'unknown_meeting') return res.status(404).json({ error: 'no cue from this meeting in the last 7 days', reason: result.error })
+      if (!result.ok) return res.status(409).json({ error: 'too many skipped meetings; undo some first', reason: result.error })
+      return res.json(result)
+    } catch (error) {
+      if (error instanceof SkipsUnreadableError) return res.status(503).json({ error: 'the skips file is unreadable', reason: error.code })
+      return res.status(500).json({ error: 'skip_write_failed' })
+    }
+  })
+}
 
 // COS Control's live cues v2 toggle (6.76.2). Token-authenticated like every /api route. The setting lives in this server's
 // data dir (live-cues-v2-settings.json, atomic write) and applies without a restart: /api/health and /api/models advertise

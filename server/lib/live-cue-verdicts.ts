@@ -25,6 +25,7 @@ import { findCosOperationsMeetingBySessionId, findDirectLibraryMeetingBySessionI
 import { CUE_FEEDBACK_REASON_MAX, isCueSourceExtras, isLogCueKind, type CueKind, type CueSourceRef, type GeneralCueKind, type LiveCuesV2MemorySource } from '../../shared/live-cues-v2.js'
 import type { WouldWithhold } from './live-cues-filter.js'
 import { publicHttpsUrl } from './public-https-url.js'
+import { LiveCueSkipStore, SKIP_TTL_MS, type SkipWriteResult } from './live-cue-skips.js'
 
 // ── Wire types (server-local: shared/live-cues-v2.ts is hash-pinned with the companion copy) ──
 export const LIVE_CUE_VERDICTS_PROTOCOL = 1 as const
@@ -312,6 +313,9 @@ export interface LiveCueVerdictsDeps {
   now(): number
   trace(row: Record<string, unknown>): void
   resolveTitle(sessionId: string): { title: string; source: 'saved' | 'library' } | null
+  /** The build after 7.0.42 (Memories C): "Skip this meeting" (live-cue-skips.ts). Absent: no skips, and the skip
+   *  methods refuse. */
+  skips?: LiveCueSkipStore
 }
 
 export type VerdictResult = { ok: true; response: LiveCuesVerdictResponse } | { ok: false; error: 'unknown_cue' | 'cue_session_mismatch' }
@@ -391,6 +395,53 @@ export class LiveCueVerdicts {
     }
   }
 
+  /**
+   * The build after 7.0.42 (Memories C, status needsYou.meetings): how many meetings have a cue to rate in the last
+   * `days`, by the same rows history() lists (not held, one per cue, inside the window, no verdict) but with no page
+   * limit and no title lookups. A skipped meeting is left out while every one of its unrated cues was logged at or before
+   * its skip; a cue logged after it brings the meeting back. Throws VerdictsUnreadableError or SkipsUnreadableError
+   * rather than a count it could not read.
+   */
+  unratedSessionCount(days: number): number {
+    const cutoff = this.deps.now() - days * DAY_MS
+    const verdicts = this.deps.store.read()
+    const skips = this.deps.skips?.read() ?? {}
+    const seen = new Set<string>()
+    const newestUnrated = new Map<string, number>()
+    for (const r of this.deps.log.read().rows) {
+      if (r.held || r.createdAt < cutoff || seen.has(r.cueId)) continue
+      seen.add(r.cueId)
+      if (verdicts[r.cueId]?.verdict) continue
+      newestUnrated.set(r.sessionId, Math.max(newestUnrated.get(r.sessionId) ?? -Infinity, r.createdAt))
+    }
+    let n = 0
+    for (const [sessionId, newest] of newestUnrated) if (!(sessionId in skips && newest <= skips[sessionId]!)) n += 1
+    return n
+  }
+
+  /** Live skips (sessionId to when), for the history route; only these meetings when `sessionIds` is given. Throws
+   *  SkipsUnreadableError; empty when skips are not set up. */
+  liveSkips(sessionIds?: readonly string[]): Record<string, number> {
+    const all = this.deps.skips?.read() ?? {}
+    if (!sessionIds?.length) return all
+    return Object.fromEntries(Object.entries(all).filter(([id]) => sessionIds.includes(id)))
+  }
+
+  /** "Skip this meeting" and its undo. Only for a meeting with a shown cue in the cue log's 7-day window, so nothing can
+   *  seed arbitrary ids. Throws SkipsUnreadableError (nothing written) on an unreadable skips file. */
+  skipMeeting(sessionId: string): SkipWriteResult | { ok: false; error: 'unknown_meeting' } {
+    if (!this.deps.skips || !this.inWindow(sessionId)) return { ok: false, error: 'unknown_meeting' }
+    return this.deps.skips.skip(sessionId)
+  }
+  clearSkip(sessionId: string): SkipWriteResult | { ok: false; error: 'unknown_meeting' } {
+    if (!this.deps.skips || !this.inWindow(sessionId)) return { ok: false, error: 'unknown_meeting' }
+    return this.deps.skips.clear(sessionId)
+  }
+  private inWindow(sessionId: string): boolean {
+    const cutoff = this.deps.now() - SKIP_TTL_MS
+    return this.deps.log.read().rows.some(r => r.sessionId === sessionId && !r.held && r.createdAt >= cutoff)
+  }
+
   /** Every logged cue for one meeting, whatever its age (for the per-meeting count once the engine's counter expired). */
   loggedCues(sessionId: string): number {
     return new Set(this.deps.log.read().rows.filter(r => r.sessionId === sessionId && !r.held).map(r => r.cueId)).size
@@ -443,6 +494,7 @@ export function liveCueVerdicts(): LiveCueVerdicts {
       // The same trace file and feedback row shape as the engine's lens votes (live-cues-v2.ts realDeps).
       trace(row) { mkdirSync(dirname(traceFile), { recursive: true, mode: 0o700 }); appendFileSync(traceFile, JSON.stringify(row) + '\n', { mode: 0o600 }) },
       resolveTitle: resolveSavedTitle,
+      skips: new LiveCueSkipStore(dataPath('live-cues-skips.json')),
     })
   }
   return singleton

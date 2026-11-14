@@ -1,6 +1,36 @@
 import { getOwnerName } from './profile.js'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import { getNeedsYouReader, memoryReview, needsYouCount, type NeedsYouBlock } from './learning-needs-you.js'
+import { liveCueVerdicts } from './live-cue-verdicts.js'
+
+/** The build after 7.0.42 (Memories C): the window "meetings to rate" counts, the same 7 days the page shows. */
+export const NEEDS_YOU_CUE_DAYS = 7
+
+export interface NeedsYouSummary { meetings: number | null; decisions: number | null; quarantineBatch: number | null; total: number | null }
+
+/**
+ * The one "Needs you" number the rail, Today and the Memories page all show (lead 2026-11-14 15:49, F1's option (a)).
+ * - decisions: every item the 11-08 predicate says needs review (memoryReview.total, unchanged), minus the memories the
+ *   retention pass would quarantine (`gates.prune_ready`), which count as one batch instead.
+ * - quarantineBatch: 1 when any are waiting, else 0.
+ * - meetings: meetings with a cue to rate in the last NEEDS_YOU_CUE_DAYS, skipped ones left out (null when unreadable).
+ * A part that cannot be read is null, and then so is the total: the rail never shows a number built from a guess.
+ * The producer's `count` and `gates` both cover every item past the shown cap (learning_events.py needs-you).
+ */
+export function computeNeedsYou(block: NeedsYouBlock | null, meetings: number | null): NeedsYouSummary {
+  const all = block ? memoryReview.total(block) : null
+  const gates = block && block.gates && typeof block.gates === 'object' && !Array.isArray(block.gates) ? block.gates as Record<string, unknown> : null
+  const prune = gates ? (typeof gates.prune_ready === 'number' && Number.isInteger(gates.prune_ready) && gates.prune_ready > 0 ? gates.prune_ready : 0) : null
+  const decisions = typeof all === 'number' && prune !== null ? Math.max(0, all - prune) : null
+  const quarantineBatch = prune === null ? null : prune > 0 ? 1 : 0
+  const m = typeof meetings === 'number' && Number.isInteger(meetings) && meetings >= 0 ? meetings : null
+  const total = m !== null && decisions !== null && quarantineBatch !== null ? m + decisions + quarantineBatch : null
+  return { meetings: m, decisions, quarantineBatch, total }
+}
+
+function defaultUnratedMeetings(): number | null {
+  try { return liveCueVerdicts().unratedSessionCount(NEEDS_YOU_CUE_DAYS) } catch { return null }
+}
 
 export const READ_ONLY_MEMORY_WEB_OPS = new Set([
   'status', 'learning.list', 'learning.review', 'learning.event', 'learning.status',
@@ -64,6 +94,7 @@ export async function dispatchMemoriesWebOp(
   loopbackFetch: LoopbackFetchFn,
   serverVersion = 'unknown',
   readNeedsYou: () => Promise<NeedsYouBlock | null> = () => getNeedsYouReader().read(),
+  countUnratedMeetings: () => number | null = defaultUnratedMeetings,
 ): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
   const reply = (ok: boolean, message: string, details: Record<string, unknown> = {}) => ({ ok, message, details })
 
@@ -103,6 +134,9 @@ export async function dispatchMemoriesWebOp(
         learningToReview: needsYouCount(needsYou),
         // Every item that needs review past the shown cap, by the same predicate: the "of N" in Today's "Next 7 of N".
         learningToReviewTotal: needsYou ? memoryReview.total(needsYou) : null,
+        // The build after 7.0.42 (Memories C): the one number for the rail, Today and the page. The two fields above stay
+        // for older clients.
+        needsYou: computeNeedsYou(needsYou, (() => { try { return countUnratedMeetings() } catch { return null } })()),
         learningTotal: learning.total ?? 0,
         learningRewardEnabled: needsYou ? needsYou.reward_enabled === true : learning.reward_enabled === true,
         ...(needsYou ? { needs_you: needsYou } : {}),

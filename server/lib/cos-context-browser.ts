@@ -649,6 +649,10 @@ export function normalizeIndexReceipt(value: unknown): Record<string, unknown> |
     peak_rss_mb: typeof source.peak_rss_mb === 'number' && Number.isFinite(source.peak_rss_mb) ? source.peak_rss_mb : null,
     node_count: integerOrAbsent(source.node_count) ?? null,
     edge_count: integerOrAbsent(source.edge_count) ?? null,
+    // The build after 7.0.42 (Memories C, Knowledge > Sources): the graph index's documents and chunks, as MU's
+    // lightrag_graph_index.py writes them on every build receipt. Dropped here before.
+    doc_count: integerOrAbsent(source.doc_count) ?? null,
+    chunk_count: integerOrAbsent(source.chunk_count) ?? null,
     build_seq: integerOrAbsent(source.build_seq) ?? null,
     degraded: source.degraded === true,
   })
