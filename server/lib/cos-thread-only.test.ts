@@ -264,6 +264,14 @@ describe('a chat sent with cosThread stays in the thread', () => {
     await h.waitEnd(again.body.job.jobId)
     h.conversation.markWebAsk(sessionId, messageEra, globalMsgNum)
     expect(h.conversation.getSessionRaw(sessionId)?.webAsks).toEqual([`${messageEra}:${globalMsgNum}`, `${messageEra}:${again.body.job.globalMsgNum}`])
+    // The era is part of the turn's identity (Q1 T33), and only a positive whole number is ever recorded (Q1 T34).
+    expect(h.conversation.isWebAsk(sessionId, messageEra, globalMsgNum)).toBe(true)
+    expect(h.conversation.isWebAsk(sessionId, `${messageEra}-other`, globalMsgNum)).toBe(false)
+    const listed = h.conversation.getSessionRaw(sessionId)!.webAsks!.length
+    for (const bad of [0, -1, 1.5, Number.NaN]) h.conversation.markWebAsk(sessionId, messageEra, bad)
+    h.conversation.markWebAsk('no-such-session', messageEra, 7)
+    expect(h.conversation.getSessionRaw(sessionId)!.webAsks).toHaveLength(listed)
+    expect(h.conversation.getSessionRaw('no-such-session')).toBeUndefined()
     // It keeps the newest WEB_ASKS_KEPT.
     for (let n = 1; n <= h.conversation.WEB_ASKS_KEPT + 5; n++) h.conversation.markWebAsk(sessionId, 'cap', n)
     const kept = h.conversation.getSessionRaw(sessionId)!.webAsks!

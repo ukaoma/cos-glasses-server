@@ -245,6 +245,16 @@ describe('readers', () => {
     expect(JSON.parse(readFileSync(join(dir, 'timeline-state.json'), 'utf8'))).not.toHaveProperty('archiveRetries')
   })
 
+  it('today\'s archive day is never given up, however often its read fails: it is read again every pass (Q1 T29)', () => {
+    const dir = tmp()
+    let reads = 0
+    const sources: TimelineSources = { archiveDays: () => ['2026-11-14'], archiveDay: () => { reads++; throw new Error('still being written') } }
+    const store = new TimelineStore(dir)
+    for (let pass = 1; pass <= 5; pass++) new TimelineSweeper(store, dir, sources, () => '2026-11-14').sweep()
+    expect(reads).toBe(5)
+    expect(JSON.parse(readFileSync(join(dir, 'timeline-state.json'), 'utf8')).archiveDays).toEqual([])
+  })
+
   it('readFeedFile: the store own rows, a bad row skipped; missing, a wrong version or bad JSON read as empty', () => {
     const dir = tmp()
     const file = join(dir, 'feed.json')
@@ -279,7 +289,8 @@ describe('the history with breadcrumbs (CosThread.timelinePage)', () => {
     expect(page.newest).toBe('c3.3.0.2.0')
     let all = [...page.entries]
     let cursor = page.older
-    while (cursor) {
+    let pages = 0   // bounded, so a paging bug fails here instead of spinning
+    while (cursor && pages++ < 20) {
       const back = h.t.timelinePage({ limit: 2, before: (parseTimelineCursor(cursor) as { before: { atMs: number; tie: string } }).before })
       all = [...back.entries, ...all]
       cursor = back.older
