@@ -1466,6 +1466,7 @@ export interface DerivedStatusFields {
   waiting_kind?: string
   waiting_detail?: string
   waiting_source?: 'turn_end'
+  waiting_ask_id?: string
   waiting_choices?: string[]
   failure?: string
   last_reply?: string
@@ -1495,7 +1496,7 @@ export function statusDraftWithDerived(
     state_since: derived.state_since,
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
-    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])] } : {}),
+    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])], ...(derived.waiting_ask_id ? { waiting_ask_id: derived.waiting_ask_id } : {}) } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(state === 'idle' && derived.last_reply ? { last_reply: derived.last_reply } : {}),
   }

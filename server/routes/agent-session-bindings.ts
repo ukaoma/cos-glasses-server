@@ -133,6 +133,8 @@ import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-j
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, QUEUED_TURN_TAMPERED_COPY, sealMatches, TURN_CARRY_HEADER, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict, type QueueSeal } from '../lib/g2-turn-provenance.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
+import { TURN_END_ASK_ID_RE, turnEndAskId } from '../lib/session-state-derive.js'
+import type { VisibleTurnAsk } from '../lib/turn-end-ask.js'
 import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -383,6 +385,12 @@ export interface AgentSessionBindingsDeps {
    * content-bearing cannot leak through this surface.
    */
   nativeHead?: (provider: BindableProvider, threadId: string) => Promise<string | null> | string | null
+  /**
+   * X1 (7.0.36): the turn-end ask a session row shows now (`openTurnEndAsk` in session-hooks-runtime.ts). With it,
+   * a turn-end answer that names its ask (`turnEndAskId`) is accepted while that ask is still the session's open one,
+   * and refused `turn_end_ask_moved` when it is not. Absent: every turn reads as before, byte for byte.
+   */
+  openTurnEndAsk?: (sessionId: string) => VisibleTurnAsk | null
 
   /** `deliverAttachedTurn` from `server/lib/attached-provider-adapter.ts`. */
   deliverAttachedTurn?: (request: AttachedTurnRequest) => Promise<unknown> | unknown
@@ -645,6 +653,7 @@ export type WriteRefusal =
   | 'target_unresolvable'
   | 'native_head_unavailable'
   | 'native_thread_changed'
+  | 'turn_end_ask_moved'
   | 'native_target_busy'
   | 'native_turn_in_progress'
   | 'native_target_fenced'
@@ -726,6 +735,8 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'COS could not read where this thread currently ends, so it will not write to it. Fork it instead.',
   native_thread_changed:
     'This thread changed on your Mac since you attached. Refresh, continue anyway, or fork.',
+  turn_end_ask_moved:
+    'The session moved past the question you answered. Your answer was not sent; you can still send it, with the question quoted.',
   native_target_busy:
     'This thread is already attached to another COS chat. Detach that one first.',
   native_turn_in_progress:
@@ -797,6 +808,15 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'The assistant hit its usage limit, so the copy got no answer. Try again after the limit resets, or start a new session with another assistant.',
   fork_provider_auth:
     'The assistant needs you to sign in again on this Mac before COS can copy this conversation.',
+}
+
+/**
+ * X1 (7.0.36): the words COS puts on a turn-end answer (contract v1.2, "Answer sent from <SURFACE> through COS, not
+ * typed in this session: <label>"). Only such a turn may name an ask; a typed message keeps the head check whole.
+ */
+const TURN_END_ANSWER_RE = /^Answer sent from [^\n]{1,60} through COS, not typed in this session: /
+export function isTurnEndAnswerPrompt(prompt: unknown): boolean {
+  return typeof prompt === 'string' && TURN_END_ANSWER_RE.test(prompt)
 }
 
 export function writeReasonCopy(reason: WriteRefusal): string {
@@ -3065,6 +3085,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (acknowledged !== undefined && acknowledged !== null && !isOpaque(acknowledged)) {
         return refuseTurn('invalid_request')
       }
+      // X1 (7.0.36): the ask a turn-end answer is addressed to. Absent on every older client and on typed messages.
+      const namedAsk = body.turnEndAskId
+      if (namedAsk !== undefined && namedAsk !== null && (typeof namedAsk !== 'string' || !TURN_END_ASK_ID_RE.test(namedAsk))) {
+        return refuseTurn('invalid_request')
+      }
       const boundTo = body.boundTo
       if (boundTo !== undefined && boundTo !== null && !isOpaque(boundTo)) return refuseTurn('invalid_request')
 
@@ -3279,6 +3304,28 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // reads as diverged, because the first turn is what moved the head.
       const baseline = guard.acknowledgedHead(bindingId) ?? binding.nativeHeadAtAttach
       if (typeof baseline !== 'string' || baseline.length === 0) return refuseTurn('native_head_unavailable')
+
+      // X1 (7.0.36): a turn-end answer is addressed to its ask, not to a log revision. The session's own turn that
+      // ended by asking always moves the head past the binding's baseline (a COS delivery is an isMeta row the head
+      // does not see), so the head check alone refused every such answer on a binding older than the ask (the three
+      // refusals of 2026-11-13). The tracker clears an ask the moment the session takes a new prompt or starts tool
+      // work after its Stop, so "this ask is still open" is exactly "nothing new happened since it asked". Open: the
+      // head check is waived for this turn below. Not open: refused, with what the session asks now, if anything,
+      // and the revision a quoted send carries. Only a Claude turn in the contract's words, naming an ask, takes it.
+      let answersOpenAsk = false
+      if (typeof namedAsk === 'string' && binding.provider === 'claude' && isTurnEndAnswerPrompt(prompt) && typeof deps.openTurnEndAsk === 'function') {
+        let open: VisibleTurnAsk | null = null
+        try { open = deps.openTurnEndAsk(binding.nativeThreadId) } catch { open = null }
+        if (open && turnEndAskId(open.stoppedAt) === namedAsk) {
+          answersOpenAsk = true
+        } else {
+          return refuseTurn('turn_end_ask_moved', {
+            changed: true,
+            revision: head.digest,
+            askNow: open ? { id: turnEndAskId(open.stoppedAt), ask: open.ask, choices: [...open.choices] } : null,
+          })
+        }
+      }
       if (head.digest !== baseline && busyCodexHop) {
         // 6.62.0 (plan 3.6): a busy thread moves while it works; that is what busy means.
         // The hop puts the turn into the app's own queue, which runs it after the current
@@ -3290,9 +3337,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       } else if (head.digest !== baseline) {
         // Only a changed/not-changed signal and a new opaque revision. No diff, no
         // content, no path — the client is told THAT it moved, never to what.
-        if (acknowledged !== head.digest) {
+        if (acknowledged !== head.digest && !answersOpenAsk) {
           return refuseTurn('native_thread_changed', { changed: true, revision: head.digest })
         }
+        if (answersOpenAsk) console.log(`[agent-session-bindings] turn-end answer to its open ask accepted past a moved head turnId=${turnId} bindingId=${bindingId}`)
         // Continue Anyway: a new admission carrying the acknowledged revision.
         // Recorded now rather than on completion, because the user acknowledged
         // this revision whatever the turn goes on to do.

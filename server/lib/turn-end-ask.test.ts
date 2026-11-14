@@ -16,7 +16,7 @@ import { SessionSignalStore } from './session-signal-store.js'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { deriveSessionState, derivedRowFields, derivedStatusFields, type RegistryFacts } from './session-state-derive.js'
 import { statusDraftWithDerived } from './session-stream-events.js'
-import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, sessionSignalStore, startSessionHooksRuntime, turnEndAskStats } from './session-hooks-runtime.js'
+import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, openTurnEndAsk, sessionSignalStore, startSessionHooksRuntime, turnEndAskStats } from './session-hooks-runtime.js'
 import { dataPath } from './data-dir.js'
 import { DEAD_GRACE_MS } from './session-state-derive.js'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -563,6 +563,10 @@ describe('the row: an idle verdict becomes the asked-you wait, nothing else does
     expect(row).toMatchObject({ agent_state: 'waiting', waiting_source: 'turn_end', waiting_choices: ['Red', 'Blue'] })
     expect('pending_question_id' in row || 'pending_permission_id' in row).toBe(false)
     expect(derivedStatusFields(derived)).toMatchObject({ waiting_source: 'turn_end', waiting_choices: ['Red', 'Blue'] })
+    // X1 7.0.36: the ask's identity rides with it on the row and the status, so an answer can name it.
+    expect(derived.waiting_ask_id).toBe(`turn_end:${T0 + 4_700}`)
+    expect(row).toMatchObject({ waiting_ask_id: `turn_end:${T0 + 4_700}` })
+    expect(derivedStatusFields(derived)).toMatchObject({ waiting_ask_id: `turn_end:${T0 + 4_700}` })
     // The wait is dated by the ask's own stop, not by whatever the idle verdict was dated by.
     const other = deriveSessionState({ signal: idleSignal(), registry: undefined, transcript: undefined, now, turnEndAsk: { ...ask, stoppedAt: T0 + 1_234 } })
     expect(other.state_since).toBe(new Date(T0 + 1_234).toISOString())
@@ -665,6 +669,26 @@ describe('the runtime: deriveForRow and the counters', () => {
       sessionSignalStore.apply(env('SessionEnd', T0 + 300_000, { reason: 'exit' }), false)
       expect(deriveForRow({ sessionId: SID, now: T0 + 300_000 })?.agent_state).toBe('ended')
       expect(turnEndAskStats()).toMatchObject({ tracked: 0, clearedByTurn: 1 })
+    } finally {
+      off()
+    }
+  })
+
+  it('X1 7.0.36: openTurnEndAsk names the same ask the row shows (waiting_ask_id), and a new prompt clears it', async () => {
+    expect(openTurnEndAsk(SID)).toBeNull()
+    const tracker = new TurnEndAskTracker({ now: () => T0 + 200_000, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    trackers.push(tracker)
+    __setTurnEndAskTrackerForTests(tracker)
+    const off = sessionSignalStore.subscribe((signal, e, child) => tracker.observe(e, child, signal))
+    try {
+      feed()
+      await tracker.tick()
+      const row = deriveForRow({ sessionId: SID, now: T0 + 200_000 })
+      const open = openTurnEndAsk(SID, T0 + 200_000)
+      expect(open).toMatchObject({ ask: 'Canary: which color?', choices: ['Red', 'Blue'] })
+      expect(row?.waiting_ask_id).toBe(`turn_end:${open!.stoppedAt}`)
+      sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: 'a peer message', prompt_id: 'p-next' }), false)
+      expect(openTurnEndAsk(SID, T0 + 210_000)).toBeNull()
     } finally {
       off()
     }

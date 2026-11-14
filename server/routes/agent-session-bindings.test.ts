@@ -2266,6 +2266,14 @@ describe('every way a write can be refused reaches the wire with words', () => {
       },
     },
     {
+      // X1 7.0.36: a turn-end answer naming an ask that is no longer the session's open one.
+      reason: 'turn_end_ask_moved',
+      run: () => oneTurn({ openTurnEndAsk: () => null }, a => ({
+        prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Yes',
+        epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-auto-0029', turnEndAskId: 'turn_end:1794633000000',
+      })),
+    },
+    {
       reason: 'native_turn_in_progress',
       run: async () => {
         const held = heldDelivery()
@@ -4984,5 +4992,128 @@ describe('key lanes: a keyed thread is refused with the one keyed 409 body (P11)
     const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-keyed-0002' })
     expect(res.body.reason).not.toBe('keyed_session')
     expect(res.body.error).toBeUndefined()
+  })
+})
+
+// X1 (7.0.36): a turn-end answer is addressed to its ask. On 2026-11-13 three answers tapped in Control Web were refused
+// `native_thread_changed`: the session's own turn that ended by asking had moved the head past the binding's baseline
+// (DIAG_turn_end_moved_on.md). The head stands for "the session's own turn ended with this ask"; `ask` for the tracker.
+describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
+  const ANSWER = 'Answer sent from COS Control Web through COS, not typed in this session: Yes, check readiness'
+  const ASKED_AT = 1_794_633_000_000
+  const ID = `turn_end:${ASKED_AT}`
+  function harness(ask: { value: { ask: string; choices: string[]; stoppedAt: number } | null } | null) {
+    const head = { value: 'h1' }
+    const calls: AttachedTurnRequest[] = []
+    const seen: string[] = []
+    const deps = writeDeps({
+      nativeHead: () => head.value,
+      deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: head.value } },
+      ...(ask ? { openTurnEndAsk: (sid: string) => { seen.push(sid); return ask.value } } : {}),
+    })
+    return { head, calls, seen, deps }
+  }
+  const openAsk = () => ({ value: { ask: 'Run a read-only readiness check?', choices: ['Yes, check readiness', 'Not tonight'], stoppedAt: ASKED_AT } as { ask: string; choices: string[]; stoppedAt: number } | null })
+
+  it('BEFORE (7.0.35 web, no ask id): the ask\'s own turn moved the head, so the answer is refused', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2: the session replied and ended its turn by asking'
+    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0001' })
+    expect(res.body.reason).toBe('native_thread_changed')
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('AFTER: naming the ask that is still open, the answer is delivered past the moved head, once', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2: the session replied and ended its turn by asking'
+    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0002', turnEndAskId: ID })
+    expect(res.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
+    expect(h.calls[0]!.prompt).toContain('Yes, check readiness')
+    expect(h.seen).toEqual([SID])
+  })
+
+  it('the session took another turn (a newer ask is open): refused turn_end_ask_moved with the new ask and a revision; the quoted send with that revision delivers', async () => {
+    const ask = openAsk()
+    const h = harness(ask)
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h3: a peer message started a new turn, which asked again'
+    ask.value = { ask: 'Ship it tonight?', choices: ['Ship', 'Wait'], stoppedAt: ASKED_AT + 60_000 }
+    const moved = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0003', turnEndAskId: ID })
+    expect(moved.status).toBe(409)
+    expect(moved.body).toMatchObject({
+      reason: 'turn_end_ask_moved', changed: true, deliveryState: 'not_delivered', revision: opaqueRevision('h3: a peer message started a new turn, which asked again'),
+      askNow: { id: `turn_end:${ASKED_AT + 60_000}`, ask: 'Ship it tonight?', choices: ['Ship', 'Wait'] },
+    })
+    expect(moved.body.reasonCopy).toContain('quoted')
+    expect(h.calls).toHaveLength(0)
+    const quoted = await post(base, turnsPath(a.bindingId), {
+      prompt: 'About your earlier question “Run a read-only readiness check?”: ' + ANSWER,
+      epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0004', acknowledgedRevision: moved.body.revision,
+    })
+    expect(quoted.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('no ask open any more (the session took a turn and did not ask again), even with the head unchanged: refused, askNow null', async () => {
+    const ask = openAsk()
+    const h = harness(ask)
+    const base = await start(h.deps)
+    const a = await attached(base)
+    ask.value = null
+    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0005', turnEndAskId: ID })
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('a typed message cannot use an ask id to skip the head check: still native_thread_changed', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0006', turnEndAskId: ID })
+    expect(res.body.reason).toBe('native_thread_changed')
+    expect(h.calls).toHaveLength(0)
+    expect(h.seen).toEqual([])
+  })
+
+  it('an older client (the contract words, no id) reads exactly as before', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    expect((await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0007' })).body.reason).toBe('native_thread_changed')
+    expect(h.seen).toEqual([])
+  })
+
+  it('a server without the tracker wired reads exactly as before, even with an ask id', async () => {
+    const h = harness(null)
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    expect((await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0008', turnEndAskId: ID })).body.reason).toBe('native_thread_changed')
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('index.ts wires the tracker into the route', async () => {
+    const { readFileSync } = await import('node:fs')
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    expect(index).toContain('  openTurnEndAsk: sessionId => openTurnEndAsk(sessionId),')
+  })
+
+  it('a malformed ask id is refused invalid_request', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    for (const bad of ['turn_end:', 'turn_end:abc', 'question:123', 42, 'turn_end:12345678901234567']) {
+      const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0009', turnEndAskId: bad })
+      expect(res.status).toBe(400)
+    }
+    expect(h.calls).toHaveLength(0)
   })
 })

@@ -43,6 +43,11 @@ export interface DerivedSessionState {
   pending_question_id?: string
   /** 7.0.18 (X1): 'turn_end' when the wait is a turn that ended by asking (lib/turn-end-ask.ts). */
   waiting_source?: 'turn_end'
+  /**
+   * X1 (7.0.36): the identity of that ask, `turn_end:<stoppedAt ms>`. A turn-end answer carries it
+   * (`turnEndAskId` on the turn route), which accepts the answer while this ask is still the session's open one.
+   */
+  waiting_ask_id?: string
   /** 7.0.18 (X1): with `waiting_source`, the reply-button labels (0 to 2; [] with the words switch off). */
   waiting_choices?: string[]
   /** Consecutive derives that saw a dead registry pid; carried by the caller between polls. */
@@ -109,6 +114,12 @@ export const HOOK_SILENCE_MS = 30 * 60_000
 /** A turn that has been open this long with no event at all is no longer trusted as running. */
 export const OPEN_TURN_CEILING_MS = 30 * 60_000
 
+/** X1 (7.0.36): a turn-end ask's identity, from the time the session stopped after asking. */
+export function turnEndAskId(stoppedAt: number): string {
+  return `turn_end:${Math.trunc(stoppedAt)}`
+}
+export const TURN_END_ASK_ID_RE = /^turn_end:\d{1,16}$/
+
 const iso = (ms: number) => new Date(ms).toISOString()
 
 export function deriveSessionState(input: DeriveInput): DerivedSessionState {
@@ -128,6 +139,7 @@ export function deriveSessionState(input: DeriveInput): DerivedSessionState {
     waiting_kind: 'question',
     waiting_detail: ask.ask,
     waiting_source: 'turn_end',
+    waiting_ask_id: turnEndAskId(ask.stoppedAt),
     waiting_choices: [...ask.choices],
   }
 }
@@ -261,6 +273,7 @@ export function derivedStatusFields(derived: DerivedSessionState): {
   waiting_kind?: WaitingKind
   waiting_detail?: string
   waiting_source?: 'turn_end'
+  waiting_ask_id?: string
   waiting_choices?: string[]
   failure?: string
   last_reply?: string
@@ -271,7 +284,7 @@ export function derivedStatusFields(derived: DerivedSessionState): {
     state_since: derived.state_since,
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
-    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])] } : {}),
+    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])], ...(derived.waiting_ask_id ? { waiting_ask_id: derived.waiting_ask_id } : {}) } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(derived.agent_state === 'idle' && derived.last_reply ? { last_reply: derived.last_reply } : {}),
   }
@@ -286,7 +299,7 @@ export function derivedRowFields(derived: DerivedSessionState | undefined): Reco
     state_since: derived.state_since,
     ...(derived.waiting_kind ? { waiting_kind: derived.waiting_kind } : {}),
     ...(derived.waiting_detail !== undefined ? { waiting_detail: derived.waiting_detail } : {}),
-    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])] } : {}),
+    ...(derived.waiting_source ? { waiting_source: derived.waiting_source, waiting_choices: [...(derived.waiting_choices ?? [])], ...(derived.waiting_ask_id ? { waiting_ask_id: derived.waiting_ask_id } : {}) } : {}),
     ...(derived.failure ? { failure: derived.failure } : {}),
     ...(derived.last_reply ? { last_reply: derived.last_reply } : {}),
     ...(derived.pending_permission_id ? { pending_permission_id: derived.pending_permission_id } : {}),

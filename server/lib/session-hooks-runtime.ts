@@ -23,7 +23,7 @@ import { ensureHookRuntimeFiles, ensureStableHookScript, hookSpoolDir, hookStatu
 import { codexHooksHealthField, cursorObserverHealthField, type CodexHooksHealth, type CursorObserverHealth } from './provider-observe.js'
 import { readHidIdleSeconds } from './permission-broker.js'
 import { waitingQuestionWordsEnabled } from './full-hold.js'
-import { TURN_ASK_MAX_AGE_MS, TurnEndAskTracker, turnEndAsksEnabled, type AnsweredTurnAsk, type QueueTurnAsk, type TurnEndAskCounters } from './turn-end-ask.js'
+import { TURN_ASK_MAX_AGE_MS, TurnEndAskTracker, turnEndAsksEnabled, type AnsweredTurnAsk, type QueueTurnAsk, type TurnEndAskCounters, type VisibleTurnAsk } from './turn-end-ask.js'
 
 export function sessionHooksEnabled(): boolean {
   const raw = process.env.COS_SESSION_HOOKS
@@ -535,6 +535,14 @@ export function turnEndAskStats(): (TurnEndAskCounters & { tracked: number }) | 
 }
 
 /** X1 (the one queue): the turn-end asks a row shows now, and those answered in the last two minutes. Empty when off. */
+/**
+ * X1 (7.0.36): the ask a session row shows now for this session (the same `visibleAsk` the row derives from), or
+ * null. The turn route uses it to accept a turn-end answer addressed to that ask.
+ */
+export function openTurnEndAsk(sessionId: string, now = Date.now()): VisibleTurnAsk | null {
+  return turnEndAskTracker ? turnEndAskTracker.visibleAsk(sessionId, now) : null
+}
+
 export function turnEndAsksForQueue(): { asks: QueueTurnAsk[]; answered: AnsweredTurnAsk[] } {
   if (!turnEndAskTracker) return { asks: [], answered: [] }
   return { asks: turnEndAskTracker.visibleAsks(), answered: turnEndAskTracker.recentlyAnswered() }
