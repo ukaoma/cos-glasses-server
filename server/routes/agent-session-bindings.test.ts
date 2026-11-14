@@ -5559,6 +5559,21 @@ describe('X1 7.0.38: the ask is read before the busy gates', () => {
     await typed
   })
 
+  it('the ask closes DURING the busy gates (open at the early check, gone after): refused as moved after the gates, never delivered', async () => {
+    // The early check runs before the claim, the occupancy probe and the head read; a prompt the session takes in those
+    // milliseconds closes the ask. The second judge, after the gates, is what refuses it then (gate: moved-not-refused).
+    const h = harness({ ask: theAsk })
+    let reads = 0
+    const deps = { ...h.deps, openTurnEndAsk: () => (++reads === 1 ? theAsk : null) }
+    const base = await start(deps)
+    const a = await attached(base)
+    const res = await tap(base, a, 'ct-early-0013')
+    expect(reads).toBe(2)
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null, revision: opaqueRevision('h-moved') })
+    expect(h.calls).toHaveLength(0)
+  })
+
   it('the Send anyway mark: refused with an ask id or as anything but true; with the revision and no id it is an ordinary send', async () => {
     const h = harness({ ask: null })
     const base = await start(h.deps)
