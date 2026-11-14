@@ -164,6 +164,12 @@ export class TurnEndAskTracker {
   private readonly lastStop = new Map<string, { at: number; promptId: string | null }>()
   /** X1: asks answered in the last TURN_ASK_ANSWERED_KEEP_MS that a surface had shown, newest last. */
   private readonly answered: AnsweredTurnAsk[] = []
+  /**
+   * X1 (7.0.36, lead 00:04 "first answer counts"): the newest ask a prompt answered, per session, kept for the ask's
+   * own life (TURN_ASK_MAX_AGE_MS) rather than the 2 minute display window above, so an answer from another surface
+   * minutes later is told "already answered" (answered at the Mac in case 3 of 2026-11-13). Bounded by MAX_TURN_ASKS.
+   */
+  private readonly lastAnswered = new Map<string, { stoppedAt: number; answeredAt: number; by: TurnAskAnswerSurface }>()
   private poll: ReturnType<typeof setTimeout> | null = null
   private pollInFlight = false
   private stopped = false
@@ -189,6 +195,14 @@ export class TurnEndAskTracker {
       if (current) {
         this.asks.delete(sessionId)
         this.counters.clearedByReply++
+        if (current.stoppedAt !== null) {
+          this.lastAnswered.delete(sessionId)
+          this.lastAnswered.set(sessionId, { stoppedAt: current.stoppedAt, answeredAt: env.ts, by: turnAskAnswerSurface(p.prompt, child) })
+          if (this.lastAnswered.size > MAX_TURN_ASKS) {
+            const oldest = this.lastAnswered.keys().next().value
+            if (oldest !== undefined) this.lastAnswered.delete(oldest)
+          }
+        }
         if (current.stoppedAt !== null && current.visibleAt !== null) {
           this.answered.push({ sessionId, ask: current.capture.ask, stoppedAt: current.stoppedAt, answeredAt: env.ts, by: turnAskAnswerSurface(p.prompt, child) })
           if (this.answered.length > MAX_TURN_ASKS) this.answered.splice(0, this.answered.length - MAX_TURN_ASKS)
@@ -285,6 +299,13 @@ export class TurnEndAskTracker {
   }
 
   /** The session's row ended: nothing it asked can still be answered. */
+  /** X1 (7.0.36): who answered this session's ask that stopped at `stoppedAt`, if a prompt did, within the ask's life. */
+  answeredAsk(sessionId: string, stoppedAt: number, now = this.deps.now()): { answeredAt: number; by: TurnAskAnswerSurface } | null {
+    const hit = this.lastAnswered.get(sessionId.toLowerCase())
+    if (!hit || hit.stoppedAt !== stoppedAt || now - hit.stoppedAt > TURN_ASK_MAX_AGE_MS) return null
+    return { answeredAt: hit.answeredAt, by: hit.by }
+  }
+
   sessionRowEnded(sessionId: string): void {
     const key = sessionId.toLowerCase()
     for (const state of [...this.asks.values()]) {

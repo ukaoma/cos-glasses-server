@@ -38,7 +38,7 @@ import { LiveEventsHub } from './lib/live-events.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { openTurnEndAsk, cachedHookStatus, isCosSpawnedPid, registryEntrypointSync, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { openTurnEndAsk, turnEndAskAnswered, cachedHookStatus, isCosSpawnedPid, registryEntrypointSync, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { clearingHaltOnSpawn, writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, setDeskCancelReaders, threadCancel } from './lib/session-cancel.js'
@@ -1436,6 +1436,7 @@ app.use('/api', createAgentSessionBindingsRouter({
   nativeHead: (provider, threadId) => nativeHead(provider, threadId, nativeHeadDeps),
   // X1 (7.0.36): a turn-end answer is accepted while its ask is still the session's open one.
   openTurnEndAsk: sessionId => openTurnEndAsk(sessionId),
+  turnEndAskAnswered: (sessionId, stoppedAt) => turnEndAskAnswered(sessionId, stoppedAt),
   deliverAttachedTurn: deliverAttachedTurnForRoute as never,
   // 6.49.0: the running session first (Desktop tab or iTerm, same registry record),
   // the resume child second. Reads `COS_CONTINUE_LIVE` per call, so the flag reports

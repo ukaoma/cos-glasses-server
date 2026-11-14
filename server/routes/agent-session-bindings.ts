@@ -134,7 +134,7 @@ import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, QUEUED_TURN_TAMPERED_COPY, sealMatches, TURN_CARRY_HEADER, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict, type QueueSeal } from '../lib/g2-turn-provenance.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
 import { TURN_END_ASK_ID_RE, turnEndAskId } from '../lib/session-state-derive.js'
-import type { VisibleTurnAsk } from '../lib/turn-end-ask.js'
+import { turnAskAnswerSurface, type VisibleTurnAsk } from '../lib/turn-end-ask.js'
 import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -391,6 +391,8 @@ export interface AgentSessionBindingsDeps {
    * and refused `turn_end_ask_moved` when it is not. Absent: every turn reads as before, byte for byte.
    */
   openTurnEndAsk?: (sessionId: string) => VisibleTurnAsk | null
+  /** X1 (7.0.36): who answered the session's ask that stopped at `stoppedAt` (a prompt cleared it), or null. */
+  turnEndAskAnswered?: (sessionId: string, stoppedAt: number) => { by: string } | null
 
   /** `deliverAttachedTurn` from `server/lib/attached-provider-adapter.ts`. */
   deliverAttachedTurn?: (request: AttachedTurnRequest) => Promise<unknown> | unknown
@@ -1786,7 +1788,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   // thread and ask id. The tracker clears an ask only when the session's UserPromptSubmit hook lands, a moment after
   // delivery, so without this a second surface answering in that moment would reach the session too. Forgotten if
   // that turn is refused after all (the answer did not go), kept once it may have landed. Bounded, oldest first.
-  const answeredAsks = new Map<string, number>()
+  const answeredAsks = new Map<string, { at: number; by: string }>()
   const ANSWERED_ASKS_MAX = 512
   const cancelDeps: CancelDeps = deps?.cancel ?? {}
   /** A throwing or absent probe reads as the cautious answer, never as a thrown route. */
@@ -3336,11 +3338,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         const askKey = `${binding.provider}:${binding.nativeThreadId.toLowerCase()}:${namedAsk}`
         if (open && turnEndAskId(open.stoppedAt) === namedAsk && answeredAsks.has(askKey)) {
           // Another surface's answer to this same ask was accepted first. The first answer counts.
-          return refuseTurn('turn_end_ask_moved', { changed: true, revision: head.digest, answered: true, askNow: null })
+          return refuseTurn('turn_end_ask_moved', { changed: true, revision: head.digest, answered: true, answeredBy: answeredAsks.get(askKey)?.by ?? 'cos', askNow: null })
         }
         if (open && turnEndAskId(open.stoppedAt) === namedAsk) {
           answersOpenAsk = true
-          answeredAsks.set(askKey, Date.now())
+          answeredAsks.set(askKey, { at: Date.now(), by: turnAskAnswerSurface(prompt, true) })
           while (answeredAsks.size > ANSWERED_ASKS_MAX) {
             const oldest = answeredAsks.keys().next()
             if (oldest.done) break
@@ -3348,10 +3350,15 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           }
           answeredAskKey = askKey
         } else {
+          // Answered already (a prompt cleared this very ask: typed at the Mac, or another surface's answer)? The first
+          // answer counts, so this one comes back as answered, never delivered as a second answer.
+          let answeredBy: string | null = null
+          try { answeredBy = deps.turnEndAskAnswered?.(binding.nativeThreadId, Number(namedAsk.slice('turn_end:'.length)))?.by ?? null } catch { answeredBy = null }
           return refuseTurn('turn_end_ask_moved', {
             changed: true,
             revision: head.digest,
             askNow: open ? { id: turnEndAskId(open.stoppedAt), ask: open.ask, choices: [...open.choices] } : null,
+            ...(answeredBy !== null ? { answered: true, answeredBy } : {}),
           })
         }
       }

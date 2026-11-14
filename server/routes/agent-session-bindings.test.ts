@@ -5002,14 +5002,14 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
   const ANSWER = 'Answer sent from COS Control Web through COS, not typed in this session: Yes, check readiness'
   const ASKED_AT = 1_794_633_000_000
   const ID = `turn_end:${ASKED_AT}`
-  function harness(ask: { value: { ask: string; choices: string[]; stoppedAt: number } | null } | null) {
+  function harness(ask: { value: { ask: string; choices: string[]; stoppedAt: number } | null } | null, answered: Record<number, string> = {}) {
     const head = { value: 'h1' }
     const calls: AttachedTurnRequest[] = []
     const seen: string[] = []
     const deps = writeDeps({
       nativeHead: () => head.value,
       deliverAttachedTurn: async req => { calls.push(req); return { status: 'completed', nativeRevisionAfter: head.value } },
-      ...(ask ? { openTurnEndAsk: (sid: string) => { seen.push(sid); return ask.value } } : {}),
+      ...(ask ? { openTurnEndAsk: (sid: string) => { seen.push(sid); return ask.value }, turnEndAskAnswered: (_sid: string, at: number) => (answered[at] ? { by: answered[at]! } : null) } : {}),
     })
     return { head, calls, seen, deps }
   }
@@ -5125,7 +5125,7 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
       epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0011', turnEndAskId: ID,
     })
     expect(second.status).toBe(409)
-    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, askNow: null, deliveryState: 'not_delivered' })
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'web', askNow: null, deliveryState: 'not_delivered' })
     expect(h.calls).toHaveLength(1)
   })
 
@@ -5142,10 +5142,54 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(again.body.outcome).toBe('completed')
   })
 
+  it('answered at the Mac first (case 3, typed at 23:24:40): the web answer comes back answered, never sent a second time', async () => {
+    const ask = openAsk()
+    const h = harness(ask, { [ASKED_AT]: 'mac' })
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h3: he typed the answer at the Mac and the session worked on it'
+    ask.value = null
+    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0014', turnEndAskId: ID })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'mac', askNow: null, deliveryState: 'not_delivered' })
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('an answer is accepted ONLY for the ask it names: another ask open now is never answered by it', async () => {
+    const ask = openAsk()
+    const h = harness(ask)
+    const base = await start(h.deps)
+    const a = await attached(base)
+    ask.value = { ask: 'A different question', choices: ['Yes, check readiness', 'No'], stoppedAt: ASKED_AT + 5_000 }
+    const res = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0015', turnEndAskId: ID })
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: { id: `turn_end:${ASKED_AT + 5_000}` } })
+    expect('answered' in res.body).toBe(false)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('the quoted send (lead 00:04 words: the contract words first): with the refusal\'s revision and NO ask id it delivers; naming the old ask again it is moved again', async () => {
+    const ask = openAsk()
+    const h = harness(ask)
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h3'
+    ask.value = null
+    const moved = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0016', turnEndAskId: ID })
+    const QUOTED = ANSWER + '. This answers your earlier question \u201cRun a read-only readiness check?\u201d. You have taken a turn since asking it.'
+    const withId = await post(base, turnsPath(a.bindingId), { prompt: QUOTED, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0017', turnEndAskId: ID, acknowledgedRevision: moved.body.revision })
+    expect(withId.body.reason).toBe('turn_end_ask_moved')
+    const sent = await post(base, turnsPath(a.bindingId), { prompt: QUOTED, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0018', acknowledgedRevision: moved.body.revision })
+    expect(sent.body.outcome).toBe('completed')
+    expect(h.calls).toHaveLength(1)
+    expect(h.calls[0]!.prompt.startsWith('Answer sent from COS Control Web through COS, not typed in this session: ')).toBe(true)
+    expect(h.calls[0]!.prompt).toContain('You have taken a turn since asking it.')
+  })
+
   it('index.ts wires the tracker into the route', async () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
     expect(index).toContain('  openTurnEndAsk: sessionId => openTurnEndAsk(sessionId),')
+    expect(index).toContain('  turnEndAskAnswered: (sessionId, stoppedAt) => turnEndAskAnswered(sessionId, stoppedAt),')
   })
 
   it('a malformed ask id is refused invalid_request', async () => {

@@ -16,7 +16,7 @@ import { SessionSignalStore } from './session-signal-store.js'
 import { SessionHookLedger } from './session-hook-ledger.js'
 import { deriveSessionState, derivedRowFields, derivedStatusFields, type RegistryFacts } from './session-state-derive.js'
 import { statusDraftWithDerived } from './session-stream-events.js'
-import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, openTurnEndAsk, sessionSignalStore, startSessionHooksRuntime, turnEndAskStats } from './session-hooks-runtime.js'
+import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, openTurnEndAsk, sessionSignalStore, startSessionHooksRuntime, turnEndAskAnswered, turnEndAskStats } from './session-hooks-runtime.js'
 import { dataPath } from './data-dir.js'
 import { DEAD_GRACE_MS } from './session-state-derive.js'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -687,8 +687,12 @@ describe('the runtime: deriveForRow and the counters', () => {
       const open = openTurnEndAsk(SID, T0 + 200_000)
       expect(open).toMatchObject({ ask: 'Canary: which color?', choices: ['Red', 'Blue'] })
       expect(row?.waiting_ask_id).toBe(`turn_end:${open!.stoppedAt}`)
-      sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: 'a peer message', prompt_id: 'p-next' }), false)
+      sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: 'Commands run, go', prompt_id: 'p-next' }), false)
       expect(openTurnEndAsk(SID, T0 + 210_000)).toBeNull()
+      // Who answered it is kept for the ask's life, past the 2 minute display window: typed at the Mac.
+      expect(turnEndAskAnswered(SID, open!.stoppedAt, T0 + 210_000 + 30 * 60_000)).toMatchObject({ by: 'mac', answeredAt: T0 + 210_000 })
+      expect(turnEndAskAnswered(SID, open!.stoppedAt + 1, T0 + 210_000)).toBeNull()
+      expect(turnEndAskAnswered(SID, open!.stoppedAt, open!.stoppedAt + 8 * 60 * 60_000 + 1)).toBeNull()
     } finally {
       off()
     }

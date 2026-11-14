@@ -543,6 +543,11 @@ export function openTurnEndAsk(sessionId: string, now = Date.now()): VisibleTurn
   return turnEndAskTracker ? turnEndAskTracker.visibleAsk(sessionId, now) : null
 }
 
+/** X1 (7.0.36): who answered the ask that stopped at `stoppedAt` (a prompt cleared it), or null. */
+export function turnEndAskAnswered(sessionId: string, stoppedAt: number, now = Date.now()): { answeredAt: number; by: string } | null {
+  return turnEndAskTracker ? turnEndAskTracker.answeredAsk(sessionId, stoppedAt, now) : null
+}
+
 export function turnEndAsksForQueue(): { asks: QueueTurnAsk[]; answered: AnsweredTurnAsk[] } {
   if (!turnEndAskTracker) return { asks: [], answered: [] }
   return { asks: turnEndAskTracker.visibleAsks(), answered: turnEndAskTracker.recentlyAnswered() }
