@@ -3019,7 +3019,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     /** X1 (7.0.36): the ask this turn answered, marked in `answeredAsks`; unmarked if the turn is refused. */
     let answeredAskKey: string | null = null
     const refuseTurn = (reason: WriteRefusal, extra: Record<string, unknown> = {}): void => {
-      if (answeredAskKey !== null) { answeredAsks.delete(answeredAskKey); answeredAskKey = null }
+      // Q1 (00:5x): forgotten only when the refusal says nothing reached the session. A refusal whose delivery is
+      // unknown or cancelled (live_unverified, turn_cancelled, a fence) may have landed, so the mark stays and a second
+      // surface's answer is told "answered" rather than sent too.
+      if (answeredAskKey !== null && (extra.deliveryState ?? 'not_delivered') === 'not_delivered') { answeredAsks.delete(answeredAskKey); answeredAskKey = null }
       respond(refusalStatus(reason), {
         turnId,
         outcome: 'refused',

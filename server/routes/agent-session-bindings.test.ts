@@ -5198,6 +5198,40 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(h.calls[0]!.prompt).toContain('You have taken a turn since asking it.')
   })
 
+  it('an accepted answer whose delivery is UNKNOWN keeps its mark: a second answer is told answered, not sent too (Q1)', async () => {
+    const h = harness(openAsk())
+    let live = 0
+    h.deps.deliverLiveTurn = async () => { live++; return { ok: false, reason: 'unverified' } }
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    const first = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0020', turnEndAskId: ID })
+    expect(first.body).toMatchObject({ reason: 'live_unverified', deliveryState: 'unknown' })
+    const second = await post(base, turnsPath(a.bindingId), {
+      prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Not tonight',
+      epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0021', turnEndAskId: ID,
+    })
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'web' })
+    expect(live).toBe(1)
+  })
+
+  it('a Codex turn naming an ask reads exactly as before: the head check, and the tracker is never asked (Q1)', async () => {
+    const h = harness(openAsk())
+    h.deps.probes = probes({ lockHolders: () => [PID], transcriptMtimeMs: () => Date.now() - 10 * 60_000 })
+    const codex: unknown[] = []
+    h.deps.deliverCodexLiveTurn = async req => { codex.push(req); return { ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-1' } }
+    const base = await start(h.deps)
+    const at = await post(base, attachPath('codex', CODEX_THREAD), { cosSessionId: 'cos/chat:42' })
+    expect(at.status, JSON.stringify(at.body)).toBe(201)
+    h.head.value = 'h2'
+    const res = await post(base, turnsPath(at.body.bindingId), {
+      prompt: ANSWER, epoch: at.body.epoch, targetKey: targetKey('codex', CODEX_THREAD), boundTo: at.body.boundTo, clientTurnId: 'ct-te-0022', turnEndAskId: ID,
+    })
+    expect(res.body.reason).toBe('native_thread_changed')
+    expect(h.seen).toEqual([])
+    expect(codex).toHaveLength(0)
+  })
+
   it('index.ts wires the tracker into the route', async () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
