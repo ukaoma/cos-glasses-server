@@ -134,7 +134,7 @@ import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, QUEUED_TURN_TAMPERED_COPY, sealMatches, TURN_CARRY_HEADER, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict, type QueueSeal } from '../lib/g2-turn-provenance.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
 import { TURN_END_ASK_ID_RE, turnEndAskId } from '../lib/session-state-derive.js'
-import { turnAskAnswerSurface, type VisibleTurnAsk } from '../lib/turn-end-ask.js'
+import { isTurnEndAnswerPrompt, turnAskAnswerSurface, type VisibleTurnAsk } from '../lib/turn-end-ask.js'
 import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -812,14 +812,9 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'The assistant needs you to sign in again on this Mac before COS can copy this conversation.',
 }
 
-/**
- * X1 (7.0.36): the words COS puts on a turn-end answer (contract v1.2, "Answer sent from <SURFACE> through COS, not
- * typed in this session: <label>"). Only such a turn may name an ask; a typed message keeps the head check whole.
- */
-const TURN_END_ANSWER_RE = /^Answer sent from [^\n]{1,60} through COS, not typed in this session: /
-export function isTurnEndAnswerPrompt(prompt: unknown): boolean {
-  return typeof prompt === 'string' && TURN_END_ANSWER_RE.test(prompt)
-}
+// X1 (7.0.36): the contract words' test lives with the tracker (lib/turn-end-ask.ts) since 7.0.38, so the queue
+// route can refuse an answer without importing this route. Re-exported for the callers that read it from here.
+export { isTurnEndAnswerPrompt }
 
 export function writeReasonCopy(reason: WriteRefusal): string {
   if (Object.prototype.hasOwnProperty.call(REASON_COPY, reason)) {

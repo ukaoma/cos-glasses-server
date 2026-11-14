@@ -116,6 +116,17 @@ export type TurnAskAnswerSurface = 'mac' | 'web' | 'glasses' | 'mac_app' | 'cos'
 export const TURN_ASK_ANSWERED_KEEP_MS = 120_000
 
 /**
+ * X1 (7.0.36): the words COS puts on a turn-end answer (contract v1.2, "Answer sent from <SURFACE> through COS, not
+ * typed in this session: <label>"). Only such a turn may name an ask; a typed message keeps the head check whole.
+ * 7.0.38: also the rule "an answer is never queued": the queue's doors refuse these words and its drain never
+ * delivers them, because a parked answer lands after the session has moved on, whatever it answered.
+ */
+const TURN_END_ANSWER_RE = /^Answer sent from [^\n]{1,60} through COS, not typed in this session: /
+export function isTurnEndAnswerPrompt(prompt: unknown): boolean {
+  return typeof prompt === 'string' && TURN_END_ANSWER_RE.test(prompt)
+}
+
+/**
  * X1: where a reply that cleared a turn-end ask came from, read from the words COS itself puts on it (contract
  * v1.2: "Answer sent from <SURFACE> through COS, not typed in this session"; a dictated reply carries the
  * `[COS-G2 turn` footer). A COS-spawned Continue child is COS. Anything else was typed at the Mac. Only the

@@ -210,7 +210,20 @@ const QUEUED_TURN_REASON_COPY: Readonly<Record<string, string>> = {
   // QA 6.99.29: a sealed queued turn refused at its drain.
   queued_turn_tampered: 'Not sent: its words, files or session changed.',
   turn_id_in_use: 'Not sent: its id belongs to another message.',
+  // X1 (7.0.38): a row in the turn-end answer's words, queued before the guard, settled at its drain.
+  turn_end_answer_not_queued: 'Not sent: an answer to a question is never sent late.',
 }
+
+/**
+ * X1 (7.0.38): an answer is never queued. A turn-end answer ("Answer sent from <SURFACE> through COS, not typed in this
+ * session: ", `isTurnEndAnswerPrompt`) answers what the session asked when its turn ended. Parked behind a busy session
+ * it would land after that turn, whatever the session asked by then, and the drain carries no ask id, so the turns
+ * route's ask check never sees it (07:12, 11/14). The queue's doors refuse it with this reason, and the drain settles a
+ * row queued before this guard instead of delivering it.
+ */
+export const TURN_END_ANSWER_NOT_QUEUED = 'turn_end_answer_not_queued'
+/** What a client shows when a door refuses it: the words are still his, and nothing was sent. */
+export const TURN_END_ANSWER_NOT_QUEUED_COPY = 'Not sent. The session is working.'
 
 /**
  * The reason line for a queue row, or null when there is nothing to say (no reason, or one
