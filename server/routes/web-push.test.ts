@@ -172,7 +172,8 @@ describe('X1 web push: the routes (as mounted with the switch on)', () => {
   async function start(store: WebPushStore, post: PushPost): Promise<string> {
     const app = express()
     app.use(express.json())
-    app.use('/api', createWebPushRouter({ store, originAllowed: o => o === ORIGIN, post }))
+    // Like isAllowedNetworkOrigin in index.ts: this Mac's name or IP, http OR https. The route itself must refuse http.
+    app.use('/api', createWebPushRouter({ store, originAllowed: o => /^https?:\/\/(mac-x1\.example-tailnet\.ts\.net|100\.112\.1\.2)(:\d+)?$/.test(o), post }))
     await new Promise<void>(r => { server = app.listen(0, '127.0.0.1', () => r()) })
     return `http://127.0.0.1:${(server!.address() as { port: number }).port}`
   }
@@ -198,6 +199,9 @@ describe('X1 web push: the routes (as mounted with the switch on)', () => {
     const p = phone()
     expect((await call(base, 'POST', '/api/web-push/devices', { subscription: p.subscription }, 'http://mac-x1.example-tailnet.ts.net:3141')).json).toEqual({ error: 'bad_origin' })
     expect((await call(base, 'POST', '/api/web-push/devices', { subscription: p.subscription })).json).toEqual({ error: 'bad_origin' })
+    // An https origin that is not this Mac's: refused by the allow-list, not by the https rule.
+    expect((await call(base, 'POST', '/api/web-push/devices', { subscription: p.subscription }, 'https://evil.example')).json).toEqual({ error: 'bad_origin' })
+    expect(existsSync(join(dir, 'devices.json'))).toBe(false)
     const added = await call(base, 'POST', '/api/web-push/devices', { subscription: p.subscription, label: 'iPhone' }, ORIGIN)
     expect(added.status).toBe(201)
     const list = await call(base, 'GET', '/api/web-push/devices')

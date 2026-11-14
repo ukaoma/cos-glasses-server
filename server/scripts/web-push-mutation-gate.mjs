@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // X1 (iPhone pings, one-ping proof): RFC 8291 encryption, VAPID, the device store, the sender and the routes behind
 // COS_WEB_PUSH. Same harness as control-tsnet-https-mutation-gate.mjs: disposable copy, green baseline, each target
-// matched exactly once, each mutant killed by the test named for it (WRONG KILLER fails), byte-for-byte restoration.
+// matched exactly once, each mutant killed by the test named for it (WRONG KILLER fails), byte-for-byte restoration. Left out as EQUIVALENT (not a gap): dropping validPushKeys' 0x04 prefix check, because
+// the curve check after it rejects a compressed point anyway.
 import { mkdtempSync, cpSync, existsSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
@@ -18,7 +19,6 @@ const mutations = [
   ["salt-fixed", "server/lib/web-push-crypto.ts", "const salt = opts.salt ?? randomBytes(16)", "const salt = opts.salt ?? Buffer.alloc(16)", "the phone decrypts what we send, with a fresh key and salt each time", ["server/lib/web-push-crypto.test.ts"]],
   ["payload-unlimited", "server/lib/web-push-crypto.ts", "if (plaintext.length > MAX_PLAINTEXT_BYTES) throw new Error('payload too large')", "void MAX_PLAINTEXT_BYTES", "refuses a payload over the limit", ["server/lib/web-push-crypto.test.ts"]],
   ["keys-curve-unchecked", "server/lib/web-push-crypto.ts", "    probe.computeSecret(pub) // throws on a point not on the curve\n", "", "validPushKeys: a real P-256 point", ["server/lib/web-push-crypto.test.ts"]],
-  ["keys-compressed-ok", "server/lib/web-push-crypto.ts", "if (pub.length !== 65 || pub[0] !== 0x04 || auth.length !== 16) return false", "if (pub.length !== 65 || auth.length !== 16) return false", "validPushKeys: a real P-256 point", ["server/lib/web-push-crypto.test.ts"]],
   ["vapid-two-days", "server/lib/web-push-crypto.ts", "export const VAPID_TTL_SECONDS = 12 * 60 * 60", "export const VAPID_TTL_SECONDS = 48 * 60 * 60", "an ES256 JWT for the push service origin", ["server/lib/web-push-crypto.test.ts"]],
   ["vapid-aud-whole-url", "server/lib/web-push-crypto.ts", "  return `${u.protocol}//${u.host}`", "  return endpoint", "pushServiceOrigin drops the path and query", ["server/lib/web-push-crypto.test.ts"]],
   ["vapid-der-signature", "server/lib/web-push-crypto.ts", "{ key: createPrivateKey(keys.privatePem), dsaEncoding: 'ieee-p1363' }", "{ key: createPrivateKey(keys.privatePem), dsaEncoding: 'der' }", "an ES256 JWT for the push service origin", ["server/lib/web-push-crypto.test.ts"]],
