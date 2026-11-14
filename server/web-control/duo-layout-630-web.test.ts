@@ -453,8 +453,13 @@ describe('6.99.30: tap targets, dvh, the rail, [hidden], long lines', () => {
     const square = coarse.find(r => r.sel.startsWith('.cc-chip-x'))!
     expect(square.decls).toMatch(/min-width: 44px !important; min-height: 44px !important/)
     const sw = coarse.find(r => r.sel === '.cx-switch button::before')!
-    const inset = /inset: (-?\d+)px/.exec(sw.decls)!
-    expect(30 - 2 * Number(inset[1]), 'a 30 px switch with its hit area').toBeGreaterThanOrEqual(44)
+    // F1 Set D (2026-11-14): the layer was inset -7px (41 px of tap on the 27 px Messages words); it is now centred and at
+    // least 44 px tall whatever the box, a taller switch keeping its 7 px above and below.
+    const h = /height: max\((\d+)px, calc\(100% \+ (\d+)px\)\)/.exec(sw.decls)!
+    expect(Math.max(Number(h[1]), 30 + Number(h[2])), 'a 30 px switch with its hit area').toBeGreaterThanOrEqual(44)
+    expect(Number(h[1]), 'any switch, whatever its box').toBeGreaterThanOrEqual(44)
+    expect(sw.decls).toMatch(/top: 50%/)
+    expect(sw.decls).toMatch(/translateY\(-50%\)/)
   })
   it('every vh height has a dvh beside it in the same rule; the ones the skeptic named are fixed', () => {
     for (const [f, css] of Object.entries(CSS)) for (const r of rules(css)) {
