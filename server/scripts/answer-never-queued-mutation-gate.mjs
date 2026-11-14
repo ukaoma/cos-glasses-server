@@ -46,10 +46,12 @@ const mutations = [
   ["machine-child-moved", "server/lib/turn-end-ask.ts", "      if (current && !child && (p.prompt_machine_only", "      if (current && (p.prompt_machine_only", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
   ["person-marker-ignored", "server/lib/session-hook-events.ts", "  if (personTurnMarker(prompt) !== null) return false\n", "", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
   ["person-marker-ignored-route", "server/lib/session-hook-events.ts", "  if (personTurnMarker(prompt) !== null) return false\n", "", "a G2 dictation wrapped in another session's message (lead 08:02)", ["server/routes/agent-session-bindings.test.ts"]],
-  ["marker-footer-missed", "server/lib/turn-footer.ts", "  if (footer) return /WEB/i.test(footer[0]) ? 'web_footer' : 'g2_footer'\n", "", "personTurnMarker names every mark", ["server/lib/turn-end-ask.test.ts"]],
-  ["marker-web-as-g2", "server/lib/turn-footer.ts", "/WEB/i.test(footer[0]) ? 'web_footer' : 'g2_footer'", "'g2_footer'", "personTurnMarker names every mark", ["server/lib/turn-end-ask.test.ts"]],
-  ["marker-contract-missed", "server/lib/turn-footer.ts", "  if (PERSON_CONTRACT_RE.test(text)) return 'contract'\n", "", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
-  ["marker-contract-anchored", "server/lib/turn-footer.ts", "const PERSON_CONTRACT_RE = /Answer sent from", "const PERSON_CONTRACT_RE = /^Answer sent from", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
+  ["marker-footer-missed", "server/lib/turn-footer.ts", "  if (footer) return footer[1] === 'WEB' ? 'web_footer' : 'g2_footer'\n", "", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-web-as-g2", "server/lib/turn-footer.ts", "footer[1] === 'WEB' ? 'web_footer' : 'g2_footer'", "'g2_footer'", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-footer-unanchored", "server/lib/turn-footer.ts", "const PERSON_FOOTER_LINE_RE = /^\\[COS-", "const PERSON_FOOTER_LINE_RE = /\\[COS-", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-footer-no-id", "server/lib/turn-footer.ts", "turn [A-Za-z0-9][A-Za-z0-9_-]{7,127} \\u00b7 verify: [^\\n\\]]*\\]/m", "turn [^\\]]*\\]/m", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-footer-any-case", "server/lib/turn-footer.ts", "verify: [^\\n\\]]*\\]/m\n", "verify: [^\\n\\]]*\\]/im\n", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-quote-counts", "server/lib/turn-footer.ts", "const footer = PERSON_FOOTER_LINE_RE.exec(text)", "const footer = TURN_FOOTER_SHAPED_RE.exec(text)", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

@@ -46,25 +46,26 @@ export function turnFooter(turnId: string, client: string = 'glasses', provider?
 export const TURN_FOOTER_SHAPED_RE = /\[\s*COS[-\u2010-\u2015\u2212\s]*(?:G2|WEB)\s+turn\b/i
 
 /**
- * X1 (7.0.38, lead 08:02): the marks COS puts on a turn a PERSON made, wherever they sit in a prompt, even inside another
- * session's message block. A prompt carrying one is his turn, never the machine's (lib/session-hook-events.ts
- * isMachineOnlyPrompt), and keeps the surface it had in 7.0.37 (lib/turn-end-ask.ts turnAskAnswerSurface):
- * - `g2_footer`: the verify footer of a glasses or phone turn, `[COS-G2 turn …]` (turnFooter above).
- * - `web_footer`: the verify footer of a web turn signed by an enrolled phone key, `[COS-WEB turn …]` (behind
- *   COS_WEB_KEY_AUTHORITY, off by default, so no such turn exists today).
- * - `contract`: the turn-end answer's words, "Answer sent from <SURFACE> through COS, not typed in this session"
- *   (contract v1.2): Control Web (server/web-control/app.js TURN_END_PREFIX, panes/today-actions.js TURN_END_PREFIX),
- *   COS Control on the Mac (Models.swift turnEndPrefix), and any later surface in the same words.
- * Lenient like the footer check: mistaking a lookalike for his turn costs a Send anyway button; the reverse could
- * offer one for a question he answered.
+ * X1 (7.0.38, lead 08:02; tightened 7.0.39): the mark COS puts on a turn a PERSON made. A prompt carrying one is his
+ * turn, never the machine's (lib/session-hook-events.ts isMachineOnlyPrompt), and keeps the surface it had in 7.0.37
+ * (lib/turn-end-ask.ts turnAskAnswerSurface). 7.0.39 counts a mark only WHERE a real turn has it, so a peer message
+ * that merely quotes one (the orchestrator sessions quote both all day) reads as the session moving on:
+ * - `g2_footer` / `web_footer`: a WHOLE footer line as turnFooter writes it, `[COS-G2 turn <id> · verify: …]` (or
+ *   COS-WEB) at the start of a line, with its turn id. g2-turn-provenance footed() always puts it on its own line.
+ *   Not "the last line of the block": Claude Desktop appends its own notes inside a cross-session block after the
+ *   body (`<artifact-content-authored-by-others/>` and a line about it, seen on every peer message of 11/14), so a
+ *   relayed dictation can end with them. A mention of the marker in prose has no id and no "verify", and never counts.
+ * - The answer words, "Answer sent from <SURFACE> through COS, not typed in this session: ", need no mark here.
+ *   Every real answer has them at the START of the prompt, outside any block (11/14 ledger: 7 Control Web and 2 Mac
+ *   app answers, all bare; none ever inside a block), and a prompt that starts outside a block is already typed words
+ *   to isMachineOnlyPrompt, so his. Inside a block they are a quote. (7.0.38 matched them anywhere.)
  */
-const PERSON_CONTRACT_RE = /Answer sent from [^\n]{1,60} through COS, not typed in this session/
-export type PersonTurnMarker = 'g2_footer' | 'web_footer' | 'contract'
+const PERSON_FOOTER_LINE_RE = /^\[COS-(G2|WEB) turn [A-Za-z0-9][A-Za-z0-9_-]{7,127} \u00b7 verify: [^\n\]]*\]/m
+export type PersonTurnMarker = 'g2_footer' | 'web_footer'
 export function personTurnMarker(text: unknown): PersonTurnMarker | null {
   if (typeof text !== 'string') return null
-  const footer = TURN_FOOTER_SHAPED_RE.exec(text)
-  if (footer) return /WEB/i.test(footer[0]) ? 'web_footer' : 'g2_footer'
-  if (PERSON_CONTRACT_RE.test(text)) return 'contract'
+  const footer = PERSON_FOOTER_LINE_RE.exec(text)
+  if (footer) return footer[1] === 'WEB' ? 'web_footer' : 'g2_footer'
   return null
 }
 
