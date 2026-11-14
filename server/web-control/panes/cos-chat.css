@@ -341,3 +341,13 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .att-clip .cc-attach { height: 38px; width: 42px; border-radius: var(--radius-sm); }
 .att-composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
 .cc-chips .att-limit { flex-basis: 100%; min-width: 0; max-width: 100%; margin: 0 2px; font-size: 12.5px; line-height: 1.35; color: var(--sub); white-space: normal; overflow-wrap: anywhere; }
+
+/* 7.0.39 (thread candidate 1, Miles's pick A "notes in flow", the reviewed mock wk46_2026/cos_thread_mock): the thread's
+   history. A day line where the local day changes, and the top line that says earlier entries load as he scrolls up.
+   The page itself keeps his place when older entries arrive (cos-chat.js keepPlace), so the browser's own scroll
+   anchoring is off inside the feed: two adjustments would move him. */
+.cc-history { overflow-anchor: none; }
+.cc .tl-start { margin: 0 0 4px; font-size: 12.5px; line-height: 1.4; color: var(--tertiary); text-align: center; }
+.cc .tl-start:empty { display: none; }
+.cc .tl-day { display: flex; align-items: center; gap: 10px; margin: 20px 0 14px; font: 600 12.5px/1.3 var(--body); color: var(--sub); }
+.cc .tl-day::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }

@@ -58,6 +58,8 @@
     onChange: null,         // messages.js: re-render when Drop it or Ask turns on or off
     onAnswered: null,       // messages.js: re-read Recent when a web Ask lands
     thread: null,           // 6.99.16: the last GET /api/cos-thread answer
+    // 7.0.39 (thread candidate 1): the thread's history, oldest first, from GET /api/cos-thread/history (S1).
+    hist: { entries: [], older: null, newest: '', state: 'idle', olderState: 'idle', newerBusy: false, full: {}, fullState: {} },
     threadCarried: '',      // the thread's newest session started fresh: 'summary' (it carried a digest) or 'plain'
     threadBusy: false,
     threadSession: '',      // 7.0.2: the session the COS thread's next Ask continues ('' when it starts fresh)
@@ -113,6 +115,8 @@
         !!(h && h.features && h.features.durableQueryJobs === true),
       steer: !!(C.caps && C.caps.steer),
       thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1),
+      // 7.0.39: the thread's history routes (S1, docs/cos-thread.md). Protocol stays 1; history >= 1 says they exist.
+      history: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1 && Number(drop.thread.history) >= 1),
       // 6.99.19: Prep (capabilities.prep, protocol 1). Absent on an older server: "Prep me" stays a plain Ask.
       prep: prepCapsOf(caps.prep),
       // 11/07: how many files a session turn takes (threadTurnAttachments). 0 (an older server): words only, and Today's
@@ -343,7 +347,7 @@
   }
 
   // ── the chat ──────────────────────────────────────────
-  function chatMode() { return dropOn() ? (threadOn() ? 'drop-thread' : 'drop') : 'ask'; }
+  function chatMode() { return dropOn() ? (threadOn() ? (historyOn() ? 'drop-thread-history' : 'drop-thread') : 'drop') : 'ask'; }
   function chatSkeleton() {
     var drop = dropOn();
     return '<section class="cc" data-cos-chat data-mode="' + chatMode() + '" data-tint="messages" aria-label="' + (drop ? 'COS chat' : 'Ask COS') + '">' +
@@ -351,9 +355,10 @@
         '<p class="cc-sub">' + (drop ? 'Text it anything: a thought, an ask, a reminder. It texts back.' : 'Ask anything, with photos or files. Each answer lands in Messages with its number, here and on the glasses.') + '</p></div>' +
         '<div class="cc-head-acts"><button type="button" class="link-btn cc-all" data-cos="all">All messages</button>' +
         (drop ? '<button type="button" class="link-btn" data-cos="read-all">Mark all read</button>' : '') +
-        (threadOn() ? '<button type="button" class="link-btn" data-cos="new-thread">New thread</button>' : '') + '</div>' +
+        // 7.0.39 (Miles 11/13, his pick): one thread, always. New thread goes once the history reads.
+        (threadOn() && !historyOn() ? '<button type="button" class="link-btn" data-cos="new-thread">New thread</button>' : '') + '</div>' +
         (threadOn() ? '<p class="cc-thread" data-cos-thread role="status">' + esc(threadLine()) + '</p>' : '') + '</header>' +
-      '<div class="cc-feed" data-cos-feed aria-live="polite"></div>' +
+      '<div class="cc-feed' + (historyOn() ? ' cc-history' : '') + '" data-cos-feed aria-live="polite"></div>' +
       composerHtml(CHAT, { drop: drop, placeholder: drop ? 'Ask COS or drop a thought' : 'Ask COS anything', label: 'Message to COS' }) +
       '</section>';
   }
@@ -370,6 +375,7 @@
     if (!visible) return;
     loadModels();
     if (threadOn()) loadThread();
+    if (historyOn() && C.hist.state !== 'ready') loadHistory();
     // Ask only: no inbox to read; the chat holds this page's Asks. Inbox lines from a Drop it session are not shown.
     if (!dropOn()) { if (C.feedMode !== 'ask') { C.items = []; C.feedState = 'ready'; C.feedMode = 'ask'; } paintFeed(true); return; }
     if (C.items === null || C.feedState === 'error' || C.feedMode !== 'drop') loadFeed(); else paintFeed(true);
@@ -706,9 +712,15 @@
       // 7.0.9: a question asked 7 days ago or more (the server marks it `archived`) lives under older questions.
       var rows = (C.items || []).filter(function (it) { return !it.archived; }).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
       C.asks.forEach(function (a) { if (!a.replyKey) rows.push({ at: new Date(a.at + (a.dropId ? 1 : 0)).toISOString(), html: askHtml(a, !!a.dropId) }); });
+      // 7.0.39: the thread's history, its chats in time with the rest; one this page is still showing as an Ask is drawn once.
+      var hist = historyOn();
+      if (hist) {
+        var live = {}; C.asks.forEach(function (a) { live['t:' + a.cid] = 1; });
+        C.hist.entries.forEach(function (e) { if (!live[e.id]) rows.push({ at: e.at, html: histHtml(e) }); });
+      }
       rows.sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
       var older = archiveHtml();
-      html = rows.length || older ? older + rows.map(function (r) { return r.html; }).join('')
+      html = rows.length || older || (hist && (C.hist.older || C.hist.state === 'error')) ? (hist ? histTopHtml() : '') + older + (hist ? withDays(rows) : rows.map(function (r) { return r.html; }).join(''))
         : dropOn() ? '<p class="cc-empty">Nothing here yet. Ask COS something, or drop a thought and COS files it.</p>'
           : '<p class="cc-empty">Ask COS anything. Attach photos or files with the clip.</p>';
     }
@@ -1175,6 +1187,169 @@
   function askFilesOf(next) {
     var ids = next && Array.isArray(next.attachmentIds) ? next.attachmentIds.filter(function (id) { return MEDIA_ID.test(String(id)); }).slice(0, MAX_ATTS) : [];
     return ids.length ? { attachmentIds: ids } : undefined;
+  }
+
+  // ── the thread's history (7.0.39, candidate 1; S1's GET /api/cos-thread/history, docs/cos-thread.md) ──
+  // The pinned chat opens on its latest stretch and loads older entries as he scrolls up. Nothing here moves him: an
+  // older page is added above with the scroll taking up its height, and a newer one below sticks only when he is already
+  // at the end (paintFeed).
+  function historyOn() { return threadOn() && !!(C.caps && C.caps.history); }
+  var HIST_PAGE = 40, HIST_POLL_MS = 30000, HIST_FILL_PAGES = 5, HIST_NEWER_PAGES = 5;
+  function histValid(e) {
+    return !!(e && typeof e.id === 'string' && /^t:/.test(e.id) && typeof e.at === 'string' && W.toDate(e.at) && e.kind === 'chat' && typeof e.question === 'string');
+  }
+  /** Entries into the list, by id: 'older' before, 'newer' after; one already held is replaced where it is. */
+  function histMerge(list, where) {
+    var have = {}, cur = C.hist.entries;
+    cur.forEach(function (e, i) { have[e.id] = i; });
+    var fresh = [];
+    (Array.isArray(list) ? list : []).filter(histValid).forEach(function (e) {
+      if (Object.prototype.hasOwnProperty.call(have, e.id)) cur[have[e.id]] = e; else { have[e.id] = -1; fresh.push(e); }
+    });
+    C.hist.entries = where === 'older' ? fresh.concat(cur) : cur.concat(fresh);
+  }
+  function histUrl(q) { return '/api/cos-thread/history?limit=' + HIST_PAGE + (q || ''); }
+  // Installed once, the first time the history is read (a server without it never gets these): the newer entries every
+  // 30 s while the chat is on screen and on focus, and the older ones as he scrolls up (the column, or the page).
+  function histListen() {
+    if (C.hist.listening) return;
+    C.hist.listening = true;
+    setInterval(function () { if (!document.hidden && historyOn() && chatVisible()) loadNewer(); }, HIST_POLL_MS);
+    window.addEventListener('focus', function () { if (historyOn() && chatVisible()) loadNewer(); });
+    window.addEventListener('scroll', onHistScroll, { passive: true });
+    document.addEventListener('scroll', function (e) { if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cos-feed')) onHistScroll(); }, { capture: true, passive: true });
+  }
+  function loadHistory() {
+    if (!historyOn() || C.hist.state === 'loading') return;
+    histListen();
+    C.hist.state = 'loading';
+    api(histUrl('')).then(function (d) {
+      C.hist.entries = []; histMerge(d && d.entries, 'newer');
+      C.hist.older = d && typeof d.older === 'string' && d.older ? d.older : null;
+      C.hist.newest = d && typeof d.newest === 'string' ? d.newest : '';
+      C.hist.state = 'ready';
+      paintFeed(true);
+      fillUp(0);
+    }, function () { C.hist.state = 'error'; paintFeed(false); });
+  }
+  // A short history does not fill the column, so no scroll can ask for more: read older pages until it does (bounded).
+  function fillUp(n) {
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    if (!feed || !C.hist.older || n >= HIST_FILL_PAGES) return;
+    var sc = scrollerOf(feed);
+    if (sc && sc.scrollHeight > sc.clientHeight + 40) return;
+    loadOlder().then(function (ok) { if (ok) fillUp(n + 1); });
+  }
+  function loadOlder() {
+    if (!historyOn() || !C.hist.older || C.hist.olderState === 'loading') return Promise.resolve(false);
+    C.hist.olderState = 'loading'; paintHistTop();
+    return api(histUrl('&before=' + encodeURIComponent(C.hist.older))).then(function (d) {
+      C.hist.olderState = 'idle';
+      keepPlace(function () {
+        histMerge(d && d.entries, 'older');
+        C.hist.older = d && typeof d.older === 'string' && d.older ? d.older : null;
+        paintFeed(false);
+      });
+      return true;
+    }, function () { C.hist.olderState = 'error'; paintHistTop(); return false; });
+  }
+  // What arrived since the newest cursor (his own chats from another tab, and later the timeline), page by page.
+  function loadNewer(n) {
+    n = n || 0;
+    if (!historyOn() || C.hist.state !== 'ready' || !C.hist.newest || (C.hist.newerBusy && !n) || n >= HIST_NEWER_PAGES) return;
+    C.hist.newerBusy = true;
+    api(histUrl('&after=' + encodeURIComponent(C.hist.newest))).then(function (d) {
+      var got = d && Array.isArray(d.entries) ? d.entries : [];
+      if (d && typeof d.newest === 'string' && d.newest) C.hist.newest = d.newest;
+      if (got.length || (d && Array.isArray(d.updated) && d.updated.length)) { histMerge(got.concat(d.updated || []), 'newer'); paintFeed(false); }
+      if (d && d.more === true && got.length) return loadNewer(n + 1);
+      C.hist.newerBusy = false;
+    }, function () { C.hist.newerBusy = false; });
+  }
+  /** Run a repaint that adds entries ABOVE what he is reading, then take up their height so nothing on screen moves. */
+  function keepPlace(paint) {
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    if (!feed) { paint(); return; }
+    var h0 = feed.scrollHeight;
+    paint();
+    var d = feed.scrollHeight - h0;
+    if (!d) return;
+    if (wide()) feed.scrollTop += d; else window.scrollBy(0, d);
+  }
+  function histTopHtml() {
+    var s = C.hist;
+    if (s.state === 'error') return '<p class="tl-start" data-hist-top>Couldn’t load the thread’s history. <button type="button" class="link-btn" data-cos="hist-retry">Try again</button></p>';
+    if (!s.older) return '';
+    if (s.olderState === 'error') return '<p class="tl-start" data-hist-top>Couldn’t load earlier entries. <button type="button" class="link-btn" data-cos="hist-older">Try again</button></p>';
+    return '<p class="tl-start" data-hist-top>' + (s.olderState === 'loading' ? 'Loading earlier entries.' : 'Earlier entries load as you scroll up.') + '</p>';
+  }
+  // The top line changes in place (its height is one line either way), so a load never rebuilds the chat under him.
+  function paintHistTop() {
+    var el = C.host && C.host.querySelector('[data-hist-top]');
+    if (el) el.outerHTML = histTopHtml() || '<p class="tl-start" data-hist-top></p>';
+  }
+  function dayLabel(d) {
+    var now = new Date();
+    var o = { weekday: 'long', month: 'long', day: 'numeric' };
+    if (d.getFullYear() !== now.getFullYear()) o.year = 'numeric';
+    var s = d.toLocaleDateString(undefined, o);
+    return d.toDateString() === now.toDateString() ? 'Today, ' + s : s;
+  }
+  function clockOnly(v) { var d = W.toDate(v); return d ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : ''; }
+  /** The rows with a day line wherever the local day changes (mock A: "Thursday, November 12", "Today, Friday, November 13"). */
+  function withDays(rows) {
+    var last = '', out = '';
+    rows.forEach(function (r) {
+      var d = W.toDate(r.at), k = d ? d.toDateString() : '';
+      if (k && k !== last) { out += '<div class="tl-day">' + esc(dayLabel(d)) + '</div>'; last = k; }
+      out += r.html;
+    });
+    return out;
+  }
+  /** One chat from the history: his words with their time, and COS's answer (its preview, or all of it once read). */
+  function histHtml(e) {
+    var whole = Object.prototype.hasOwnProperty.call(C.hist.full, e.id);
+    var text = whole ? C.hist.full[e.id] : String(e.answer || '');
+    var more = !whole && e.full !== true && !!text && (e.answerChars == null || Number(e.answerChars) > text.length);
+    var t = clockOnly(e.at);
+    var title = Number.isInteger(e.messageNo) && e.messageNo > 0 ? 'Message #' + e.messageNo : 'COS';
+    var body = text ? W.md(W.structureLensAnswer(text))
+      : '<span class="cc-wait">' + (e.status === 'running' ? 'COS is answering.' : e.status === 'failed' ? 'This ask did not finish.'
+        : e.status === 'interrupted' ? 'This ask was stopped before it finished.' : 'This answer was not kept.') + '</span>';
+    var fs = C.hist.fullState[e.id] || '';
+    var acts = more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
+      (fs === 'loading' ? 'Loading the rest…' : 'Show all of it') + '</button>' + (fs === 'error' ? '<span class="cc-fine warn">Couldn’t load the rest.</span>' : '') : '';
+    return '<div class="cc-line you"><div class="cc-bubble">' + esc(e.question) + '</div><div class="cc-src">' + esc(t) + '</div></div>' +
+      '<div class="cc-line cos" data-hist="' + esc(e.id) + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
+      '<p class="cc-card-title"><span>' + esc(title) + '</span><span class="cx-time">' + esc(t) + '</span></p>' +
+      '<div class="cc-answer md">' + body + '</div>' + (acts ? '<div class="cc-acts">' + acts + '</div>' : '') + '</div></div>';
+  }
+  // "Show all of it": the whole answer (S1's GET /api/cos-thread/entry/:id), drawn in place in its own card.
+  function loadFull(id) {
+    if (!id || C.hist.fullState[id] === 'loading') return;
+    C.hist.fullState[id] = 'loading'; paintHistCard(id);
+    api('/api/cos-thread/entry/' + encodeURIComponent(id)).then(function (d) {
+      var e = d && d.entry;
+      if (e && typeof e.answer === 'string') { C.hist.full[id] = e.answer; delete C.hist.fullState[id]; }
+      else C.hist.fullState[id] = 'error';
+      paintHistCard(id);
+    }, function () { C.hist.fullState[id] = 'error'; paintHistCard(id); });
+  }
+  function paintHistCard(id) {
+    var el = C.host && C.host.querySelector('[data-hist="' + id.replace(/["\\]/g, '') + '"]');
+    var e = C.hist.entries.filter(function (x) { return x.id === id; })[0];
+    if (!el || !e) return;
+    var box = document.createElement('div'); box.innerHTML = histHtml(e);
+    var card = box.querySelector('[data-hist]');
+    if (card) el.replaceWith(card);
+  }
+  // Near the top of the history: read the page before it. The chat column scrolls on its own from 860 px, the page below.
+  function onHistScroll() {
+    if (!historyOn() || !C.hist.older || C.hist.olderState !== 'idle' || !chatVisible()) return;
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    if (!feed) return;
+    var near = wide() ? feed.scrollTop < 300 : feed.getBoundingClientRect().top > -300;
+    if (near) loadOlder();
   }
 
   // ── the COS thread (6.99.16) ──────────────────────────
@@ -2261,6 +2436,9 @@
     if (what === 'all') return W.go('messages');
     if (what === 'read-all') return markReadIfShown(true);
     if (what === 'new-thread') return newThread();
+    if (what === 'hist-full') return loadFull(t.getAttribute('data-id'));
+    if (what === 'hist-older') { C.hist.olderState = 'idle'; return loadOlder(); }
+    if (what === 'hist-retry') { C.hist.state = 'idle'; return loadHistory(); }
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -2434,6 +2612,7 @@
   });
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden && dropOn() && chatVisible()) loadFeedQuietly();
+    if (!document.hidden && historyOn() && chatVisible()) loadNewer();
   });
 
   W.cosChat = {
@@ -2532,6 +2711,7 @@
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
-    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
+    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
+    _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn
   };
 })();
