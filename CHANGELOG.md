@@ -27,6 +27,11 @@
 - **The new question drawn after a refusal** comes from the refusal itself and is replaced by the next session read.
 - **Not tried on a real phone, and not in a test browser (WebKit) for the new words and button.** Measured with route tests that run a session which ends its turn with a question, then takes another turn, then gets the tap, and with Control Web tests on the real send path against fake routes.
 
+**Tested on this build** (the full suite on its parent 6b8b41d1; this commit adds only these lines):
+- **The full server suite, alone:** 16,669 passed, 0 failed, type check clean.
+- **The layout sweep in a test browser (WebKit), quick set, on 6b8b41d1:** 0 failing over 625 states (14 known: the rail in a stranded pan), the same as 7.0.36. It checks layout only, not the answer behaviour, which the tests below cover.
+- **Not on a real phone** (as above).
+
 **Tests:**
 - Server:
 - 18 route tests:
