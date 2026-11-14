@@ -28,9 +28,17 @@
 **Not covered, said plainly:**
 - **Glasses and Mac chats in the thread:** the timeline (notifications, session questions, meetings and glasses chats as one-line entries) is a later candidate; this build shows chats sent from the thread only.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent 2d00174e, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 16,965 passed, 6 skipped (16,971) in 931 files (929 passed, 2 skipped); type check clean.
+- **The layout sweep in a test browser (WebKit), quick set, on 2d00174e (F1):** exit 0; 0 defect keys over 640 states in 1120 s (14 known keys, not failing: the rail in the pan state at 787 x 1022, one key per pane, as F1 classes them) (F1_evidence/sweep_gate_2d00174e.log).
+- **Not on a real phone** (see the list above).
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **COS thread candidate 1, server (S1, claude/server-cos-thread-history to 05eece64):** 65 focused tests, tsc 0; Q1 PASS 09:29.
+- **COS thread candidate 1, Control Web (W1, claude/web-cos-thread-history to e1ae3e8a):** web set 1,716 green; WebKit: older entries load with 0 px of movement at 1x, 2x and 3x. Q1 PASS 10:33 (read as a pair with 05eece64).
+- **COS thread candidate 2, server (S1, claude/server-cos-thread-only to 4c835615):** mutation gate 43 of 43 on a green baseline, tsc 0; never-lost tested by killing the process at each step; the Mac app's and glasses' reads held to the 7.0.38 bytes. Q1 PASS (4c835615, nothing owed).
+- **COS thread candidate 2, Control Web (W1, claude/web-cos-thread-only to 78034568):** web set and the 3 server canaries that read the page, 1,748 green; 37 of 37 mutants; WebKit render check on S1's real routes at the open Duo, the folded Duo and a phone. Q1 PASS 12:58 on f157eb82, then Q1 PASS 13:24 on 78034568 (the canary fix after the 13:16 suite failure, and Q1's owed tests).
+- **The cut:** every replayed commit's added and removed lines equal the passed heads (16 commits).
 
 ## 7.0.40 - A quoted mark is no longer read as his answer, Work offers Claude first and stops trusting a usage reading whose window has ended, https for Control Web on the Mac's ts.net name (off), and the sender for one test ping to his iPhone (off)
 
