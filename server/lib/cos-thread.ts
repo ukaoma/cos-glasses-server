@@ -64,6 +64,28 @@ export const ARCHIVE_LOOKAHEAD_DAYS = 31
 export const ARCHIVE_FILE_MAX_BYTES = 32 * 1024 * 1024
 export const ARCHIVE_TOTAL_MAX_BYTES = 96 * 1024 * 1024
 export const DIGEST_HEADER = 'Earlier in this COS thread (a summary carried over; ask COS to search History or Messages for more):'
+/** 7.0.39 candidate 4: the look-back read (GET /cos-thread/timeline): entries per answer by default and at most, the most
+ * bytes one answer carries, and how much of a chat's question and answer it shows. */
+export const LOOKBACK_DEFAULT_LIMIT = 50
+export const LOOKBACK_MAX_LIMIT = 200
+export const LOOKBACK_MAX_BYTES = 64 * 1024
+export const LOOKBACK_TEXT_CHARS = 300
+/** Days the look-back reads when `from` is left out: `to` and the six before it. */
+export const LOOKBACK_DEFAULT_DAYS = 7
+/** The look-back route's own protocol, advertised as `capabilities.dropIt.thread.lookback`. */
+export const COS_THREAD_LOOKBACK_PROTOCOL = 1
+
+/**
+ * 7.0.39 candidate 4: the one line that tells COS the look-back read exists. The server prints it after the quoted
+ * digest on a thread conversation's first chat (conversation.ts formatHistoryForPrompt, set by query-job-runtime.ts), so
+ * it costs its tokens once per fresh segment and never on a continued chat. It is server text, never inside the
+ * untrusted reference box. The CLI child inherits COS_API_TOKEN and PORT from the server (claude-bridge, codex-bridge
+ * and cursor-bridge copy process.env), so the line names the variable, never the token. Same port rule as index.ts.
+ */
+export function lookbackPointer(env: NodeJS.ProcessEnv = process.env): string {
+  const port = /^\d{1,5}$/.test(env.PORT ?? '') ? env.PORT! : '3141'
+  return `Older chats, notifications, meetings and messages by local day (for "a week ago", read a few days either side): curl -s -H "X-Cos-Token: $COS_API_TOKEN" "http://127.0.0.1:${port}/api/cos-thread/timeline?from=YYYY-MM-DD&to=YYYY-MM-DD"`
+}
 const DAY_MS = 24 * 60 * 60_000
 
 /** thread_only (7.0.39): the next Ask is a cosThread one and the thread's conversation is not a thread conversation yet. */
@@ -172,6 +194,38 @@ export interface CosThreadTimelinePage {
   newest: string
   more: boolean
   updated: TimelineEntry[]
+}
+/** 7.0.39 candidate 4: the look-back read (COS's, GET /cos-thread/timeline). `fromMs` inclusive, `toMs` exclusive. */
+export interface CosThreadLookbackQuery {
+  fromMs: number
+  toMs: number
+  limit: number
+  maxBytes?: number
+  kinds?: readonly HistoryKind[]
+  /** An older page within the window: everything strictly before this place in time order (a c2 cursor). */
+  before?: { atMs: number; tie: string }
+}
+/** A chat as the look-back shows it: question and answer cut to LOOKBACK_TEXT_CHARS (the entry route has the rest). */
+export interface LookbackChatEntry {
+  id: string
+  at: string
+  kind: 'chat'
+  threadId: string
+  question: string
+  answer: string
+  /** The whole answer's length when known, else null. */
+  answerChars: number | null
+  /** True when `answer` is the whole answer. */
+  full: boolean
+  status: CosThreadChatStatus
+  messageNo: number | null
+}
+export interface CosThreadLookbackPage {
+  protocol: 1
+  /** Oldest to newest: the newest `limit` (and at most LOOKBACK_MAX_BYTES) of the window, or of the part before `before`. */
+  entries: Array<LookbackChatEntry | CrumbEntry>
+  /** The c2 cursor for the window's older part, or null when this page reaches the window's start. */
+  older: string | null
 }
 /** What a full-answer read needs to look the answer up elsewhere. */
 export interface CosThreadEntryLookup { sessionId: string; clientId: string; messageNo: number | null; at: string; query: string }
@@ -833,6 +887,44 @@ export class CosThread {
     return { protocol: 1, entries: kept, older: first > 0 && firstItem ? `c2.${firstItem.atMs}.${firstItem.tie}` : null, newest: timelineCursor(counts), more: false, updated: [] }
   }
 
+  /**
+   * 7.0.39 candidate 4: COS's look-back. Every chat of every thread and every breadcrumb whose time falls in
+   * [fromMs, toMs), in time order; the newest `limit` of them (or of the part before `before`), cut to the byte cap with
+   * at least one entry. Chats are cut to LOOKBACK_TEXT_CHARS each way. Read only: it opens no file but the ledger.
+   */
+  lookback(query: CosThreadLookbackQuery): CosThreadLookbackPage {
+    const tl = this.timeline()
+    const kinds = new Set<HistoryKind>(query.kinds ?? ['chat', 'notification', 'session_question', 'meeting', 'message'])
+    const limit = Math.max(1, Math.min(LOOKBACK_MAX_LIMIT, Math.floor(query.limit)))
+    const cap = query.maxBytes ?? LOOKBACK_MAX_BYTES
+    const inWindow = (atMs: number) => atMs >= query.fromMs && atMs < query.toMs
+    type Item = { atMs: number; tie: string; chat?: number; crumb?: number }
+    const items: Item[] = []
+    if (kinds.has('chat')) this.history.forEach((h, i) => { if (inWindow(h.atMs)) items.push({ atMs: h.atMs, tie: chatTie(i), chat: i }) })
+    tl.crumbs.forEach((c, j) => { if (kinds.has(c.kind) && inWindow(c.atMs)) items.push({ atMs: c.atMs, tie: `b${c.id}`, crumb: j }) })
+    items.sort(compareItems)
+    let end = items.length
+    if (query.before) end = items.findIndex(it => compareItems(it, query.before!) >= 0)
+    if (end < 0) end = items.length
+    const window = items.slice(Math.max(0, end - limit), end)
+    const chatIdx = window.filter(it => it.chat !== undefined).map(it => it.chat!)
+    const rows = this.readTurns(chatIdx)
+    const chats = new Map<number, LookbackChatEntry>()
+    chatIdx.forEach((i, k) => chats.set(i, lookbackChat(this.chatEntry(rows[k]!))))
+    const kept: Array<LookbackChatEntry | CrumbEntry> = []
+    let bytes = 0, first = end
+    for (let k = window.length - 1; k >= 0; k--) {
+      const it = window[k]!
+      const e = it.chat !== undefined ? chats.get(it.chat)! : tl.entry(tl.crumbs[it.crumb!]!)
+      const b = Buffer.byteLength(JSON.stringify(e))
+      if (kept.length && bytes + b > cap) break
+      kept.push(e); bytes += b; first = end - window.length + k
+    }
+    kept.reverse()
+    const firstItem = items[first]
+    return { protocol: 1, entries: kept, older: first > 0 && firstItem ? `c2.${firstItem.atMs}.${firstItem.tie}` : null }
+  }
+
   /** A candidate-1 `before` cursor (the n-th chat) as a place in time order. */
   timePlaceOfChat(n: number): { atMs: number; tie: string } | undefined {
     return n < this.history.length ? { atMs: this.history[n]!.atMs, tie: chatTie(n) } : undefined
@@ -1014,6 +1106,18 @@ function supersededBy(prior: { generation: number; status: CosThreadChatStatus; 
 }
 
 const chatTie = (i: number) => `t${String(i).padStart(9, '0')}`
+/** A chat entry cut for the look-back. */
+function lookbackChat(e: CosThreadChatEntry): LookbackChatEntry {
+  const cutQ = e.question.length > LOOKBACK_TEXT_CHARS
+  const cutA = e.answer.length > LOOKBACK_TEXT_CHARS
+  return {
+    id: e.id, at: e.at, kind: 'chat', threadId: e.threadId,
+    question: cutQ ? e.question.slice(0, LOOKBACK_TEXT_CHARS - 1) + '…' : e.question,
+    answer: cutA ? e.answer.slice(0, LOOKBACK_TEXT_CHARS - 1) + '…' : e.answer,
+    answerChars: e.answerChars,
+    full: e.full && !cutA, status: e.status, messageNo: e.messageNo ?? null,
+  }
+}
 function compareItems(a: { atMs: number; tie: string }, b: { atMs: number; tie: string }): number {
   return a.atMs !== b.atMs ? a.atMs - b.atMs : a.tie < b.tie ? -1 : a.tie > b.tie ? 1 : 0
 }

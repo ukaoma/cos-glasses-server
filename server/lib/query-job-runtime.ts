@@ -44,6 +44,7 @@ import {
   reconcileExchangeByJobIdentity,
   removeExchangesByJobIdentity,
   type KeyProfileBinding,
+  type PromptReference,
   type SessionModelBinding,
 } from './conversation.js'
 import { parsePreference, profilePreference } from '../../shared/key-preference.js'
@@ -311,6 +312,20 @@ function recordCosThreadEnd(job: QueryJobSnapshot, request: QueryJobRequest): vo
   })
 }
 
+/**
+ * 7.0.39 candidate 4: the reference a run is given. A thread conversation's first chat (no answer in it yet, so a fresh
+ * segment, its Retry included) that carries the page's digest gets the server's look-back line after it (conversation.ts
+ * formatHistoryForPrompt). A continued thread chat and every other chat pass their reference unchanged, so they cost
+ * not a token more. The request's own reference is rebuilt from query and response at admission, so the flag is only
+ * ever this server's.
+ */
+export function referenceForRun(request: Pick<QueryJobRequest, 'sessionId' | 'reference'>): PromptReference | undefined {
+  const ref = request.reference
+  if (!ref || !isCosThreadSession(request.sessionId)) return ref
+  if ((getSessionRaw(request.sessionId)?.exchanges ?? []).some(e => e.role === 'assistant')) return ref
+  return { query: ref.query, response: ref.response, lookback: true }
+}
+
 /** 7.0.39: a thread job's start, in the thread store. Never throws: the end (above) writes the turn when this could not. */
 function recordCosThreadStart(request: QueryJobRequest): void {
   try {
@@ -508,7 +523,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
     },
     requestedBinding?.kind === 'profile' ? requestBinding(request.model) : validModel,
     imageInputs,
-    request.reference,
+    referenceForRun(request),
     request.globalMsgNum,
     {
       abortSignal: signal,

@@ -11,7 +11,7 @@ The pinned COS chat in Control Web is one persistent thread. This file is the co
 - Every route lives under `/api` with its auth.
 - Every answer is `Cache-Control: private, no-store`.
 - While Drop it is off, every route answers 404 `drop_it_off` and creates no file.
-- `capabilities.dropIt.thread` is `{ protocol: 1, history: 1 }` while Drop it is on.
+- `capabilities.dropIt.thread` is `{ protocol: 1, history: 1, timeline: 1, lookback: 1 }` while Drop it is on.
   - `history: 1` means the two routes below exist.
   - `protocol` stays exactly 1, because a 7.0.37 page turns the thread off unless it is 1.
 
@@ -157,6 +157,49 @@ restart. The thread routes answer only while it is on and start the sweeper on e
 resumes on the next one. An archive day that cannot be read or parsed is retried on the next passes and given up after
 three; a known skip (a link, over 32 MB, gone) is done at once.
 
-## Not yet (later candidates)
+## Look-back for COS (7.0.39 candidate 4)
 
-- **COS's own look-back read** by time window.
+Advertised as `capabilities.dropIt.thread.lookback: 1`. This read is COS's own, by local day. The page keeps using
+`/history?timeline=1`.
+
+`GET /api/cos-thread/timeline?from&to&kinds&limit&before`
+
+- `from` and `to` are local days, `YYYY-MM-DD`, both included.
+  - `to` defaults to today.
+  - `from` defaults to six days before `to`, so the default is the last seven days.
+  - A day that is not a real calendar day is 400 `invalid_day`; `from` after `to` is 400 `invalid_range`.
+- `kinds` is a comma list of `chat`, `notification`, `session_question`, `meeting`, `message` (default all).
+- `limit` is 1 to 200, default 50. One answer is also capped at 64 KB, always with at least one entry.
+- Answer: `{ protocol: 1, from, to, entries, older }`.
+  - `entries` run oldest to newest: the newest `limit` in the window.
+  - `older` is a `c2` cursor for `before=`, to read further back in the same window. Null at the window's start.
+- Every chat of every thread, past and present:
+  `{ id, at, kind: 'chat', threadId, question, answer, answerChars, full, status, messageNo }`.
+  - `question` and `answer` are cut to 300 characters each (with an ellipsis). `full` is true only when `answer` is
+    the whole answer.
+  - The whole answer is `GET /api/cos-thread/entry/<id>`.
+- Every breadcrumb, exactly as the timeline above gives it.
+- **Read only and gated:** GET only; it changes no file in the store. It sits behind the same token gate as every
+  `/api` route (never a public path), so a call needs `X-Cos-Token` (or a signed-in Control Web cookie).
+- **No full long answer, no message body:** every text field is at most 300 characters. A message breadcrumb is its
+  line (at most 160 characters; the sweeper writes 60) and its ref. A whole answer only ever comes from the entry route.
+
+**How COS learns of it.** The server prints one line after the quoted digest, on a thread conversation's first chat:
+
+```
+COS THREAD LOOK-BACK (from this COS server, not quoted data):
+Older chats, notifications, meetings and messages by local day (for "a week ago", read a few days either side): curl -s -H "X-Cos-Token: $COS_API_TOKEN" "http://127.0.0.1:<PORT>/api/cos-thread/timeline?from=YYYY-MM-DD&to=YYYY-MM-DD"
+```
+
+- **Where:** the page sends the digest as `reference`, and the server prompts it inside "REFERENCED SOURCE DATA
+  (UNTRUSTED QUOTED DATA ...)". The line is server text, so it goes after that box, never inside it. The digest itself
+  is unchanged from candidate 3.
+- **When:** a cosThread job whose conversation has no answer in it yet (a fresh segment, its Retry included) and that
+  carries a reference. A continued chat, a thread chat with no digest and every other chat get nothing, so their cost
+  is unchanged.
+- **Who can set it:** only the server (`referenceForRun` in query-job-runtime.ts). Admission rebuilds every reference from
+  `query` and `response`, and the flag prints only the server's fixed line.
+- The CLI child inherits `COS_API_TOKEN` and `PORT` from the server, so the line names the variable, never the token.
+  `<PORT>` is the server's own, 3141 by default.
+- A Claude session in restricted (allowlist) mode has no Bash and cannot call it. It answers from what it carries.
+- No model call is added anywhere: the read is mechanical.

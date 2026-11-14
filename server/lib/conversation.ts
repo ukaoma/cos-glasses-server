@@ -19,6 +19,7 @@ import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/
 import { secureExistingPrivateFile } from './secure-user-config.js'
 import { currentMessageEra } from './message-era.js'
 import { formatReferencedSourceData } from './prompt-reference-boundary.js'
+import { lookbackPointer } from './cos-thread.js'
 
 export type { ModelPreference }
 
@@ -855,6 +856,9 @@ export function setSessionModel(sessionId: string, model: SessionModelBinding | 
 export interface PromptReference {
   query: string
   response: string
+  /** 7.0.39 candidate 4: set by the server only (query-job-runtime.ts), never read from a request. When true, the
+   * server's own look-back line (cos-thread.ts lookbackPointer) follows the quoted reference, outside its box. */
+  lookback?: boolean
 }
 
 /**
@@ -865,6 +869,9 @@ export interface PromptReference {
  *   3. Photo filtering — skip [Photo] user exchanges AND their paired assistant response
  * Then caps at PROMPT_HISTORY_LIMIT and optionally appends a referenced message.
  */
+/** 7.0.39 candidate 4: the label on the server's look-back line (formatHistoryForPrompt). */
+export const LOOKBACK_HEADER = 'COS THREAD LOOK-BACK (from this COS server, not quoted data):'
+
 export function formatHistoryForPrompt(
   exchanges: Exchange[],
   contextBreaks: number[] = [],
@@ -914,6 +921,9 @@ export function formatHistoryForPrompt(
 
   if (reference) {
     parts.push(formatReferencedSourceData(reference))
+    // 7.0.39 candidate 4: server text, so it sits after the untrusted box, never inside it. A fixed line: a flag that
+    // somehow came from a client could add only this.
+    if (reference.lookback === true) parts.push(`${LOOKBACK_HEADER}\n${lookbackPointer()}`)
   }
 
   return parts.length > 0 ? '\n\n' + parts.join('\n\n') : ''

@@ -278,6 +278,47 @@ describe('a chat sent with cosThread stays in the thread', () => {
     expect([kept.length, kept[0], kept.at(-1)]).toEqual([h.conversation.WEB_ASKS_KEPT, 'cap:6', `cap:${h.conversation.WEB_ASKS_KEPT + 5}`])
   })
 
+  it('candidate 4: a thread conversation\'s first chat carrying the digest gets the look-back line after the box; a continued one, a plain web Ask and a client flag do not', async () => {
+    const h = await harness()
+    const digest = { query: 'Summary carried over from earlier in this COS thread', response: 'Earlier: placeholder words.' }
+    const refs = () => mocks.callModelStreaming.mock.calls.map(c => c[5])
+    const first = await h.post('/query-jobs', threadAsk('ok first', { reference: digest }))
+    expect(first.status).toBe(202)
+    const done = await h.waitEnd(first.body.job.jobId)
+    expect(done.status).toBe('completed')
+    expect(refs()[0]).toEqual({ ...digest, lookback: true })
+    // Printed after the quoted box, never inside it.
+    const prompt = h.conversation.formatHistoryForPrompt([], [], refs()[0])
+    const [box, after] = prompt.split(h.conversation.LOOKBACK_HEADER)
+    expect(box).toContain('REFERENCED SOURCE DATA')
+    expect(box).not.toContain('cos-thread/timeline')
+    expect(after).toContain('/api/cos-thread/timeline?from=YYYY-MM-DD&to=YYYY-MM-DD')
+    expect(after).toContain('$COS_API_TOKEN')
+    // A continued chat in that conversation: its reference passes as sent, so it costs nothing more.
+    const again = await h.post('/query-jobs', threadAsk('ok again', { sessionId: done.sessionId, reference: digest }))
+    await h.waitEnd(again.body.job.jobId)
+    expect(refs()[1]).toEqual(digest)
+    expect(h.conversation.formatHistoryForPrompt([], [], refs()[1])).not.toContain(h.conversation.LOOKBACK_HEADER)
+    // A plain web Ask: unchanged, and a client cannot set the flag (admission rebuilds the reference).
+    const plain = await h.post('/query-jobs', { clientJobId: randomUUID(), generation: 1, query: 'ok plain', model: 'opus', source: 'web', reference: { ...digest, lookback: true } })
+    await h.waitEnd(plain.body.job.jobId)
+    expect(refs()[2]).toEqual(digest)
+    // A thread's first chat with no digest: nothing to put a line after.
+    const bare = await h.post('/query-jobs', threadAsk('ok bare'))
+    await h.waitEnd(bare.body.job.jobId)
+    expect(refs()[3]).toBeUndefined()
+    // A glasses chat that carries a reference (a recalled message), in a conversation of its own: unchanged.
+    const glasses = await h.post('/query-jobs', { clientJobId: randomUUID(), generation: 1, query: 'ok glasses recall', model: 'opus', sessionId: plain.body.job.sessionId, globalMsgNum: plain.body.job.globalMsgNum + 1, messageEra: plain.body.job.messageEra, reference: digest })
+    expect(glasses.status).toBe(202)
+    await h.waitEnd(glasses.body.job.jobId)
+    expect(refs()[4]).toEqual(digest)
+    // A Work job, a routine, anything else: its conversation is not a thread conversation, so the reference passes as is.
+    for (const sessionId of ['work0001', plain.body.job.sessionId, 'gone0001']) {
+      expect(h.runtime.referenceForRun({ sessionId, reference: digest })).toBe(digest)
+    }
+    expect(h.runtime.referenceForRun({ sessionId: done.sessionId, reference: undefined })).toBeUndefined()
+  })
+
   it('threadOnly: a thread whose conversation is not a thread one starts fresh with the digest; an older page continues as before', async () => {
     const h = await harness()
     // A turn the 7.0.37 page recorded in an ordinary (numbered) conversation.

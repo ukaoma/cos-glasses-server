@@ -19,12 +19,22 @@
  *   GET  /cos-thread/entry/:id          { entry, source: 'ledger' | 'live' | 'archive' | 'preview' }
  *        One chat (`t:<clientId>`) with its whole answer: the ledger's when it holds all of it, else the live
  *        conversation's, else the day archive's, else the preview with `full: false`.
+ *
+ * 7.0.39 (candidate 4), advertised as `capabilities.dropIt.thread.lookback: 1`, COS's own read:
+ *   GET  /cos-thread/timeline ?from&to&kinds&limit&before
+ *        { protocol: 1, from, to, entries: [chat (question and answer at most 300 characters, threadId) | breadcrumb],
+ *          older }
+ *        Every chat of every thread and every breadcrumb between the local days `from` and `to` (both YYYY-MM-DD, both
+ *        included; `to` defaults to today and `from` to six days before `to`), oldest to newest: the newest `limit`
+ *        (1..200, default 50; at most 64 KB) of them. `before` is the `older` cursor this route gave, for further back.
  */
 import { Router, type Response } from 'express'
 import {
-  archivedAnswer, CosThread, CosThreadError, ENTRY_MAX_ANSWER_CHARS, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, parseCursorParts,
-  parseTimelineCursor, parseTurnInput, type CosThreadEntryLookup, type HistoryKind,
+  archivedAnswer, CosThread, CosThreadError, ENTRY_MAX_ANSWER_CHARS, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, LOOKBACK_DEFAULT_DAYS,
+  LOOKBACK_DEFAULT_LIMIT, LOOKBACK_MAX_LIMIT, parseCursorParts, parseTimelineCursor, parseTurnInput, type CosThreadEntryLookup,
+  type HistoryKind,
 } from '../lib/cos-thread.js'
+import { localDay } from '../lib/local-day.js'
 import { dataPath } from '../lib/data-dir.js'
 import { isCosThreadSession } from '../lib/conversation.js'
 import { startTimeline } from '../lib/cos-thread-timeline-sources.js'
@@ -38,6 +48,8 @@ export interface CosThreadRouterDependencies {
   archiveAnswer?: (lookup: CosThreadEntryLookup) => string | undefined
   /** 7.0.39 candidate 3: start the timeline sweeper when the store first opens. Default: the server's sources. */
   startTimeline?: (thread: CosThread) => void
+  /** 7.0.39 candidate 4: the clock the look-back's default `to` (today) reads. Default Date.now. */
+  now?: () => number
 }
 const HISTORY_KINDS: readonly HistoryKind[] = ['chat', ...CRUMB_KINDS]
 const ENTRY_ID_RE = /^t:([A-Za-z0-9:_-]{8,80})$/
@@ -53,6 +65,27 @@ function intParam(raw: unknown, min: number, max: number, fallback: number): num
   if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return null
   const n = Number(raw)
   return n >= min && n <= max ? n : null
+}
+
+const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+/** Local midnight of a YYYY-MM-DD day, or null when it is not a real calendar day. */
+function localMidnight(day: string): number | null {
+  const m = DAY_RE.exec(day)
+  if (!m) return null
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  return localDay(d.getTime()) === day ? d.getTime() : null
+}
+/** The local day `n` calendar days after `day` (negative: before). */
+function addDays(day: string, n: number): string {
+  const m = DAY_RE.exec(day)!
+  return localDay(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + n).getTime())
+}
+/** A kinds list, the default when absent, or null when any name is unknown. */
+function kindsParam(raw: unknown): HistoryKind[] | undefined | null {
+  if (raw === undefined) return undefined
+  const list = typeof raw === 'string' ? raw.split(',') : null
+  if (!list || !list.length || list.some(k => !(HISTORY_KINDS as readonly string[]).includes(k))) return null
+  return [...new Set(list)] as HistoryKind[]
 }
 
 export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router {
@@ -104,12 +137,8 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     // 7.0.39 candidate 3: ?timeline=1 adds the breadcrumbs, in time order, with c2 (before) and c3 (after) cursors.
     // Without it the answer is exactly candidate 1's: chats only, c1 cursors (a page that does not ask never sees a crumb).
     if (req.query.timeline === '1') {
-      let kinds: HistoryKind[] | undefined
-      if (req.query.kinds !== undefined) {
-        const list = typeof req.query.kinds === 'string' ? req.query.kinds.split(',') : null
-        if (!list || !list.length || list.some(k => !(HISTORY_KINDS as readonly string[]).includes(k))) return res.status(400).json({ error: { code: 'invalid_kinds' } })
-        kinds = [...new Set(list)] as HistoryKind[]
-      }
+      const kinds = kindsParam(req.query.kinds)
+      if (kinds === null) return res.status(400).json({ error: { code: 'invalid_kinds' } })
       const raw = before ?? after
       const cursor = raw === undefined ? undefined : parseTimelineCursor(raw)
       if (cursor === null || (before !== undefined && cursor && !('before' in cursor)) || (after !== undefined && cursor && !('after' in cursor))) {
@@ -123,6 +152,26 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     return withThread(res, t => res.json(t.historyPage(after !== undefined
       ? { after: parts!.place, ...(parts!.answers !== undefined ? { afterAnswers: parts!.answers } : {}), limit }
       : { before: parts?.place, limit })))
+  })
+
+  // 7.0.39 candidate 4: COS's look-back, by local day. Named once in a fresh segment's digest (lookbackPointer).
+  router.get('/cos-thread/timeline', (req, res) => {
+    const limit = intParam(req.query.limit, 1, LOOKBACK_MAX_LIMIT, LOOKBACK_DEFAULT_LIMIT)
+    if (limit === null) return res.status(400).json({ error: { code: 'invalid_limit' } })
+    const kinds = kindsParam(req.query.kinds)
+    if (kinds === null) return res.status(400).json({ error: { code: 'invalid_kinds' } })
+    const { from: rawFrom, to: rawTo, before: rawBefore } = req.query
+    // A repeated parameter arrives as a list; as text it is never a YYYY-MM-DD day, so it reads as invalid_day below.
+    const to = rawTo === undefined ? localDay((deps.now ?? Date.now)()) : String(rawTo)
+    const from = rawFrom !== undefined ? String(rawFrom) : localMidnight(to) === null ? to : addDays(to, 1 - LOOKBACK_DEFAULT_DAYS)
+    const fromMs = localMidnight(from)
+    const toStart = localMidnight(to)
+    if (fromMs === null || toStart === null) return res.status(400).json({ error: { code: 'invalid_day', message: 'Send from and to as YYYY-MM-DD.' } })
+    if (fromMs > toStart) return res.status(400).json({ error: { code: 'invalid_range', message: 'from is after to.' } })
+    const toMs = localMidnight(addDays(to, 1))!
+    const cursor = rawBefore === undefined ? undefined : parseTimelineCursor(rawBefore)
+    if (cursor === null || (cursor && !('before' in cursor))) return res.status(400).json({ error: { code: 'invalid_cursor' } })
+    return withThread(res, t => res.json({ ...t.lookback({ fromMs, toMs, limit, ...(kinds ? { kinds } : {}), ...(cursor ?? {}) }), from, to }))
   })
 
   router.get('/cos-thread/entry/:id', (req, res) => {
