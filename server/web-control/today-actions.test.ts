@@ -5063,6 +5063,32 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     await flush()
     expect(turns(h)[1]!.body.acknowledgedRevision).toBe('rev2')
   })
+  it('7.0.36 (Q1 00:22): a moved answer never sends by itself: every timer and interval run, still one send and the button waiting', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED(null) : { status: 202, body: { outcome: 'queued' } } }
+    const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '0')
+    await flush()
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(turns(h), 'only his tap sends the quoted answer').toHaveLength(1)
+    expect(h.els['ta-status']!.innerHTML).toContain('data-ta="te-quote"')
+  })
+  it('7.0.36 (Q1 00:22): opening another session drops a quoted answer with its note; the button then sends nothing', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED(null) : { status: 202, body: { outcome: 'queued' } } }
+    const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '0')
+    await flush()
+    expect((h.ta as any)._state.quote).toBeTruthy()
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect((h.ta as any)._state.quote).toBeNull()
+    h.tap('te-quote')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
+  })
   it('7.0.36: answered first on another screen: said, no button, nothing more sent', async () => {
     const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, askNow: null } } }
     const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })

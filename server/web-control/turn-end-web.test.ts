@@ -4,7 +4,7 @@
  * against fakes: the row reading, the attributed text, Today's row, the reader's card and its send. The Today overlay's
  * part is in today-actions.test.ts ("7.0.18: a turn that ended asking you, in Today's overlay").
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -184,7 +184,8 @@ describe('the reader’s card and its send', () => {
   })
   it('7.0.36: moved past it, with a newer ask: says what it asks now, draws it, and offers ONE button; nothing sends by itself', async () => {
     const row: Record<string, unknown> = { ...ROW, waiting_ask_id: 'turn_end:1' }
-    const h = reader(row, () => { Object.assign(h.r, { teRefusal: { revision: 'rev9', askNow: { id: 'turn_end:2', ask: 'Which branch?', choices: ['main', 'feature'] } } }); return Promise.resolve('moved') })
+    // Refused as moved only while the answer names its ask, as the server does; a quoted send would go through.
+    const h = reader(row, (_t, o) => o.turnEndAskId ? (Object.assign(h.r, { teRefusal: { revision: 'rev9', askNow: { id: 'turn_end:2', ask: 'Which branch?', choices: ['main', 'feature'] } } }), Promise.resolve('moved')) : Promise.resolve('sent'))
     h.fns.sendTurnEndChoice(h.r, 1)
     await flush()
     expect(h.sent).toHaveLength(1)
@@ -209,6 +210,25 @@ describe('the reader’s card and its send', () => {
     h.fns.sendTurnEndQuoted(h.r)
     expect(h.sent, 'the button is spent').toHaveLength(2)
   })
+  it('7.0.36 (Q1 00:22): a moved answer never sends by itself: ten minutes of timers later, still one send and the button waiting', async () => {
+    vi.useFakeTimers()
+    try {
+      const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1' }, (_t, o) => o.turnEndAskId ? (Object.assign(h.r, { teRefusal: { revision: 'rev9', askNow: { id: 'turn_end:2', ask: 'Which branch?', choices: ['main'] } } }), Promise.resolve('moved')) : Promise.resolve('sent'))
+      h.fns.sendTurnEndChoice(h.r, 0)
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+      expect(h.sent, 'only his tap sends the quoted answer').toHaveLength(1)
+      expect(h.r.teQuote).toEqual({ label: 'Good Morning + Today', ask: 'Where should the overnight mail intel show up first?', revision: 'rev9' })
+    } finally { vi.useRealTimers() }
+  })
+  it('7.0.36 (Q1 00:22): the same for an older server’s refusal', async () => {
+    vi.useFakeTimers()
+    try {
+      const h = reader(ROW, (_t, o) => o.acknowledgedRevision ? Promise.resolve('sent') : ((h.r as Record<string, unknown>).sendAnyway = 'rev2', Promise.resolve('changed')))
+      h.fns.sendTurnEndChoice(h.r, 0)
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+      expect(h.sent).toHaveLength(1)
+    } finally { vi.useRealTimers() }
+  })
   it('7.0.36: answered first on another screen: said, no button, nothing more sent', async () => {
     const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1' }, () => Promise.resolve('answered'))
     h.fns.sendTurnEndChoice(h.r, 0)
@@ -219,7 +239,8 @@ describe('the reader’s card and its send', () => {
     expect(h.sent).toHaveLength(1)
   })
   it('an older server (or Codex) refuses on the moved head: the composer’s box is cleared, and the choice keeps its own button with that revision', async () => {
-    const h = reader(ROW, () => { (h.r as Record<string, unknown>).refusal = { changed: true }; (h.r as Record<string, unknown>).sendAnyway = 'rev2'; return Promise.resolve('changed') })
+    // Refused as changed only without the acknowledged revision, as the server does.
+    const h = reader(ROW, (_t, o) => o.acknowledgedRevision ? Promise.resolve('sent') : ((h.r as Record<string, unknown>).refusal = { changed: true }, (h.r as Record<string, unknown>).sendAnyway = 'rev2', Promise.resolve('changed')))
     h.fns.sendTurnEndChoice(h.r, 1)
     await flush()
     expect(h.r.refusal).toBeNull()

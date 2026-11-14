@@ -372,7 +372,8 @@
     O.back = opt.from || null;
     O.open = { kind: kind, key: String(key || ''), all: kind === 'intake' };
     O.opener = opener || document.activeElement; O.openerSel = openerSelector(opener);
-    O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false; O.armedAt = {};
+    // 7.0.36 (Q1 00:22): a quoted answer belongs to the session it was refused in; another opening drops it with its note.
+    O.note = { text: '', kind: '' }; O.quote = null; O.cautionAsk = false; O.needGone = false; O.armedAt = {};
     O.stopping = false; O.stopKey = '';
     layer.hidden = false;
     document.documentElement.classList.add('ta-open');
