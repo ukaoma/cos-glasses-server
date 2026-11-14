@@ -141,6 +141,14 @@ describe('Today summary size: kept per device, applied before the first paint', 
   it('a saved Large, Medium or Small is on <html> at once; anything else reads as Automatic', () => {
     for (const v of ['large', 'medium', 'small']) expect(themeBlock({ cos_web_story_size: v }).attrs['data-story-size']).toBe(v)
     expect(themeBlock({ cos_web_story_size: 'huge' }).attrs['data-story-size']).toBeUndefined()
+    // Q1 (11/14): a key of Object.prototype is not a size, read or set.
+    for (const v of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const t = themeBlock({ cos_web_story_size: v })
+      expect(t.attrs['data-story-size']).toBeUndefined()
+      expect(t.api.choice()).toBe('auto')
+      expect(t.api.set(v)).toBe('auto')
+      expect('cos_web_story_size' in t.store).toBe(false)
+    }
   })
   it('set() saves on this device and applies; Automatic forgets the key; the theme key is never touched', () => {
     const t = themeBlock({ cos_web_theme: 'dark' })

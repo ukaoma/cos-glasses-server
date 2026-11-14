@@ -55,11 +55,13 @@
   // small, as html[data-story-size] before the first paint, so the summary never draws at one size and jumps (app.css
   // --story-k; Settings, This browser, Appearance).
   var STORY_KEY = 'cos_web_story_size', STORY = { large: 1, medium: 1, small: 1 };
-  function storyRead() { try { var v = localStorage.getItem(STORY_KEY); return STORY[v] ? v : 'auto'; } catch (_e) { return 'auto'; } }
-  function storyApply(choice) { try { var de = document.documentElement; if (STORY[choice]) de.setAttribute('data-story-size', choice); else if (de.hasAttribute ? de.hasAttribute('data-story-size') : de.removeAttribute) de.removeAttribute('data-story-size'); } catch (_e) { /* the CSS default by width */ } return choice; }
+  // Own keys only (Q1, 11/14): a saved 'toString' or '__proto__' is not a size.
+  function isStory(v) { return typeof v === 'string' && Object.prototype.hasOwnProperty.call(STORY, v); }
+  function storyRead() { try { var v = localStorage.getItem(STORY_KEY); return isStory(v) ? v : 'auto'; } catch (_e) { return 'auto'; } }
+  function storyApply(choice) { try { var de = document.documentElement; if (isStory(choice)) de.setAttribute('data-story-size', choice); else if (de.hasAttribute ? de.hasAttribute('data-story-size') : de.removeAttribute) de.removeAttribute('data-story-size'); } catch (_e) { /* the CSS default by width */ } return choice; }
   window.CosStorySize = {
     choice: storyRead,
-    set: function (choice) { choice = STORY[choice] ? choice : 'auto'; try { if (choice === 'auto') localStorage.removeItem(STORY_KEY); else localStorage.setItem(STORY_KEY, choice); } catch (_e) {} return storyApply(choice); }
+    set: function (choice) { choice = isStory(choice) ? choice : 'auto'; try { if (choice === 'auto') localStorage.removeItem(STORY_KEY); else localStorage.setItem(STORY_KEY, choice); } catch (_e) {} return storyApply(choice); }
   };
   storyApply(storyRead());
   // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
