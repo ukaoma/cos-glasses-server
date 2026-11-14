@@ -39,6 +39,11 @@ Miles, 22:14 (two pictures on the open Duo): "the answer and the submit button a
 - **`open-lost` cannot see** an open where the page never arrived or theme.js never ran. It also miscounts in four ways: two tabs opened together count each other as lost; closing the app before it shows counts as lost; a Try again or a restyle reload counts the open before it; and a signed-out open sends its row while signed out, which may not reach the Mac.
 - **Not on a real phone.** All of this was measured in WebKit with a test server that holds back or stalls a named file.
 
+**Tested on this build** (the full suite on its parent f14d38ef; this commit adds only these lines):
+- **The full server suite, alone:** 16,618 passed, 0 failed, type check clean.
+- **The blank open checks in a test browser (WebKit):** 12 of 12 pass, including app.js answering an error and its connection dropping (the card at about 7 s, still there at 27 s). 15 of 15 mutation tests caught.
+- **Not on a real phone** (as above).
+
 **Not changed:** the server's first request after a cold start was measured at about 11 ms for the page and 44 ms for all nine boot files, so nothing is warmed at start.
 
 ## 7.0.34 - Questions can wait 8 hours, on by default (takes effect when you choose Reinstall hooks)
