@@ -193,6 +193,29 @@ describe('X1: on, exact-name SNI on 3143', () => {
   })
 })
 
+describe('X1: the name must match EXACTLY (Q1 Y4)', () => {
+  it('only this Mac\'s name, in any case, gets the pair; a suffix, a prefix, a trailing dot, the tailnet, ts.net or another domain get mkcert', async () => {
+    const calls: string[] = []
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true }, () => null, deps(pair, { now: Date.now() }, calls))!
+    tls.start()
+    await tls.active()!.check()
+    const port = await serve3143(tls)
+    for (const exact of [NAME, NAME.toUpperCase(), 'MAC-X1.Example-Tailnet.TS.NET']) expect(await served(port, exact)).toBe(pair.fingerprint)
+    const label = NAME.split('.')[0]!
+    for (const near of [
+      `${NAME}.`,                        // trailing dot
+      `x${NAME}`, `x.${NAME}`,           // prefixes
+      NAME.slice(label.length + 1),      // the tailnet: example-tailnet.ts.net
+      'ts.net', 'net',                   // suffixes
+      `${NAME}.evil.com`,                // another domain
+      label,                             // the bare label
+    ]) {
+      expect({ near, got: await served(port, near) }).toEqual({ near, got: mkcert.fingerprint })
+    }
+    tls.stop()
+  })
+})
+
 describe('X1: renewal and expiry', () => {
   it('a failed renewal keeps serving the valid pair and says so; once expired the name gets mkcert (a loud error), never http', async () => {
     const calls: string[] = []

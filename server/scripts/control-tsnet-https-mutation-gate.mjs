@@ -27,7 +27,8 @@ const mutations = [
   ["index-sni-every-listener", "server/index.ts", "const mkcertPair = mkcertFiles && entry.label === 'HTTPS' ? controlHttpsOptions(mkcertFiles, controlTsnetTls)", "const mkcertPair = mkcertFiles ? controlHttpsOptions(mkcertFiles, controlTsnetTls)", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
   ["index-never-started", "server/index.ts", "  controlTsnetTls?.start()\n", "", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
   ["index-never-stopped", "server/index.ts", "  controlTsnetTls?.stop()\n", "", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
-  ["health-not-spread", "server/routes/health.ts", "    ...controlTsnetHealthField(),\n", "", "/api/health spreads the field", ["server/lib/control-tsnet-tls.test.ts"]]
+  ["health-not-spread", "server/routes/health.ts", "    ...controlTsnetHealthField(),\n", "", "/api/health spreads the field", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["sni-suffix-match", "server/lib/web-key-signer-tls.ts", "servername.toLowerCase() === pair.host", "pair.host.endsWith(servername.toLowerCase())", "the name must match EXACTLY", ["server/lib/control-tsnet-tls.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }
