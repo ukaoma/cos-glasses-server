@@ -1,3 +1,4 @@
+import { webPushRoutesMounted } from '../lib/web-push-mounted.js'
 import { API_AUTH_BY_LOCAL } from '../lib/api-auth.js'
 import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
 import { calendarStatus } from '../lib/calendar-source.js'
@@ -335,6 +336,10 @@ healthRouter.get('/health', async (_req, res) => {
     // so on an older server a thread chat stays an ordinary numbered Ask and is never lost.
     // Drop it gates the thread itself (its routes answer 404 while it is off), so it gates this too (Q1 2026-11-14).
     cosThreadOnly: durableJobs.enabled && dropItEnabled(),
+    // X1 (lead 15:18, for W1's Settings button): the push routes (/api/web-push/*) exist in this running server. True
+    // only when index.ts mounted them at boot, which it does only with COS_WEB_PUSH on (lib/web-push-mounted.ts).
+    // An older server omits it: treat absent as false.
+    webPush: webPushRoutesMounted(),
     // Static: this build carries the scheduler. The live schedule is under
     // capabilities.morningBrief and may be absent while the runtime boots.
     morningBrief: true,

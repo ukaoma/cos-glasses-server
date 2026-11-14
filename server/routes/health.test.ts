@@ -15,6 +15,8 @@ import { __resetProviderObserveForTests, refreshProviderHookFiles } from '../lib
 import { healthRouter } from './health.js'
 import { API_AUTH_BY_LOCAL, requireApiToken } from '../lib/api-auth.js'
 import { mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
+import { __resetWebPushMountedForTests, markWebPushRoutesMounted } from '../lib/web-push-mounted.js'
+import { readFileSync } from 'node:fs'
 
 // Every temp root this file makes is removed when the file ends (6.53.3 /qa W3: the suites
 // had left ~150,000 `cos-*` folders in $TMPDIR). Tracked at the mkdtemp call, so a new test
@@ -136,6 +138,27 @@ describe('health capability contract', () => {
     const body = await (await fetch(`${base}/api/health`)).json() as any
     expect(body.capabilities?.transcriptCleanup).toEqual({ protocol: 1, enabled: false })
   }, 20_000)
+})
+
+describe('features.webPush (X1, lead 15:18: W1\'s Settings button)', () => {
+  afterEach(() => __resetWebPushMountedForTests())
+
+  it('is false while the push routes are not mounted, and true once index.ts has mounted them', async () => {
+    __resetWebPushMountedForTests()
+    const off = await (await fetch(`${base}/api/health`)).json() as any
+    expect(off.features.webPush).toBe(false)
+    markWebPushRoutesMounted()
+    const on = await (await fetch(`${base}/api/health`)).json() as any
+    expect(on.features.webPush).toBe(true)
+  }, 20_000)
+
+  it('index.ts marks it inside the COS_WEB_PUSH block, after mounting the routes, and nowhere else', () => {
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    const block = index.slice(index.indexOf('if (webPushEnabled()) {'), index.indexOf("app.use('/api', diagRouter)"))
+    expect(block.indexOf('markWebPushRoutesMounted()')).toBeGreaterThan(block.indexOf('app.use(\'/api\', createWebPushRouter({'))
+    expect(block.indexOf('app.use(\'/api\', createWebPushRouter({')).toBeGreaterThan(0)
+    expect(index.split('markWebPushRoutesMounted()').length - 1).toBe(1)
+  })
 })
 
 describe('morning brief capability', () => {

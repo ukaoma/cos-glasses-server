@@ -14,6 +14,7 @@ import { execSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { createWebPushRouter, webPushEnabled } from './routes/web-push.js'
+import { markWebPushRoutesMounted } from './lib/web-push-mounted.js'
 import { WebPushStore } from './lib/web-push-store.js'
 import { diagRouter } from './routes/diag.js'
 import { createClientInstanceRouter, isMeetingChunkPost, pairedInstanceFrom } from './routes/client-instance.js'
@@ -1010,6 +1011,8 @@ if (webPushEnabled()) {
     // A phone subscribes from Control Web over https on 3143 (this Mac's ts.net name, or its IP).
     originAllowed: origin => isAllowedNetworkOrigin(origin, { selfDnsName: webKeySelfDnsName(), allowedPorts: [HTTPS_PORT] }),
   }))
+  // health's features.webPush: true only now that the routes exist.
+  markWebPushRoutesMounted()
 }
 app.use('/api', diagRouter)
 // 6.50.3: the referee between copies of the COS Glasses app (routes/client-instance.ts).

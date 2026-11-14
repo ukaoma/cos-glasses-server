@@ -58,7 +58,11 @@ const mutations = [
   ["cap-write-failure-sends", "server/routes/web-push.ts", "try { claim = deps.store.claimTestPing() } catch { return res.status(503).json({ ok: false, status: 0, reason: 'cap_unavailable', removed: false }) }", "try { claim = deps.store.claimTestPing() } catch { claim = { ok: true } }", "a count that cannot be written sends nothing", ["server/routes/web-push.test.ts"]],
   ["bad-lastat-kept", "server/lib/web-push-store.ts", "      this.write('test-pings.json', { day, count, lastAt: now })\n", "", "a far-future lastAt", ["server/routes/web-push.test.ts"]],
   ["future-day-fresh", "server/lib/web-push-store.ts", "(storedDay === day || storedDay > day)", "(storedDay === day)", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]],
-  ["future-day-not-restamped", "server/lib/web-push-store.ts", "    if (storedDay !== null && storedDay > day) this.write('test-pings.json', { day, count, lastAt })\n", "", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]]
+  ["future-day-not-restamped", "server/lib/web-push-store.ts", "    if (storedDay !== null && storedDay > day) this.write('test-pings.json', { day, count, lastAt })\n", "", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]],
+  // Lead 15:18: health's features.webPush says whether the routes exist.
+  ["health-flag-always-true", "server/routes/health.ts", "webPush: webPushRoutesMounted(),", "webPush: true,", "is false while the push routes are not mounted", ["server/routes/health.test.ts"]],
+  ["mark-is-noop", "server/lib/web-push-mounted.ts", "  mounted = true\n", "", "is false while the push routes are not mounted", ["server/routes/health.test.ts"]],
+  ["index-mark-missing", "server/index.ts", "  markWebPushRoutesMounted()\n}", "}", "index.ts marks it inside the COS_WEB_PUSH block", ["server/routes/health.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }
