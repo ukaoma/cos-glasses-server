@@ -1,3 +1,47 @@
+## 7.0.40 - A quoted mark is no longer read as his answer, Work offers Claude first and stops trusting a usage reading whose window has ended, https for Control Web on the Mac's ts.net name (off), and the sender for one test ping to his iPhone (off)
+
+2026-11-14. 7.0.39 plus the changes below; everything in 7.0.39 is in this update too (see its entry).
+
+**On for everyone, one line each (the pieces installed with their switch off are listed too: each changes nothing until it is turned on):**
+- server: a message from another session that only quotes the glasses footer or the answer words now reads as the session moving on (with Send anyway), not as his answer.
+- server, how Work treats an out-of-date plan reading and picks a provider, for every user: a plan window whose reset time has passed no longer counts (the provider reads "unknown" until a read succeeds), and Claude is offered first whenever it is not at its plan limit, unknown included (Codex first only while Claude is low and Codex is ok). Miles's verified glasses answer, 2026-11-14.
+- server, off by default: Control Web over https on the Mac's own ts.net name, on 3143, behind COS_CONTROL_TSNET_HTTPS. Nothing changes until it is turned on: with it off there is no Tailscale call, no certificate file and no new health field, and 3143 serves exactly what it serves today.
+- server, off by default: the sender for one test ping to his iPhone (Web Push, iOS 18.4 and later), behind COS_WEB_PUSH. Nothing changes until it is turned on: with it off no route exists, no key is made and nothing is sent. It is not wired to any notification; with it on, only a signed-in "send a test ping" sends, one ping.
+
+**In detail:**
+- **A quoted mark is the session moving on, not his answer.** (X1.)
+  - Cause: 7.0.38 counted the glasses footer and the answer words anywhere in a message. A message from another session that only quoted them (the orchestrating sessions quote both all day) read as answered, and the page took away Send anyway where he needed it.
+  - The footer now counts only as a whole footer line, as COS writes it: "[COS-G2 turn <id> · verify: …]" (or COS-WEB), at the start of a line, with its turn id. A mention in prose never counts. A relayed dictation with Claude Desktop's own notes after the footer still counts as answered by glasses.
+  - The answer words count when the prompt starts with them outside any quoted block (every real answer in the 11/14 ledger did: 7 from Control Web, 2 from the Mac app). Inside a block they are a quote.
+- **Work's plan usage stops trusting a window that has ended, and Claude is offered first.** (U1.)
+  - A plan window whose reset time has passed no longer counts. When every window of a provider's last reading has reset, Work reads that provider as "unknown" with no headroom number, and its note says "not read since its window ended" plus the last failure, until a read succeeds. On Miles's Mac on 2026-11-14, Claude read "low, 77% left" from a week that reset on Oct 26; it now reads unknown.
+  - **How Work picks a provider changes for every user** (Miles, verified glasses turn, 2026-11-14: "generally I would prefer using Claude unless I set the preference to something else"):
+    - Claude is offered first whenever it is not at its plan limit, including when its plan reading is unknown. The one exception is unchanged: when Claude is low and Codex is ok, Codex goes first. A provider at its limit is never chosen. Cursor comes last and Work does not start Cursor sessions.
+    - The planner receives that order with the words to use ("Claude, your default.", "Codex, because Claude is close to its plan limit (Claude 9% left, Codex 70% left).", "Claude, your default. Its plan reading is unknown; a COS Claude job finished at 10:40 AM."). It no longer prefers ok over low, and never says usage decided a choice unless those words say so.
+    - Ask Work no longer takes Continue and Fork away from a provider whose plan reading is unknown or old; only a provider at its limit is held back.
+    - A plan-lane COS job that finishes records when its provider last answered (never a key-lane job, never a failed or canceled one). That is the free check that an unknown provider still answers; no probe or extra turn is spent. There is no preference setting yet: the default is Claude, in code.
+  - A "close to your limit" warning from Claude holds only until the window it warned about resets, so an old warning cannot keep a new week at "low".
+  - When Claude says its plan limits apply but gives none (what its CLI answers when Claude's usage service refuses it; HTTP 429 on Miles's Mac on 2026-11-14), COS records "Claude gave no plan limits" instead of "unknown get_usage shape", and waits 10 minutes before asking again, kept across restarts. Three such answers in a row still pause the reader for an hour.
+  - Every failed plan usage read writes one line to the server log with a reason code and the time of the last good read, no account detail. Before, only the hour-long pause was logged, so a failed read left no trace.
+  - Work's usage route (`GET /api/work/orchestrator/usage`) adds `reason` (why the last read failed, or null) and `lastGoodAt` to each provider.
+  - A usage read that fails in a way COS did not expect is shown and logged as "unexpected error", never its own text (which can carry a file path with the owner's user name).
+- **Off by default: https on the Mac's ts.net name, behind COS_CONTROL_TSNET_HTTPS.** (X1.) His phone opens Control Web over plain http on the Mac's ts.net name, so it is not a secure context and cannot take push (the caps row, 11/14 09:52).
+  - When it is on (read at boot): 3143 also presents a publicly trusted Tailscale certificate to a handshake naming exactly this Mac's MagicDNS host. Every other name, the IP address, localhost and no name at all keep the current certificate byte for byte, so the glasses, the Mac app and curl see no change.
+  - It reuses the phone key's certificate manager (fetch through the local Tailscale daemon, key file 0600, 30-day renewal with backoff), never a second renewal loop on the same files. An expired certificate is never served, so a lapse is a loud certificate error, never a fall back to http. /api/health gains `controlTsnetHttps` {state, reason, renewalError, expiresAt} only while on, never the host or a key.
+  - Turning it on requests the certificate, which publishes the Mac's ts.net name in the public certificate transparency log. That needs Miles's typed go.
+- **Off by default: one test ping to his iPhone, behind COS_WEB_PUSH.** (X1.) The proof that Control Web can reach his phone, before any real notification is wired.
+  - When it is on: `POST /api/web-push/test` sends ONE ping, titled "COS: Test ping", that opens his Control Web. At most one every 10 seconds and 20 a local day per Mac, counted before the send and kept across a restart; beyond that it answers "Not sent. A test ping was just sent." or "Not sent. Today's test pings are used up." and reaches no network.
+  - The signing key is made on the first signed-in read, never sooner; a request that is not signed in is refused and makes no key. Phones are kept on the Mac (at most 8), only Apple push addresses, never logged or returned by a route.
+  - The phone can only subscribe over https, so it needs the ts.net https switch above turned on first.
+  - Encryption and signing (RFC 8291, RFC 8292) use Node's own crypto, no new package.
+
+**Not covered, said plainly:**
+- **Not on a real phone.** Measured with route tests, Control Web tests on the real send path against fake routes, and the gates named below.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+
 ## 7.0.39 - Settings keeps the rail on screen on the open Duo, and the picked day in Meetings is clearly marked
 
 2026-11-14. 7.0.38 plus two Control Web changes (F1); everything in 7.0.38 is in this update too, see its entry below. Miles, 07:14: the Settings rail stopped part way down the open Duo; 08:20: the picked day in Meetings should be clearly marked; 10:01, after the pictures: "The calendar view looks much better. Good to proceed and push that".
