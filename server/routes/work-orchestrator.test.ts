@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { type Server } from 'node:http'
-import { createWorkOrchestratorRouter, readUsage } from './work-orchestrator.js'
+import { createWorkOrchestratorRouter, readUsage, readPlan } from './work-orchestrator.js'
 import { UsageMonitor, parseClaudeUsage, parseCodexUsage } from '../lib/work-orchestrator/usage.js'
 import { orchestratorInputFor } from '../lib/work-orchestrator/runtime.js'
 import { createWorkChatRouter, planLogRow } from './work-chat.js'
@@ -280,5 +280,36 @@ describe('7.0.39: Work offers providers in the order Miles set (verified G2 turn
       expect(WORK_CHAT_ORCHESTRATOR_RULES).toMatch(/a new session goes to the first usable provider in providerOrder that newSessionProviders offers/)
       expect(WORK_CHAT_ORCHESTRATOR_RULES).not.toMatch(/known provider with headroom over an unknown one|say in the answer when usage decided the choice/)
     } finally { s.server.close() }
+  })
+})
+
+describe('7.0.41: GET /api/usage/plan, the plan ruler (Miles 2026-11-14 "Collapsed, tap to open")', () => {
+  it('answers the pane, passes Refresh through, and fails closed with no numbers', async () => {
+    const asked: boolean[] = []
+    const pane = { protocolVersion: 1, now: '2026-11-14T16:03:55.000Z', readAt: null, closest: null, others: '', lines: [] }
+    const app = express()
+    app.use('/api', createWorkOrchestratorRouter({ plan: async refresh => { asked.push(refresh); if (asked.length === 3) throw new Error('down'); return pane as any } }))
+    const s = await listen(app)
+    try {
+      const a = await fetch(s.url + '/usage/plan'); expect(a.status).toBe(200); expect(await a.json()).toEqual(pane)
+      expect(a.headers.get('cache-control')).toBe('private, no-store')
+      await fetch(s.url + '/usage/plan?refresh=1')
+      const c = await fetch(s.url + '/usage/plan'); expect(c.status).toBe(503); expect(await c.json()).toEqual({ error: 'usage_plan_unavailable' })
+      expect(asked).toEqual([false, true, false])
+    } finally { s.server.close() }
+  })
+  it('opening the view reads only a reading older than 10 minutes; Refresh one older than 2; the pane is built from what was read', async () => {
+    const fixture = (name: string) => JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'work-orchestrator', '__fixtures__', name), 'utf8'))
+    let now = Date.parse('2026-10-21T03:10:00Z')
+    const claude = vi.fn(async () => parseClaudeUsage(fixture('claude-get-usage-2026-10-20.json'))!)
+    const codex = vi.fn(async () => parseCodexUsage(fixture('codex-rate-limits-2026-10-20.json'))!)
+    const m = new UsageMonitor({ probes: { claude, codex }, now: () => now })
+    const first = await readPlan(false, m, () => now)
+    expect([claude.mock.calls.length, codex.mock.calls.length]).toEqual([1, 1])
+    expect(first.lines.find(l => l.provider === 'claude')).toMatchObject({ state: 'fresh', usedPct: 55 })
+    now += 5 * 60_000; await readPlan(false, m, () => now)
+    expect([claude.mock.calls.length, codex.mock.calls.length]).toEqual([1, 1])
+    await readPlan(true, m, () => now)
+    expect([claude.mock.calls.length, codex.mock.calls.length]).toEqual([2, 2])
   })
 })

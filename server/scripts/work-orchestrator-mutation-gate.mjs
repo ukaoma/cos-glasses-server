@@ -24,12 +24,13 @@ const tests = [
   'server/lib/claude-bridge-rate-limit-usage.test.ts',
   'server/lib/query-job-coordinator-usage-limit.test.ts',
   'server/lib/ask-work-plan.test.ts',
+  'server/lib/work-orchestrator/plan-pane.test.ts',
 ]
 const O = 'server/lib/work-orchestrator/'
 const TG = O + 'tags.ts', RD = O + 'redact.ts', SL = O + 'session-log.ts', PK = O + 'pickup.ts', TI = O + 'tag-index.ts', DI = O + 'discovery.ts'
 const IN = O + 'input.ts', SN = O + 'snapshot.ts', US = O + 'usage.ts', RT = O + 'runtime.ts', PL = O + 'plan-log.ts'
 const WC = 'server/lib/work-chat.ts', WR = 'server/routes/work-chat.ts', OR = 'server/routes/work-orchestrator.ts'
-const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts'
+const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts'
 // Defense in depth that no test can reach on purpose, each with the guard that already stops the same outcome.
 const EXPECTED_SURVIVORS = new Set([
   'tail-drops-partial-line',     // a row cut by the seek never parses (JSON.parse rejects it), so it is skipped either way
@@ -145,6 +146,19 @@ const mutations = [
   ['po-route-answered-merge', 'server/routes/work-chat.ts', 'answeredAt:s?.answeredAt ?? null', 'answeredAt:null'],
   ['po-planner-rule', WC, 'a new session goes to the first usable provider in providerOrder that newSessionProviders offers', 'a new session goes to the provider with the most headroom'],
   ['ask-unknown-allowed', AW, "!evidence.usage.some(u => u.provider === provider && u.state === 'exhausted')", "evidence.usage.some(u => u.provider === provider && (u.state === 'ok' || u.state === 'low'))"],
+  // 7.0.41 (U1): the plan ruler (plan-pane.ts), one mutant per rule.
+  ['pp-failed-no-ruler', PP, "    return { ...base, ...none, state: 'failed',", "    return { ...base, usedPct: 0, gonePct: 0, windowStart: null, resetsAt: null, state: 'failed',"],
+  ['pp-cursor-no-ruler', PP, "    return { ...base, ...none, state: 'no_plan',", "    return { ...base, usedPct: 0, gonePct: null, windowStart: null, resetsAt: null, state: 'no_plan',"],
+  ['pp-ended-no-ruler', PP, '  const live = found && windowLive(found.w, now) && found.w.resetsAt ? found : null\n', '  const live = found && found.w.resetsAt ? found : null\n'],
+  ['pp-limit-beats', PP, '  if (limitUntil) {\n', '  if (false) {\n'],
+  ['pp-held-paused', PP, '  if (held > now) {\n', '  if (false) {\n'],
+  ['pp-failure-before-reading', PP, '  if (e.lastFailure) {\n', '  if (false) {\n'],
+  ['pp-older-25', PP, '  const older = !e.observedAt || now - e.observedAt > USAGE_STALE_MS\n', '  const older = false\n'],
+  ['pp-estimate-12h', PP, 'if (elapsed < PLAN_ESTIMATE_MIN_ELAPSED_MS || usedPct <= 0', 'if (usedPct <= 0'],
+  ['pp-closest', PP, '.sort((a, b) => b.usedPct! - a.usedPct!)', '.sort((a, b) => a.usedPct! - b.usedPct!)'],
+  ['pp-claude-week', PP, "windows.find(x => x.kind === 'weekly_all')", "windows.find(x => x.kind === 'session')"],
+  ['pp-failure-words', PP, "    case 'no_limits': return `refused by ${NAME[provider]}`\n", "    case 'no_limits': return 'unexpected error'\n"],
+  ['pp-route-refresh', OR, "return res.json(await deps.plan(req.query.refresh === '1'))", 'return res.json(await deps.plan(true))'],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],

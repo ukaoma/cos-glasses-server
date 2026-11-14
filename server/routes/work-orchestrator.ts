@@ -11,11 +11,16 @@
  *   GET  /api/work/orchestrator/usage[?refresh=1]
  *        The usage snapshot per provider, read on demand: Claude and Codex are re-read when their reading is older than
  *        10 minutes (`refresh=1`: 2 minutes). No timer reads usage unless COS_WORK_USAGE_POLL=1.
+ *   GET  /api/usage/plan[?refresh=1]
+ *        7.0.41: the plan ruler on the Usage view (plan-pane.ts), from the same reader and the same rule: opening the
+ *        view re-reads a reading older than 10 minutes, Refresh one older than 2. The breaker and the 10-minute hold
+ *        after a "no limits" answer apply. Nothing reads on a timer.
  */
 import { Router } from 'express'
 import { parseSnapshotReport, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
 import type { OrchestratorInput } from '../lib/work-orchestrator/input.js'
-import type { UsageMonitor, UsageView } from '../lib/work-orchestrator/usage.js'
+import { USAGE_PROVIDERS, type UsageMonitor, type UsageView } from '../lib/work-orchestrator/usage.js'
+import { planPane, type PlanPane } from '../lib/work-orchestrator/plan-pane.js'
 import { orchestratorInputFor, orchestratorSnapshots, orchestratorUsage } from '../lib/work-orchestrator/runtime.js'
 import { listBoard, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader } from '../lib/work-board-reader.js'
@@ -31,6 +36,7 @@ export interface WorkOrchestratorDeps {
   putSnapshot: (s: ControlSnapshot) => void
   input: (workID: string, meetingWorkIDs: string[]) => Promise<OrchestratorInput>
   usage: (refresh: boolean) => Promise<UsageView[]>
+  plan: (refresh: boolean) => Promise<PlanPane>
   now: () => number
   board: () => Promise<TaskBoardRow[]>
   serverInstanceId: () => string | null
@@ -40,11 +46,17 @@ export interface WorkOrchestratorDeps {
 
 /** GET /usage reads on demand: a reading older than 10 minutes is re-read (`refresh=1`: 2 minutes). */
 export const readUsage = (refresh: boolean, monitor: UsageMonitor = orchestratorUsage()): Promise<UsageView[]> => monitor.onDemand(refresh)
+/** GET /usage/plan: the same on-demand read, then the ruler's lines (plan-pane.ts). */
+export const readPlan = async (refresh: boolean, monitor: UsageMonitor = orchestratorUsage(), now: () => number = Date.now): Promise<PlanPane> => {
+  await monitor.onDemand(refresh)
+  return planPane(USAGE_PROVIDERS.map(p => monitor.entry(p)), now())
+}
 
 const DEFAULTS: WorkOrchestratorDeps = {
   putSnapshot: s => orchestratorSnapshots().put(s),
   input: orchestratorInputFor,
   usage: refresh => readUsage(refresh),
+  plan: refresh => readPlan(refresh),
   now: () => Date.now(),
   board: () => createWorkBoardReader(() => listBoard()).read(0),
   serverInstanceId: getServerInstanceId,
@@ -128,6 +140,11 @@ export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps
   router.get('/work/orchestrator/usage', async (req, res) => {
     try { return res.json({ protocolVersion: 1, now: new Date(deps.now()).toISOString(), usage: await deps.usage(req.query.refresh === '1') }) }
     catch { return res.status(503).json({ error: 'usage_unavailable' }) }
+  })
+  router.get('/usage/plan', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    try { return res.json(await deps.plan(req.query.refresh === '1')) }
+    catch { return res.status(503).json({ error: 'usage_plan_unavailable' }) }
   })
   return router
 }
