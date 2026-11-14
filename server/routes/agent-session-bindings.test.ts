@@ -5094,6 +5094,19 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(h.seen).toEqual([])
   })
 
+  it('the contract words count only at the START: a typed message quoting them mid-text, naming the ask, still gets the head check', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    const res = await post(base, turnsPath(a.bindingId), {
+      prompt: 'For the record, I wrote: ' + ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0019', turnEndAskId: ID,
+    })
+    expect(res.body.reason).toBe('native_thread_changed')
+    expect(h.calls).toHaveLength(0)
+    expect(h.seen).toEqual([])
+  })
+
   it('an older client (the contract words, no id) reads exactly as before', async () => {
     const h = harness(openAsk())
     const base = await start(h.deps)
