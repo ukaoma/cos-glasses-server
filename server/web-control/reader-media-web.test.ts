@@ -358,6 +358,6 @@ describe('7.0.38: reopening a session settles a held answer before it is drawn o
     expect(timed, 'no held timer for it').toEqual([])
     expect(store['codex|session-one'], 'gone from the held store').toEqual([])
     expect(t.document.getElementById('session-input')?.value, 'his own words, not the contract sentence').toBe('Yes, build it')
-    expect(status).toContain('An answer that was waiting was not sent. It is back in the box.')
+    expect(status).toContain('“Yes, build it” was not sent. An answer is never sent later. Answer again if the question is still open.')
   })
 })

@@ -2331,10 +2331,10 @@
     // 7.0.38 (lead 07:20): an answer the session was too busy to take now. It is never queued or held, and no button:
     // a bare busy refusal does not say whether the question was answered, so a button here could send a duplicate.
     busy: function (label) { return 'The session is working. \u201c' + label + '\u201d was not sent.'; },
-    // 7.0.38 (Q1 07:50 FIX FIRST, lead 08:0x): an answer a 7.0.37 page held behind COS's own turn, found on reopening or
-    // by the timer. It is never sent late (no ask id would go with it). His words go back to the box only if it is empty.
-    late: 'An answer that was waiting was not sent. It is back in the box.',
-    lateKept: function (label) { return 'An answer that was waiting was not sent: \u201c' + label + '\u201d'; },
+    // 7.0.38 (Q1 07:50 FIX FIRST; lead 08:13 ruling on the words): an answer a 7.0.37 page held behind COS's own turn,
+    // found on reopening or by the timer. It is never sent late (no ask id would go with it). His words go back to the
+    // box only if it is empty.
+    late: function (label) { return '\u201c' + label + '\u201d was not sent. An answer is never sent later. Answer again if the question is still open.'; },
     /** The words of an answer, without the contract words in front, clipped for a status line. */
     bare: function (text) { var w = String(text || ''); return (w.indexOf(TURN_END_PREFIX) === 0 ? w.slice(TURN_END_PREFIX.length) : w).trim(); },
     label: function (text) { var w = TURN_END_QUOTE.bare(text); return w.length > 60 ? w.slice(0, 59).trim() + '\u2026' : w; }
@@ -5693,10 +5693,8 @@
     var bubble = heldBubble(h.key); if (bubble) bubble.remove();
     if (!r.held.some(function (x) { return !x.cancelled; })) clearInterval(r.heldTimer);
     var input = $('session-input'), words = TURN_END_QUOTE.bare(h.text);
-    if (input && !input.value.trim()) {
-      input.value = words; autoGrow(input); if (typeof unsentSave === 'function') unsentSave();
-      sessionStatus(TURN_END_QUOTE.late, 'error');
-    } else sessionStatus(TURN_END_QUOTE.lateKept(TURN_END_QUOTE.label(h.text)), 'error');
+    if (input && !input.value.trim()) { input.value = words; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); }
+    sessionStatus(TURN_END_QUOTE.late(TURN_END_QUOTE.label(h.text)), 'error');
   }
   // Ends one held message: sent, refused, timed out or cancelled.
   function settleHeld(r, h, how, copy) {

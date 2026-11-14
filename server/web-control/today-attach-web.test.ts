@@ -1233,7 +1233,7 @@ describe('7.0.38: a held answer (from before the update, or any source) is never
     expect(turnPosts(t)).toHaveLength(0)
     expect(t.r.held).toHaveLength(0)
     expect(t.els['session-input']!.value).toBe('Yes, build it')
-    expect(t.status()).toContain('An answer that was waiting was not sent. It is back in the box.')
+    expect(t.status()).toContain('“Yes, build it” was not sent. An answer is never sent later. Answer again if the question is still open.')
     expect(JSON.stringify([...t.store.entries()])).not.toContain('k-old')
   })
   it('lead 08:0x: the box already has his typing: it is never overwritten; the line names the answer that was not sent', async () => {
@@ -1244,7 +1244,7 @@ describe('7.0.38: a held answer (from before the update, or any source) is never
     t.page.flushHeld(); await flush()
     expect(turnPosts(t)).toHaveLength(0)
     expect(t.els['session-input']!.value).toBe('something new he is typing')
-    expect(t.status()).toContain('An answer that was waiting was not sent: “Yes, build it”')
+    expect(t.status()).toContain('“Yes, build it” was not sent. An answer is never sent later. Answer again if the question is still open.')
   })
   it('an answer behind an ordinary held message: the message goes, then the answer comes back unsent', async () => {
     const t = readerPage({ routes: READER_ROUTES })
@@ -1254,6 +1254,20 @@ describe('7.0.38: a held answer (from before the update, or any source) is never
     t.page.flushHeld(); await flush()
     expect(turnPosts(t).map(c => (c as any).body.prompt)).toEqual(['After that, check the Duo'])
     expect(t.r.held).toHaveLength(0)
+  })
+  it('Q1 N7: a held message detached twice says one true line: link lost, back in the box (never "still in the box")', async () => {
+    const DET = { status: 409, body: { outcome: 'refused', reason: 'binding_detached', reasonCopy: 'That continuation was detached. Attach again.' } }
+    const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b2', epoch: 4 } },
+      ['POST ' + TURNS]: DET, ['POST /api/agent-sessions/bindings/b2/turns']: DET } })
+    t.store.set('cos_web_bindings', JSON.stringify({ ['claude|' + SID]: { bindingId: 'b1', epoch: 3, at: Date.now() } }))
+    t.page.paint()
+    t.r.held = [{ text: 'After that, check the Duo', key: 'k1', since: Date.now() }] as any
+    t.page.flushHeld(); await flush()
+    expect(t.calls.filter(x => x.method === 'POST' && /\/turns$/.test(x.path)).map(x => x.path.split('/')[4]), 'b1 then the fresh b2, once each').toEqual(['b1', 'b2'])
+    expect(t.r.held).toHaveLength(0)
+    expect(t.els['session-input']!.value).toBe('After that, check the Duo')
+    expect(t.status()).toContain('COS lost its link to this session. Send again. Your message is back in the box.')
+    expect(t.status()).not.toContain('still in the box')
   })
   it('the 60-character clip on the busy line (Q1 M12): a long answer is cut with an ellipsis', async () => {
     const long = 'Yes, and also please rebuild the Duo layout pass and the rail before lunch today'
