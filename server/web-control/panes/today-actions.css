@@ -193,7 +193,7 @@ html.ta-open #sq-host { display: none; }
 .next-prep-acts .link-btn { min-height: 40px; font-size: 14px; }
 /* Phones and short touch screens: 44 px touch rows, on the same query as app.css's 44 px floor for .cx-btn and .field,
    so the panel's buttons and the rows change height together. */
-@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {
+@media (max-width: 599px), (pointer: coarse) {
   #next-card { --np-row: 44px; --np-gap: 12px; }
   .next-prep-files .link-btn, .next-prep-acts .link-btn { min-height: 44px; }
 }

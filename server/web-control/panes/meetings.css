@@ -274,6 +274,10 @@
 .mt-lempty { color: var(--sub); text-align: center; font-size: 14px; padding: 26px 8px; margin: 0; }
 .mt-jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); box-shadow: var(--shadow); background: var(--panel); }
 .mt-jump[hidden] { display: none; }
+/* F1 (lead 23:31): "Go to <day>" under an empty day shares .mt-jump with the live feed's Jump to live, which floats at
+   the bottom of its box. Floating, it sat over calendar days and the search field on folded and short screens (449 x 548
+   days 18 and 19), so a tap landed on the wrong control. In its own row it stays in place, with the same look. */
+.mt-jump-row .mt-jump { position: static; transform: none; }
 /* The recording bar (Control's LiveRecordingBar): one row, 50 px (56 on phones), never wraps. Under 560 px of bar Add file is the
    paperclip alone; under 340 px the still glyph takes the strip's place. */
 .mt-lbarslot { container-type: inline-size; min-height: 50px; margin-top: 8px; }

@@ -644,8 +644,9 @@ html { touch-action: manipulation; }
 /* Folded phones: every button and field is at least 44 px tall (design QA: .cx-btn came in six heights from 30 px). A
    minimum only, so it grows the compact ones and leaves the taller ones; the per-pane phone heights that fought it are
    gone. */
-/* 7.0.2 (A8): a short touch screen at any width too (the unfolded Duo, 951x539 in Comet, is touch first). */
-@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {
+/* 7.0.2 (A8): a short touch screen at any width too (the unfolded Duo, 951x539 in Comet, is touch first). F1 (Miles 11/13,
+   lead 23:31): every touch screen, whatever its height; his open Duo is 787 tall and missed it (a 32 px button was 27 points). */
+@media (max-width: 599px), (pointer: coarse) {
   .cx-btn, .field { min-height: 44px !important; }
 }
 /* Touch screens: the small controls the canary measured under 44 px (nav 30, switches 30, a chip's remove and Retry 36,

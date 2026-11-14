@@ -1,3 +1,25 @@
+## 7.0.36 (unreleased) - Control Web: layout on the open Duo, and a smaller Today summary
+
+2026-11-13. Not published; the release bump drops "(unreleased)". On top of 7.0.35.
+
+Miles, 22:14 (two pictures on the open Duo): "the answer and the submit button are lapped over the message content or the question content ... our tests need to incorporate resizing that kind of two column layout, knowing that there's also a side rail". 23:02, after the pictures: "Build your picks"; 23:03: "two steps down when closed and one or two when opened".
+
+**On for everyone:**
+- **A question card's footer no longer lands mid-screen.** After a fold, Safari can leave the screen showing the page from a few hundred px down, with the visible height reading 0 (his phone at 22:10: 267 and 552 px). The footer (the progress, Review and submit, Leave for the Mac) is pinned to the page's viewport, so it was drawn over the questions. While that reading is bad, the footer scrolls with the card instead, as it already does with a keyboard up. Nothing changes while the reading is good.
+  - A new numbers-only report, `sq-vv-lost`: one row each time a card is on screen while the reading is bad, so his phone says how often this happens.
+- **The Messages list header stays in its column** on a wide screen (860 px and up). It ran 40 px past both edges, to the rail and over the divider into the chat.
+- **Today's summary is smaller and spans the full width above the cards.** With no choice saved, it is two steps down (0.72 of the old size) on a narrow screen (under 600 px, the folded Duo) and one step down (0.85) on a wide one; the measure stops at about 69 characters a line. His 15-line sentence from 18:43, measured: open upright (787 x 1022) 15 lines to 6, open (1119 x 787) 15 to 6, folded (449 x 798) 13 to 9, desktop (1440 x 900) 11 to 5. **This changes Today for every user on first open after the update.**
+- **Buttons and fields are at least 44 px tall on every touch screen.** Before, that floor applied only on a touch screen 720 px tall or less, so the open Duo (787 tall at his 85 percent zoom) missed it and a 32 px button was 27 points. Measured at 1119 x 787: on Messages 5 controls grow, on Work 6; the pages do not get taller.
+- **Meetings: "Go to <day>" under an empty day no longer floats over the calendar.** On folded and short screens it sat over day buttons (449 x 548: days 18 and 19) and the search field, so a tap landed on it instead. It now keeps its own row, with the same look.
+- **Settings, This browser: Today summary size.** Automatic (the default above), Large (the old look), Medium, Small. Kept on this device only, like the theme, and applied before the page first draws, so it never jumps.
+
+**Not covered, said plainly:**
+- **A pan that reports a normal height** is not told apart from a good screen, so the footer still pins then. Every pan his phone has reported so far read a height of 0.
+- **The rail in the same pan** still ends mid-screen (known since 7.0.31, left as is).
+- **The stranded pan itself is not undone.** The page never moves the view by itself.
+- **The Mac app's Today** is not part of this.
+- **Not on a real phone.** Measured in headless WebKit with his phone's sizes and a stand-in for the pan; it is ready for his check, not proven on the Duo.
+
 ## 7.0.35 - Control Web: opening from the Home Screen never leaves a blank screen for good
 
 2026-11-13. 7.0.34 plus one change, the blank open fix. Everything in 7.0.34 is in this update too; see its entry below. Miles, 21:20: "I'm opening up the COS web application shortcut on the home screen and I'm being met with just a blank screen. The server never ends up loading." Scope: W1_blank_open_scope.md (the lead, 21:45).

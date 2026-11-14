@@ -174,3 +174,11 @@ describe('Today summary size: kept per device, applied before the first paint', 
     expect(paint).toContain('BRIEF.heldPx = 0;')
   })
 })
+
+describe('F1 (lead 23:31): Meetings "Go to <day>" stays in its row', () => {
+  it('in the empty-day row the jump button is in flow, so it never floats over the calendar or the search field', () => {
+    const css = strip(readFileSync(join(HERE, 'panes/meetings.css'), 'utf8'))
+    expect(css).toMatch(/\.mt-jump-row \.mt-jump \{ position: static; transform: none; \}/)
+    expect(css).toMatch(/\.mt-jump \{ position: absolute;/)   // the live feed's Jump to live still floats, on purpose
+  })
+})

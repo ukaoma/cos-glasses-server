@@ -309,8 +309,9 @@ describe('Prep on every Next up row (app.js)', () => {
     const panel = css.match(/\n\.next-prep \{([^}]*)\}/)![1]
     expect(panel).not.toMatch(/border/)
     // The phone row height switches on the same query as app.css's 44 px floor for the panel's buttons.
-    expect(css).toContain('@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {\n  #next-card { --np-row: 44px;')
-    expect(readFileSync(join(HERE, 'app.css'), 'utf8')).toContain('@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {\n  .cx-btn, .field { min-height: 44px !important; }')
+    // F1 (lead 23:31): both floors reach every coarse screen, whatever its height, still on the one shared query.
+    expect(css).toContain('@media (max-width: 599px), (pointer: coarse) {\n  #next-card { --np-row: 44px;')
+    expect(readFileSync(join(HERE, 'app.css'), 'utf8')).toContain('@media (max-width: 599px), (pointer: coarse) {\n  .cx-btn, .field { min-height: 44px !important; }')
   })
 
   it('copy: no em dashes in what the panel says', async () => {

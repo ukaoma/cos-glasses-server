@@ -341,7 +341,8 @@ describe('7.0.2 A8: a short wide touch screen is a phone', () => {
     expect(isPhoneOf(mq(951, 539, false))(), 'a short laptop window').toBe(false)
   })
   it('the 44 px floor and the phone Ask sheet reach coarse screens 720 px tall or less', () => {
-    expect(APP_CSS).toContain('@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {\n  .cx-btn, .field { min-height: 44px !important; }')
+    // F1 (lead 23:31): the 44 px floor now reaches every coarse screen, whatever its height (the open Duo is 787 tall).
+    expect(APP_CSS).toContain('@media (max-width: 599px), (pointer: coarse) {\n  .cx-btn, .field { min-height: 44px !important; }')
     const sheet = APP_CSS.slice(APP_CSS.indexOf('@media (min-width: 600px) and (pointer: coarse) and (max-height: 720px) {'))
     expect(sheet).toMatch(/^@media \(min-width: 600px\) and \(pointer: coarse\) and \(max-height: 720px\) \{\n  \.sheet-backdrop \{ padding-top: 0; \}\n  \.sheet \{ max-width: none;/)
     // It must come after the desktop sheet rules it overrides (same specificity).
