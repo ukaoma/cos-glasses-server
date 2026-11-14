@@ -991,12 +991,18 @@ describe('the broker, driven directly', () => {
     expect(broker.peekPendingFor(SESSION)).toEqual([{ id, kind: expect.any(String) }])
     expect(broker.peekPendingFor('ffffffff-0000-4000-8000-000000000000')).toEqual([])
     expect(broker.peekPendingFor(SESSION.toUpperCase())).toEqual([{ id, kind: expect.any(String) }])
+    // Not shown on the lens (held at the Mac): not listed, as list() does not list it either.
+    const held = await broker.admit(permissionEnvelope('Bash', { command: 'pwd' }, {}, clock.now))
+    if (!held.ok) throw new Error('not admitted')
+    const heldId = broker.park({ ...held.request, lensVisible: false }, fakeChannel(true).channel)
+    expect(broker.peekPendingFor(SESSION).map(p => p.id)).toEqual([id])
+    expect(broker.list().map(v => v.id)).not.toContain(heldId)
     clock.now += 111_000
     expect(broker.peekPendingFor(SESSION)).toEqual([])
     expect(broker.stats().counters.expired).toBe(0)
-    // The probe can fail: list() settles the same item.
+    // The probe can fail: list() settles the same items (the held one too).
     broker.list()
-    expect(broker.stats().counters.expired).toBe(1)
+    expect(broker.stats().counters.expired).toBe(2)
   })
 
   it('retracts on the session moving on without us, and only then', async () => {

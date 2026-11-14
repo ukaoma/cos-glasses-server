@@ -2368,6 +2368,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       return
     }
     const now = readNow() ?? Date.now()
+    // The limiter's client: the remote address plus the credential KIND (an X-COS-Token header present or not), never
+    // the credential itself, which is never kept in memory here.
     const client = `${req.socket?.remoteAddress ?? ''}|${req.headers['x-cos-token'] ? 'token' : 'cookie'}`
     const requestKey = [provider, threadId, after, bindingId, epochRaw, revisionSeen, askSeen, cards ? '1' : '', bootSeen].join('\u0001')
     const limited = catchUpLimiter.check(client, requestKey, now)

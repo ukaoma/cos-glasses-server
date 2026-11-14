@@ -17,6 +17,9 @@ import { agentSessionsRouter, readSessionCatchUpView } from './agent-sessions.js
 import { createAgentSessionBindingsRouter } from './agent-session-bindings.js'
 import { requireApiToken } from '../lib/api-auth.js'
 import { mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
+import { TurnEndAskTracker, WRAP_UP_TOOL, __setTurnEndAsksForTests } from '../lib/turn-end-ask.js'
+import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow } from '../lib/session-hooks-runtime.js'
+import type { HookEnvelope } from '../lib/session-hook-events.js'
 
 const TOKEN = 'catch-up-redaction-token-0123456789abcd'
 const CLAUDE_ID = 'cccccccc-1111-4222-8333-444444444444'
@@ -30,7 +33,7 @@ afterEach(async () => { await Promise.all(closers.splice(0).map(close => close()
 const saved: Record<string, string | undefined> = {}
 beforeEach(() => {
   const home = mkdtempSync(join(tmpdir(), 'cos-catch-up-redact-')); temps.push(home)
-  for (const k of ['COS_AGENT_SESSIONS_HOME', 'CODEX_HOME']) saved[k] = process.env[k]
+  for (const k of ['COS_AGENT_SESSIONS_HOME', 'CODEX_HOME', 'COS_WEB_SESSION_FILES', 'COS_CLAUDE_SESSIONS_ENABLED', 'COS_SESSION_HOOKS']) saved[k] = process.env[k]
   process.env.COS_AGENT_SESSIONS_HOME = home
   process.env.CODEX_HOME = join(home, '.codex')
   const t = (m: number) => `2026-11-14T12:${String(m).padStart(2, '0')}:00.000Z`
@@ -124,5 +127,55 @@ describe('X1 catch-up: the same gate and redaction as detail, for every caller c
     expect(catchUp.status).toBe(detail.status)
     expect(catchUp.status).toBe(401)
     expect(catchUp.body).toEqual(detail.body)
+  })
+})
+
+describe('X1 catch-up: the view is the detail\'s browser path, previews and all, and its derive changes nothing (Q1 U13, U23)', () => {
+  it('previews off (COS_WEB_SESSION_FILES=0): catch-up marks previewsOff and drops the card exactly as detail does', async () => {
+    process.env.COS_WEB_SESSION_FILES = '0'
+    const port = await serve()
+    const detail = await get(port, DETAIL, BROWSER)
+    const catchUp = await get(port, CATCH_UP, BROWSER)
+    const assistant = (turns: Array<Turn & { previewsOff?: boolean; outputLinks?: unknown[] }>) => turns.find(t => t.role === 'assistant')!
+    expect(assistant(detail.body.recent_turns).previewsOff).toBe(true)
+    expect(assistant(catchUp.body.turns).previewsOff).toBe(true)
+    expect(assistant(catchUp.body.turns).outputLinks).toBeUndefined()
+    expect(catchUp.body.turns).toEqual(detail.body.recent_turns)
+    // With previews on, the card is there (so the setting is what removed it).
+    delete process.env.COS_WEB_SESSION_FILES
+    const on = await get(port, `${CATCH_UP}?cards=1`, BROWSER)
+    expect(assistant(on.body.turns).previewsOff).toBeUndefined()
+  })
+
+  it('the view\'s derive never ages out the session\'s open ask (an observing derive does), whatever the tracker holds', async () => {
+    process.env.COS_CLAUDE_SESSIONS_ENABLED = '1'
+    delete process.env.COS_SESSION_HOOKS
+    __resetSessionHooksForTests()
+    __setTurnEndAsksForTests(true)
+    const t = Date.now() - 9 * 60 * 60_000   // asked nine hours ago: past the 8 h age-out
+    const clock = { now: t + 5_000 }
+    const tracker = new TurnEndAskTracker({ now: () => clock.now, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    __setTurnEndAskTrackerForTests(tracker)
+    try {
+      const env = (event: HookEnvelope['event'], ts: number, payload: Record<string, unknown> = {}): HookEnvelope =>
+        ({ ts, ppid: 4242, event, sessionId: CLAUDE_ID, payload: { session_id: CLAUDE_ID, ...payload } })
+      tracker.observe(env('UserPromptSubmit', t - 10_000, { prompt: 'go', prompt_id: 'p-cu-1' }), false)
+      tracker.observe(env('PostToolUse', t, { tool_name: WRAP_UP_TOOL, prompt_id: 'p-cu-1', tool_input: { recap: 'r', ask: 'Ship it?', actions: [{ label: 'Yes' }] } }), false)
+      tracker.observe(env('Stop', t + 1_000, { last_assistant_message: 'done', prompt_id: 'p-cu-1' }), false)
+      await tracker.tick()
+      const before = tracker.stats()
+      expect(before.tracked).toBe(1)
+      const view = await readSessionCatchUpView('claude', CLAUDE_ID, { cards: false, turns: 40 })
+      expect(view).not.toBeNull()
+      expect(tracker.stats()).toEqual(before)
+      // The probe can fail: an observing derive of the same row ages it out.
+      deriveForRow({ sessionId: CLAUDE_ID, transcript: { inFlight: false, lastActivityAt: null } })
+      expect(tracker.stats()).toMatchObject({ tracked: 0, agedOut: before.agedOut + 1 })
+    } finally {
+      tracker.stop()
+      __setTurnEndAskTrackerForTests(null)
+      __setTurnEndAsksForTests(null)
+      __resetSessionHooksForTests()
+    }
   })
 })

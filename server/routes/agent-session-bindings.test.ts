@@ -5747,8 +5747,14 @@ describe('X1 catch-up: one read for every stale state, and nothing written', () 
     const open = await cu(base)
     expect(open.body.question).toEqual({ id: ASK_ID(NOW - 5_000), ask: 'Run the check?', choices: ['Yes', 'No'], stoppedAt: NOW - 5_000 })
     expect(open.body.summaryCodes).toContain('waiting_question')
+    // Q1 U26: the page names the question that is still open: not closed, not answered.
+    r.clock.now += 3_000
+    const stillOpen = await cu(base, `ask=${ASK_ID(NOW - 5_000)}`)
+    expect(stillOpen.body).toMatchObject({ lastAnswered: null })
+    expect(stillOpen.body.summaryCodes).not.toContain('question_closed')
     r.state.ask = null
     r.state.answered = { by: 'mac', answeredAt: NOW - 1_000 }
+    r.clock.now += 3_000
     const answered = await cu(base, `ask=${ASK_ID(NOW - 5_000)}`)
     expect(answered.body.lastAnswered).toEqual({ by: 'mac', at: new Date(NOW - 1_000).toISOString() })
     expect(answered.body.summaryCodes).toContain('answered_mac')
@@ -5844,6 +5850,42 @@ describe('X1 catch-up: one read for every stale state, and nothing written', () 
     expect(Number(over.retryAfter)).toBeGreaterThan(0)
     r.clock.now = NOW + 61_000
     expect((await cu(base, 'revision=after-a-minute')).status).toBe(200)
+  })
+
+  it('the replay key is every request field and the credential kind: a change in any one is answered fresh (Q1 U1)', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const a = await attached(base)
+    const first = await cu(base)
+    const cursor = encodeURIComponent(first.body.cursor)
+    const fresh: Array<[string, Record<string, string>]> = [
+      [`binding=${a.bindingId}&epoch=${a.epoch}`, {}],
+      [`after=${cursor}`, {}],
+      ['revision=r-seen', {}],
+      [`ask=${ASK_ID(NOW - 1)}`, {}],
+      ['cards=1', {}],
+      ['', { 'x-cos-boot': 'boot-other' }],
+      ['', { 'x-cos-token': 'any' }],
+    ]
+    for (const [q, headers] of fresh) {
+      const res = await cu(base, q, headers)
+      expect(res.body.cached, `${q} ${JSON.stringify(headers)}`).toBe(false)
+    }
+    // And the exact same request again is the replay.
+    expect((await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}`)).body.cached).toBe(true)
+    // Another binding with the same epoch is a different request (the binding alone is in the key).
+    const other = await cu(base, `binding=bnd-other-0001&epoch=${a.epoch}`)
+    expect(other.body.cached).toBe(false)
+    expect(other.body.binding.state).toBe('unknown')
+  })
+
+  it('x-cos-boot: up to 128 characters is read, 129 is invalid_request', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    expect((await cu(base, '', { 'x-cos-boot': 'b'.repeat(128) })).status).toBe(200)
+    const long = await cu(base, '', { 'x-cos-boot': 'b'.repeat(129) })
+    expect(long.status).toBe(400)
+    expect(long.body.reason).toBe('invalid_request')
   })
 
   it('the 256 KB cap: oldest turns dropped, gap set, the body fits', async () => {
