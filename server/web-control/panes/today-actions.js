@@ -1151,9 +1151,10 @@
   function answeredLine() { return (W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.'; }
   // 7.0.38 (lead 08:0x): "Answered" only when delivery is confirmed: the turn came back completed, or the watch later
   // reports it completed. Queued or unknown waits (pending); a refused or ambiguous watch clears both.
+  // Q1 08:25: the pending mark is tied to its own turn (its clientTurnId), so another turn's result never promotes it.
   function markSent(r, key) {
-    if (r && r.lastTurn && r.lastTurn.outcome === 'completed') { O.teSent = key; O.teSentPending = ''; }
-    else O.teSentPending = key;
+    if (r && r.lastTurn && r.lastTurn.outcome === 'completed') { O.teSent = key; O.teSentPending = null; }
+    else O.teSentPending = { ask: key, turn: r && r.lastTurn ? r.lastTurn.key : '' };
   }
   /** Which ask a Needs you row names: its session, and the server's id or (an older server) its words. */
   function teKey(w) { return !w ? '' : String(w.key || '') + (w.askId ? '|id:' + w.askId : '|ask:' + String(w.ask || '').trim()); }
@@ -1582,14 +1583,14 @@
         if (o === 'completed') {
           clearInterval(O.watch);
           // 6.99.29: a turn delivered LIVE is in the open session, which now works on it; it is not done.
-          if (O.teSentPending) { O.teSent = O.teSentPending; O.teSentPending = ''; paintMeta(); }
+          if (O.teSentPending && O.teSentPending.turn === key) { O.teSent = O.teSentPending.ask; O.teSentPending = null; paintMeta(); }
           if (s.body.via === 'live') { K.feed.noteGate(r, true); O.note = { text: 'Sent into the open session. It is working on it now.', kind: '' }; }
           else { O.note = { text: 'Done. The reply is below.', kind: '' }; loadLast(r); }
           paintNote(); VIEW.stateChanged(r);
         }
         // 7.0.38 (Q1 07:50): an answer the session then refused, or whose landing COS cannot tell, is not "Answered".
-        else if (o === 'refused') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = ''; O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); paintMeta(); }
-        else if (o === 'ambiguous') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = ''; O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); paintMeta(); }
+        else if (o === 'refused') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = null; O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); paintMeta(); }
+        else if (o === 'ambiguous') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = null; O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); paintMeta(); }
       }).catch(function () {});
     }, 3000);
   }

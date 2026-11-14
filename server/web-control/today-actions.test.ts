@@ -5402,6 +5402,26 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
     expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
   })
+  it('Q1 08:25: answer A only queued, then an ordinary message B completes: the head stays "no longer open" (B never confirms A)', async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    const keyA = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    h.els['ta-input']!.value = 'Also check the Duo'
+    h.tap('send')
+    await flush()
+    const keyB = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[1] as any).body.clientTurnId
+    expect(keyB).not.toBe(keyA)
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + keyB] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + keyA] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-status']!.textContent, 'B was watched to completion').toBe('Sent into the open session. It is working on it now.')
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
   it('Q1 07:50 (7), the other side: a sent answer the watch reports completed still reads Answered when the row closes', async () => {
     const routes: Routes = { ...OK_ROUTES }
     const m = model(), h = await opened(m, routes)
