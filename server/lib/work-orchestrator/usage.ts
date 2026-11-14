@@ -93,12 +93,16 @@ export interface UsageEntry {
   lastFailureAt?: number | null
   /** 7.0.39+: no probe before this time (after a "no limits" answer). Kept across restarts, unlike the breaker's pause. */
   holdUntil?: number | null
+  /** 7.0.39+: when a plan-lane COS job on this provider last finished with an answer: free proof that it answers. */
+  answeredAt?: number | null
 }
 export type UsageState = 'ok' | 'low' | 'exhausted' | 'unknown'
 /** What the planner sees: one line per provider. */
 export interface UsageView { provider: UsageProvider; state: UsageState; headroomPct: number | null; resetsAt: string | null; ageSec: number | null; source: string; plan: string | null; stale: boolean; note: string
   /** 7.0.39+: why the last read failed (null after a good read), and when the last good read was. */
-  reason?: UsageFailureCode | null; lastGoodAt?: string | null }
+  reason?: UsageFailureCode | null; lastGoodAt?: string | null
+  /** 7.0.39+: when a plan-lane COS job on this provider last finished with an answer. */
+  answeredAt?: string | null }
 
 /** The windows that bind: Claude's 5-hour session and weekly all-models; every Codex window; Cursor's included. */
 const BINDING: Record<UsageProvider, (kind: string) => boolean> = {
@@ -188,7 +192,8 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
   const bind = allBind.filter(w => windowLive(w, now))
   const tightest = bind.length ? bind.reduce((a, b) => (b.usedPct > a.usedPct ? b : a)) : null
   const base = { provider: e.provider, ageSec, source: e.source, plan: e.reading?.plan ?? null, stale,
-    reason: e.lastFailure ?? null, lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null }
+    reason: e.lastFailure ?? null, lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null,
+    answeredAt: e.answeredAt ? new Date(e.answeredAt).toISOString() : null }
   // A stated limit beats any percentage (canary C1 rule), until the time it names.
   if (e.limitUntil && e.limitUntil > now) {
     return { ...base, state: 'exhausted', headroomPct: 0, resetsAt: new Date(e.limitUntil).toISOString(), source: e.limitSource ?? 'provider_limit', note: 'plan limit reached' }
@@ -204,6 +209,50 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
   const warned = e.warning && !(typeof e.warningUntil === 'number' && e.warningUntil <= now)
   const state: UsageState = headroom <= 0 ? 'exhausted' : headroom < USAGE_LOW_HEADROOM || warned ? 'low' : 'ok'
   return { ...base, state, headroomPct: headroom, resetsAt: tightest?.resetsAt ?? null, note: stale ? 'reading is old' : '' }
+}
+
+// ─── Which provider Work offers first (Miles, verified G2 turn, 2026-11-14) ───
+// "Generally I would prefer using Claude unless I set the preference to something else", and an unknown plan reading
+// must not push Claude or Codex aside. The order: the preferred provider first whenever it is not exhausted, unknown
+// included; except when it is low and the other is ok, then the other first (the rule before this change, kept).
+// Exhausted is never usable. Cursor is last and never a target: Work does not start Cursor sessions.
+// There is no preference setting yet, so the preference is Claude in code.
+export const WORK_DEFAULT_PROVIDER: 'claude' | 'codex' = 'claude'
+export interface ProviderChoice { provider: UsageProvider; usable: boolean; why: string }
+const NAME: Record<UsageProvider, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' }
+
+/** "10:52 AM" today, "Oct 23, 9:18 AM" another day, in the server's time zone. */
+export function clockWords(iso: string, now: number, timeZone?: string): string {
+  const t = new Date(iso), day = (d: Date) => d.toLocaleDateString('en-US', { timeZone })
+  const time = t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone })
+  return day(t) === day(new Date(now)) ? time : `${t.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone })}, ${time}`
+}
+
+export function providerOrder(views: Array<Pick<UsageView, 'provider' | 'state' | 'headroomPct' | 'resetsAt'> & Partial<UsageView>>, now: number,
+  preference: 'claude' | 'codex' = WORK_DEFAULT_PROVIDER, timeZone?: string): ProviderChoice[] {
+  const view = (p: UsageProvider) => views.find(v => v.provider === p)
+  const state = (p: UsageProvider) => view(p)?.state ?? 'unknown'
+  const usable = (p: UsageProvider) => state(p) !== 'exhausted'
+  const other: 'claude' | 'codex' = preference === 'claude' ? 'codex' : 'claude'
+  const left = (p: UsageProvider) => view(p)?.headroomPct
+  const lowSwap = usable(preference) && state(preference) === 'low' && state(other) === 'ok'
+  const order: Array<'claude' | 'codex'> = lowSwap || (!usable(preference) && usable(other)) ? [other, preference] : [preference, other]
+  const unknownWords = (p: UsageProvider) => {
+    const v = view(p)
+    if (v?.answeredAt) return ` Its plan reading is unknown; a COS ${NAME[p]} job finished at ${clockWords(v.answeredAt, now, timeZone)}.`
+    if (v?.lastGoodAt) return ` Its plan reading is unknown; COS has not seen it answer since ${clockWords(v.lastGoodAt, now, timeZone)}.`
+    return ' Its plan reading is unknown; COS has not seen it answer yet.'
+  }
+  const detail = (p: UsageProvider) => state(p) === 'low' && left(p) != null ? ` (${left(p)}% of its plan left)` : ''
+  const choices: ProviderChoice[] = order.map((p, i) => {
+    if (!usable(p)) { const r = view(p)?.resetsAt; return { provider: p, usable: false, why: `${NAME[p]} is at its plan limit${r ? ` until ${clockWords(r, now, timeZone)}` : ''}.` } }
+    const unknown = state(p) === 'unknown' ? unknownWords(p) : ''
+    if (i === 0 && p === preference) return { provider: p, usable: true, why: `${NAME[p]}, your default${detail(p)}.${unknown}` }
+    if (i === 0 && lowSwap) return { provider: p, usable: true, why: `${NAME[p]}, because ${NAME[preference]} is close to its plan limit (${NAME[preference]} ${left(preference)}% left, ${NAME[p]} ${left(p)}% left).` }
+    if (i === 0) return { provider: p, usable: true, why: `${NAME[p]}, because ${NAME[preference]} is at its plan limit${detail(p)}.${unknown}` }
+    return { provider: p, usable: true, why: `${NAME[p]}, next${detail(p)}.${unknown}` }
+  })
+  return [...choices, { provider: 'cursor', usable: false, why: 'Cursor comes last: Work does not start Cursor sessions.' }]
 }
 
 /** The background poll runs only when the owner opted in: `COS_WORK_USAGE_POLL=1`, nothing else. */
@@ -281,6 +330,13 @@ export class UsageMonitor {
   async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS); return this.views() }
   /** On demand (GET /usage): answer from a reading younger than 10 minutes; `refresh` tightens that to 2. */
   async onDemand(refresh = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS); return this.views() }
+  /** A plan-lane COS job on this provider finished with an answer (never a key-lane job). Saved at most once a minute. */
+  noteAnswered(p: UsageProvider): void {
+    const e = this.entries[p], now = this.now()
+    const due = !e.answeredAt || now - e.answeredAt >= 60_000
+    e.answeredAt = now
+    if (due) this.save()
+  }
   /** A provider refused a plan-lane turn with its limit text. Never called for a key-lane turn. */
   noteLimit(p: UsageProvider, message: string, source = 'provider_limit'): void {
     const now = this.now()

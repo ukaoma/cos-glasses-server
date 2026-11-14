@@ -23,12 +23,13 @@ const tests = [
   'server/lib/work-chat.test.ts',
   'server/lib/claude-bridge-rate-limit-usage.test.ts',
   'server/lib/query-job-coordinator-usage-limit.test.ts',
+  'server/lib/ask-work-plan.test.ts',
 ]
 const O = 'server/lib/work-orchestrator/'
 const TG = O + 'tags.ts', RD = O + 'redact.ts', SL = O + 'session-log.ts', PK = O + 'pickup.ts', TI = O + 'tag-index.ts', DI = O + 'discovery.ts'
 const IN = O + 'input.ts', SN = O + 'snapshot.ts', US = O + 'usage.ts', RT = O + 'runtime.ts', PL = O + 'plan-log.ts'
 const WC = 'server/lib/work-chat.ts', WR = 'server/routes/work-chat.ts', OR = 'server/routes/work-orchestrator.ts'
-const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts'
+const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts'
 // Defense in depth that no test can reach on purpose, each with the guard that already stops the same outcome.
 const EXPECTED_SURVIVORS = new Set([
   'tail-drops-partial-line',     // a row cut by the seek never parses (JSON.parse rejects it), so it is skipped either way
@@ -132,6 +133,18 @@ const mutations = [
   ['usage-failure-text-safe', US, "before answering$/.test(text) ? text : 'unexpected error'", 'before answering$/.test(text) ? text : text'],
   ['usage-failure-text-exited-exact', US, '/^exited (?:-?\\d+|on error) before answering$/', '/^exited /'],
   ['usage-failure-text-window-note', US, '`; last read failed: ${safeFailureText(e.lastError)}`', '`; last read failed: ${e.lastError}`'],
+  // 7.0.39 (U1): the provider order Miles set (verified G2 turn 2026-11-14), one mutant per rule.
+  ['po-default-first', US, ': [preference, other]\n', ': [other, preference]\n'],
+  ['po-unknown-usable', US, "  const usable = (p: UsageProvider) => state(p) !== 'exhausted'\n", "  const usable = (p: UsageProvider) => state(p) === 'ok' || state(p) === 'low'\n"],
+  ['po-low-swap', US, "  const lowSwap = usable(preference) && state(preference) === 'low' && state(other) === 'ok'\n", '  const lowSwap = false\n'],
+  ['po-cursor-last', US, "{ provider: 'cursor', usable: false,", "{ provider: 'cursor', usable: true,"],
+  ['po-answered-words', US, '    if (v?.answeredAt) return', '    if (false) return'],
+  ['po-answered-hook', QC, "if (result.applied && snapshot.status === 'completed') noteJobAnswered(", 'if (false) noteJobAnswered('],
+  ['po-key-lane-not-answered', UE, '    if (lane || isProfilePreference(model)) return\n', ''],
+  ['po-route-order', 'server/routes/work-chat.ts', 'body={...prompt, providerOrder:providerOrder(merged,deps.now())}', 'body={...prompt}'],
+  ['po-route-answered-merge', 'server/routes/work-chat.ts', 'answeredAt:s?.answeredAt ?? null', 'answeredAt:null'],
+  ['po-planner-rule', WC, 'a new session goes to the first usable provider in providerOrder that newSessionProviders offers', 'a new session goes to the provider with the most headroom'],
+  ['ask-unknown-allowed', AW, "!evidence.usage.some(u => u.provider === provider && u.state === 'exhausted')", "evidence.usage.some(u => u.provider === provider && (u.state === 'ok' || u.state === 'low'))"],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],

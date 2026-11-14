@@ -39,7 +39,7 @@ import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
 import { restartNoticeEnabled } from './query-job-feature.js'
-import { noteJobProviderLimit } from './work-orchestrator/usage-events.js'
+import { noteJobAnswered, noteJobProviderLimit } from './work-orchestrator/usage-events.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -815,6 +815,8 @@ export class QueryJobCoordinator {
       }
       const result = await this.store.complete(active.jobId, completion)
       snapshot = result.job
+      // 7.0.39+: a plan-lane job that completed is free proof its provider answers (Work's provider order uses it).
+      if (result.applied && snapshot.status === 'completed') noteJobAnswered(snapshot.provider, active.request.model, snapshot.lane)
       const projected = isTerminalQueryJobStatus(snapshot.status)
         ? await this.projectTerminal(snapshot, active.request)
         : false

@@ -64,8 +64,10 @@ export function prepareAskWorkPlan(request: AskWorkPlanRequest, task: TaskBoardR
   const freshAge = (age: number | null) => age !== null && Number.isFinite(age) && age >= 0 && age * 1000 <= LIVE_FRESH_MS
   const fresh = freshAge(evidence.snapshotAgeSec) && freshAge(evidence.liveListAgeSec)
     && Number.isFinite(Date.parse(evidence.now)) && now - Date.parse(evidence.now) >= 0 && now - Date.parse(evidence.now) <= LIVE_FRESH_MS
-  const providerAllowed = (provider: string) => evidence.usage.some(u => u.provider === provider
-    && (u.state === 'ok' || u.state === 'low') && !u.stale && freshAge(u.ageSec))
+  // 7.0.39+ (Miles, 2026-11-14): an unknown or old plan reading never shuts a provider out; only a provider at its
+  // stated limit is held back. Before, a Claude whose reading could not be taken (its usage service refusing reads)
+  // lost Continue and Fork on every card.
+  const providerAllowed = (provider: string) => !evidence.usage.some(u => u.provider === provider && u.state === 'exhausted')
   const sessions = evidence.rows.map(row => {
     const provider = row.id.split(':')[0]!
     const owned = row.member && (provider === 'claude' || provider === 'codex')

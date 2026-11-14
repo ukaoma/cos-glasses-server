@@ -8,6 +8,8 @@ import { isProfilePreference } from '../../../shared/key-preference.js'
 export interface UsageEventSink {
   limit(provider: 'claude' | 'codex' | 'cursor', message: string, source: string): void
   claudeFrame(frame: unknown): void
+  /** 7.0.39+: a plan-lane job finished with an answer. Optional so an older sink keeps working. */
+  answered?(provider: 'claude' | 'codex' | 'cursor'): void
 }
 let sink: UsageEventSink | null = null
 export function setUsageEventSink(next: UsageEventSink | null): void { sink = next }
@@ -21,6 +23,18 @@ export function noteJobProviderLimit(provider: string | undefined, code: string,
     if (code !== 'provider_limit' || lane || isProfilePreference(model)) return
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'cursor') return
     sink?.limit(provider, message, 'provider_limit')
+  } catch { /* observation only */ }
+}
+
+/**
+ * 7.0.39+: a plan-lane job finished with an answer, free proof that the provider answers (Miles 2026-11-14: check that an
+ * unknown provider answers before passing it over). A key-lane job is never counted: it says nothing about the plan.
+ */
+export function noteJobAnswered(provider: string | undefined, model: unknown, lane: unknown): void {
+  try {
+    if (lane || isProfilePreference(model)) return
+    if (provider !== 'claude' && provider !== 'codex' && provider !== 'cursor') return
+    sink?.answered?.(provider)
   } catch { /* observation only */ }
 }
 

@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, windowLive, probeClaudeUsage, probeCodexUsage,
   CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines,
-  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS } from './usage.js'
+  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS, providerOrder, clockWords } from './usage.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -285,5 +285,49 @@ describe('7.0.39: an exception\'s own text never reaches a client', () => {
       const ended = { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct: 23, resetsAt: '2026-10-20T00:00:00Z' }] }
       expect(viewOf({ ...saved, reading: ended }, NOW).note).toBe('not read since its window ended; last read failed: unexpected error')
     } finally { warn.mockRestore() }
+  })
+})
+
+describe('7.0.39: which provider Work offers first (Miles, verified G2 turn 2026-11-14)', () => {
+  const T = Date.parse('2026-11-14T16:52:00Z'), TZ = 'America/Chicago'
+  const v = (provider: 'claude' | 'codex' | 'cursor', state: 'ok' | 'low' | 'exhausted' | 'unknown', headroomPct: number | null, more: Record<string, unknown> = {}) =>
+    ({ provider, state, headroomPct, resetsAt: null, ...more })
+  const order = (views: any[], pref?: 'claude' | 'codex') => providerOrder(views, T, pref, TZ)
+  it('case 1: Claude is the default whenever it is usable; another preference puts that provider first', () => {
+    expect(order([v('claude', 'ok', 60), v('codex', 'ok', 90)]).map(c => [c.provider, c.usable, c.why])).toEqual([
+      ['claude', true, 'Claude, your default.'], ['codex', true, 'Codex, next.'], ['cursor', false, 'Cursor comes last: Work does not start Cursor sessions.']])
+    expect(order([v('claude', 'low', 10), v('codex', 'low', 4)])[0]).toEqual({ provider: 'claude', usable: true, why: 'Claude, your default (10% of its plan left).' })
+    expect(order([v('claude', 'ok', 60), v('codex', 'ok', 90)], 'codex')[0]).toMatchObject({ provider: 'codex', why: 'Codex, your default.' })
+  })
+  it('case 2: unknown never moves Claude or Codex down, and the words say what COS saw it do', () => {
+    const answered = order([v('claude', 'unknown', null, { answeredAt: '2026-11-14T16:40:00Z' }), v('codex', 'low', 4)])
+    expect(answered[0]).toEqual({ provider: 'claude', usable: true,
+      why: `Claude, your default. Its plan reading is unknown; a COS Claude job finished at ${clockWords('2026-11-14T16:40:00Z', T, TZ)}.` })
+    expect(answered[0]!.why).toContain('10:40 AM')
+    expect(order([v('claude', 'unknown', null, { lastGoodAt: '2026-10-23T14:18:57Z' }), v('codex', 'ok', 70)])[0]!.why)
+      .toBe('Claude, your default. Its plan reading is unknown; COS has not seen it answer since Oct 23, 9:18 AM.')
+    expect(order([v('claude', 'exhausted', 0), v('codex', 'unknown', null)])[0]).toMatchObject({ provider: 'codex', usable: true })
+    expect(order([])[0]).toMatchObject({ provider: 'claude', usable: true, why: 'Claude, your default. Its plan reading is unknown; COS has not seen it answer yet.' })
+  })
+  it('case 3: exhausted is never usable, and Cursor is last and never a target', () => {
+    const o = order([v('claude', 'exhausted', 0, { resetsAt: '2026-11-14T21:00:00Z' }), v('codex', 'ok', 70), v('cursor', 'unknown', null)])
+    expect(o.map(c => [c.provider, c.usable])).toEqual([['codex', true], ['claude', false], ['cursor', false]])
+    expect(o[0]!.why).toBe('Codex, because Claude is at its plan limit.')
+    expect(o[1]!.why).toBe('Claude is at its plan limit until 3:00 PM.')
+    expect(order([v('claude', 'exhausted', 0), v('codex', 'exhausted', 0), v('cursor', 'ok', 90)]).filter(c => c.usable)).toEqual([])
+  })
+  it('case 4 (unchanged): Claude low while Codex is ok puts Codex first, with both numbers; Codex low or unknown keeps Claude', () => {
+    expect(order([v('claude', 'low', 9), v('codex', 'ok', 70)])[0]).toEqual({ provider: 'codex', usable: true,
+      why: 'Codex, because Claude is close to its plan limit (Claude 9% left, Codex 70% left).' })
+    expect(order([v('claude', 'low', 9), v('codex', 'unknown', null)])[0]!.provider).toBe('claude')
+    expect(order([v('claude', 'low', 9), v('codex', 'low', 12)])[0]!.provider).toBe('claude')
+  })
+  it('a plan-lane job that finished is kept as the provider\'s answered time, saved at most once a minute', () => {
+    let now = T
+    const m = new UsageMonitor({ probes: { claude: async () => { throw new Error('x') }, codex: async () => { throw new Error('x') } }, now: () => now })
+    m.noteAnswered('claude')
+    expect(m.views().find(x => x.provider === 'claude')!.answeredAt).toBe(new Date(T).toISOString())
+    now += 5000; m.noteAnswered('claude')
+    expect(m.entry('claude').answeredAt).toBe(T + 5000)
   })
 })

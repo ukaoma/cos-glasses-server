@@ -261,3 +261,24 @@ describe('usage is read on demand, never on a timer by default (6.83.0 release)'
     expect(later.usage.find(u => u.provider === 'claude')).toMatchObject({ ageSec: 0 })
   })
 })
+
+describe('7.0.39: Work offers providers in the order Miles set (verified G2 turn, 2026-11-14)', () => {
+  it('the planner is given providerOrder: Claude first while its reading is unknown, with the time a COS Claude job answered', async () => {
+    const run = vi.fn(async () => ({ text: JSON.stringify({ answer: 'Nothing to send yet.', assignments: [] }) }))
+    const app = express(); app.use(express.json({ limit: '1mb' }))
+    app.use('/api', createWorkChatRouter({ run: run as any, admissions: () => true, lease: () => ({ release() {} }) as any, planLog: () => {}, now: () => NOW,
+      serverUsage: () => [{ provider: 'claude', answeredAt: '2026-10-20T21:20:00.000Z', lastGoodAt: null } as any] }))
+    const s = await listen(app)
+    try {
+      const sent = [{ ...usage[0], state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read' }, usage[1], usage[2]]
+      const res = await fetch(s.url + '/work/chat', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...base, orchestrator: true, now: new Date(NOW).toISOString(), usage: sent, leftOut: [], newSessionProviders: ['claude', 'codex'], sessions: [] }) })
+      expect(res.status).toBe(200)
+      const order = JSON.parse((run.mock.calls[0] as any)[1]).providerOrder
+      expect(order.map((c: any) => [c.provider, c.usable])).toEqual([['claude', true], ['codex', true], ['cursor', false]])
+      expect(order[0].why).toMatch(/^Claude, your default\. Its plan reading is unknown; a COS Claude job finished at \d{1,2}:20 [AP]M\.$/)
+      expect(WORK_CHAT_ORCHESTRATOR_RULES).toMatch(/a new session goes to the first usable provider in providerOrder that newSessionProviders offers/)
+      expect(WORK_CHAT_ORCHESTRATOR_RULES).not.toMatch(/known provider with headroom over an unknown one|say in the answer when usage decided the choice/)
+    } finally { s.server.close() }
+  })
+})

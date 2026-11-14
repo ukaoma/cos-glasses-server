@@ -25,7 +25,8 @@ export function orchestratorUsage(): UsageMonitor {
     const noProbe = async (): Promise<never> => { throw new Error('not probed inside a test') }
     const monitor = usage = new UsageMonitor({ path: dataPath('work-orchestrator', 'usage.json'), ...(inTest ? { probes: { claude: noProbe, codex: noProbe } } : {}) })
     // Jobs report limits and rate-limit frames through the leaf module; this monitor is where they land.
-    setUsageEventSink({ limit: (p, message, source) => monitor.noteLimit(p as UsageProvider, message, source), claudeFrame: frame => monitor.noteClaudeRateLimitEvent(frame) })
+    setUsageEventSink({ limit: (p, message, source) => monitor.noteLimit(p as UsageProvider, message, source), claudeFrame: frame => monitor.noteClaudeRateLimitEvent(frame),
+      answered: p => monitor.noteAnswered(p as UsageProvider) })
   }
   return usage
 }

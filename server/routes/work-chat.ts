@@ -5,7 +5,8 @@ import { parseWorkChatInput, parseWorkChatAnswer, WORK_CHAT_SYSTEM, WORK_CHAT_OR
 import { runMeetingAskModel } from '../lib/meeting-ask-runner.js'
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
 import { appendPlanLog, type PlanLogRow } from '../lib/work-orchestrator/plan-log.js'
-import { PLAN_LOG_PATH } from '../lib/work-orchestrator/runtime.js'
+import { PLAN_LOG_PATH, orchestratorUsage } from '../lib/work-orchestrator/runtime.js'
+import { providerOrder, type UsageView } from '../lib/work-orchestrator/usage.js'
 import { defaultLensRoundStore } from '../lib/work-lens-rounds.js'
 
 /** 6.83.0: one plan's log row. Ids and enums only (plan-log.ts). */
@@ -25,6 +26,8 @@ export function planLogRow(input: WorkChatInput, outcome: PlanLogRow['outcome'],
 
 const WORK_CHAT_DEPS = {run:runMeetingAskModel, admissions:maintenanceAdmissionsOpen, lease:()=>acquireMaintenanceWork('work_chat'),
   planLog:(row: PlanLogRow)=>appendPlanLog(PLAN_LOG_PATH(), row), now:()=>Date.now(),
+  // 7.0.39+: the server's own usage views (never a probe): when each provider last answered a COS job, and its last good read.
+  serverUsage:(): UsageView[]=>orchestratorUsage().views(),
   lensPlansControl:()=>defaultLensRoundStore().controlStatus()}
 export function createWorkChatRouter(given: Partial<typeof WORK_CHAT_DEPS> = {}) {
   // 6.83.0: a caller that passes only some deps (the tests pass run, admissions and lease) gets the rest by default.
@@ -59,7 +62,16 @@ export function createWorkChatRouter(given: Partial<typeof WORK_CHAT_DEPS> = {})
       const {planner='sonnet',effort=WORK_CHAT_DEFAULT_EFFORT,...prompt}=input
       const orchestrator=input.orchestrator===true
       const system=orchestrator ? WORK_CHAT_SYSTEM+'\n\n'+WORK_CHAT_ORCHESTRATOR_RULES : WORK_CHAT_SYSTEM
-      const out=await deps.run({engine:'claude',model:planner},JSON.stringify(prompt),system,controller.signal,undefined,{caller:'work_chat_'+input.mode},
+      // 7.0.39+ (Miles, 2026-11-14): the order Work offers providers in, with the words it must use, computed here from the
+      // usage the client sent plus the server's own record of when each provider last answered a COS job.
+      let body: Record<string, unknown>=prompt
+      if (orchestrator) {
+        let server: UsageView[]=[]
+        try { server=deps.serverUsage() } catch { /* the order still works from the client's usage */ }
+        const merged=(input.usage ?? []).map(u=>{ const s=server.find(v=>v.provider===u.provider); return {...u, answeredAt:s?.answeredAt ?? null, lastGoodAt:s?.lastGoodAt ?? null} })
+        body={...prompt, providerOrder:providerOrder(merged,deps.now())}
+      }
+      const out=await deps.run({engine:'claude',model:planner},JSON.stringify(body),system,controller.signal,undefined,{caller:'work_chat_'+input.mode},
         {effort,maxOutputTokens:orchestrator ? WORK_CHAT_ORCHESTRATOR_OUTPUT_TOKENS : WORK_CHAT_OUTPUT_TOKENS,maxThinkingTokens:WORK_CHAT_THINKING_TOKENS[effort],deadlineMs:WORK_CHAT_DEADLINE_MS})
       try { answer=parseWorkChatAnswer(out.text,input) } catch (e) { outcome='invalid_answer'; throw e }
       outcome='planned'

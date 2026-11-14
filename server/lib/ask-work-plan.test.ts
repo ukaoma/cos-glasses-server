@@ -55,7 +55,16 @@ describe('Ask Work preparation', () => {
     expect(askWorkProposalID(ready.input, answer)).toBe(askWorkProposalID(ready.input, answer))
     expect(askWorkProposalID(ready.input, answer)).not.toBe(askWorkProposalID(ready.input, { ...answer, answer: 'Different' }))
   })
-  it.each(['stale', 'futureAge', 'futureNow', 'incomplete', 'suggestion', 'appOwned', 'busy', 'notLive', 'exhausted', 'unknown', 'usageStale'])(
+  // 7.0.39 (Miles, verified G2 turn 2026-11-14): an unknown or old plan reading no longer fails closed; only exhausted does.
+  it.each(['unknown', 'usageStale'])('keeps Continue and Fork when the plan reading is %s (only a provider at its limit is held back)', kind => {
+    const data = evidence()
+    if (kind === 'unknown') { data.usage[0]!.state = 'unknown'; data.usage[0]!.headroomPct = null }
+    if (kind === 'usageStale') { data.usage[0]!.stale = true; data.usage[0]!.ageSec = 7 * 86_400 }
+    const prepared = prepareAskWorkPlan(request, task, data, now)
+    expect(prepared.input.sessions[0]!).toMatchObject({ automatic: true, available: true })
+    expect(JSON.stringify(JSON.parse(prepared.input.context).evidenceStatus)).not.toContain('provider_usage_unavailable')
+  })
+  it.each(['stale', 'futureAge', 'futureNow', 'incomplete', 'suggestion', 'appOwned', 'busy', 'notLive', 'exhausted'])(
     'fails closed for Continue with %s evidence', kind => {
       const data = evidence(), row = data.rows[0]!
       if (kind === 'stale') data.liveListAgeSec = 181
