@@ -3,6 +3,7 @@
 // answer-never-queued-mutation-gate.mjs: disposable copy, green baseline over every named suite, each target matched
 // exactly once, each mutant killed by the test named for it (a kill by another test is WRONG KILLER and fails the
 // gate), byte-for-byte restoration. `--check` stops after the exact-once check.
+// 7.0.42 adds the boot name miss (11/14 14:51): 3143's name source and the health reason that names the miss.
 import { mkdtempSync, cpSync, existsSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
@@ -28,6 +29,18 @@ const mutations = [
   ["index-never-started", "server/index.ts", "  controlTsnetTls?.start()\n", "", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
   ["index-never-stopped", "server/index.ts", "  controlTsnetTls?.stop()\n", "", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
   ["health-not-spread", "server/routes/health.ts", "    ...controlTsnetHealthField(),\n", "", "/api/health spreads the field", ["server/lib/control-tsnet-tls.test.ts"]],
+  // 7.0.42: the boot name miss (11/14 14:51).
+  ["name-source-cached", "server/lib/control-tsnet-tls.ts", "return () => self.refreshIfMissing(TAILNET_NAME_CHECK_WAIT_MS)", "return () => (self as never as { refresh: () => Promise<string | null> }).refresh()", "the first check after a boot miss finds the name", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["index-name-source-cached", "server/index.ts", "  selfDnsName: controlTsnetSelfDnsName(tailnetSelf),\n", "  selfDnsName: () => tailnetSelf.refresh(),\n", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["index-miss-not-wired", "server/index.ts", "httpsAvailable, nameMiss: () => tailnetSelf.lastMiss?.() ?? null }", "httpsAvailable }", "index.ts builds it from the switch", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["miss-reason-dropped", "server/lib/control-tsnet-tls.ts", "const reason = raw === 'tailnet_name_unknown' && nameMiss ? TAILNET_NAME_MISS_REASON[nameMiss] : raw", "const reason = raw", "tailnet_name_unknown is replaced by the miss seen", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["miss-replaces-every-reason", "server/lib/control-tsnet-tls.ts", "const reason = raw === 'tailnet_name_unknown' && nameMiss ? TAILNET_NAME_MISS_REASON[nameMiss] : raw", "const reason = nameMiss ? TAILNET_NAME_MISS_REASON[nameMiss] : raw", "tailnet_name_unknown is replaced by the miss seen", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["health-miss-not-passed", "server/lib/control-tsnet-tls.ts", "return controlTsnetHealthFrom(status, miss)", "return controlTsnetHealthFrom(status)", "health now says what was wrong", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["boot-miss-not-passed", "server/lib/control-tsnet-tls.ts", "return new ControlTsnetTls(signer, deps, make, opts.nameMiss)", "return new ControlTsnetTls(signer, deps, make)", "health now says what was wrong", ["server/lib/control-tsnet-tls.test.ts"]],
+  ["self-throw-unlabeled", "server/lib/tailnet-self-name.ts", "        name = null\n        why = 'no_answer'\n", "        name = null\n", "an ENOTFOUND lookup is cached a minute", ["server/lib/tailnet-self-name.test.ts"]],
+  ["self-empty-as-not-ts-net", "server/lib/tailnet-self-name.ts", "if (!name) why = names.length ? 'not_ts_net' : 'no_answer'", "if (!name) why = 'not_ts_net'", "lastMiss says no_tailscale_ip, not_ts_net or no_answer", ["server/lib/tailnet-self-name.test.ts"]],
+  ["self-no-ip-unlabeled", "server/lib/tailnet-self-name.ts", "          why = 'no_tailscale_ip'\n", "", "lastMiss says no_tailscale_ip, not_ts_net or no_answer", ["server/lib/tailnet-self-name.test.ts"]],
+  ["self-miss-kept-after-hit", "server/lib/tailnet-self-name.ts", "lastMiss: () => (currentSelfDnsName() ? null : miss)", "lastMiss: () => miss", "lastMiss says no_tailscale_ip, not_ts_net or no_answer", ["server/lib/tailnet-self-name.test.ts"]],
   ["sni-suffix-match", "server/lib/web-key-signer-tls.ts", "servername.toLowerCase() === pair.host", "pair.host.endsWith(servername.toLowerCase())", "the name must match EXACTLY", ["server/lib/control-tsnet-tls.test.ts"]]
 ]
 const args = process.argv.slice(2)

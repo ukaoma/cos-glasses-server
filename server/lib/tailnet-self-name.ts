@@ -56,7 +56,20 @@ export interface TailnetSelfName {
    * running and caches its answer for the next reader. Never throws.
    */
   refreshIfMissing(waitMs?: number): Promise<string | null>
+  /**
+   * X1 (7.0.42): why the last lookup found no name, or null after a hit (or before any lookup). Optional so
+   * hand-made fakes need not carry it. Never a name or an address.
+   */
+  lastMiss?(): TailnetNameMiss | null
 }
+
+/**
+ * Why a lookup found no name. `no_answer` is MagicDNS giving none within TAILNET_REVERSE_TIMEOUT_MS, which is also what
+ * a busy event loop produces: at boot the lookup is sent before the server's synchronous startup work, and with the
+ * loop blocked 2 s or more the answer arrives after the timer and the lookup fails ENOTFOUND (probe 2026-11-14 14:5x,
+ * 7.0.41 on his Mac: 1 ms unblocked, ENOTFOUND blocked 2 s and 4 s). That miss is cached TAILNET_NAME_MISS_TTL_MS.
+ */
+export type TailnetNameMiss = 'no_tailscale_ip' | 'no_answer' | 'not_ts_net'
 
 function defaultTailscaleIpv4(): string | null {
   return reachableIpv4Addresses(networkInterfaces()).find(a => a.kind === 'tailscale')?.address ?? null
@@ -74,6 +87,7 @@ export function createTailnetSelfName(deps: TailnetSelfNameDeps = {}): TailnetSe
   const reverse = deps.reverse ?? defaultReverse
   let cached: { name: string | null; at: number } | null = null
   let inflight: Promise<string | null> | null = null
+  let miss: TailnetNameMiss | null = null
 
   const fromNudger = (): string | null => {
     try { return normalizeTailscaleDnsName(deps.nudgerName?.() ?? null) } catch { return null }
@@ -86,17 +100,23 @@ export function createTailnetSelfName(deps: TailnetSelfNameDeps = {}): TailnetSe
     if (inflight) return inflight
     inflight = (async () => {
       let name: string | null = null
+      let why: TailnetNameMiss | null = null
       try {
         const ip = ipv4()
         if (ip) {
           const names = await reverse(ip)
           name = names.map(n => normalizeTailscaleDnsName(n)).find((n): n is string => n !== null) ?? null
+          if (!name) why = names.length ? 'not_ts_net' : 'no_answer'
+        } else {
+          why = 'no_tailscale_ip'
         }
       } catch {
         name = null
+        why = 'no_answer'
       }
       // A miss never erases a name we already had: a blip in MagicDNS must not lock the phone out.
       cached = { name: name ?? cached?.name ?? null, at: now() }
+      miss = cached.name ? null : why
       return cached.name
     })().finally(() => { inflight = null })
     return inflight
@@ -135,7 +155,7 @@ export function createTailnetSelfName(deps: TailnetSelfNameDeps = {}): TailnetSe
     })
   }
 
-  return { currentSelfDnsName, refresh, queryStatus: refresh, refreshIfMissing }
+  return { currentSelfDnsName, refresh, queryStatus: refresh, refreshIfMissing, lastMiss: () => (currentSelfDnsName() ? null : miss) }
 }
 
 let singleton: TailnetSelfName | null = null

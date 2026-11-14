@@ -21,11 +21,34 @@
 // served (SignerTls.sniMatches): that handshake gets mkcert, which the phone does not trust, so a lapse is a loud
 // certificate error, never a silent fall back to http. Turning the switch on is what requests the certificate, and
 // that puts the machine's full ts.net name in the public Certificate Transparency log: Miles's typed go, each time.
+//
+// THE NAME (7.0.42, the 7.0.41 field failure of 11/14 14:51). 3143 learns this Mac's name from tailnetSelf, which asks
+// MagicDNS (the CLI fails under the LaunchAgent). Its boot lookup is sent before the server's synchronous startup work
+// and misses when that work blocks the loop past the 1.5 s timeout; refresh() then answers that miss from cache for a
+// minute, so every check in that minute failed tailnet_name_unknown and the backoff climbed to 960 s, though the name
+// was one millisecond away. 3143 therefore asks with refreshIfMissing(): a name known is used as is, and a miss starts
+// a fresh lookup instead of reading the cached one (at most one per 30 s). Health names the miss it saw.
 
 import type { SecureContext } from 'node:tls'
 import type { ServerOptions as HttpsServerOptions } from 'node:https'
 import { readSwitch } from './env-switch.js'
 import { SignerTls, type SignerTlsDeps, type SignerTlsStatus } from './web-key-signer-tls.js'
+import type { TailnetNameMiss, TailnetSelfName } from './tailnet-self-name.js'
+
+/** How long a 3143 check waits for a fresh name lookup (the lookup itself is bounded at 1.5 s). */
+export const TAILNET_NAME_CHECK_WAIT_MS = 5_000
+
+/** 3143's name source: never a cached miss (see THE NAME above). */
+export function controlTsnetSelfDnsName(self: Pick<TailnetSelfName, 'refreshIfMissing'>): () => Promise<string | null> {
+  return () => self.refreshIfMissing(TAILNET_NAME_CHECK_WAIT_MS)
+}
+
+/** tailnet_name_unknown, said precisely: what the last name lookup actually found. */
+export const TAILNET_NAME_MISS_REASON: Readonly<Record<TailnetNameMiss, string>> = Object.freeze({
+  no_tailscale_ip: 'tailnet_no_tailscale_ip',
+  no_answer: 'tailnet_name_no_answer',
+  not_ts_net: 'tailnet_name_not_ts_net',
+})
 
 /** `COS_CONTROL_TSNET_HTTPS`: default OFF. Read once at boot (index.ts); a change takes a restart. */
 export function controlTsnetHttpsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -44,11 +67,13 @@ export interface ControlTsnetHealth {
   expiresAt: string | null
 }
 
-export function controlTsnetHealthFrom(status: SignerTlsStatus | null): ControlTsnetHealth {
+export function controlTsnetHealthFrom(status: SignerTlsStatus | null, nameMiss: TailnetNameMiss | null = null): ControlTsnetHealth {
   if (!status) return { state: 'starting', reason: null, renewalError: null, expiresAt: null }
   if (status.trusted) return { state: 'serving', reason: null, renewalError: status.lastError, expiresAt: status.notAfter }
   if (status.checkedAt === null && status.lastError === null) return { state: 'starting', reason: null, renewalError: null, expiresAt: null }
-  return { state: 'not_serving', reason: status.lastError ?? status.reason, renewalError: null, expiresAt: null }
+  const raw = status.lastError ?? status.reason
+  const reason = raw === 'tailnet_name_unknown' && nameMiss ? TAILNET_NAME_MISS_REASON[nameMiss] : raw
+  return { state: 'not_serving', reason, renewalError: null, expiresAt: null }
 }
 
 export class ControlTsnetTls {
@@ -59,6 +84,8 @@ export class ControlTsnetTls {
     private readonly signer: () => SignerTls | null,
     private readonly deps: SignerTlsDeps,
     private readonly make: (deps: SignerTlsDeps) => SignerTls = d => new SignerTls(d),
+    /** Why the last name lookup missed (tailnetSelf.lastMiss), for the health reason. */
+    private readonly nameMiss: () => TailnetNameMiss | null = () => null,
   ) {}
 
   /** The instance 3143 asks now: the signer's when it exists, else this module's own (null until start()). */
@@ -87,19 +114,23 @@ export class ControlTsnetTls {
   /** The health field. statusRead (SR-04) may start one bounded re-check for failures a user fixes outside COS. */
   health(): ControlTsnetHealth {
     const tls = this.active()
-    return controlTsnetHealthFrom(tls ? tls.statusRead() : null)
+    if (!tls) return controlTsnetHealthFrom(null)
+    const status = tls.statusRead()
+    let miss: TailnetNameMiss | null = null
+    try { miss = this.nameMiss() } catch { miss = null }
+    return controlTsnetHealthFrom(status, miss)
   }
 }
 
 /** index.ts's one door: an instance only with the switch on AND 3143 planned (mkcert present). Otherwise null. */
 export function createControlTsnetTlsForBoot(
-  opts: { enabled: boolean; httpsAvailable: boolean },
+  opts: { enabled: boolean; httpsAvailable: boolean; nameMiss?: () => TailnetNameMiss | null },
   signer: () => SignerTls | null,
   deps: SignerTlsDeps,
   make?: (deps: SignerTlsDeps) => SignerTls,
 ): ControlTsnetTls | null {
   if (opts.enabled !== true || opts.httpsAvailable !== true) return null
-  return new ControlTsnetTls(signer, deps, make)
+  return new ControlTsnetTls(signer, deps, make, opts.nameMiss)
 }
 
 /** 3143's TLS options: the mkcert pair as the default, plus SNI selection only when an instance exists. */

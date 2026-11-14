@@ -57,4 +57,51 @@ describe('tailnet self name (MagicDNS reverse lookup)', () => {
     const offline = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => null, reverse: async () => [NAME] })
     expect(await offline.refresh()).toBeNull()
   })
+  it('X1 7.0.42, the boot miss of 11/14: an ENOTFOUND lookup is cached a minute by refresh(), refreshIfMissing looks again at once, and lastMiss names every miss', async () => {
+    let now = 1_000_000
+    let lookups = 0
+    // What a blocked boot loop produced on his Mac: the PTR answer arrived after the 1.5 s timer, and the lookup failed ENOTFOUND.
+    const busyBoot = () => Object.assign(new Error('queryPtr ENOTFOUND'), { code: 'ENOTFOUND' })
+    const self = createTailnetSelfName({
+      nudgerName: () => null,
+      tailscaleIpv4: () => '100.108.149.114',
+      reverse: async () => { lookups++; if (lookups === 1) throw busyBoot(); return [`${NAME}.`] },
+      now: () => now,
+    })
+    expect(self.lastMiss!()).toBeNull()
+    expect(await self.refresh()).toBeNull()
+    expect(self.lastMiss!()).toBe('no_answer')
+    now += 5_000
+    // The 7.0.41 path: refresh() answers the cached miss for a minute, without looking.
+    expect(await self.refresh()).toBeNull()
+    expect(lookups).toBe(1)
+    // The 7.0.42 path for 3143: a fresh lookup now, which finds the name.
+    expect(await self.refreshIfMissing()).toBe(NAME)
+    expect(lookups).toBe(2)
+    expect(self.lastMiss!()).toBeNull()
+    // A later miss never erases the name, so there is no miss to report.
+    now += 11 * 60_000
+    lookups = 0
+    expect(await self.refresh()).toBe(NAME)
+    expect(self.lastMiss!()).toBeNull()
+  })
+
+  it('X1 7.0.42: lastMiss says no_tailscale_ip, not_ts_net or no_answer, never a name or an address', async () => {
+    const offline = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => null, reverse: async () => [NAME] })
+    await offline.refresh()
+    expect(offline.lastMiss!()).toBe('no_tailscale_ip')
+    const foreign = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => '100.108.149.114', reverse: async () => ['router.local.'] })
+    await foreign.refresh()
+    expect(foreign.lastMiss!()).toBe('not_ts_net')
+    const empty = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => '100.108.149.114', reverse: async () => [] })
+    await empty.refresh()
+    expect(empty.lastMiss!()).toBe('no_answer')
+    // A miss, then the nudger learns the name: there is a name now, so no miss to report.
+    let nudge: string | null = null
+    const late = createTailnetSelfName({ nudgerName: () => nudge, tailscaleIpv4: () => null, reverse: async () => [] })
+    await late.refresh()
+    expect(late.lastMiss!()).toBe('no_tailscale_ip')
+    nudge = NAME
+    expect(late.lastMiss!()).toBeNull()
+  })
 })

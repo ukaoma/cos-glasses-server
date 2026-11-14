@@ -15,10 +15,13 @@ import {
   controlTsnetHealthField,
   controlTsnetHealthFrom,
   controlTsnetHttpsEnabled,
+  controlTsnetSelfDnsName,
   createControlTsnetTlsForBoot,
   registerControlTsnetTls,
+  TAILNET_NAME_MISS_REASON,
   type ControlTsnetTls,
 } from './control-tsnet-tls.js'
+import { createTailnetSelfName } from './tailnet-self-name.js'
 import { parseRootPems, SignerTls, type SignerTlsDeps } from './web-key-signer-tls.js'
 import type { RunResult } from './tailscale-nudge.js'
 
@@ -266,10 +269,71 @@ describe('X1: renewal and expiry', () => {
   })
 })
 
+// 7.0.42: the 7.0.41 field failure of 11/14 14:51. The boot name lookup missed (ENOTFOUND, a busy boot loop), refresh()
+// served that miss from cache, and every check in the next minute failed tailnet_name_unknown, backing off to 960 s.
+describe('X1 7.0.42: a boot name miss no longer holds back the certificate', () => {
+  /** tailnetSelf as on his Mac: the CLI never answers, the boot lookup fails ENOTFOUND, every later one finds the name. */
+  function bootMissedSelf() {
+    let lookups = 0
+    const self = createTailnetSelfName({
+      nudgerName: () => null,
+      tailscaleIpv4: () => '100.112.1.2',
+      reverse: async () => { lookups++; if (lookups === 1) throw Object.assign(new Error('queryPtr ENOTFOUND'), { code: 'ENOTFOUND' }); return [`${NAME}.`] },
+    })
+    return { self, lookups: () => lookups }
+  }
+
+  it('the first check after a boot miss finds the name with a fresh lookup and serves the trusted pair on 3143', async () => {
+    const { self, lookups } = bootMissedSelf()
+    expect(await self.refresh()).toBeNull() // index.ts's boot lookup, missed
+    const calls: string[] = []
+    const clock = { now: Date.now() }
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true, nameMiss: () => self.lastMiss?.() ?? null }, () => null,
+      { ...deps(pair, clock, calls), selfDnsName: controlTsnetSelfDnsName(self) }, d => new SignerTls(d))!
+    const port = await serve3143(tls)
+    tls.start()
+    await tls.active()!.check()
+    expect(lookups()).toBe(2)
+    expect(calls).toEqual(['status', 'cert'])
+    expect(await served(port, NAME)).toBe(pair.fingerprint)
+    expect(tls.health()).toMatchObject({ state: 'serving', reason: null })
+    tls.stop()
+  })
+
+  it('the 7.0.41 wiring (refresh) fails on the cached miss, and health now says what was wrong: tailnet_name_no_answer', async () => {
+    const { self, lookups } = bootMissedSelf()
+    await self.refresh()
+    const calls: string[] = []
+    const clock = { now: Date.now() }
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true, nameMiss: () => self.lastMiss?.() ?? null }, () => null,
+      { ...deps(pair, clock, calls), selfDnsName: () => self.refresh() }, d => new SignerTls(d))!
+    tls.start()
+    await tls.active()!.check()
+    expect(lookups()).toBe(1)
+    expect(calls).toEqual([])
+    expect(tls.health()).toEqual({ state: 'not_serving', reason: 'tailnet_name_no_answer', renewalError: null, expiresAt: null })
+    tls.stop()
+  })
+
+  it('controlTsnetHealthFrom: tailnet_name_unknown is replaced by the miss seen; other reasons, or no miss, stay as they are', () => {
+    const base = { trusted: false, reason: 'tailnet_name_unknown', host: null, notAfter: null, checkedAt: '2026-11-14T20:51:40.000Z', nextCheckAt: null, storedRefused: null } as const
+    const failed = { ...base, lastError: 'tailnet_name_unknown' } as never
+    expect(controlTsnetHealthFrom(failed, 'no_answer').reason).toBe('tailnet_name_no_answer')
+    expect(controlTsnetHealthFrom(failed, 'no_tailscale_ip').reason).toBe('tailnet_no_tailscale_ip')
+    expect(controlTsnetHealthFrom(failed, 'not_ts_net').reason).toBe('tailnet_name_not_ts_net')
+    expect(controlTsnetHealthFrom(failed, null).reason).toBe('tailnet_name_unknown')
+    expect(controlTsnetHealthFrom({ ...base, lastError: 'tailnet_https_certs_off' } as never, 'no_answer').reason).toBe('tailnet_https_certs_off')
+    expect(Object.values(TAILNET_NAME_MISS_REASON).every(r => /^tailnet_[a-z_]+$/.test(r))).toBe(true)
+  })
+})
+
 describe('X1: index.ts and health wire it, and only on 3143', () => {
   it('index.ts builds it from the switch, gives SNI to the HTTPS listener only, starts it after the signer, stops it on shutdown', () => {
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
-    expect(index).toContain('controlTsnetTls = createControlTsnetTlsForBoot({ enabled: controlTsnetHttpsEnabled(), httpsAvailable }, () => webKeySignerTls, {')
+    expect(index).toContain('controlTsnetTls = createControlTsnetTlsForBoot({ enabled: controlTsnetHttpsEnabled(), httpsAvailable, nameMiss: () => tailnetSelf.lastMiss?.() ?? null }, () => webKeySignerTls, {')
+    // 7.0.42: 3143 asks for the name with a fresh lookup; the 3144 signer's own line is untouched (web-key code).
+    expect(index).toContain('  selfDnsName: controlTsnetSelfDnsName(tailnetSelf),\n')
+    expect(index.split('selfDnsName: () => tailnetSelf.refresh(),').length - 1).toBe(1)
     expect(index).toContain("const mkcertPair = mkcertFiles && entry.label === 'HTTPS' ? controlHttpsOptions(mkcertFiles, controlTsnetTls)")
     expect(index).toContain('registerControlTsnetTls(controlTsnetTls)')
     expect(index.indexOf('controlTsnetTls?.start()')).toBeGreaterThan(index.indexOf('webKeySignerTls?.start()'))

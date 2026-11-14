@@ -249,7 +249,7 @@ import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
-import { controlHttpsOptions, controlTsnetHttpsEnabled, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
+import { controlHttpsOptions, controlTsnetHttpsEnabled, controlTsnetSelfDnsName, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -1770,9 +1770,10 @@ const certDir = path.join(__dirname, 'certs')
 const listeners: RequiredListener[] = []
 const httpsAvailable = existsSync(path.join(certDir, 'cert.pem'))
 if (!httpsAvailable) console.log('[COS API] No certs found — HTTPS disabled (drop cert.pem/key.pem in server/certs to enable)')
-controlTsnetTls = createControlTsnetTlsForBoot({ enabled: controlTsnetHttpsEnabled(), httpsAvailable }, () => webKeySignerTls, {
+// 7.0.42: a fresh name lookup on every check while the name is unknown (never the cached boot miss), and health names the miss.
+controlTsnetTls = createControlTsnetTlsForBoot({ enabled: controlTsnetHttpsEnabled(), httpsAvailable, nameMiss: () => tailnetSelf.lastMiss?.() ?? null }, () => webKeySignerTls, {
   dir: dataPath(SIGNER_TLS_DIR),
-  selfDnsName: () => tailnetSelf.refresh(),
+  selfDnsName: controlTsnetSelfDnsName(tailnetSelf),
 })
 registerControlTsnetTls(controlTsnetTls)
 // 6.99.31: with COS_WEB_KEY_AUTHORITY on, the phone key's signer origin (https on 3144, same cert)
