@@ -363,12 +363,17 @@ describe('X1 web push: the test-ping cap and the key behind the sign-in (lead 10
     expect(r.sent).toHaveLength(3)
   })
 
-  it('a day stamp in the future counts as today: a full count stays full, never a fresh 20 (lead 10:4x)', async () => {
+  it('a day stamp in the future counts as today: a full count stays full, never a fresh 20, and the next real day is free (lead 10:4x, Q1)', async () => {
     const r = rig()
     const base = await app(r.store, r.post)
     writeFileSync(join(r.dir, 'test-pings.json'), JSON.stringify({ day: '2099-01-01', count: TEST_PINGS_PER_DAY, lastAt: r.clock.now - 60_000 }))
     expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'daily_cap' })
     expect(r.sent).toHaveLength(0)
+    // The refusal re-stamped the record to today, so the next real day counts afresh instead of waiting for 2099.
+    expect(JSON.parse(readFileSync(join(r.dir, 'test-pings.json'), 'utf8')).day).toBe('2026-11-14')
+    r.clock.now = Date.parse('2026-11-15T09:00:00')
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    expect(r.sent).toHaveLength(1)
   })
 
   it('a count that cannot be written sends nothing: 503 cap_unavailable, no POST (Q1 Q5)', async () => {

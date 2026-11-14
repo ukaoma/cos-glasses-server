@@ -57,7 +57,8 @@ const mutations = [
   ["cap-backwards-clock-ok", "server/lib/web-push-store.ts", "if (lastAt !== null && now - lastAt < TEST_PING_GAP_MS) return", "if (lastAt !== null && now >= lastAt && now - lastAt < TEST_PING_GAP_MS) return", "a clock that went backwards after a ping", ["server/routes/web-push.test.ts"]],
   ["cap-write-failure-sends", "server/routes/web-push.ts", "try { claim = deps.store.claimTestPing() } catch { return res.status(503).json({ ok: false, status: 0, reason: 'cap_unavailable', removed: false }) }", "try { claim = deps.store.claimTestPing() } catch { claim = { ok: true } }", "a count that cannot be written sends nothing", ["server/routes/web-push.test.ts"]],
   ["bad-lastat-kept", "server/lib/web-push-store.ts", "      this.write('test-pings.json', { day, count, lastAt: now })\n", "", "a far-future lastAt", ["server/routes/web-push.test.ts"]],
-  ["future-day-fresh", "server/lib/web-push-store.ts", "(storedDay === day || storedDay > day)", "(storedDay === day)", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]]
+  ["future-day-fresh", "server/lib/web-push-store.ts", "(storedDay === day || storedDay > day)", "(storedDay === day)", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]],
+  ["future-day-not-restamped", "server/lib/web-push-store.ts", "    if (storedDay !== null && storedDay > day) this.write('test-pings.json', { day, count, lastAt })\n", "", "a day stamp in the future counts as today", ["server/routes/web-push.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

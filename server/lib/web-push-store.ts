@@ -141,6 +141,9 @@ export class WebPushStore {
     // Lead 10:4x: a day stamp in the future (a clock set back, a damaged file) counts as TODAY, never as a fresh day.
     const count = storedDay !== null && (storedDay === day || storedDay > day) ? storedCount : 0
     const lastAt = typeof stored?.lastAt === 'number' && Number.isFinite(stored.lastAt) ? stored.lastAt : null
+    // Q1 (10:4x): re-stamp a future day to today before anything returns, or a refusal would leave it there and lock
+    // every later day until that date.
+    if (storedDay !== null && storedDay > day) this.write('test-pings.json', { day, count, lastAt })
     // Lead 10:4x: a lastAt more than one gap ahead is a bad record. Refuse this one send and reset lastAt to now, so the
     // lock after any clock change or damaged file lasts at most one gap, never until real time catches up.
     if (lastAt !== null && lastAt - now > TEST_PING_GAP_MS) {
