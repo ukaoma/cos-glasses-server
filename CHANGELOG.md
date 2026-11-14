@@ -1,3 +1,55 @@
+## 7.0.37 - An answer tapped on a question is not lost when the session has moved on
+
+2026-11-14. 7.0.36 plus one fix and one small one. Everything in 7.0.36 is in this update too; see its entry below. Miles, 23:31 on 2026-11-13, after three answers were refused with "The session moved on before this reached it": "we also need a team to fix this".
+
+**On for everyone:**
+- **A tapped answer reaches the question it answers.**
+  - Before, an answer tapped in Control Web (Sessions or Today) on a question a Claude session asked at the end of its turn was refused with "The session moved on before this reached it" almost every time. The session's own turn, the one that ended by asking, counted as the session having moved on.
+  - Three such answers were refused on the evening of 2026-11-13. Two were to questions still open, and in one Miles then typed the same answer at the Mac.
+  - Now the answer names its question, and the server delivers it while that question is still the session's open one, whatever else the session wrote before asking.
+- **If the session has really moved on,** the answer is not sent. Control Web (the Sessions reader and Today's panel) says "The session asked something new: “<new question>”. Your answer to “<question>” was not sent." and shows the new question with its own choices, or "The session took another turn. Your answer to “<question>” was not sent." One button, "Send “<label>” anyway", still sends it; only a tap sends it, once per tap. The session receives: "Answer sent from COS Control Web through COS, not typed in this session: <label>. This answers your earlier question “<question>”. You have taken a turn since asking it."
+- **The first answer counts.** An answer to a question already answered, typed at the Mac or sent from another screen, comes back as already answered and is not sent a second time. This holds for the question's whole life (8 hours), not only the next 2 minutes.
+- **If COS could not confirm the first answer arrived** (its delivery came back unknown), a second answer is held back too, and Control Web says so plainly: "An answer was just sent and COS could not confirm it arrived. Look at the session before answering again." It never claims the question was answered. The reply box stays. This hold lasts only while that question is open.
+- **An older server or a Codex session** that refuses a tapped answer because the thread moved now offers the same button, with the words above. Before, the answer was dropped.
+- **It is still a message from COS.** The answer keeps the words "Answer sent from ... through COS, not typed in this session", and only a message that starts with those words can name a question. A typed message is checked exactly as before.
+- **Today summary size, Settings:** a saved value is read only from the size's own keys, so a stray saved value can never be taken for a size (F1, a fix found in review of 7.0.36).
+- **For developers:**
+  - Session rows and the session stream carry `waiting_ask_id` ("turn_end:<time the session stopped>") when a turn-end question is waiting.
+  - The turn route takes an optional `turnEndAskId`.
+  - A question that is no longer open is refused with the new reason `turn_end_ask_moved`. It carries `askNow` (what the session asks now, or null) and `revision` (what a send-anyway carries). If the question was already answered, it also carries `answered: true` and `answeredBy` (mac, web, glasses, mac_app or cos), or `answered: "unconfirmed"` when an earlier answer's delivery could not be confirmed.
+  - The server log's turn timing line now also carries the time, the binding, the client's turn key, and whether a question was named (ids only, never the words).
+
+**Not covered, said plainly:**
+- **Claude sessions only.** Codex has no end-of-turn questions; its turns are unchanged.
+- **The Mac app** (COS Control) does not name the question yet. It already offers Continue Anyway on a refusal, and the server change removes the false refusals there too; naming the question from the Mac is for a later Mac release.
+- **A burst of about 40 refused sends at 23:16 to 23:20 on 2026-11-13 is not explained.** It was two runs of 7 and 17 back to back, each about a second long, and later runs of 6 and 2. That is a page sending in a loop or a batch, not taps. It was not the Mac app, the glasses or the server's own turn queue, and a read of the web's held, parked and resend paths found no loop. The new timing line names the binding and the client's turn key of the next one.
+- **A server restart forgets** the point each binding was last acknowledged at (it is kept in memory), so typed messages on a binding older than the restart are asked to confirm once. That is unchanged here. Answers that name their question do not depend on it.
+- **The new question drawn after a refusal** comes from the refusal itself and is replaced by the next session read.
+- **Not tried on a real phone, and not in a test browser (WebKit) for the new words and button.** Measured with route tests that run a session which ends its turn with a question, then takes another turn, then gets the tap, and with Control Web tests on the real send path against fake routes.
+
+**Tests:**
+- Server:
+- 18 route tests:
+  - the answer before and after;
+  - accepted only for the question it names;
+  - a newer question open;
+  - no question open with nothing new written;
+  - answered at the Mac first;
+  - first answer counts; an accepted answer refused after all does not use the question up; one whose delivery is unknown holds a second answer as unconfirmed, and that hold ends with the question;
+  - the send-anyway words, with and without the question named;
+  - a typed message, including one quoting the words mid-text;
+  - an older page, a server without the tracker, and a Codex turn naming a question (read as before);
+  - a malformed id;
+  - the wiring;
+  - the timing line.
+- Plus the row's id and the tracker's memory of who answered.
+- Focused run: 22 files, 1,133 tests, exit 0, on 5128b6b9 (with W1's web half); the route file 413 of 413 on 9fd1c08d.
+- Mutation gates on the final server head 9fd1c08d, under the lease:
+  - turn-end-answer: 26 of 26 killed on a green 471-test baseline;
+  - turn-end-ask: 60 of 60 killed on a green 61-test baseline (its 5 stale targets repointed: 2 stale since 7.0.32, 3 from this change).
+- Control Web: `turn-end-web.test.ts` (the reader) and `today-actions.test.ts` (Today's panel, through the real send path): the question named only when the server gave its id; moved, with and without a new question; the button's words, the refusal's revision and no question id; answered; unconfirmed (its words, no button, the reply box left alone); an older server; and nothing sent without a tap after ten minutes of timers. Mutation: 30 of 30 on a green baseline, plus Q1's own automatic-send mutants.
+- The combined full suite on 04cbfecb (both halves), run by W1: 16,644 passed.
+
 ## 7.0.36 - Control Web: layout on the open Duo, and a smaller Today summary
 
 2026-11-14. 7.0.35 plus the layout fixes below. Everything in 7.0.35 is in this update too; see its entry below.
