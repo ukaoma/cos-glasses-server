@@ -96,21 +96,28 @@
    7.0.35 C: a file that stalls fires neither load nor error, so "nothing waits forever" did not hold. Past
    DEADLINE_MS with boot not run, one card under the mark says COS is taking longer than usual, with Try again. Only his tap
    reloads. If the files then arrive, boot runs and the card goes. The deadline is three of the restyle check's asks
-   (STEPS, which that check reads from here): by then the page has asked the Mac for a failed file three times. */
+   (STEPS, which that check reads from here): by then the page has asked the Mac for a failed file three times.
+   Q1 22:30: the deadline and the card belong to the page SHOWING (app.js firstPaintDone calls CosLoad.shown), not to the
+   files settling. A file that fails settles at once, so a failed app.js used to clear the deadline before 7 s: no card,
+   and the 25 s failsafe then uncovered an empty page. Boot still runs when every file has loaded or failed. */
 (function () {
   var STEPS = [1000, 2000, 4000, 8000], DEADLINE_MS = STEPS[0] + STEPS[1] + STEPS[2];
   window.CosLoad = { STEPS: STEPS, DEADLINE_MS: DEADLINE_MS };
   var waiting = [], settled = false, scriptsDone = false, sheetsLeft = -1, deadline = null;
   function stage() { if (window.CosOpen) window.CosOpen.stage(scriptsDone && sheetsLeft === 0 ? 'scripts' : sheetsLeft === 0 ? 'css' : scriptsDone ? 'js' : 'html'); }
   function settle() {
-    settled = true; clearTimeout(deadline);
-    var card = document.getElementById('cos-slow-card'); if (card && card.parentNode) card.parentNode.removeChild(card);
+    settled = true;
     var fns = waiting; waiting = []; fns.forEach(function (fn) { try { fn(); } catch (_e) { setTimeout(function () { throw _e; }, 0); } });
   }
+  // The page showed (the sign-in card or the app): the deadline goes, and the card if it is up.
+  window.CosLoad.shown = function () {
+    clearTimeout(deadline);
+    var card = document.getElementById('cos-slow-card'); if (card && card.parentNode) card.parentNode.removeChild(card);
+  };
   function maybeSettle() { stage(); if (!settled && scriptsDone && sheetsLeft === 0) settle(); }
   window.CosBoot = { after: function (fn) { if (typeof fn !== 'function') return; if (settled) fn(); else waiting.push(fn); } };
   function slowCard() {
-    if (settled || document.getElementById('cos-slow-card') || !document.body) return;
+    if (document.getElementById('cos-slow-card') || !document.body) return;
     var card = document.createElement('div');
     card.id = 'cos-slow-card'; card.setAttribute('role', 'status');
     card.style.cssText = 'position:fixed;left:16px;right:16px;top:calc(50% + 44px);z-index:71;max-width:360px;margin:0 auto;padding:16px;' +
@@ -131,7 +138,7 @@
     try { var u = new URL(location.href); u.searchParams.set('r', String(Date.now())); location.replace(u.pathname + u.search + u.hash); } catch (_e) { location.reload(); }
   }
   window.CosLoad.tryAgain = tryAgain;
-  deadline = setTimeout(function show() { if (settled) return; if (document.body) slowCard(); else deadline = setTimeout(show, 100); }, DEADLINE_MS);
+  deadline = setTimeout(function show() { if (document.body) slowCard(); else deadline = setTimeout(show, 100); }, DEADLINE_MS);
   // The stylesheets, now: they are in the head, before this script, so the list is there already.
   (function sheets() {
     var list = [];

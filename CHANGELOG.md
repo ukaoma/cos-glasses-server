@@ -3,18 +3,18 @@
 2026-11-13. Not published; the release bump drops "(unreleased)". Miles, 21:20: "I'm opening up the COS web application shortcut on the home screen and I'm being met with just a blank screen. The server never ends up loading." Scope: W1_blank_open_scope.md (the lead, 21:45).
 
 **On for everyone:**
-- **The mark draws at once.** The ten stylesheets no longer hold the first paint: theme.js adds them so they never block it, and each turns on when it arrives. The app still never shows unstyled: it starts only once every stylesheet and script has arrived or failed. With JavaScript off, the stylesheets load as before.
+- **The mark draws at once.** The ten stylesheets no longer hold the first paint: theme.js adds them so they never block it, and each turns on when it arrives. The app starts only once every stylesheet and script has arrived or failed. A stylesheet that failed is asked for again in the background, and until it comes back the app shows without it, the same as 7.0.34. With JavaScript off, the stylesheets load as before.
   - Measured, every stylesheet 10 s late: first paint 20,107 ms before, 473 to 864 ms now.
-- **A slow load says so.** If the page has not started after 7 s, one card under the mark reads "COS is taking longer than usual to load. Your Mac may be asleep, or this device may be off Tailscale or on a slow connection." with Try again. If the files then arrive, the app starts and the card goes. It never reloads by itself; only a tap does.
+- **A slow load says so.** If the page has not shown after 7 s, one card under the mark reads "COS is taking longer than usual to load. Your Mac may be asleep, or this device may be off Tailscale or on a slow connection." with Try again. If the files then arrive, the app shows and the card goes. It never reloads by itself; only a tap does.
   - Try again opens the page afresh rather than reloading it, so files that already arrived come from the cache (measured: 4 of 10 stylesheets asked again instead of 10).
-  - Before, a file that never answered left an empty page after 25 s. Now the card stays.
+  - Before, a file that never answered, or one that failed (app.js answering an error, or its connection dropping), left an empty page after 25 s. Now the card shows at 7 s and stays until the page shows.
 - **If theme.js itself fails,** a plain line with a Try again link shows after 7 s, with no script.
 - **A new numbers-only report, `open-lost`.** An open that never showed the page is counted, and the next open that does show sends one row: how many were lost, how long ago, and how far the last one got (`html`, `css`, `js` or `scripts`).
 
 **Not covered, said plainly:**
 - **theme.js stalling.** It is a parser-blocking script, first in the head, so the theme is set before any frame draws. If it never answers, the page cannot reach its body and nothing draws: measured, no paint at 27 s, the same as 7.0.34. Loading it without blocking would cover this, but drew a first frame in the wrong theme on 6 of 10 opens (10 of 10 when it was late), so it is not done.
 - **The page itself never arriving** (the Mac unreachable when the Home Screen app opens). Nothing on the phone can draw then; an offline copy would need a service worker and is not in this release.
-- **`open-lost` cannot see** an open where the page never arrived or theme.js never ran.
+- **`open-lost` cannot see** an open where the page never arrived or theme.js never ran. It also miscounts in four ways: two tabs opened together count each other as lost; closing the app before it shows counts as lost; a Try again or a restyle reload counts the open before it; and a signed-out open sends its row while signed out, which may not reach the Mac.
 - **Not on a real phone.** All of this was measured in WebKit with a test server that holds back or stalls a named file.
 
 **Not changed:** the server's first request after a cold start was measured at about 11 ms for the page and 44 ms for all nine boot files, so nothing is warmed at start.

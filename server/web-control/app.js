@@ -944,6 +944,8 @@
     if (FIRST_PAINT.done) return false;
     FIRST_PAINT.done = true;
     document.documentElement.classList.remove('fp-wait');
+    // 7.0.35 (Q1 22:30): the page showed, so theme.js drops its slow-load deadline and takes the card away if it is up.
+    try { if (window.CosLoad && typeof window.CosLoad.shown === 'function') window.CosLoad.shown(); } catch (_e) { /* the app shows anyway */ }
     try {
       var perf = window.performance, fcp = perf && perf.getEntriesByName ? perf.getEntriesByName('first-contentful-paint')[0] : null;
       var shown = perf && perf.now ? Math.round(perf.now()) : -1;

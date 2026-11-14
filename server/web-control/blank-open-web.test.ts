@@ -119,19 +119,30 @@ describe('C: a deadline, and never an empty page', () => {
     expect(b.replaced).toHaveLength(1)
     expect(b.replaced[0]).toMatch(/^\/control\/\?code=AB12CD34&r=\d+#\/today$/)
   })
-  it('the files then arrive: boot runs and the card goes', () => {
+  it('the files then arrive: boot runs, and the card goes when the page shows', () => {
     const b = boot()
     b.fire(b.window.CosLoad.DEADLINE_MS)
     expect(b.card()).toBeTruthy()
     b.sheets().forEach((s: any) => s.onload()); b.loadScripts(); b.scripts().forEach((s: any) => s.onload())
     expect(b.booted()).toBe(true)
+    expect(b.card(), 'booted is not shown yet').toBeTruthy()
+    b.window.CosLoad.shown()
     expect(b.card(), 'the card is gone').toBeNull()
   })
-  it('a page that booted in time never shows the card, and its deadline is cleared', () => {
+  it('a page that showed in time never shows the card, and its deadline is cleared', () => {
     const b = boot()
     b.sheets().forEach((s: any) => s.onload()); b.loadScripts(); b.scripts().forEach((s: any) => s.onload())
+    expect(b.timers.some(t => t.ms === b.window.CosLoad.DEADLINE_MS), 'booted alone keeps the deadline').toBe(true)
+    b.window.CosLoad.shown()
     expect(b.timers.some(t => t.ms === b.window.CosLoad.DEADLINE_MS), 'deadline cleared').toBe(false)
     expect(b.card()).toBeNull()
+  })
+  it('Q1 22:30: every file FAILS (a refused connection, a 5xx): boot settles at once, and the card still comes at the deadline', () => {
+    const b = boot()
+    b.sheets().forEach((s: any) => s.onerror()); b.loadScripts(); b.scripts().forEach((s: any) => s.onerror())
+    expect(b.booted(), 'settled: failed files count').toBe(true)
+    expect(b.fire(b.window.CosLoad.DEADLINE_MS), 'the deadline is still set').toBe(true)
+    expect(b.card(), 'the card, not an empty page').toBeTruthy()
   })
   it('theme.js marks the page (cos-js), and index.html\'s script-free line shows after the same deadline unless it did', () => {
     const b = boot()
@@ -175,9 +186,10 @@ describe('A: count the opens that never finish', () => {
   it('app.js firstPaintDone sends one open-lost row, numbers only, when opens were lost', () => {
     const i = APP.indexOf('  var FIRST_PAINT = { done: false };'), j = APP.indexOf('  function showAuth(message) {')
     const rows: Array<[string, any]> = []
+    let shownCalls = 0
     const run = (lost: any) => {
       rows.length = 0
-      const window: any = { performance: { getEntriesByName: () => [], now: () => 1, getEntriesByType: () => [] }, CosOpen: { done: () => lost } }
+      const window: any = { performance: { getEntriesByName: () => [], now: () => 1, getEntriesByType: () => [] }, CosOpen: { done: () => lost }, CosLoad: { shown: () => { shownCalls++ } } }
       // eslint-disable-next-line no-new-func
       new Function('window', 'document', 'layoutCrumb', 'Date', APP.slice(i, j) + '\nfirstPaintDone("app");')(window, { documentElement: { classList: { remove() {} } } }, (w: string, d: any) => rows.push([w, d]), { now: () => 10000 })
       return rows.filter(r => r[0] === 'open-lost').map(r => r[1])
@@ -185,5 +197,7 @@ describe('A: count the opens that never finish', () => {
     expect(run({ n: 2, t: 4000, stage: 'css' })).toEqual([{ lost: 2, ago: 6000, stage: 'css' }])
     expect(run(null)).toEqual([])
     expect(run({ n: 0, t: 1, stage: 'html' })).toEqual([])
+    // Q1 22:30: each first paint tells theme.js the page showed, so its slow-load card goes and never comes after.
+    expect(shownCalls, 'CosLoad.shown once per first paint').toBe(3)
   })
 })
