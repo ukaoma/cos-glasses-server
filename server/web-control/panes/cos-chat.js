@@ -727,6 +727,7 @@
     var scroller = scrollerOf(feed);
     var atBottom = scroller ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 : true;
     feed.innerHTML = html;
+    if (historyOn()) paintTrim(feed);
     if (stick || atBottom) scrollToEnd(feed);
   }
   // From 860 px the chat column scrolls by itself; on a phone the page does.
@@ -1281,9 +1282,16 @@
     var el = held ? feed.querySelector('[data-hist="' + held.replace(/["\\]/g, '') + '"]') : null;
     var d = el ? el.getBoundingClientRect().top - at : feed.scrollHeight - h0;
     if (!d) return;
-    if (w) feed.scrollTop += d; else window.scrollBy(0, d);
+    // WebKit keeps a scroll position in whole CSS pixels, and the added height is fractional: a spacer above the history
+    // takes the fraction (0 to 1 px), so the scroll is a whole number and nothing on screen moves at all.
+    var old = C.hist.trim || 0, trim = ((old - d) % 1 + 1) % 1;
+    C.hist.trim = trim; paintTrim(feed);
+    var by = Math.round(d + trim - old);
+    if (by) { if (w) feed.scrollTop += by; else window.scrollBy(0, by); }
   }
-  function histTopHtml() {
+  function paintTrim(feed) { var sp = feed && feed.querySelector ? feed.querySelector('[data-hist-trim]') : null; if (sp && sp.style) sp.style.height = (C.hist.trim || 0) + 'px'; }
+  function histTopHtml() { return '<div class="cc-hist-trim" data-hist-trim aria-hidden="true"></div>' + histTopLine(); }
+  function histTopLine() {
     var s = C.hist;
     if (s.state === 'error') return '<p class="tl-start" data-hist-top>Couldn’t load the thread’s history. <button type="button" class="link-btn" data-cos="hist-retry">Try again</button></p>';
     if (!s.older) return '';
@@ -1293,7 +1301,7 @@
   // The top line changes in place (its height is one line either way), so a load never rebuilds the chat under him.
   function paintHistTop() {
     var el = C.host && C.host.querySelector('[data-hist-top]');
-    if (el) el.outerHTML = histTopHtml() || '<p class="tl-start" data-hist-top></p>';
+    if (el) el.outerHTML = histTopLine() || '<p class="tl-start" data-hist-top></p>';
   }
   function dayLabel(d) {
     var now = new Date();
