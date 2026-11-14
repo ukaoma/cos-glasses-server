@@ -6241,6 +6241,9 @@
   function renderUsageView(force) {
     var box = $('sessions-usage'); if (!box) return;
     uLoadPrefs(); uWire();
+    // 7.0.41 (U1): the plan ruler at the top of Usage (panes/plan-ruler.js). Opening reads a plan reading only when it
+    // is over 10 minutes old (the server's rule); the view's Refresh asks for one over 2 minutes old.
+    if (SX.view === 'usage') ensurePane('planRuler').then(function (p) { if (p) { p.open(force === true); mountPlanRuler(); } }, function () { /* Usage works without it */ });
     var stale = !SX.usage || Date.now() - SX.usageAt > 5 * 60000;
     if (SX.usage) paintUsage(true);
     else box.innerHTML = '<p class="cx-note sx-reading">' + (SX.view === 'cost' ? 'Reading what COS used.' : 'Reading local usage…') + '</p>';
@@ -6266,11 +6269,14 @@
     SX.uWideShown = wide;
     box.classList.toggle('u-wide', wide);
     if (!wide) SX.uM = null;
-    if (!SX.usage) { box.innerHTML = SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : ''; return; }
+    if (!SX.usage) { box.innerHTML = SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : ''; mountPlanRuler(); return; }
     box.innerHTML = (SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : '') +
       (SX.view === 'cost' ? cosCostHtml(SX.usage) : wide ? sessionUsageWideHtml(SX.usage) : sessionUsageHtml(SX.usage));
     if (wide) uDrawWide();
+    mountPlanRuler();
   }
+  // The plan ruler keeps its own element (its open state, focus and height) and is put back at the top after each paint.
+  function mountPlanRuler() { var box = $('sessions-usage'); if (box && PANES.planRuler) PANES.planRuler.mount(box, SX.view === 'usage'); }
 
   // Numbers the way Control writes them (SessionUsagePresentation, CosCostPresentation).
   function uCurrency(v, digits) { return (Number(v) || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }); }

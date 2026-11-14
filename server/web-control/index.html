@@ -61,7 +61,7 @@
        stylesheets no longer hold the first paint. theme.js, the page's first script, adds them from this list (the server
        stamps each with its ?v= hash here) without blocking the render, so the mark draws at once, and boot waits for them,
        loaded or failed, so the app never shows unstyled. With JavaScript off, the noscript copy below loads them. -->
-  <script type="application/json" id="boot-styles">["/control/app.css", "/control/control.css", "/control/panes/speakers.css", "/control/panes/meetings.css", "/control/panes/work.css", "/control/panes/sessions.css", "/control/panes/cos-chat.css", "/control/panes/questions.css", "/control/panes/memories.css", "/control/panes/today-actions.css"]</script>
+  <script type="application/json" id="boot-styles">["/control/app.css", "/control/control.css", "/control/panes/speakers.css", "/control/panes/meetings.css", "/control/panes/work.css", "/control/panes/sessions.css", "/control/panes/plan-ruler.css", "/control/panes/cos-chat.css", "/control/panes/questions.css", "/control/panes/memories.css", "/control/panes/today-actions.css"]</script>
   <!-- theme.js stays a parser-blocking script, first in the head: it sets the theme before any frame draws (measured
        7.0.35: as async, 6 of 10 opens drew a first frame before an explicit dark theme was set; parser-blocking, 0 of
        10). So if it FAILS, the parser goes on and the script-free line below shows; if it STALLS, the page cannot reach
@@ -74,6 +74,7 @@
     <link rel="stylesheet" href="/control/panes/meetings.css">
     <link rel="stylesheet" href="/control/panes/work.css">
     <link rel="stylesheet" href="/control/panes/sessions.css">
+    <link rel="stylesheet" href="/control/panes/plan-ruler.css">
     <link rel="stylesheet" href="/control/panes/cos-chat.css">
     <link rel="stylesheet" href="/control/panes/questions.css">
     <link rel="stylesheet" href="/control/panes/memories.css">
@@ -388,7 +389,8 @@
     "memories": "/control/panes/memories.js",
     "todayActions": "/control/panes/today-actions.js",
     "readerMedia": "/control/panes/reader-media.js",
-    "preview": "/control/panes/preview.js"
+    "preview": "/control/panes/preview.js",
+    "planRuler": "/control/panes/plan-ruler.js"
   }</script>
   <!-- The Knowledge graph explorer, loaded by panes/memories.js when the graph first opens. -->
   <script type="application/json" id="memories-graph-assets">{

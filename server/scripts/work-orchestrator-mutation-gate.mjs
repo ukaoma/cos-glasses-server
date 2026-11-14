@@ -25,12 +25,13 @@ const tests = [
   'server/lib/query-job-coordinator-usage-limit.test.ts',
   'server/lib/ask-work-plan.test.ts',
   'server/lib/work-orchestrator/plan-pane.test.ts',
+  'server/web-control/plan-ruler-web.test.ts',
 ]
 const O = 'server/lib/work-orchestrator/'
 const TG = O + 'tags.ts', RD = O + 'redact.ts', SL = O + 'session-log.ts', PK = O + 'pickup.ts', TI = O + 'tag-index.ts', DI = O + 'discovery.ts'
 const IN = O + 'input.ts', SN = O + 'snapshot.ts', US = O + 'usage.ts', RT = O + 'runtime.ts', PL = O + 'plan-log.ts'
 const WC = 'server/lib/work-chat.ts', WR = 'server/routes/work-chat.ts', OR = 'server/routes/work-orchestrator.ts'
-const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts'
+const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts', PR = 'server/web-control/panes/plan-ruler.js', APP = 'server/web-control/app.js'
 // Defense in depth that no test can reach on purpose, each with the guard that already stops the same outcome.
 const EXPECTED_SURVIVORS = new Set([
   'tail-drops-partial-line',     // a row cut by the seek never parses (JSON.parse rejects it), so it is skipped either way
@@ -161,6 +162,16 @@ const mutations = [
   ['pp-route-refresh', OR, "return res.json(await deps.plan(req.query.refresh === '1'))", 'return res.json(await deps.plan(true))'],
   ['pp-read-no-window', PP, '  if (e.reading && !found) {\n', '  if (false) {\n'],
   ['pp-live-no-reset', PP, '  if (found && windowLive(found.w, now) && !found.w.resetsAt) {\n', '  if (false) {\n'],
+  // 7.0.41 (U1): the plan ruler on Control Web (panes/plan-ruler.js), one mutant per rule.
+  ['pr-no-ruler-null', PR, "    if (line.usedPct === null || line.usedPct === undefined) return '';\n", ''],
+  ['pr-closed-default', PR, "localStorage.getItem(KEY) === '1' : false", "localStorage.getItem(KEY) !== '1' : false"],
+  ['pr-reading-hides', PR, "    if (S.loading) lead = '<span class=\"up-quietw\">Reading…</span>';\n", ''],
+  ['pr-rows-reading-hidden', PR, '    var lines = p && !S.loading ? p.lines :', '    var lines = p ? p.lines :'],
+  ['pr-remember', PR, 'S.open = !S.open; saveOpen(S.open);', 'S.open = !S.open;'],
+  ['pr-refresh-param', PR, "api('/api/usage/plan' + (refresh ? '?refresh=1' : '')", "api('/api/usage/plan' + ''"],
+  ['pr-mount-top', PR, '    if (box.firstChild !== el) box.insertBefore(el, box.firstChild);\n', ''],
+  ['pr-mount-leave', PR, '    if (!visible) { if (el.parentNode) el.parentNode.removeChild(el); return; }', '    if (!visible) { return; }'],
+  ['pr-app-mount-after-paint', APP, '    if (wide) uDrawWide();\n    mountPlanRuler();\n', '    if (wide) uDrawWide();\n'],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],
