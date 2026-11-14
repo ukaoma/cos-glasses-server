@@ -21,6 +21,15 @@ export const PUSH_DIR_MODE = 0o700
 export const PUSH_FILE_MODE = 0o600
 export const MAX_PUSH_DEVICES = 8
 export const MAX_DEVICE_LABEL = 40
+/** Lead 10:3x: at most one test ping every 10 s, and 20 a day per Mac. Counted before the send, kept across a restart. */
+export const TEST_PING_GAP_MS = 10_000
+export const TEST_PINGS_PER_DAY = 20
+
+/** The local calendar day ("today" in his time zone, as the Mac keeps it). */
+function localDay(ms: number): string {
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 /** A subscription endpoint the sender may POST to: https on Apple's push service only. */
 export function isAllowedPushEndpoint(endpoint: unknown): endpoint is string {
@@ -116,6 +125,22 @@ export class WebPushStore {
     if (kept.length === devices.length) return false
     this.write('devices.json', { devices: kept })
     return true
+  }
+
+  /**
+   * Counts one test ping BEFORE it is sent, or refuses it. Kept in push/test-pings.json (0600), so a restart keeps
+   * both limits. A clock that went backwards reads as too soon. A failed write throws: no count, no send.
+   */
+  claimTestPing(): { ok: true } | { ok: false; reason: 'too_soon' | 'daily_cap' } {
+    const now = this.now()
+    const stored = this.read('test-pings.json') as { day?: unknown; count?: unknown; lastAt?: unknown } | null
+    const day = localDay(now)
+    const count = stored?.day === day && typeof stored.count === 'number' && Number.isInteger(stored.count) ? stored.count : 0
+    const lastAt = typeof stored?.lastAt === 'number' ? stored.lastAt : null
+    if (lastAt !== null && now - lastAt < TEST_PING_GAP_MS) return { ok: false, reason: 'too_soon' }
+    if (count >= TEST_PINGS_PER_DAY) return { ok: false, reason: 'daily_cap' }
+    this.write('test-pings.json', { day, count: count + 1, lastAt: now })
+    return { ok: true }
   }
 
   get(id: string): PushDevice | null {

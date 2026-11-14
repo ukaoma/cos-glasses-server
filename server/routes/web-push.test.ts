@@ -8,9 +8,10 @@ import { request, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { b64u, fromB64u, vapidPublicKeyObject } from '../lib/web-push-crypto.js'
-import { isAllowedPushEndpoint, MAX_PUSH_DEVICES, PUSH_DIR_MODE, PUSH_FILE_MODE, WebPushStore } from '../lib/web-push-store.js'
+import { isAllowedPushEndpoint, MAX_PUSH_DEVICES, PUSH_DIR_MODE, PUSH_FILE_MODE, TEST_PING_GAP_MS, TEST_PINGS_PER_DAY, WebPushStore } from '../lib/web-push-store.js'
 import { applePushReason, PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
-import { createWebPushRouter, webPushEnabled } from './web-push.js'
+import { createWebPushRouter, TEST_PING_REFUSED_COPY, webPushEnabled } from './web-push.js'
+import { requireApiToken } from '../lib/api-auth.js'
 import { isPublicApiRequest } from '../lib/api-auth.js'
 
 const ORIGIN = 'https://mac-x1.example-tailnet.ts.net:3143'
@@ -258,5 +259,103 @@ describe('X1 web push: the routes (as mounted with the switch on)', () => {
     expect((await call(base, 'POST', '/api/web-push/test', { deviceId: added.json.id })).json).toMatchObject({ ok: false, reason: 'unknown_device' })
     expect(sent).toHaveLength(1)
     expect((await call(base, 'POST', '/api/web-push/test', { deviceId: '../x' })).status).toBe(400)
+  })
+})
+
+describe('X1 web push: the test-ping cap and the key behind the sign-in (lead 10:3x)', () => {
+  const servers: Server[] = []
+  afterEach(async () => { while (servers.length) { const sv = servers.pop()!; await new Promise<void>(r => sv.close(() => r())) } })
+  async function app(store: WebPushStore, post: PushPost, token?: string): Promise<string> {
+    const a = express()
+    a.use(express.json())
+    if (token) a.use('/api', requireApiToken(token))
+    a.use('/api', createWebPushRouter({ store, originAllowed: o => o === ORIGIN, post }))
+    const server: Server = await new Promise(r => { const sv = a.listen(0, '127.0.0.1', () => r(sv)) })
+    servers.push(server)
+    return `http://127.0.0.1:${(server.address() as { port: number }).port}`
+  }
+  function call(base: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: any }> {
+    return new Promise(resolve => {
+      const data = body === undefined ? undefined : JSON.stringify(body)
+      const req = request(`${base}${path}`, { method, headers: { ...(data ? { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(data)) } : {}), ...headers } }, res => {
+        let raw = ''; res.on('data', c => { raw += c }); res.on('end', () => { let json: any = {}; try { json = JSON.parse(raw) } catch { /* not json */ } resolve({ status: res.statusCode ?? 0, json }) })
+      })
+      if (data) req.write(data)
+      req.end()
+    })
+  }
+  /** A store on a fake clock, with one phone added, and a fake POST that counts every request that would leave the Mac. */
+  function rig(dir = storeDir(), start = Date.parse('2026-11-14T10:00:00')) {
+    const clock = { now: start }
+    const store = new WebPushStore(dir, () => clock.now)
+    const id = (store.add({ endpoint: ENDPOINT, keys: phone().subscription.keys, origin: ORIGIN }) as { ok: true; id: string }).id
+    const sent: string[] = []
+    const post: PushPost = async url => { sent.push(url); return { status: 201, reason: null } }
+    return { dir, clock, store, id, sent, post }
+  }
+
+  it('one test ping every 10 seconds: a second inside the gap is refused with its words and reaches no network', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    r.clock.now += TEST_PING_GAP_MS - 1
+    const soon = await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })
+    expect(soon.status).toBe(429)
+    expect(soon.json).toEqual({ ok: false, status: 0, reason: 'too_soon', reasonCopy: 'Not sent. A test ping was just sent.', removed: false })
+    expect(r.sent).toHaveLength(1)
+    r.clock.now += 1
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    expect(r.sent).toHaveLength(2)
+    expect(TEST_PING_GAP_MS).toBe(10_000)
+  })
+
+  it('20 a day: the 21st is refused with its words and reaches no network; the next day counts afresh', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    for (let i = 0; i < 20; i++) {
+      expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+      r.clock.now += 11_000
+    }
+    const capped = await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })
+    expect(capped.status).toBe(429)
+    expect(capped.json).toMatchObject({ ok: false, reason: 'daily_cap', reasonCopy: "Not sent. Today's test pings are used up." })
+    expect(r.sent).toHaveLength(20)
+    r.clock.now = Date.parse('2026-11-15T09:00:00')
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    expect(r.sent).toHaveLength(21)
+    expect([TEST_PINGS_PER_DAY, TEST_PING_REFUSED_COPY.daily_cap]).toEqual([20, "Not sent. Today's test pings are used up."])
+  })
+
+  it('kept across a restart: a new store and router on the same folder still refuse inside the gap; the ledger file is 0600', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    expect(mode(join(r.dir, 'test-pings.json'))).toBe(0o600)
+    const restarted = new WebPushStore(r.dir, () => r.clock.now + 5_000)
+    const base2 = await app(restarted, r.post)
+    expect((await call(base2, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'too_soon' })
+    expect(r.sent).toHaveLength(1)
+  })
+
+  it('an unknown device is not counted: it never uses up the gap', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: '0000000000000000' })).status).toBe(404)
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+  })
+
+  it('with the switch on, an unauthenticated request makes no key and sends nothing; a signed-in one makes the key once', async () => {
+    const dir = storeDir()
+    const store = new WebPushStore(dir)
+    const sent: string[] = []
+    const base = await app(store, async url => { sent.push(url); return { status: 201, reason: null } }, 'tok-0123456789abcdef')
+    for (const [method, path] of [['GET', '/api/web-push/key'], ['GET', '/api/web-push/devices'], ['POST', '/api/web-push/test']] as const) {
+      expect((await call(base, method, path, method === 'POST' ? { deviceId: '0123456789abcdef' } : undefined)).status).toBe(401)
+    }
+    expect(existsSync(join(dir, 'vapid.json'))).toBe(false)
+    expect(sent).toHaveLength(0)
+    const key = await call(base, 'GET', '/api/web-push/key', undefined, { 'x-cos-token': 'tok-0123456789abcdef' })
+    expect(key.status).toBe(200)
+    expect(existsSync(join(dir, 'vapid.json'))).toBe(true)
   })
 })

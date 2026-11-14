@@ -8,7 +8,8 @@
 //                                  The Origin header must be an https Control Web origin this server serves; a tap on
 //                                  the notification opens <origin>/control.
 //   DELETE /web-push/devices/:id   { removed }
-//   POST   /web-push/test          { deviceId } -> { ok, status, reason, removed }   ONE ping, "COS: Test ping".
+//   POST   /web-push/test          { deviceId } -> { ok, status, reason, removed }   ONE ping, "COS: Test ping". At most one
+//                                  per 10 s and 20 a day per Mac (429 with reasonCopy), counted before the send.
 // Nothing here sends on its own: only POST /web-push/test sends, once per call.
 
 import { Router, type Request, type Response } from 'express'
@@ -30,6 +31,11 @@ export interface WebPushRouterDeps {
 }
 
 const DEVICE_ID_RE = /^[0-9a-f]{16}$/
+/** What a refused test ping says (lead 10:3x). */
+export const TEST_PING_REFUSED_COPY = {
+  too_soon: 'Not sent. A test ping was just sent.',
+  daily_cap: "Not sent. Today's test pings are used up.",
+} as const
 
 export function createWebPushRouter(deps: WebPushRouterDeps): Router {
   const router = Router()
@@ -66,6 +72,11 @@ export function createWebPushRouter(deps: WebPushRouterDeps): Router {
     noStore(res)
     const id = typeof req.body?.deviceId === 'string' ? req.body.deviceId : ''
     if (!DEVICE_ID_RE.test(id)) return res.status(400).json({ error: 'bad_id' })
+    if (!deps.store.get(id)) return res.status(404).json({ ok: false, status: 0, reason: 'unknown_device', removed: false })
+    // Lead 10:3x: one test ping per 10 s and 20 a day, counted BEFORE the send; a refused call reaches no network.
+    let claim: ReturnType<WebPushStore['claimTestPing']>
+    try { claim = deps.store.claimTestPing() } catch { return res.status(503).json({ ok: false, status: 0, reason: 'cap_unavailable', removed: false }) }
+    if (!claim.ok) return res.status(429).json({ ok: false, status: 0, reason: claim.reason, reasonCopy: TEST_PING_REFUSED_COPY[claim.reason], removed: false })
     const result = await sendOnePing(deps.store, id, 'test', { post: deps.post, nowSeconds: deps.nowSeconds })
     console.log(`[web-push] test ping status=${result.status} ok=${result.ok} reason=${result.reason ?? 'none'} removed=${result.removed}`)
     return res.status(result.ok ? 200 : 502).json(result)
