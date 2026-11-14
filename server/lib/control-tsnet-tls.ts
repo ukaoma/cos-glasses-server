@@ -67,13 +67,18 @@ export interface ControlTsnetHealth {
   expiresAt: string | null
 }
 
+/** A reason code, with tailnet_name_unknown said precisely when the miss is known. */
+function precise(code: string | null, nameMiss: TailnetNameMiss | null): string | null {
+  return code === 'tailnet_name_unknown' && nameMiss ? TAILNET_NAME_MISS_REASON[nameMiss] : code
+}
+
 export function controlTsnetHealthFrom(status: SignerTlsStatus | null, nameMiss: TailnetNameMiss | null = null): ControlTsnetHealth {
   if (!status) return { state: 'starting', reason: null, renewalError: null, expiresAt: null }
-  if (status.trusted) return { state: 'serving', reason: null, renewalError: status.lastError, expiresAt: status.notAfter }
+  // A stored pair serves from the first handshake after a restart, before the name is known: a failed name lookup then
+  // is a renewal error beside `serving`, never a fault in front of it.
+  if (status.trusted) return { state: 'serving', reason: null, renewalError: precise(status.lastError, nameMiss), expiresAt: status.notAfter }
   if (status.checkedAt === null && status.lastError === null) return { state: 'starting', reason: null, renewalError: null, expiresAt: null }
-  const raw = status.lastError ?? status.reason
-  const reason = raw === 'tailnet_name_unknown' && nameMiss ? TAILNET_NAME_MISS_REASON[nameMiss] : raw
-  return { state: 'not_serving', reason, renewalError: null, expiresAt: null }
+  return { state: 'not_serving', reason: precise(status.lastError ?? status.reason, nameMiss), renewalError: null, expiresAt: null }
 }
 
 export class ControlTsnetTls {

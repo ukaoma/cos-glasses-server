@@ -307,11 +307,41 @@ describe('X1 7.0.42: a boot name miss no longer holds back the certificate', () 
     const clock = { now: Date.now() }
     const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true, nameMiss: () => self.lastMiss?.() ?? null }, () => null,
       { ...deps(pair, clock, calls), selfDnsName: () => self.refresh() }, d => new SignerTls(d))!
+    const port = await serve3143(tls)
     tls.start()
     await tls.active()!.check()
     expect(lookups()).toBe(1)
     expect(calls).toEqual([])
     expect(tls.health()).toEqual({ state: 'not_serving', reason: 'tailnet_name_no_answer', renewalError: null, expiresAt: null })
+    // Lead 14:59, question 2, from a real handshake: in that window the ts.net name gets the mkcert pair (a phone on
+    // https would see a certificate warning; on http it sees nothing).
+    expect(await served(port, NAME)).toBe(mkcert.fingerprint)
+    tls.stop()
+  })
+
+  it('a restart serves the stored certificate from the first handshake, before the name is known, with no new request', async () => {
+    // Before the restart: a check finds the name, fetches and stores the pair.
+    const clock = { now: Date.now() }
+    const firstCalls: string[] = []
+    const first = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true }, () => null, deps(pair, clock, firstCalls), d => new SignerTls(d))!
+    first.start()
+    await first.active()!.check()
+    expect(firstCalls).toEqual(['status', 'cert'])
+    const dir = (first.active() as unknown as { deps: SignerTlsDeps }).deps.dir
+    first.stop()
+    // After the restart: the name lookup misses (as at 14:51), and the same folder holds the pair.
+    const { self } = bootMissedSelf()
+    await self.refresh()
+    const calls: string[] = []
+    const tls = createControlTsnetTlsForBoot({ enabled: true, httpsAvailable: true, nameMiss: () => self.lastMiss?.() ?? null }, () => null,
+      { ...deps(pair, clock, calls), dir, selfDnsName: () => self.refresh() }, d => new SignerTls(d))!
+    const port = await serve3143(tls)
+    tls.start()
+    expect(await served(port, NAME)).toBe(pair.fingerprint)
+    await tls.active()!.check()
+    expect(calls).toEqual([])
+    expect(await served(port, NAME)).toBe(pair.fingerprint)
+    expect(tls.health()).toMatchObject({ state: 'serving', reason: null, renewalError: 'tailnet_name_no_answer' })
     tls.stop()
   })
 
