@@ -337,6 +337,26 @@ describe('X1 web push: the test-ping cap and the key behind the sign-in (lead 10
     expect(r.sent).toHaveLength(1)
   })
 
+  it('a clock that went backwards after a ping reads as too soon, never as a fresh gap (Q1 Q3)', async () => {
+    const r = rig()
+    const base = await app(r.store, r.post)
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json.ok).toBe(true)
+    r.clock.now -= 30_000
+    expect((await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })).json).toMatchObject({ ok: false, reason: 'too_soon' })
+    expect(r.sent).toHaveLength(1)
+  })
+
+  it('a count that cannot be written sends nothing: 503 cap_unavailable, no POST (Q1 Q5)', async () => {
+    const r = rig()
+    class BrokenCount extends WebPushStore { override claimTestPing(): never { throw new Error('EROFS') } }
+    const broken = new BrokenCount(r.dir, () => r.clock.now)
+    const base = await app(broken, r.post)
+    const res = await call(base, 'POST', '/api/web-push/test', { deviceId: r.id })
+    expect(res.status).toBe(503)
+    expect(res.json).toEqual({ ok: false, status: 0, reason: 'cap_unavailable', removed: false })
+    expect(r.sent).toHaveLength(0)
+  })
+
   it('an unknown device is not counted: it never uses up the gap', async () => {
     const r = rig()
     const base = await app(r.store, r.post)
