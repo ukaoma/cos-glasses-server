@@ -43,7 +43,8 @@ const mutations = [
   ["replay-loses-moved", "server/lib/turn-end-ask.ts", "      if (promptId === null || current.promptId === null || promptId !== current.promptId) {", "      if (false) {", "restart, the session moved on with tool work", ["server/routes/agent-session-bindings.test.ts"]],
   ["replay-loses-open", "server/lib/turn-end-ask.ts", "      const capture = p.turn_ask !== undefined ? projectedTurnAsk(p.turn_ask) : captureTurnAsk(p.tool_input, this.deps.words())", "      const capture = captureTurnAsk(p.tool_input, this.deps.words())", "restart, the ask still open", ["server/routes/agent-session-bindings.test.ts"]],
   ["early-path-sets-mark", "server/routes/agent-session-bindings.ts", "        if (!early.open) {\n", "        if (!early.open) {\n          answeredAsks.set(`claude:${binding.nativeThreadId.toLowerCase()}:${namedAsk}`, { at: Date.now(), by: turnAskAnswerSurface(prompt, true), state: 'unconfirmed' })\n", "a second tap during an in-flight first answer", ["server/routes/agent-session-bindings.test.ts"]],
-  ["machine-child-moved", "server/lib/turn-end-ask.ts", "      if (current && !child && (p.prompt_machine_only", "      if (current && (p.prompt_machine_only", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
+  ["machine-child-moved", "server/lib/turn-end-ask.ts", "      if (current && !child && (p.prompt_machine_only", "      if (current && (p.prompt_machine_only", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
+  ["g2-dictation-moved", "server/lib/session-hook-events.ts", "  if (prompt.includes('[COS-G2 turn')) return false\n", "", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

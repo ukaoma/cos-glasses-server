@@ -682,6 +682,7 @@ describe('the runtime: deriveForRow and the counters', () => {
     expect('prompt_machine_only' in typed).toBe(false)
     expect(String(typed.prompt).length).toBeLessThan(typedAfter.length)
     expect('prompt_machine_only' in projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: 'Commands run, go' })).toBe(false)
+    expect('prompt_machine_only' in projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: '<cross-session-message from="g">Yes [COS-G2 turn ct1]</cross-session-message>' })).toBe(false)
   })
 
   it('X1 7.0.38: a prompt the machine wrote clears the ask as moved on, never as answered; one he typed is still his answer', async () => {
@@ -741,6 +742,16 @@ describe('the runtime: deriveForRow and the counters', () => {
       ]) {
         const r = await roundWith(typed)
         expect(r.answered).toMatchObject({ by: 'mac' })
+        expect([r.byTurn, r.byReply]).toEqual([0, 1])
+      }
+      // Q1 (08:0x): a G2 dictation reaches a session wrapped in another session's message, its verify footer inside the
+      // block. It is his answer, from the glasses, as in 7.0.37: never "moved on".
+      for (const dictated of [
+        '<cross-session-message from="local_g2">Yes, ship it\n[COS-G2 turn ctg2-0001 verify]</cross-session-message>',
+        '<system-reminder>x</system-reminder>\n<cross-session-message from="local_g2">Approved [COS-G2 turn ctg2-0002]</cross-session-message>',
+      ]) {
+        const r = await roundWith(dictated)
+        expect(r.answered).toMatchObject({ by: 'glasses' })
         expect([r.byTurn, r.byReply]).toEqual([0, 1])
       }
       // Q1 S17: a COS-spawned Continue child carries words someone sent through COS. Blocks or not, it is a reply by COS.

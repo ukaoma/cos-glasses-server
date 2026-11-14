@@ -244,11 +244,14 @@ export const HOOK_TEXT_MAX = 400
  * starts a new turn without answering what the session asked. Typed text can arrive bundled after those blocks (on
  * Miles's ledger, 11/14: 25 prompts were blocks only, 4 had text after the blocks, 857 were clipped too short to tell),
  * so a prompt counts only when no text at all is left outside the blocks. An unclosed block, text before or after,
- * or clipped words all read as typed: when in doubt it is his answer.
+ * clipped words, or a G2 verify footer anywhere all read as typed: when in doubt it is his answer.
  */
 const MACHINE_BLOCK_OPEN_RE = /^\s*<(cross-session-message|task-notification|system-reminder|scheduled-task|agent-message)(?=[\s>])[^>]*>/
 export function isMachineOnlyPrompt(prompt: unknown): boolean {
   if (typeof prompt !== 'string') return false
+  // Q1 (08:0x): a G2 dictation arrives wrapped in another session's message with its verify footer inside. That is
+  // his answer from the glasses, never the machine's.
+  if (prompt.includes('[COS-G2 turn')) return false
   let rest = prompt
   let blocks = 0
   for (;;) {
