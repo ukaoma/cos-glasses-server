@@ -1255,17 +1255,21 @@
     }, function () { C.hist.olderState = 'error'; paintHistTop(); return false; });
   }
   // What arrived since the newest cursor (his own chats from another tab, and later the timeline), page by page.
+  // Q1 10:08: the busy mark belongs to one run of pages, and every way out of that run clears it (the page cap included),
+  // or the poll and focus reads would stop for good until a reload.
   function loadNewer(n) {
     n = n || 0;
-    if (!historyOn() || C.hist.state !== 'ready' || !C.hist.newest || (C.hist.newerBusy && !n) || n >= HIST_NEWER_PAGES) return;
+    if (!n && C.hist.newerBusy) return;
+    var done = function () { C.hist.newerBusy = false; };
+    if (!historyOn() || C.hist.state !== 'ready' || !C.hist.newest || n >= HIST_NEWER_PAGES) { if (n) done(); return; }
     C.hist.newerBusy = true;
     api(histUrl('&after=' + encodeURIComponent(C.hist.newest))).then(function (d) {
       var got = d && Array.isArray(d.entries) ? d.entries : [];
       if (d && typeof d.newest === 'string' && d.newest) C.hist.newest = d.newest;
       if (got.length || (d && Array.isArray(d.updated) && d.updated.length)) { histMerge(got.concat(d.updated || []), 'newer'); paintFeed(false); }
       if (d && d.more === true && got.length) return loadNewer(n + 1);
-      C.hist.newerBusy = false;
-    }, function () { C.hist.newerBusy = false; });
+      done();
+    }, done);
   }
   /** Run a repaint that adds entries ABOVE what he is reading, then put the entry he was looking at back where it was, to
    *  the fraction of a pixel (WebKit measured 0.5 px off when only the total height was compared). With no entry to hold

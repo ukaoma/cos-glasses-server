@@ -48,7 +48,7 @@ function load(answers: Record<string, Answer>, o: { wide?: boolean } = {}) {
   chat._state.caps = { dropIt: true, jobs: true, steer: false, thread: true, history: true, dropFiles: 0 }
   chat._state.host = host; chat._state.items = []; chat._state.feedState = 'ready'
   const tap = (what: string, id?: string) => chat.onClick({ getAttribute: (a: string) => (a === 'data-cos' ? what : a === 'data-id' ? id ?? null : null), closest: () => null })
-  return { chat, feed, host, calls, scrolled, intervals, tap, document }
+  return { chat, feed, host, calls, scrolled, intervals, tap, document, W }
 }
 const day = (d: number, h = 9, m = 0) => new Date(2026, 10, d, h, m).toISOString()
 const entry = (id: string, at: string, o: Record<string, unknown> = {}) => ({ id: 't:' + id, at, kind: 'chat', question: 'Q ' + id, answer: 'A ' + id, answerChars: null, full: true, threadId: 'th_1', status: 'completed', ...o })
@@ -191,6 +191,36 @@ describe('7.0.39 thread candidate 1: newer entries and whole answers', () => {
     expect(h.chat._state.hist.entries.map((e: any) => e.id)).toEqual(['t:a', 't:b', 't:c'])
     expect(h.feed.innerHTML).toContain('A a revised')
     expect(h.chat._state.hist.newest).toBe('n3')
+  })
+  it('Q1 10:08: a server that keeps saying more stops at five pages, and the next poll still reads (nothing is left busy)', async () => {
+    let k = 0
+    const h = load({ [H]: page([entry('a', day(13, 9))], null, 'n0'),
+      '/api/cos-thread/history?limit=40&after=*': () => ({ protocol: 1, entries: [entry('m' + ++k, day(13, 10, k))], updated: [], newest: 'n' + k, more: true, older: null }) }, { wide: true })
+    h.chat._loadHistory(); await flush()
+    h.chat._loadNewer(); await flush(40)
+    expect(h.calls.filter(c => /after=/.test(c)), 'five pages, then it stops').toHaveLength(5)
+    expect(h.chat._state.hist.newerBusy, 'not left busy').toBe(false)
+    h.chat._loadNewer(); await flush(40)
+    expect(h.calls.filter(c => /after=/.test(c)), 'the next poll reads again').toHaveLength(10)
+  })
+  it('a newer read that fails leaves nothing busy; the history turning off mid-run leaves nothing busy', async () => {
+    let fail = true
+    const h = load({ [H]: page([entry('a', day(13, 9))], null, 'n0'),
+      '/api/cos-thread/history?limit=40&after=*': () => (fail ? new Error('x') : { protocol: 1, entries: [entry('b', day(13, 10))], updated: [], newest: 'n1', more: true, older: null }) }, { wide: true })
+    h.chat._loadHistory(); await flush()
+    h.chat._loadNewer(); await flush()
+    expect(h.chat._state.hist.newerBusy).toBe(false)
+    fail = false
+    h.chat._state.caps.history = true
+    const p = h.chat._loadNewer(); h.chat._state.caps = { ...h.chat._state.caps, history: false }; await flush(20)
+    expect(h.chat._state.hist.newerBusy, 'a run that ends because history went away clears its mark').toBe(false)
+  })
+  it('the card time is escaped like everything else on it (Q1 J14): a locale string with markup draws as text', () => {
+    const h = load({})
+    h.W.toDate = () => ({ toLocaleTimeString: () => '<i>9:00</i>', toDateString: () => 'd', getFullYear: () => 2026 })
+    const html = h.chat._histHtml(entry('t', day(13)))
+    expect(html).not.toContain('<i>9:00</i>')
+    expect(html).toContain('&lt;i>9:00&lt;/i>')
   })
   it('the poll runs every 30 s while the chat shows, and reads only after the first page', async () => {
     const h = load({ [H]: page([entry('a', day(13))], null, 'n1') })
