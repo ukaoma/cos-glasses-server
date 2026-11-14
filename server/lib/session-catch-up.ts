@@ -35,16 +35,18 @@ export function isCursor(value: unknown): value is string {
 }
 
 /**
- * The turns after `after` in `window` (oldest first), or the whole window with `gap` when `after` is absent or is
- * not in the window (more than a window behind, or a transcript rewritten). The newest match counts.
+ * The turns after `after` in `window` (oldest first), or the whole window with `gap` when `after` is absent, is not
+ * in the window (more than a window behind, or a transcript rewritten), or names MORE than one turn. Identical turns
+ * share a cursor (Cursor writes no time), and picking either copy is wrong: the newest hides turns the page never saw
+ * (it saw [go, Done.], the desk added [next, Done.]), the oldest repeats turns it already has (Q1 17:22).
  */
 export function turnsSince<T extends TurnLike>(window: readonly T[], after: string | null): { turns: T[]; gap: boolean; cursor: string | null } {
   const cursor = window.length ? turnCursor(window[window.length - 1]!) : null
   if (after === null) return { turns: [...window], gap: true, cursor }
-  for (let i = window.length - 1; i >= 0; i--) {
-    if (turnCursor(window[i]!) === after) return { turns: window.slice(i + 1), gap: false, cursor: cursor ?? after }
-  }
-  return { turns: [...window], gap: true, cursor }
+  const hits: number[] = []
+  for (let i = 0; i < window.length; i++) if (turnCursor(window[i]!) === after) hits.push(i)
+  if (hits.length !== 1) return { turns: [...window], gap: true, cursor }
+  return { turns: window.slice(hits[0]! + 1), gap: false, cursor: cursor ?? after }
 }
 
 // ------------------------------------------------------------------ the sentence (a fixed set; contract section)

@@ -67,17 +67,25 @@ describe('the cursor', () => {
     expect(turnCursor(t(2, '2026-11-14T12:00:00.000Z'))).not.toBe(c)
     for (const bad of ['', 'c2.x.AAAAAAAAAAAAAAAA', 'c1.x.short', 'c1.a b.AAAAAAAAAAAAAAAA', 'c1.' + 'a'.repeat(70) + '.AAAAAAAAAAAAAAAA', 7]) expect(isCursor(bad)).toBe(false)
   })
-  it('turnsSince: the turns after the cursor; none or an unknown cursor gives the window with gap; the newest match counts', () => {
+  it('turnsSince: the turns after the cursor; none, an unknown or an ambiguous cursor gives the window with gap', () => {
     const w = [t(1, 'a'), t(2, 'b'), t(3, 'c')]
     expect(turnsSince(w, null)).toMatchObject({ gap: true, turns: w, cursor: turnCursor(w[2]!) })
     expect(turnsSince(w, turnCursor(w[0]!))).toMatchObject({ gap: false, turns: [w[1], w[2]] })
     expect(turnsSince(w, turnCursor(w[2]!))).toMatchObject({ gap: false, turns: [] })
     expect(turnsSince(w, 'c1..AAAAAAAAAAAAAAAA')).toMatchObject({ gap: true, turns: w })
     expect(turnsSince([], null)).toEqual({ turns: [], gap: true, cursor: null })
-    // Two identical turns (same role, words and time): the NEWEST match counts, so only what follows it is new.
-    const same = t(1, 'x')
-    const dup = [same, t(2, 'y'), { ...same }, t(3, 'z')]
-    expect(turnsSince(dup, turnCursor(same))).toMatchObject({ gap: false, turns: [dup[3]] })
+    // Q1 17:22: a cursor that names MORE than one turn is ambiguous (identical turns; Cursor writes no time), so it
+    // answers like an unknown one: the window, with gap. Newest-first would hide new turns, oldest-first repeat them.
+    const turnNoAt = (role: string, text: string) => ({ role, text })
+    const seen = [turnNoAt('user', 'go'), turnNoAt('assistant', 'Done.')]
+    const later = [...seen, turnNoAt('user', 'next'), turnNoAt('assistant', 'Done.')]
+    expect(turnsSince(later, turnCursor(seen[1]!))).toEqual({ gap: true, turns: later, cursor: turnCursor(later[3]!) })
+    // The mirror: the page saw [Done., go, Done.] and nothing came since.
+    const mirror = [turnNoAt('assistant', 'Done.'), turnNoAt('user', 'go'), turnNoAt('assistant', 'Done.')]
+    expect(turnsSince(mirror, turnCursor(mirror[2]!))).toMatchObject({ gap: true, turns: mirror })
+    // Distinct times make identical words unique again: only what follows that one turn.
+    const timed = [t(1, 'a'), { ...t(1, 'b'), text: 't1' }, t(3, 'c')]
+    expect(turnsSince(timed, turnCursor(timed[1]!))).toMatchObject({ gap: false, turns: [timed[2]] })
   })
 })
 
