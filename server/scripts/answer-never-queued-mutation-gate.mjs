@@ -51,7 +51,8 @@ const mutations = [
   ["marker-footer-unanchored", "server/lib/turn-footer.ts", "const PERSON_FOOTER_LINE_RE = /^\\[COS-", "const PERSON_FOOTER_LINE_RE = /\\[COS-", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
   ["marker-footer-no-id", "server/lib/turn-footer.ts", "turn [A-Za-z0-9][A-Za-z0-9_-]{7,127} \\u00b7 verify: [^\\n\\]]*\\]/m", "turn [^\\]]*\\]/m", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
   ["marker-footer-any-case", "server/lib/turn-footer.ts", "verify: [^\\n\\]]*\\]/m\n", "verify: [^\\n\\]]*\\]/im\n", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]],
-  ["marker-quote-counts", "server/lib/turn-footer.ts", "const footer = PERSON_FOOTER_LINE_RE.exec(text)", "const footer = TURN_FOOTER_SHAPED_RE.exec(text)", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
+  ["marker-quote-counts", "server/lib/turn-footer.ts", "const footer = PERSON_FOOTER_LINE_RE.exec(text)", "const footer = TURN_FOOTER_SHAPED_RE.exec(text)", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-footer-no-verify", "server/lib/turn-footer.ts", "[A-Za-z0-9][A-Za-z0-9_-]{7,127} \\u00b7 verify: [^\\n\\]]*\\]/m", "[A-Za-z0-9][A-Za-z0-9_-]{7,127}/m", "counts a mark only where a real turn has it", ["server/lib/turn-end-ask.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

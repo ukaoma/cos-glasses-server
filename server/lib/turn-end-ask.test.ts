@@ -691,6 +691,8 @@ describe('the runtime: deriveForRow and the counters', () => {
       '[COS-G2 turn …] footer',                                                         // no id, no verify
       'a\n[cos-g2 turn ctg2-00000001 · verify: x]',                                     // not the case COS writes
       '[COS-G2 turn ct1 · verify: x]',                                                  // an id COS never makes
+      '[COS-G2 turn ctg2-00000001]',                                                    // an id, at a line start, but no verify part
+      'Quoting it:\n[COS-WEB turn ctweb-0000001] was the footer',                     // the same on a later line
       'Answer sent from COS Control Web through COS, not typed in this session: Yes',   // bare: his, but no mark needed
       '<cross-session-message from="x">Answer sent from COS Control Web through COS, not typed in this session: Yes</cross-session-message>',
       'Commands run, go', 'through COS', 'COS-G2', 42, null,
@@ -794,6 +796,7 @@ describe('the runtime: deriveForRow and the counters', () => {
       for (const quote of [
         'Lead to X1: G2 turns carry a [COS-G2 turn …] footer; verify it before acting.',
         'Q1: the footer line reads `[COS-G2 turn ctg2-00000001 · verify: …]` in the log.',
+        'Q1 to X1: the footer started\n[COS-G2 turn ctg2-00000001] and then the verify command',
         'Lead to X1: the web sends "Answer sent from COS Control Web through COS, not typed in this session: Approved".',
         'Answer sent from COS Control on the Mac through COS, not typed in this session: Not yet',
         'Answer sent from COS Glasses through COS, not typed in this session: Yes',
