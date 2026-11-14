@@ -157,7 +157,7 @@ describe('Today summary size: kept per device, applied before the first paint', 
     expect(css).toMatch(/html\[data-story-size='small'\] \{ --story-k: 0\.72; \}/)
     const sizes = [...css.matchAll(/\.story \{([^}]*)\}/g)].map(m => m[1]!).filter(b => /font(-size)?:/.test(b))
     expect(sizes.length).toBe(5)
-    for (const b of sizes) expect(b).toMatch(/calc\(\d+px \* var\(--story-k\)\)/)
+    for (const b of sizes) expect(b).toMatch(/max\(17px, calc\(\d+px \* var\(--story-k\)\)\)/)   // never under 17 px (lead 23:10)
     expect(css).toMatch(/\.story \{[^}]*max-width: 62ch;/)
   })
   it('the sentence sits above the two columns, not inside the left one', () => {
