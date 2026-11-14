@@ -5038,7 +5038,8 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     } finally { spy.mockRestore() }
     expect(res.body.outcome).toBe('completed')
     // The timing line now says when, on which binding, from which client key, and that it named an ask; never the words.
-    const timing = logged.find(l => l.includes('turn timing') && l.includes('outcome=completed'))
+    // The first answer here is the 202 (`queued`); whichever outcome, the line carries the same tags.
+    const timing = logged.find(l => l.includes('turn timing') && l.includes('clientTurnId=ct-te-0002'))
     expect(timing).toMatch(/ at=\d{4}-\d\d-\d\dT/)
     expect(timing).toContain(`bindingId=${a.bindingId}`)
     expect(timing).toContain('clientTurnId=ct-te-0002 turnEndAsk=named')
