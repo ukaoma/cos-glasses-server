@@ -954,6 +954,14 @@
       if (typeof layoutCrumb === 'function') layoutCrumb('open-time', { fcp: fcp ? Math.round(fcp.startTime) : -1, shown: shown, via: via,
         dcl: dcl, boot: FIRST_PAINT.boot == null ? -1 : FIRST_PAINT.boot, rtt: FIRST_PAINT.rtt == null ? -1 : FIRST_PAINT.rtt });
     } catch (_e) { /* timing is a report only */ }
+    // 7.0.35 A (W1_blank_open_scope.md): this open showed, so it is not lost. Opens before it that never showed (theme.js
+    // counted them) are reported once, numbers only: how many, how long ago the last began, and how far it got.
+    try {
+      var lost = window.CosOpen && typeof window.CosOpen.done === 'function' ? window.CosOpen.done() : null;
+      if (lost && Number(lost.n) > 0 && typeof layoutCrumb === 'function') {
+        layoutCrumb('open-lost', { lost: Number(lost.n), ago: typeof lost.t === 'number' ? Math.max(0, Date.now() - lost.t) : -1, stage: String(lost.stage || '').slice(0, 8) });
+      }
+    } catch (_e) { /* a report only */ }
     return true;
   }
   function showAuth(message) {

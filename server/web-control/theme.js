@@ -1,3 +1,35 @@
+/* 7.0.35 A (W1_blank_open_scope.md): count the opens that never finish. First thing on every open: if the open before
+   this one left its mark (cos_open_try), it never showed the page, so it is counted as lost (cos_open_lost: how many,
+   and the time and the stage of the last). Then this open writes its own mark, moved on as it gets further: html (this
+   script ran), css (the stylesheets settled), js (the scripts settled before the stylesheets), scripts (both settled).
+   app.js's firstPaintDone takes the mark away and sends one numbers-only 'open-lost' row for what was counted. It cannot
+   see an open where the page never arrived or this script never ran. */
+(function () {
+  var KEY = 'cos_open_try', LOST = 'cos_open_lost';
+  try {
+    var prev = JSON.parse(localStorage.getItem(KEY) || 'null');
+    if (prev && typeof prev.t === 'number') {
+      var lost = JSON.parse(localStorage.getItem(LOST) || 'null') || { n: 0 };
+      lost.n = (Number(lost.n) || 0) + 1; lost.t = prev.t; lost.stage = String(prev.stage || 'html');
+      localStorage.setItem(LOST, JSON.stringify(lost));
+    }
+    localStorage.setItem(KEY, JSON.stringify({ t: Date.now(), stage: 'html' }));
+  } catch (_e) { /* no storage: nothing counted */ }
+  // Try again (the slow-load card) opens the page at a fresh ?r= address; take it out of the address again, keeping the
+  // rest of it and the history entry's own state.
+  try {
+    if (/[?&]r=\d{1,15}(&|$)/.test(location.search) && window.history && history.replaceState) {
+      var u = new URL(location.href); u.searchParams.delete('r');
+      history.replaceState(history.state, '', u.pathname + u.search + u.hash);
+    }
+  } catch (_e) { /* the address keeps r; nothing reads it */ }
+  window.CosOpen = {
+    stage: function (stage) { try { var v = JSON.parse(localStorage.getItem(KEY) || 'null'); if (v) { v.stage = stage; localStorage.setItem(KEY, JSON.stringify(v)); } } catch (_e) {} },
+    // The page showed: this open is not lost. Returns what was counted before it (or null), and forgets it.
+    done: function () { try { localStorage.removeItem(KEY); var l = JSON.parse(localStorage.getItem(LOST) || 'null'); localStorage.removeItem(LOST); return l; } catch (_e) { return null; } }
+  };
+})();
+
 /* Runs before first paint so the page never flashes the wrong theme. Choice: system | light | dark. */
 (function () {
   var KEY = 'cos_web_theme';
@@ -22,6 +54,8 @@
   // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
   // never shows a mark that nothing would take away. app.js removes the class when the sign-in card or the app shows.
   document.documentElement.classList.add('fp-wait');
+  // 7.0.35 C: this script ran, so index.html's script-free fallback line (.fp-lost) stays away.
+  document.documentElement.classList.add('cos-js');
   if (media && media.addEventListener) media.addEventListener('change', function () { if (read() === 'system') apply('system'); });
 })();
 
@@ -55,17 +89,72 @@
    for them. Same files, same order (async=false keeps insertion order), and app.js's boot runs only once every one of
    them has run, as when they were in the page: window.CosBoot.after(boot). The frame wait has a 50 ms fallback, because
    a page opened in the background gets no animation frames. A script that fails to load counts as settled, as a failed
-   <script> tag did; nothing waits for it forever. */
+   <script> tag did.
+   7.0.35 B (W1_blank_open_scope.md): the stylesheets (index.html #boot-styles) are added here, as media="print" so they
+   never hold the first paint, and each turns on the moment it arrives. Boot also waits for them, loaded or failed, so
+   the app never shows unstyled under the cover; a failed one is asked for again by the restyle check below.
+   7.0.35 C: a file that stalls fires neither load nor error, so "nothing waits forever" did not hold. Past
+   DEADLINE_MS with boot not run, one card under the mark says COS is taking longer than usual, with Try again. Only his tap
+   reloads. If the files then arrive, boot runs and the card goes. The deadline is three of the restyle check's asks
+   (STEPS, which that check reads from here): by then the page has asked the Mac for a failed file three times. */
 (function () {
-  var waiting = [], settled = false;
-  function settle() { settled = true; var fns = waiting; waiting = []; fns.forEach(function (fn) { try { fn(); } catch (_e) { setTimeout(function () { throw _e; }, 0); } }); }
+  var STEPS = [1000, 2000, 4000, 8000], DEADLINE_MS = STEPS[0] + STEPS[1] + STEPS[2];
+  window.CosLoad = { STEPS: STEPS, DEADLINE_MS: DEADLINE_MS };
+  var waiting = [], settled = false, scriptsDone = false, sheetsLeft = -1, deadline = null;
+  function stage() { if (window.CosOpen) window.CosOpen.stage(scriptsDone && sheetsLeft === 0 ? 'scripts' : sheetsLeft === 0 ? 'css' : scriptsDone ? 'js' : 'html'); }
+  function settle() {
+    settled = true; clearTimeout(deadline);
+    var card = document.getElementById('cos-slow-card'); if (card && card.parentNode) card.parentNode.removeChild(card);
+    var fns = waiting; waiting = []; fns.forEach(function (fn) { try { fn(); } catch (_e) { setTimeout(function () { throw _e; }, 0); } });
+  }
+  function maybeSettle() { stage(); if (!settled && scriptsDone && sheetsLeft === 0) settle(); }
   window.CosBoot = { after: function (fn) { if (typeof fn !== 'function') return; if (settled) fn(); else waiting.push(fn); } };
+  function slowCard() {
+    if (settled || document.getElementById('cos-slow-card') || !document.body) return;
+    var card = document.createElement('div');
+    card.id = 'cos-slow-card'; card.setAttribute('role', 'status');
+    card.style.cssText = 'position:fixed;left:16px;right:16px;top:calc(50% + 44px);z-index:71;max-width:360px;margin:0 auto;padding:16px;' +
+      'border-radius:14px;border:1px solid var(--panel-border, #e3d9c6);background:var(--panel, #ffffff);color:var(--ink, #1f1712);text-align:center;' +
+      'font:400 16px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;pointer-events:auto;';
+    var p = document.createElement('p'); p.style.cssText = 'margin:0 0 12px;';
+    p.textContent = 'COS is taking longer than usual to load. Your Mac may be asleep, or this device may be off Tailscale or on a slow connection.';
+    var btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Try again';
+    btn.style.cssText = 'min-height:44px;padding:0 18px;border-radius:10px;border:0;background:var(--accent, #89662d);color:var(--on-accent, #ffffff);font:inherit;font-weight:600;cursor:pointer;';
+    // A fresh address, not location.reload(): measured 7.0.35, a reload asked the server again for all ten stylesheets,
+    // the six already here (cached as immutable) included, and the app took 20 s after the tap; a normal load of a new
+    // address takes them from the cache. Every other part of the address stays (a sign-in link keeps its code).
+    btn.addEventListener('click', function () { tryAgain(); });
+    card.appendChild(p); card.appendChild(btn);
+    document.body.appendChild(card);
+  }
+  function tryAgain() {
+    try { var u = new URL(location.href); u.searchParams.set('r', String(Date.now())); location.replace(u.pathname + u.search + u.hash); } catch (_e) { location.reload(); }
+  }
+  window.CosLoad.tryAgain = tryAgain;
+  deadline = setTimeout(function show() { if (settled) return; if (document.body) slowCard(); else deadline = setTimeout(show, 100); }, DEADLINE_MS);
+  // The stylesheets, now: they are in the head, before this script, so the list is there already.
+  (function sheets() {
+    var list = [];
+    try { list = JSON.parse((document.getElementById('boot-styles') || {}).textContent || '[]'); } catch (_e) { list = []; }
+    list = Array.isArray(list) ? list.filter(function (u) { return typeof u === 'string' && u.indexOf('/control/') === 0; }) : [];
+    sheetsLeft = list.length;
+    if (!sheetsLeft) { maybeSettle(); return; }
+    var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+    list.forEach(function (href) {
+      var el = document.createElement('link');
+      el.rel = 'stylesheet'; el.href = href; el.media = 'print';
+      var once = false, done = function (ok) { if (once) return; once = true; if (ok) el.media = 'all'; sheetsLeft--; if (sheetsLeft === 0) maybeSettle(); };
+      el.onload = function () { done(true); };
+      el.onerror = function () { done(false); };
+      head.appendChild(el);
+    });
+  })();
   function load() {
     var list = [];
     try { list = JSON.parse((document.getElementById('boot-scripts') || {}).textContent || '[]'); } catch (_e) { list = []; }
     list = Array.isArray(list) ? list.filter(function (u) { return typeof u === 'string' && u.indexOf('/control/') === 0; }) : [];
     var left = list.length;
-    if (!left) { settle(); return; }
+    if (!left) { scriptsDone = true; maybeSettle(); return; }
     // 7.0.28: after a reload that the restyle check below made because a script had failed, ask for every script with a
     // fresh query, so none comes from the browser's memory of the failed request (WebKit kept the failure across the
     // reload). Read once.
@@ -74,8 +163,8 @@
     list.forEach(function (src) {
       var el = document.createElement('script');
       el.src = /^\d{1,15}$/.test(bust) ? src + (src.indexOf('?') >= 0 ? '&' : '?') + 'r=' + bust : src; el.async = false;
-      el.onload = function () { if (--left === 0) settle(); };
-      el.onerror = function () { if (window.CosRestyle) window.CosRestyle.scriptFailed(src); if (--left === 0) settle(); };
+      el.onload = function () { if (--left === 0) { scriptsDone = true; maybeSettle(); } };
+      el.onerror = function () { if (window.CosRestyle) window.CosRestyle.scriptFailed(src); if (--left === 0) { scriptsDone = true; maybeSettle(); } };
       document.body.appendChild(el);
     });
   }
@@ -101,7 +190,8 @@
    closed: if the reload count cannot be read, or does not read back after writing (storage blocked), it gives up and
    shows the same line rather than reloading. */
 (function () {
-  var STEPS = [1000, 2000, 4000, 8000], SETTLED_MS = 30000, KEY = 'cos_web_restyle', RELOADS_KEY = 'cos_web_restyle_reloads';
+  // 7.0.35: the asking steps live with the loader above (CosLoad.STEPS), whose slow-load deadline is made of them.
+  var STEPS = (window.CosLoad && window.CosLoad.STEPS) || [1000, 2000, 4000, 8000], SETTLED_MS = 30000, KEY = 'cos_web_restyle', RELOADS_KEY = 'cos_web_restyle_reloads';
   var RELOAD_MAX = 2, RELOAD_WINDOW_MS = 5 * 60000;
   var R = { scripts: [], sheets: 0, tries: 0, t0: 0, timer: null, done: false, last: null };
   // Every real browser has these; a harness that runs this file without them gets no restyle check, not a throw that

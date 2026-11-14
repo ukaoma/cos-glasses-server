@@ -18,7 +18,8 @@ const THEME = readFileSync(join(HERE, 'theme.js'), 'utf8')
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
 
 const crit = (() => { const m = HTML.match(/<style id="critical-css">([\s\S]*?)<\/style>/); expect(m, 'index.html has the critical style').toBeTruthy(); return m![1]! })()
-const critLines = crit.split('\n').map(l => l.trim()).filter(Boolean)
+// Comments out (the 7.0.35 fallback's note spans lines).
+const critLines = crit.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map(l => l.trim()).filter(Boolean)
 const tokenBlock = (css: string, sel: string) => { const i = css.indexOf(sel + ' {'); expect(i, sel).toBeGreaterThan(-1); return css.slice(i, css.indexOf('}', i)) }
 const tokens = (block: string) => Object.fromEntries([...block.matchAll(/(--[a-z-]+):\s*([^;]+);/g)].map(m => [m[1], norm(m[2]!)]))
 
@@ -28,9 +29,10 @@ describe('the inline critical CSS (index.html)', () => {
     expect(HTML).not.toMatch(/<script(?![^>]*\bsrc=)(?![^>]*type="application\/json")[^>]*>/)
   })
   it('every rule is a word-for-word copy of app.css, so the stylesheets change nothing when they arrive', () => {
-    const rules = critLines.filter(l => !l.startsWith(':root') && !l.startsWith('@media (prefers-color-scheme'))
+    // 7.0.35: the script-free fallback line (.fp-lost, shown only when theme.js never ran) is the page's own, not app.css's.
+    const rules = critLines.filter(l => !l.startsWith(':root') && !l.startsWith('@media (prefers-color-scheme') && !/fp-lost/.test(l))
     expect(rules.length).toBeGreaterThan(20)
-    const app = norm(APP_CSS)
+    const app = norm(APP_CSS.replace(/\/\*[\s\S]*?\*\//g, ''))   // comments out on both sides
     const missing = rules.filter(r => !app.includes(norm(r)))
     expect(missing).toEqual([])
   })

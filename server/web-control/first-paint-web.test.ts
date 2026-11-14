@@ -32,9 +32,10 @@ describe('theme.js: the theme first, then the gate that lets the first paint sho
     return order
   }
   it('sets data-theme, then adds fp-wait, in that order, for system, light and dark', () => {
-    expect(run(null, true)).toEqual(['data-theme=dark', 'class+fp-wait'])
-    expect(run('light', true)).toEqual(['data-theme=light', 'class+fp-wait'])
-    expect(run('dark', false)).toEqual(['data-theme=dark', 'class+fp-wait'])
+    // 7.0.35: then cos-js, which keeps index.html's script-free fallback line away (blank-open-web.test.ts).
+    expect(run(null, true)).toEqual(['data-theme=dark', 'class+fp-wait', 'class+cos-js'])
+    expect(run('light', true)).toEqual(['data-theme=light', 'class+fp-wait', 'class+cos-js'])
+    expect(run('dark', false)).toEqual(['data-theme=dark', 'class+fp-wait', 'class+cos-js'])
   })
   it('theme.js stays the first script, in the head, before the body: no frame in the wrong theme', () => {
     const head = HTML.slice(0, HTML.indexOf('</head>'))

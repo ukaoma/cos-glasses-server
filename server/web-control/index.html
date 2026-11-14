@@ -33,6 +33,14 @@
     html.fp-wait .first-paint { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; background: var(--page); color: var(--ink); pointer-events: none; animation: fp-failsafe 1ms linear 25s forwards; }
     .first-paint .mark { width: 44px; height: 44px; }
     @keyframes fp-failsafe { to { visibility: hidden; } }
+    /* 7.0.35 C: if theme.js itself never runs (it failed or stalled), nothing else could show anything. This line needs no
+       script: it shows after the same 7 s as theme.js's slow-load card (CosLoad.DEADLINE_MS; a test compares the two),
+       unless theme.js marked the page (cos-js). With JavaScript off the noscript style above hides it. */
+    .fp-lost { display: none; }
+    html:not(.cos-js) .fp-lost { position: fixed; inset: 0; z-index: 69; display: grid; place-items: center; padding: 24px var(--gutter); text-align: center; color: var(--ink); background: var(--page); visibility: hidden; animation: fp-lost-show 1ms linear 7s forwards; }
+    .fp-lost p { margin: 0; max-width: 360px; font-size: 17px; }
+    .fp-lost a { color: var(--accent); font-weight: 600; }
+    @keyframes fp-lost-show { to { visibility: visible; } }
     .noscript-note { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px var(--gutter); font-size: 17px; color: var(--ink); text-align: center; }
     .auth-gate { min-height: 100dvh; display: grid; place-items: center; padding: calc(var(--safe-top) + 24px) var(--gutter) calc(var(--safe-bottom) + 24px); }
     .auth-card { width: 100%; max-width: 420px; }
@@ -49,17 +57,29 @@
     .btn.block { width: 100%; }
     .link-btn { color: var(--accent); font-weight: 600; font-size: 15px; min-height: 44px; display: inline-flex; align-items: center; }
   </style>
-  <link rel="stylesheet" href="/control/app.css">
-  <link rel="stylesheet" href="/control/control.css">
-  <link rel="stylesheet" href="/control/panes/speakers.css">
-  <link rel="stylesheet" href="/control/panes/meetings.css">
-  <link rel="stylesheet" href="/control/panes/work.css">
-  <link rel="stylesheet" href="/control/panes/sessions.css">
-  <link rel="stylesheet" href="/control/panes/cos-chat.css">
-  <link rel="stylesheet" href="/control/panes/questions.css">
-  <link rel="stylesheet" href="/control/panes/memories.css">
-  <link rel="stylesheet" href="/control/panes/today-actions.css">
+  <!-- 7.0.35 (Miles 21:20, "a blank screen... the server never ends up loading"; W1_blank_open_scope.md B): the ten
+       stylesheets no longer hold the first paint. theme.js, the page's first script, adds them from this list (the server
+       stamps each with its ?v= hash here) without blocking the render, so the mark draws at once, and boot waits for them,
+       loaded or failed, so the app never shows unstyled. With JavaScript off, the noscript copy below loads them. -->
+  <script type="application/json" id="boot-styles">["/control/app.css", "/control/control.css", "/control/panes/speakers.css", "/control/panes/meetings.css", "/control/panes/work.css", "/control/panes/sessions.css", "/control/panes/cos-chat.css", "/control/panes/questions.css", "/control/panes/memories.css", "/control/panes/today-actions.css"]</script>
+  <!-- theme.js stays a parser-blocking script, first in the head: it sets the theme before any frame draws (measured
+       7.0.35: as async, 6 of 10 opens drew a first frame before an explicit dark theme was set; parser-blocking, 0 of
+       10). So if it FAILS, the parser goes on and the script-free line below shows; if it STALLS, the page cannot reach
+       its body and nothing can draw (left for the device check, W1_blank_open_scope.md). -->
   <script src="/control/theme.js"></script>
+  <noscript>
+    <link rel="stylesheet" href="/control/app.css">
+    <link rel="stylesheet" href="/control/control.css">
+    <link rel="stylesheet" href="/control/panes/speakers.css">
+    <link rel="stylesheet" href="/control/panes/meetings.css">
+    <link rel="stylesheet" href="/control/panes/work.css">
+    <link rel="stylesheet" href="/control/panes/sessions.css">
+    <link rel="stylesheet" href="/control/panes/cos-chat.css">
+    <link rel="stylesheet" href="/control/panes/questions.css">
+    <link rel="stylesheet" href="/control/panes/memories.css">
+    <link rel="stylesheet" href="/control/panes/today-actions.css">
+    <style>.fp-lost { display: none !important; }</style>
+  </noscript>
   <!-- The app's scripts start downloading now, while the page parses; theme.js runs them after the first paint
        (#boot-scripts, the same list). -->
   <link rel="preload" href="/control/vendor/qrcode-encoder.js" as="script">
@@ -101,6 +121,7 @@
        background, true whichever comes next (the sign-in card or the app). Out of the layout (fixed), so nothing moves
        when it goes. app.js removes it; a CSS failsafe hides it after 25 s if the scripts never run. -->
   <div id="first-paint" class="first-paint" aria-hidden="true"><svg class="mark" width="44" height="44"><use href="#i-mark"/></svg></div>
+  <div id="fp-lost" class="fp-lost"><p>COS is taking longer than usual to load. Your Mac may be asleep, or this device may be off Tailscale or on a slow connection. <a href="/control/">Try again</a></p></div>
   <noscript><p class="noscript-note">COS Control Web needs JavaScript. Turn it on for this site, then reload.</p></noscript>
 
   <main id="auth-gate" class="auth-gate hidden" aria-labelledby="auth-title">
