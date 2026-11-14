@@ -2440,7 +2440,11 @@
   var TURN_END_GONE = 'Already answered on another screen, or the session moved on. Nothing was sent.';
   function sendTurnEndChoice(r, i) {
     if (!r || r.sending) return;
-    var te = turnEndOf(readerRowOf(r));
+    // 7.0.38 (b), lead 07:16: the choice he tapped is on the card this reader last drew. When that card named its ask,
+    // the server decides: it delivers only while that ask is open, else says answered, moved or what it asks now (an
+    // answer is never queued or held, continueSession). Without an id (an older server) the row read still decides.
+    var drawn = r.turnEnd && r.turnEnd.id ? r.turnEnd : null;
+    var te = drawn || turnEndOf(readerRowOf(r));
     if (!te) { sessionStatus(TURN_END_GONE); readerMacPaint(r, r.waitingNow); return; }
     var label = te.choices[i];
     if (!label) return;

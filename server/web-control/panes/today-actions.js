@@ -1183,7 +1183,9 @@
     var r = O.r, w = O.wait; if (!r || !w || r.sending) return;
     var label = (Array.isArray(w.choices) ? w.choices : [])[i];
     if (!label) return;
-    if (!turnEndStill()) { O.note = { text: 'Already answered on another screen, or the session moved on. Nothing was sent.', kind: '' }; paintNote(); return; }
+    // 7.0.38 (b), lead 07:16: with the ask's id the server decides (delivered only while that ask is open; else answered,
+    // moved, or what it asks now). Without one (an older server) Today's latest read still decides here.
+    if (!w.askId && !turnEndStill()) { O.note = { text: 'Already answered on another screen, or the session moved on. Nothing was sent.', kind: '' }; paintNote(); return; }
     O.quote = null;
     // 7.0.36 (X1): the answer names its ask (an older server ignores the id), as the reader's choice does.
     return choiceSend(r, turnEndAnswer(label), w.askId ? { turnEndAskId: w.askId } : {}, label, w.ask ? String(w.ask).trim() : '');

@@ -5007,7 +5007,9 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'COS Control pane')
     expect(h.els['ta-status']!.textContent).toBe('Sent “COS Control pane”. It reaches the session as a message from COS; it may ask you to confirm.')
   })
-  it('answered on another screen first: nothing is sent, and it says so', async () => {
+  // 7.0.38 (b), lead 07:16: this test pinned the page's own check, which showed the catch-all before the server was asked
+  // (Miles's phone, 11/14 07:01). A row WITHOUT an ask id (an older server) still gets it: the page has nothing to name.
+  it('an older server (no ask id), answered on another screen first: nothing is sent, and the page says so itself', async () => {
     const m = tmodel()
     const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
     h.ta.open('wait', 'claude|' + SID, h.opener())
@@ -5017,6 +5019,22 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     await flush()
     expect(turns(h)).toHaveLength(0)
     expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen, or the session moved on. Nothing was sent.')
+  })
+  // 7.0.38 (b): WITH an ask id the tap goes to the server, which never delivers to a closed ask (and an answer is never
+  // queued or held), so its answer decides the line: Miles's exact 07:01 case now reads the specific one.
+  it('7.0.38: with an ask id, Today dropped the row but the tap still asks the server; its answer gives the specific line', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, answeredBy: 'web', askNow: null } } }
+    const m = tmodelId()
+    const h = load({ data: { sessions: [TROW] }, routes, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    m.rows = []
+    h.tap('turnend', '0'); h.tap('turnend', '0')
+    await flush()
+    expect(turns(h), 'one tap, one ask, at most once').toHaveLength(1)
+    expect(turns(h)[0]!.body.turnEndAskId).toBe('turn_end:1794600000123')
+    expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen. “Good Morning + Today” was not sent.')
+    expect(h.els['ta-status']!.textContent).not.toContain('or the session moved on')
   })
   // 7.0.36 (X1, lead 00:03): the answer names its ask; a moved one keeps ONE button that sends it quoted.
   const MOVED = (askNow: unknown) => ({ status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', askNow, reasonCopy: 'The session moved past the question you answered.' } })

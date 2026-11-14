@@ -167,11 +167,30 @@ describe('the reader’s card and its send', () => {
     expect(h.sent).toEqual([PREFIX + 'Good Morning + Today'])
     expect(h.status.at(-1)).toEqual({ text: 'Sent “Good Morning + Today”. It reaches the session as a message from COS; it may ask you to confirm.', kind: undefined })
   })
-  it('answered on another screen (the row moved on): nothing is sent, and it says so', () => {
+  // 7.0.38 (b), lead 07:16: this pinned the page's own check for every row. It still holds when no card named an ask
+  // (an older server): the page has no id to send, so it says so itself.
+  it('no card with an ask id (an older server) and the row moved on: nothing is sent, and it says so', () => {
     const h = reader({ ...ROW, waiting_source: undefined, agent_state: 'idle' })
     h.fns.sendTurnEndChoice(h.r, 0)
     expect(h.sent).toEqual([])
     expect(h.status.at(-1)!.text).toBe('Already answered on another screen, or the session moved on. Nothing was sent.')
+  })
+  it('7.0.38: the card named its ask and the row has moved on: the tap sends the drawn choice with that id, once, and the server decides', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => Promise.resolve('answered'))
+    h.fns.readerMacPaint(h.r, false)
+    h.deps.state.sessions = [{ ...ROW, waiting_source: undefined, agent_state: 'idle' }]
+    h.fns.sendTurnEndChoice(h.r, 1); h.fns.sendTurnEndChoice(h.r, 1)
+    await flush()
+    expect(h.sent).toEqual([PREFIX + 'COS Control pane'])
+    expect(h.optsSent[0]).toEqual({ turnEndAskId: 'turn_end:7' })
+    expect(h.status.at(-1)!.text).toBe('Already answered on another screen. “COS Control pane” was not sent.')
+  })
+  it('7.0.38: a card WITHOUT an id still reads the row (unchanged), even when one was drawn', () => {
+    const h = reader(ROW)
+    h.fns.readerMacPaint(h.r, false)
+    h.deps.state.sessions = []
+    h.fns.sendTurnEndChoice(h.r, 0)
+    expect(h.sent).toEqual([])
   })
   it('7.0.36: the tap names its ask when the server gave one, and only then', async () => {
     const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1794600000123' })
