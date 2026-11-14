@@ -685,10 +685,36 @@ describe('the runtime: deriveForRow and the counters', () => {
   })
 
   it('X1 7.0.38: a prompt the machine wrote clears the ask as moved on, never as answered; one he typed is still his answer', async () => {
-    const tracker = new TurnEndAskTracker({ now: () => T0 + 200_000, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    // Each round asks anew at its own time, so no round can lean on an earlier round's record (the 08:0x gate found
+    // two mutants alive because every round reused one stop time and round 1's "answered" satisfied the rest).
+    const clock = { now: T0 }
+    const tracker = new TurnEndAskTracker({ now: () => clock.now, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
     trackers.push(tracker)
     __setTurnEndAskTrackerForTests(tracker)
     const off = sessionSignalStore.subscribe((signal, e, child) => tracker.observe(e, child, signal))
+    let round = 0
+    /** One round: the session asks at its own time, then `prompt` arrives; returns how the tracker cleared the ask. */
+    const roundWith = async (prompt: string, child = false) => {
+      const base = T0 + (++round) * 3_600_000
+      const pid = `p-round-${round}`
+      sessionSignalStore.apply(env('UserPromptSubmit', base - 10_000, { prompt: 'go', prompt_id: pid }), false)
+      sessionSignalStore.apply(wrapUp(base, C17_INPUT, { prompt_id: pid }), false)
+      sessionSignalStore.apply(stop(base + 4_700, pid), false)
+      clock.now = base + 200_000
+      await tracker.tick()
+      const open = openTurnEndAsk(SID, clock.now)
+      expect(open?.stoppedAt).toBe(base + 4_700)
+      const before = turnEndAskStats()!
+      sessionSignalStore.apply(env('UserPromptSubmit', base + 210_000, { prompt, prompt_id: `${pid}-next` }), child)
+      clock.now = base + 211_000
+      expect(openTurnEndAsk(SID, clock.now)).toBeNull()
+      const after = turnEndAskStats()!
+      return {
+        answered: turnEndAskAnswered(SID, open!.stoppedAt, clock.now),
+        byTurn: after.clearedByTurn - before.clearedByTurn,
+        byReply: after.clearedByReply - before.clearedByReply,
+      }
+    }
     try {
       for (const machine of [
         '<system-reminder>a</system-reminder>\n<system-reminder>b</system-reminder>\n',
@@ -698,31 +724,29 @@ describe('the runtime: deriveForRow and the counters', () => {
         '<scheduled-task name="nightly">run</scheduled-task>',
         '<agent-message from="a1">done</agent-message>',
       ]) {
-        feed(); await tracker.tick()
-        const open = openTurnEndAsk(SID, T0 + 200_000)
-        expect(open).not.toBeNull()
-        const before = turnEndAskStats()!
-        sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: machine, prompt_id: 'p-machine' }), false)
-        expect(openTurnEndAsk(SID, T0 + 210_000)).toBeNull()
-        expect(turnEndAskAnswered(SID, open!.stoppedAt, T0 + 211_000)).toBeNull()
-        expect(turnEndAskStats()).toMatchObject({ clearedByTurn: before.clearedByTurn + 1, clearedByReply: before.clearedByReply })
+        expect(await roundWith(machine)).toEqual({ answered: null, byTurn: 1, byReply: 0 })
       }
-      // The lead's condition (07:29): his own words bundled after harness blocks are still his answer, and so is anything
-      // that cannot be shown to be blocks only (an unclosed or clipped block, text before the first block).
+      // The lead's condition (07:29): his own words bundled with harness blocks are still his answer, and so is anything
+      // that cannot be shown to be blocks only (text before the first block, an unclosed or clipped block).
       for (const typed of [
         '<bash-input>ls</bash-input>',
         'Commands run, go',
         'Note <cross-session-message from="x"> quoted mid-text',
+        'Approved <system-reminder>x</system-reminder>',
+        'Approved\n<cross-session-message from="local_1">go</cross-session-message>',
         '<system-reminder>\nThe session was compacted.</system-reminder>\nYes, ship it',
         '<system-reminder>a</system-reminder><task-notification>b</task-notification> Approved',
         '<cross-session-message from="local_1">Lead to X1: clipped mid-blo…',
-        'Approved <system-reminder>x</system-reminder>',
+        '<system-reminder>a</system-reminder><cross-session-message from="local_1">unclosed',
       ]) {
-        feed(); await tracker.tick()
-        const open = openTurnEndAsk(SID, T0 + 200_000)
-        sessionSignalStore.apply(env('UserPromptSubmit', T0 + 210_000, { prompt: typed, prompt_id: 'p-typed' }), false)
-        expect(turnEndAskAnswered(SID, open!.stoppedAt, T0 + 211_000)).toMatchObject({ by: 'mac' })
+        const r = await roundWith(typed)
+        expect(r.answered).toMatchObject({ by: 'mac' })
+        expect([r.byTurn, r.byReply]).toEqual([0, 1])
       }
+      // Q1 S17: a COS-spawned Continue child carries words someone sent through COS. Blocks or not, it is a reply by COS.
+      const child = await roundWith('<cross-session-message from="local_1">Lead to X1: go</cross-session-message>', true)
+      expect(child.answered).toMatchObject({ by: 'cos' })
+      expect([child.byTurn, child.byReply]).toEqual([0, 1])
     } finally {
       off()
     }
