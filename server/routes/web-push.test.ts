@@ -11,6 +11,7 @@ import { b64u, fromB64u, vapidPublicKeyObject } from '../lib/web-push-crypto.js'
 import { isAllowedPushEndpoint, MAX_PUSH_DEVICES, PUSH_DIR_MODE, PUSH_FILE_MODE, WebPushStore } from '../lib/web-push-store.js'
 import { PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
 import { createWebPushRouter, webPushEnabled } from './web-push.js'
+import { isPublicApiRequest } from '../lib/api-auth.js'
 
 const ORIGIN = 'https://mac-x1.example-tailnet.ts.net:3143'
 const ENDPOINT = 'https://web.push.apple.com/QGuQyavXutnMH6cTPXQ8xsAeBCs?x=1'
@@ -59,6 +60,18 @@ describe('X1 web push: the switch COS_WEB_PUSH', () => {
     expect(index.slice(at, index.indexOf('\n}\n', at))).toContain("store: new WebPushStore(dataPath('push')),")
     expect(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')).toContain('"COS_WEB_PUSH"')
     expect(readFileSync(new URL('../../.env.example', import.meta.url), 'utf8')).toMatch(/^# COS_WEB_PUSH=1$/m)
+  })
+})
+
+describe('X1 web push: behind the sign-in', () => {
+  it('every /web-push path needs the API token or the signed-in web session: none is public, and the router mounts after requireApiToken', () => {
+    for (const [method, path] of [['GET', '/web-push/key'], ['GET', '/web-push/devices'], ['POST', '/web-push/devices'], ['DELETE', '/web-push/devices/0123456789abcdef'], ['POST', '/web-push/test']]) {
+      expect({ method, path, public: isPublicApiRequest(method!, path!) }).toEqual({ method, path, public: false })
+    }
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    const auth = index.indexOf("app.use('/api', requireApiToken(")
+    expect(auth).toBeGreaterThan(0)
+    expect(index.indexOf('createWebPushRouter(')).toBeGreaterThan(auth)
   })
 })
 
@@ -159,6 +172,14 @@ describe('X1 web push: one ping', () => {
     expect((await sendOnePing(s2.store, s2.id, 'test', { post: s2.post })).removed).toBe(true)
   })
 
+  it('a redirect is never followed: a 3xx is one request, reported, and the device is kept', async () => {
+    const r = rig()
+    r.answer({ status: 307, reason: null })
+    expect(await sendOnePing(r.store, r.id, 'test', { post: r.post })).toEqual({ ok: false, status: 307, reason: null, removed: false })
+    expect(r.sent).toHaveLength(1)
+    expect(r.store.get(r.id)).not.toBeNull()
+  })
+
   it('an unknown device, or a stored endpoint that is not Apple\'s, sends nothing', async () => {
     const r = rig()
     expect(await sendOnePing(r.store, '0000000000000000', 'test', { post: r.post })).toMatchObject({ ok: false, reason: 'unknown_device' })
@@ -192,7 +213,8 @@ describe('X1 web push: the routes (as mounted with the switch on)', () => {
     const dir = storeDir()
     const store = new WebPushStore(dir)
     const sent: string[] = []
-    const base = await start(store, async url => { sent.push(url); return { status: 201, reason: null } })
+    const bodies: Buffer[] = []
+    const base = await start(store, async (url, _h, body) => { sent.push(url); bodies.push(body); return { status: 201, reason: null } })
     expect(existsSync(dir)).toBe(false)
     const key = await call(base, 'GET', '/api/web-push/key')
     expect(fromB64u(key.json.publicKey).length).toBe(65)
@@ -208,9 +230,11 @@ describe('X1 web push: the routes (as mounted with the switch on)', () => {
     expect(list.json.devices).toHaveLength(1)
     expect(list.text).not.toContain('QGuQ')
     expect(sent).toHaveLength(0)
-    const ping = await call(base, 'POST', '/api/web-push/test', { deviceId: added.json.id })
+    // Extra fields cannot change what is sent: the title is fixed, and so is where a tap goes.
+    const ping = await call(base, 'POST', '/api/web-push/test', { deviceId: added.json.id, title: 'pwned', kind: 'other', body: 'secret words', navigate: 'https://evil.example' })
     expect(ping.json).toEqual({ ok: true, status: 201, reason: null, removed: false })
     expect(sent).toEqual([ENDPOINT])
+    expect(JSON.parse(decrypt(bodies[0]!, p))).toEqual({ web_push: 8030, notification: { title: 'COS: Test ping', navigate: `${ORIGIN}/control`, silent: false } })
     expect(ping.text).not.toContain('QGuQ')
     expect((await call(base, 'DELETE', `/api/web-push/devices/${added.json.id}`)).json).toEqual({ removed: true })
     expect((await call(base, 'POST', '/api/web-push/test', { deviceId: added.json.id })).json).toMatchObject({ ok: false, reason: 'unknown_device' })

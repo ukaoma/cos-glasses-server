@@ -41,7 +41,9 @@ const mutations = [
   ["origin-unchecked", "server/routes/web-push.ts", "if (!origin.startsWith('https://') || !deps.originAllowed(origin))", "if (!origin.startsWith('https://'))", "subscribe from his https origin", ["server/routes/web-push.test.ts"]],
   ["test-id-unchecked", "server/routes/web-push.ts", "    const id = typeof req.body?.deviceId === 'string' ? req.body.deviceId : ''\n    if (!DEVICE_ID_RE.test(id)) return res.status(400).json({ error: 'bad_id' })\n", "    const id = typeof req.body?.deviceId === 'string' ? req.body.deviceId : ''\n", "subscribe from his https origin", ["server/routes/web-push.test.ts"]],
   ["switch-default-on", "server/routes/web-push.ts", "return readSwitch(env.COS_WEB_PUSH, false)", "return readSwitch(env.COS_WEB_PUSH, true)", "is off by default and on only for 1, true or on", ["server/routes/web-push.test.ts"]],
-  ["index-mount-always", "server/index.ts", "if (webPushEnabled()) {\n  app.use('/api', createWebPushRouter({", "if (true) {\n  app.use('/api', createWebPushRouter({", "off: index.ts mounts no route and builds no store", ["server/routes/web-push.test.ts"]]
+  ["index-mount-always", "server/index.ts", "if (webPushEnabled()) {\n  app.use('/api', createWebPushRouter({", "if (true) {\n  app.use('/api', createWebPushRouter({", "off: index.ts mounts no route and builds no store", ["server/routes/web-push.test.ts"]],
+  ["route-kind-from-body", "server/routes/web-push.ts", "sendOnePing(deps.store, id, 'test', {", "sendOnePing(deps.store, id, (req.body?.kind ?? 'test') as never, {", "subscribe from his https origin", ["server/routes/web-push.test.ts"]],
+  ["3xx-treated-gone", "server/lib/web-push-sender.ts", "const gone = res.status === 404 || res.status === 410", "const gone = res.status >= 300", "a redirect is never followed", ["server/routes/web-push.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }
