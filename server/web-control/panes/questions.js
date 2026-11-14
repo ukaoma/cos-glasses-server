@@ -27,6 +27,7 @@
   var esc = W.esc, api = W.api;
   var host = document.getElementById('sq-host');
   if (!host) return;
+  var VV_LOST = { sent: false };   // F1: the one sq-vv-lost row per bad stretch (fitKeyboard)
 
   var Q = {
     cap: null,            // capabilities.sessionQuestions, once read
@@ -492,6 +493,8 @@
   var OFFLINE_LINE = 'Your Mac is not answering. You can answer here once it is back.';
   function render() {
     hostsOf().forEach(drawInto);
+    // F1: a card drawn while the reading is already bad gets the footer rule and its one row at once (fitKeyboard).
+    fitKeyboard();
     clearInterval(Q.tick);
     if (Q.items.length) Q.tick = setInterval(tickSeconds, 1000);
   }
@@ -837,6 +840,15 @@
     var v = W.viewportFit ? W.viewportFit() : null, a = document.activeElement;
     var typing = !!(a && host.contains && host.contains(a) && a.hasAttribute && a.hasAttribute('data-sq-other'));
     if (host.classList) host.classList.toggle('sq-kb-up', !!(v && v.vv && (v.inset >= 120 || (typing && v.inset > 0))));
+    // F1 (Miles 11/13 22:14, the open Duo): after a fold Safari can leave the screen panned with the visual viewport
+    // reading a height of 0 (his rows: top 267 and 552). The footer sticks to the page's viewport, which is then not the
+    // screen, so it drew mid-screen over the questions. While the reading is bad (viewportFit `bad`) the footer stops
+    // sticking (questions.css), as with a keyboard up. A pan that reports a normal height is not told apart from a good
+    // screen. One numbers-only row per bad stretch while a card shows, so his phone says how often this happens.
+    var lost = !!(v && v.bad);
+    if (host.classList) host.classList.toggle('sq-vv-lost', lost);
+    if (!lost) VV_LOST.sent = false;
+    else if (!VV_LOST.sent && W.layoutCrumb && host.querySelector && host.querySelector('.sq-foot')) VV_LOST.sent = !!W.layoutCrumb('sq-vv-lost', { cards: host.querySelectorAll('.sq-card').length });
   }
   if (window.visualViewport) { window.visualViewport.addEventListener('resize', fitKeyboard); window.visualViewport.addEventListener('scroll', fitKeyboard); }
   window.addEventListener('resize', fitKeyboard); window.addEventListener('orientationchange', fitKeyboard);

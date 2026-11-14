@@ -60,6 +60,10 @@
 /* 6.99.30 (canary): with a keyboard up on the page (questions.js sets sq-kb-up) the footer scrolls with the card, so
    the options it would cover stay readable. */
 .sq-host.sq-kb-up .sq-foot { position: static; }
+/* F1 (11/13): the visual viewport reading is bad (questions.js sets sq-vv-lost: a fold left Safari panned and the height
+   reads 0), so the page's viewport is not the screen and a sticky footer would draw mid-screen over the questions. It
+   scrolls with the card instead, as with a keyboard up. */
+.sq-host.sq-vv-lost .sq-foot { position: static; }
 /* The Mac not answering: Submit, Allow and Deny wait, and say why (questions.js offline). */
 .sq-offline { margin: 8px 0 0; font-size: 13px; color: var(--sub); }
 /* 6.99.30 (canary): folded, a waiting question is one line over the pane (it filled the first screen of every pane);

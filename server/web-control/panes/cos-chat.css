@@ -14,6 +14,9 @@
   .msg-split > .split-handle { display: flex; top: calc(56px + var(--safe-top, 0px)); height: calc(100dvh - 72px - var(--safe-top, 0px)); }
   /* The list column is narrower than the pane: its header's buttons go under the title instead of over it. */
   .msg-left .cx-hero .cx-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  /* F1 (Miles 11/13 22:14): the hero's full bleed (control.css, the workspace gutter) is for a pane-wide header. In the
+     list column it drew 40 px past both edges, to the rail and over the divider into the chat. Here it ends at the column. */
+  .msg-left .cx-hero { margin-inline: 0; padding-inline: 0; }
   /* 7.0.2 (A4): the floor never asks for more than the screen has (420 px on a 539 px unfolded Duo with the keyboard up
      pushed the composer under it). */
   .msg-right { position: sticky; top: calc(56px + var(--safe-top, 0px)); height: calc(100vh - 72px - var(--safe-top, 0px)); height: calc(100dvh - 72px - var(--safe-top, 0px)); min-height: 420px; min-height: min(420px, calc(100dvh - 72px - var(--safe-top, 0px))); }
