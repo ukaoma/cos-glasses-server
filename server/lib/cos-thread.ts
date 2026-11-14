@@ -20,12 +20,19 @@
  *
  * `sessionId` is the COS conversation id (the one POST /api/query-jobs takes and reports). Its Claude Code log is
  * found through the CLI session the bridge holds for it (`native`), read from the tail only.
+ *
+ * 7.0.39 (persistent thread, candidate 1; lanes/S1_cos_thread_server_design.md, W1_cos_thread_routes_proposal.md):
+ * the thread's whole history, read a page at a time (history(), entry()). Every turn row ever written, in every thread
+ * past and present, is indexed by its byte place in the ledger, so a page is a handful of positioned reads and memory
+ * holds only the index, however long the thread grows. A cursor is the place between two entries (`c1.<n>`: before
+ * the n-th turn), stable across restarts because the ledger is append-only. Nothing here logs words.
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, writeSync, fsyncSync, fchmodSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
+import { localDay } from './local-day.js'
 import { securePrivateDirectory } from './secure-user-config.js'
 
 export const COS_THREAD_PROTOCOL = 1
@@ -43,6 +50,18 @@ export const ANSWER_HEAD_CHARS = 2000
 /** Kept in memory per turn for search; the ledger keeps the whole query. */
 export const MEMORY_QUERY_CHARS = 4000
 export const LOG_TAIL_BYTES = 512 * 1024
+/** History pages (7.0.39): entries per page by default and at most, and the most bytes one page may carry. */
+export const HISTORY_DEFAULT_LIMIT = 40
+export const HISTORY_MAX_LIMIT = 100
+export const HISTORY_MAX_BYTES = 256 * 1024
+/** The history route's own protocol, advertised as `capabilities.dropIt.thread.history`. */
+export const COS_THREAD_HISTORY_PROTOCOL = 1
+/** One entry's full answer, at most (a longer one is cut and reads `full: false`). */
+export const ENTRY_MAX_ANSWER_CHARS = 1_000_000
+/** The archive fallback for a full answer: days read after the turn's own day, each file's size, and all of them. */
+export const ARCHIVE_LOOKAHEAD_DAYS = 31
+export const ARCHIVE_FILE_MAX_BYTES = 32 * 1024 * 1024
+export const ARCHIVE_TOTAL_MAX_BYTES = 96 * 1024 * 1024
 export const DIGEST_HEADER = 'Earlier in this COS thread (a summary carried over; ask COS to search History or Messages for more):'
 const DAY_MS = 24 * 60 * 60_000
 
@@ -94,6 +113,35 @@ export interface CosThreadSummary {
   segments: number
   title: string
 }
+/** One chat in the thread's history (7.0.39). `answer` is the preview the ledger keeps (2,000 characters); `full` says
+ * whether it is the whole answer, and `answerChars` its whole length when known. */
+export interface CosThreadChatEntry {
+  id: string
+  at: string
+  kind: 'chat'
+  question: string
+  answer: string
+  answerChars: number | null
+  full: boolean
+  threadId: string
+  status: 'completed'
+  messageNo: number | null
+}
+/** A page of history: entries oldest to newest. `older` reads further back (null: this is the start). `newest` is the
+ * cursor for `after=`. `more`: an `after=` page stopped at its limit or its byte cap and more entries follow. */
+export interface CosThreadHistoryPage {
+  protocol: 1
+  entries: CosThreadChatEntry[]
+  older: string | null
+  newest: string
+  more: boolean
+  /** Entries already sent whose outcome changed since the cursor; always empty until breadcrumbs (candidate 3). */
+  updated: CosThreadChatEntry[]
+}
+/** `maxBytes` exists for tests only (the route never sends it): one entry is at most about 120 KB, under the cap. */
+export interface CosThreadHistoryQuery { before?: number; after?: number; limit: number; maxBytes?: number }
+/** What a full-answer read needs to look the answer up elsewhere. */
+export interface CosThreadEntryLookup { sessionId: string; clientId: string; messageNo: number | null; at: string; query: string }
 /** A drop as the digest carries it: its words and where it was filed. */
 export interface DigestDrop { text: string; createdAt: string; filed: string }
 /** found: the session and its log exist. tokens: the last assistant message's context, null when unreadable. */
@@ -126,6 +174,9 @@ interface CurrentThread {
   from: string | null
 }
 interface StateFile { schema: 1; ledgerRows: number; current: CurrentThread }
+/** A turn row's place in the ledger (7.0.39). */
+interface HistoryRef { clientId: string; offset: number; length: number }
+interface RowPlace { offset: number; length: number }
 interface MemoryTurn { threadId: string; sessionId: string; clientId: string; at: string; query: string; answerHead: string; messageNo: number | null }
 
 // ── validation ────────────────────────────────────────
@@ -333,6 +384,10 @@ export class CosThread {
   private readonly turns: MemoryTurn[] = []
   private readonly threads = new Map<string, CosThreadSummary>()
   private readonly order: string[] = []
+  /** Every turn row, in ledger order: the history index. Never trimmed. */
+  private readonly history: HistoryRef[] = []
+  private readonly historyByClient = new Map<string, number>()
+  private ledgerBytes = 0
 
   constructor(private readonly deps: CosThreadDeps) {
     this.now = deps.now ?? Date.now
@@ -349,8 +404,9 @@ export class CosThread {
   // ── loading ─────────────────────────────────────────
   private load(): void {
     const rows = this.readLedger()
-    for (const row of rows) this.apply(row)
+    for (const { row, place } of rows) this.apply(row, place)
     this.ledgerRows = rows.length
+    this.ledgerBytes = existsSync(this.ledgerFile) ? lstatSync(this.ledgerFile).size : 0
     if (!this.order.length) {
       this.append({ kind: 'thread', id: this.newId(), at: this.iso() })
       return
@@ -360,20 +416,27 @@ export class CosThread {
     if (snapshot && snapshot.ledgerRows === this.ledgerRows && snapshot.current.id === this.current.id) this.current = snapshot.current
     else this.writeState()
   }
-  private readLedger(): LedgerRow[] {
+  private readLedger(): Array<{ row: LedgerRow; place: RowPlace }> {
     if (!existsSync(this.ledgerFile)) return []
     const stat = lstatSync(this.ledgerFile)
     if (stat.isSymbolicLink() || !stat.isFile()) throw new CosThreadError('cos_thread_unsafe', 503)
-    const text = readFileSync(this.ledgerFile, 'utf8')
+    const bytes = readFileSync(this.ledgerFile)
     // A torn last row (a crash mid-append) must not swallow the next one: end the file with a newline first.
-    if (text.length && !text.endsWith('\n')) this.appendRaw('\n')
-    const rows: LedgerRow[] = []
-    for (const line of text.split('\n')) {
-      if (!line.trim()) continue
-      try {
-        const row = JSON.parse(line) as LedgerRow
-        if (isRow(row)) rows.push(row)
-      } catch { /* a torn row is skipped */ }
+    if (bytes.length && bytes[bytes.length - 1] !== 0x0a) this.appendRaw('\n')
+    const rows: Array<{ row: LedgerRow; place: RowPlace }> = []
+    // Split on the newline BYTE so each row's place is its byte offset in the file (7.0.39 history index).
+    let start = 0
+    while (start < bytes.length) {
+      let end = bytes.indexOf(0x0a, start)
+      if (end === -1) end = bytes.length
+      const line = bytes.subarray(start, end).toString('utf8')
+      if (line.trim()) {
+        try {
+          const row = JSON.parse(line) as LedgerRow
+          if (isRow(row)) rows.push({ row, place: { offset: start, length: end - start } })
+        } catch { /* a torn row is skipped */ }
+      }
+      start = end + 1
     }
     return rows
   }
@@ -392,7 +455,7 @@ export class CosThread {
   }
 
   /** One row into memory: the same code builds the state live and from the ledger, so a rebuild cannot drift. */
-  private apply(row: LedgerRow): void {
+  private apply(row: LedgerRow, place?: RowPlace): void {
     if (row.kind === 'thread') {
       this.threads.set(row.id, { id: row.id, startedAt: row.at, endedAt: null, asks: 0, segments: 0, title: '' })
       this.order.push(row.id)
@@ -401,6 +464,10 @@ export class CosThread {
     }
     if (row.kind === 'turn') {
       this.clientIds.add(row.clientId)
+      if (place && !this.historyByClient.has(row.clientId)) {
+        this.historyByClient.set(row.clientId, this.history.length)
+        this.history.push({ clientId: row.clientId, offset: place.offset, length: place.length })
+      }
       this.turns.push({ threadId: row.threadId, sessionId: row.sessionId, clientId: row.clientId, at: row.at, query: row.query.slice(0, MEMORY_QUERY_CHARS), answerHead: row.answerHead, messageNo: row.messageNo })
       if (this.turns.length > SEARCH_MEMORY_TURNS) this.turns.splice(0, this.turns.length - SEARCH_MEMORY_TURNS)
       const summary = this.threads.get(row.threadId)
@@ -438,8 +505,17 @@ export class CosThread {
   }
   /** Ledger first, then memory, then the snapshot: a crash between them leaves a ledger the next open rebuilds from. */
   private append(...rows: LedgerRow[]): void {
-    this.appendRaw(rows.map(r => JSON.stringify(r)).join('\n') + '\n')
-    for (const row of rows) this.apply(row)
+    const lines = rows.map(r => JSON.stringify(r))
+    const text = lines.join('\n') + '\n'
+    const base = this.ledgerBytes
+    this.appendRaw(text)
+    this.ledgerBytes = base + Buffer.byteLength(text)
+    let offset = base
+    rows.forEach((row, i) => {
+      const length = Buffer.byteLength(lines[i]!)
+      this.apply(row, { offset, length })
+      offset += length + 1
+    })
     this.ledgerRows += rows.length
     this.writeState()
   }
@@ -531,6 +607,102 @@ export class CosThread {
     return this.view()
   }
 
+  // ── history (7.0.39) ─────────────────────────────────
+  /** Turn rows at these indexes, read from the ledger by place. A row that is not the turn the index says it is (the file
+   * changed under us) is a 503, never a wrong entry. */
+  private readTurns(indexes: number[]): TurnRow[] {
+    if (!indexes.length) return []
+    const fd = openSync(this.ledgerFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    try {
+      if (!fstatSync(fd).isFile()) throw new CosThreadError('cos_thread_unsafe', 503)
+      return indexes.map(i => {
+        const ref = this.history[i]!
+        const buffer = Buffer.alloc(ref.length)
+        let read = 0
+        while (read < ref.length) {
+          const n = readSync(fd, buffer, read, ref.length - read, ref.offset + read)
+          if (n <= 0) break
+          read += n
+        }
+        let row: unknown
+        try { row = JSON.parse(buffer.subarray(0, read).toString('utf8')) } catch { row = null }
+        if (!isRow(row) || row.kind !== 'turn' || row.clientId !== ref.clientId) throw new CosThreadError('cos_thread_history_stale', 503)
+        return row
+      })
+    } finally { closeSync(fd) }
+  }
+
+  private chatEntry(row: TurnRow): CosThreadChatEntry {
+    // The ledger keeps the first ANSWER_HEAD_CHARS of the answer. Shorter than that, it is the whole answer; at the cap
+    // or empty (a turn recorded without its answer), the whole one has to be looked up (entry()).
+    const whole = row.answerHead.length > 0 && row.answerHead.length < ANSWER_HEAD_CHARS
+    return {
+      id: `t:${row.clientId}`, at: row.at, kind: 'chat', question: row.query, answer: row.answerHead,
+      answerChars: whole ? row.answerHead.length : null, full: whole, threadId: row.threadId, status: 'completed',
+      messageNo: row.messageNo,
+    }
+  }
+
+  /** The number of chats in the whole history (every thread). */
+  historySize(): number { return this.history.length }
+
+  /**
+   * A page of the whole history, oldest to newest within the page. No cursor: the newest page. `before`: the page
+   * ending just before that place. `after`: what was added from that place on. Capped at `limit` entries and at
+   * HISTORY_MAX_BYTES of entries (always at least one entry when any is due). A place past the end reads as the end.
+   */
+  historyPage(query: CosThreadHistoryQuery): CosThreadHistoryPage {
+    const n = this.history.length
+    const limit = Math.max(1, Math.min(HISTORY_MAX_LIMIT, Math.floor(query.limit)))
+    const size = (e: CosThreadChatEntry) => Buffer.byteLength(JSON.stringify(e))
+    const cap = query.maxBytes ?? HISTORY_MAX_BYTES
+    if (query.after !== undefined) {
+      const from = Math.min(Math.max(0, query.after), n)
+      const end = Math.min(n, from + limit)
+      const rows = this.readTurns(range(from, end))
+      const entries: CosThreadChatEntry[] = []
+      let bytes = 0
+      for (const row of rows) {
+        const e = this.chatEntry(row)
+        const b = size(e)
+        if (entries.length && bytes + b > cap) break
+        entries.push(e); bytes += b
+      }
+      const stop = from + entries.length
+      return { protocol: 1, entries, older: from > 0 ? cursorOf(from) : null, newest: cursorOf(stop), more: stop < n, updated: [] }
+    }
+    const end = Math.min(Math.max(0, query.before ?? n), n)
+    const start = Math.max(0, end - limit)
+    const rows = this.readTurns(range(start, end))
+    const kept: CosThreadChatEntry[] = []
+    let bytes = 0
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const e = this.chatEntry(rows[i]!)
+      const b = size(e)
+      if (kept.length && bytes + b > cap) break
+      kept.push(e); bytes += b
+    }
+    kept.reverse()
+    const first = end - kept.length
+    return { protocol: 1, entries: kept, older: first > 0 ? cursorOf(first) : null, newest: cursorOf(end), more: end < n, updated: [] }
+  }
+
+  /** One chat by its clientId, with what a full-answer lookup needs. Null when the history has no such chat. */
+  entry(clientId: string): { entry: CosThreadChatEntry; lookup: CosThreadEntryLookup } | null {
+    const index = this.historyByClient.get(clientId)
+    if (index === undefined) return null
+    const row = this.readTurns([index])[0]!
+    return {
+      entry: this.chatEntry(row),
+      lookup: { sessionId: row.sessionId, clientId: row.clientId, messageNo: row.messageNo, at: row.at, query: row.query },
+    }
+  }
+
+  /** The whole answer from the live conversation, when it still holds it (the store's own answerFor). */
+  liveAnswer(lookup: CosThreadEntryLookup): string | undefined {
+    try { return this.deps.answerFor?.(lookup.sessionId, lookup.clientId, lookup.messageNo) } catch { return undefined }
+  }
+
   search(q: string, limit: number): CosThreadSearchAnswer {
     const needle = q.toLowerCase()
     const hits: CosThreadSearchHit[] = []
@@ -555,6 +727,71 @@ export class CosThread {
     }
     return { threads: out }
   }
+}
+
+function range(from: number, to: number): number[] {
+  const out: number[] = []
+  for (let i = from; i < to; i++) out.push(i)
+  return out
+}
+/** A history cursor: the place before the n-th chat. Opaque to clients. */
+export function cursorOf(place: number): string { return `c1.${place}` }
+const CURSOR_RE = /^c1\.(\d{1,9})$/
+/** The place a cursor names, or null when it is not one of ours. */
+export function parseCursor(raw: unknown): number | null {
+  if (typeof raw !== 'string') return null
+  const m = CURSOR_RE.exec(raw)
+  return m ? Number(m[1]) : null
+}
+
+/**
+ * 7.0.39: a chat's whole answer from the day archive, for a turn the live conversation no longer holds. Read only: a
+ * day file is parsed only when it is a plain file under ARCHIVE_FILE_MAX_BYTES, all of them together stay under
+ * ARCHIVE_TOTAL_MAX_BYTES, and nothing is quarantined or created. A session is archived on the day it was last used,
+ * so the days read run from the turn's own local day forward, ARCHIVE_LOOKAHEAD_DAYS at most and never past today.
+ * The match is the session and the message number (or, for a turn without one, its question).
+ */
+export function archivedAnswer(
+  archiveDir: string, lookup: CosThreadEntryLookup, now = Date.now(),
+  limits: { fileMax?: number; totalMax?: number; lookaheadDays?: number } = {},
+): string | undefined {
+  const fileMax = limits.fileMax ?? ARCHIVE_FILE_MAX_BYTES
+  const lookahead = limits.lookaheadDays ?? ARCHIVE_LOOKAHEAD_DAYS
+  const atMs = Date.parse(lookup.at)
+  if (!Number.isFinite(atMs)) return undefined
+  const today = localDay(now)
+  let budget = limits.totalMax ?? ARCHIVE_TOTAL_MAX_BYTES
+  for (let d = 0; d <= lookahead; d++) {
+    const date = localDay(atMs + d * DAY_MS)
+    if (date > today) break
+    const file = join(archiveDir, `${date}.json`)
+    let size: number
+    try {
+      const stat = lstatSync(file)
+      if (!stat.isFile()) continue
+      size = stat.size
+    } catch { continue }
+    if (size > fileMax || size > budget) continue
+    budget -= size
+    let day: any
+    try { day = JSON.parse(readFileSync(file, 'utf8')) } catch { continue }
+    const chats = Array.isArray(day?.chats) ? day.chats : []
+    for (const chat of chats) {
+      if (chat?.sessionId !== lookup.sessionId || !Array.isArray(chat.exchanges)) continue
+      const ex = chat.exchanges as Array<{ role?: unknown; content?: unknown; globalMsgNum?: unknown }>
+      for (let i = 0; i < ex.length; i++) {
+        const user = ex[i]
+        if (user?.role !== 'user') continue
+        const next = ex[i + 1]
+        if (next?.role !== 'assistant' || typeof next.content !== 'string') continue
+        const hit = lookup.messageNo !== null
+          ? user.globalMsgNum === lookup.messageNo || next.globalMsgNum === lookup.messageNo
+          : user.content === lookup.query
+        if (hit) return next.content
+      }
+    }
+  }
+  return undefined
 }
 
 function isRow(row: unknown): row is LedgerRow {

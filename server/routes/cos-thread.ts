@@ -9,15 +9,32 @@
  *   POST /cos-thread/turn    { clientId, sessionId, query, answer?, messageNo?, provider? }   CosThreadAnswer
  *   GET  /cos-thread/search  ?q&limit   { hits: [{ threadId, sessionId, at, query, answerHead, messageNo }], scanned }
  *   GET  /cos-thread/threads ?limit     { threads: [{ id, startedAt, endedAt, asks, segments, title }] }
+ *
+ * 7.0.39 (persistent thread, candidate 1), advertised as `capabilities.dropIt.thread.history: 1`:
+ *   GET  /cos-thread/history ?before|after&limit
+ *        { protocol: 1, entries: [{ id, at, kind: 'chat', question, answer, answerChars, full, threadId, status, messageNo }],
+ *          older, newest, more, updated }
+ *        Every chat of every thread, past and present, oldest to newest within a page. No cursor: the newest page.
+ *        limit 1..100 (default 40); a page also stops at 256 KB. `before` and `after` are cursors this route gave out.
+ *   GET  /cos-thread/entry/:id          { entry, source: 'ledger' | 'live' | 'archive' | 'preview' }
+ *        One chat (`t:<clientId>`) with its whole answer: the ledger's when it holds all of it, else the live
+ *        conversation's, else the day archive's, else the preview with `full: false`.
  */
 import { Router, type Response } from 'express'
-import { CosThread, CosThreadError, parseTurnInput } from '../lib/cos-thread.js'
+import {
+  archivedAnswer, CosThread, CosThreadError, ENTRY_MAX_ANSWER_CHARS, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, parseCursor,
+  parseTurnInput, type CosThreadEntryLookup,
+} from '../lib/cos-thread.js'
+import { dataPath } from '../lib/data-dir.js'
 
 export interface CosThreadRouterDependencies {
   enabled: () => boolean
   /** The store, opened on first use. Null when it cannot open. */
   thread: () => CosThread | null
+  /** 7.0.39: a chat's whole answer from the day archive. Default: the data dir's archive, read only and size-capped. */
+  archiveAnswer?: (lookup: CosThreadEntryLookup) => string | undefined
 }
+const ENTRY_ID_RE = /^t:([A-Za-z0-9:_-]{8,80})$/
 
 const fail = (res: Response, error: unknown) => {
   if (error instanceof CosThreadError) return res.status(error.status).json({ error: { code: error.code } })
@@ -67,6 +84,40 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     const limit = intParam(req.query.limit, 1, 50, 20)
     if (limit === null) return res.status(400).json({ error: { code: 'invalid_limit' } })
     return withThread(res, t => res.json(t.search(q, limit)))
+  })
+
+  router.get('/cos-thread/history', (req, res) => {
+    const limit = intParam(req.query.limit, 1, HISTORY_MAX_LIMIT, HISTORY_DEFAULT_LIMIT)
+    if (limit === null) return res.status(400).json({ error: { code: 'invalid_limit' } })
+    const { before, after } = req.query
+    if (before !== undefined && after !== undefined) return res.status(400).json({ error: { code: 'invalid_cursor', message: 'Send before or after, not both.' } })
+    const raw = before ?? after
+    const place = raw === undefined ? undefined : parseCursor(raw)
+    if (place === null) return res.status(400).json({ error: { code: 'invalid_cursor' } })
+    return withThread(res, t => res.json(t.historyPage(after !== undefined ? { after: place, limit } : { before: place, limit })))
+  })
+
+  router.get('/cos-thread/entry/:id', (req, res) => {
+    const m = ENTRY_ID_RE.exec(req.params.id)
+    if (!m) return res.status(400).json({ error: { code: 'invalid_entry' } })
+    return withThread(res, t => {
+      const found = t.entry(m[1]!)
+      if (!found) return res.status(404).json({ error: { code: 'entry_not_found' } })
+      const { entry, lookup } = found
+      if (entry.full) return res.json({ entry, source: 'ledger' })
+      let source: 'live' | 'archive' = 'live'
+      let whole = t.liveAnswer(lookup)
+      if (typeof whole !== 'string' || !whole) {
+        source = 'archive'
+        try { whole = (deps.archiveAnswer ?? (l => archivedAnswer(dataPath('archive'), l)))(lookup) } catch { whole = undefined }
+      }
+      if (typeof whole !== 'string' || !whole) return res.json({ entry, source: 'preview' })
+      const cut = whole.length > ENTRY_MAX_ANSWER_CHARS
+      return res.json({
+        entry: { ...entry, answer: cut ? whole.slice(0, ENTRY_MAX_ANSWER_CHARS) : whole, answerChars: whole.length, full: !cut },
+        source,
+      })
+    })
   })
 
   router.get('/cos-thread/threads', (req, res) => {

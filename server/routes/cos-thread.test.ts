@@ -156,14 +156,14 @@ describe('health capability', () => {
     await new Promise<void>(resolve => server ? server.close(() => resolve()) : resolve())
   })
 
-  it('dropIt.thread is { protocol: 1 } only while Drop it is on; every other dropIt key stays', async () => {
+  it('dropIt.thread is { protocol: 1, history: 1 } only while Drop it is on; every other dropIt key stays', async () => {
     process.env.COS_DROP_IT = '1'
     const on = (await (await fetch(`${base}/api/health`)).json() as any).capabilities.dropIt
-    expect(on).toEqual({ protocol: 1, enabled: true, source: 'env', p2Settings: 1, attachments: 5, thread: { protocol: 1 } })
+    expect(on).toEqual({ protocol: 1, enabled: true, source: 'env', p2Settings: 1, attachments: 5, thread: { protocol: 1, history: 1 } })
     process.env.COS_DROP_IT = '0'
     const off = (await (await fetch(`${base}/api/health`)).json() as any).capabilities.dropIt
     expect(off).toEqual({ protocol: 1, enabled: false, source: 'env', p2Settings: 1, attachments: 5 })
-    expect(dropItCapability({ COS_DROP_IT: '1' }).thread).toEqual({ protocol: 1 })
+    expect(dropItCapability({ COS_DROP_IT: '1' }).thread).toEqual({ protocol: 1, history: 1 })
     expect('thread' in dropItCapability({ COS_DROP_IT: '0' })).toBe(false)
   }, 20_000)
 })

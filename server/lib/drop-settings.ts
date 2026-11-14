@@ -42,15 +42,19 @@ export function writeDropItSetting(enabled: boolean, file = DROP_IT_SETTINGS_FIL
 }
 
 /** The capability block for /api/health and /api/models. Codes only: no counts, no words. Additive. */
-export function dropItCapability(env: NodeJS.ProcessEnv = process.env, file = DROP_IT_SETTINGS_FILE()): { protocol: number; enabled: boolean; source: 'env' | 'settings'; p2Settings: number; attachments: number; thread?: { protocol: number } } {
+export function dropItCapability(env: NodeJS.ProcessEnv = process.env, file = DROP_IT_SETTINGS_FILE()): { protocol: number; enabled: boolean; source: 'env' | 'settings'; p2Settings: number; attachments: number; thread?: { protocol: number; history: number } } {
   // p2Settings (6.99.11): GET/PUT /api/drops/settings/p2 exists. Clients that do not see it hide the P2 controls.
   // attachments (6.99.13): POST /api/drops takes this many attachmentIds. A client that does not see it sends words only.
   // thread (6.99.16): the COS thread routes (routes/cos-thread.ts), present only while Drop it is on, as they are.
+  // thread.history (7.0.39): GET /api/cos-thread/history and /entry/:id exist. Its own number, because the 7.0.37 page
+  // turns the thread off unless thread.protocol is exactly 1, so that number cannot move.
   const enabled = dropItEnabled(env, file)
   return {
     protocol: DROP_IT_PROTOCOL, enabled, source: dropItSource(env), p2Settings: 1, attachments: DROP_ATTACHMENTS_MAX,
-    ...(enabled ? { thread: { protocol: COS_THREAD_CAPABILITY_PROTOCOL } } : {}),
+    ...(enabled ? { thread: { protocol: COS_THREAD_CAPABILITY_PROTOCOL, history: COS_THREAD_HISTORY_CAPABILITY } } : {}),
   }
 }
 /** 6.99.16: the COS thread's protocol (lib/cos-thread.ts COS_THREAD_PROTOCOL; kept here so this module imports nothing new). */
 export const COS_THREAD_CAPABILITY_PROTOCOL = 1
+/** 7.0.39: the history route's protocol (lib/cos-thread.ts COS_THREAD_HISTORY_PROTOCOL; kept here for the same reason). */
+export const COS_THREAD_HISTORY_CAPABILITY = 1
