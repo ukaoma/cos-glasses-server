@@ -342,6 +342,9 @@ describe('X1 7.0.42: a boot name miss no longer holds back the certificate', () 
       { ...deps(pair, clock, calls), dir, selfDnsName: () => self.refresh() }, d => new SignerTls(d))!
     const port = await serve3143(tls)
     tls.start()
+    // Two paths serve it: the constructor loads the stored pair (asserted here before any handshake or status read,
+    // served() does no pickup), and a handshake's own pickup would load it too.
+    expect(tls.active()!.served()?.host).toBe(NAME)
     expect(await served(port, NAME)).toBe(pair.fingerprint)
     await tls.active()!.check()
     expect(calls).toEqual([])
