@@ -127,6 +127,34 @@ describe('the monitor', () => {
   })
 })
 
+describe('7.0.39: a window that has reset no longer counts', () => {
+  // The reading on Miles's Mac on 2026-11-14: Claude last read on Oct 23 (week 23% used, reset Oct 26), probes failing since.
+  const LATER = Date.parse('2026-11-14T16:03:54Z')
+  const oct23 = { plan: 'max', allowed: null, available: true, windows: [
+    { kind: 'session', usedPct: 2, resetsAt: '2026-10-23T18:09:59.848Z' },
+    { kind: 'weekly_all', usedPct: 23, resetsAt: '2026-10-26T07:59:59.848Z' },
+    { kind: 'weekly_scoped', usedPct: 0, resetsAt: '2026-10-26T08:00:00.000Z' }] }
+  const entry = (over: Record<string, unknown> = {}) => ({ provider: 'claude' as const, reading: oct23, observedAt: Date.parse('2026-10-23T14:18:57Z'), source: 'probe' as const,
+    lastError: 'unknown get_usage shape', failures: 1, pausedUntil: null, limitUntil: null, limitSource: null, warning: true, ...over })
+  it('every binding window past its reset: unknown, no headroom, no reset, and the note says why (never the old 77%)', () => {
+    expect(viewOf(entry(), LATER)).toMatchObject({ state: 'unknown', headroomPct: null, resetsAt: null,
+      note: 'not read since its window ended; last read failed: unknown get_usage shape' })
+  })
+  it('only the windows past their reset drop out: a reset 5-hour window does not bind, the live week still does', () => {
+    const mixed = { ...oct23, windows: [{ kind: 'session', usedPct: 99, resetsAt: '2026-11-14T15:00:00Z' }, { kind: 'weekly_all', usedPct: 30, resetsAt: '2026-11-16T08:00:00Z' }] }
+    expect(viewOf(entry({ reading: mixed, warning: false }), LATER)).toMatchObject({ state: 'ok', headroomPct: 70, resetsAt: '2026-11-16T08:00:00Z' })
+  })
+  it('a stated limit still wins over windows that have reset; a warning stops counting once the window it warned about resets', () => {
+    expect(viewOf(entry({ limitUntil: LATER + 60_000, limitSource: 'rate_limit_event' }), LATER)).toMatchObject({ state: 'exhausted', headroomPct: 0 })
+    const live = { ...oct23, windows: [{ kind: 'weekly_all', usedPct: 50, resetsAt: '2026-11-16T08:00:00Z' }] }
+    expect(viewOf(entry({ reading: live, warningUntil: LATER - 1 }), LATER)).toMatchObject({ state: 'ok', headroomPct: 50 })
+    expect(viewOf(entry({ reading: live, warningUntil: LATER + 60_000 }), LATER)).toMatchObject({ state: 'low', headroomPct: 50 })
+    const m = new UsageMonitor({ probes: { claude: async () => live as any, codex: async () => live as any }, now: () => LATER })
+    m.noteClaudeRateLimitEvent({ rate_limit_info: { status: 'allowed_warning', resetsAt: Math.round((LATER + 3_600_000) / 1000) } })
+    expect(m.entry('claude')).toMatchObject({ warning: true, warningUntil: Math.round((LATER + 3_600_000) / 1000) * 1000 })
+  })
+})
+
 function fakeSpawn(answer: (line: Record<string, any>, emit: (o: unknown) => void) => void) {
   const writes: string[] = [], calls: Array<{ bin: string; args: string[]; cwd: string }> = []
   let killed = 0

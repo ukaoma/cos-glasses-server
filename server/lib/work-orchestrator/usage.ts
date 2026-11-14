@@ -62,6 +62,8 @@ export interface UsageEntry {
   limitUntil: number | null
   limitSource: string | null
   warning: boolean
+  /** 7.0.39+: when the window an `allowed_warning` frame warned about resets. Past it, the warning no longer counts. */
+  warningUntil?: number | null
 }
 export type UsageState = 'ok' | 'low' | 'exhausted' | 'unknown'
 /** What the planner sees: one line per provider. */
@@ -122,9 +124,17 @@ export function parseLimitReset(message: string, now: number): number | null {
   return null
 }
 
-export function headroomOf(provider: UsageProvider, reading: UsageReading | null): number | null {
+/** A window still counts until its own reset. Past it the percentage describes a window that has ended (7.0.39+: Work was
+ *  shown Claude at 77% left from a week that reset 19 days earlier, because nothing checked). No reset given: it counts. */
+export function windowLive(w: UsageWindow, now: number): boolean {
+  if (!w.resetsAt) return true
+  const t = Date.parse(w.resetsAt)
+  return Number.isNaN(t) || t > now
+}
+
+export function headroomOf(provider: UsageProvider, reading: UsageReading | null, now: number = Date.now()): number | null {
   if (!reading || !reading.available) return null
-  const bind = reading.windows.filter(w => BINDING[provider](w.kind))
+  const bind = reading.windows.filter(w => BINDING[provider](w.kind) && windowLive(w, now))
   if (!bind.length) return null
   return Math.max(0, Math.round(100 - Math.max(...bind.map(w => w.usedPct))))
 }
@@ -132,8 +142,9 @@ export function headroomOf(provider: UsageProvider, reading: UsageReading | null
 export function viewOf(e: UsageEntry, now: number): UsageView {
   const ageSec = e.observedAt ? Math.round((now - e.observedAt) / 1000) : null
   const stale = !e.observedAt || now - e.observedAt > USAGE_STALE_MS
-  const headroom = headroomOf(e.provider, e.reading)
-  const bind = (e.reading?.windows ?? []).filter(w => BINDING[e.provider](w.kind))
+  const headroom = headroomOf(e.provider, e.reading, now)
+  const allBind = (e.reading?.windows ?? []).filter(w => BINDING[e.provider](w.kind))
+  const bind = allBind.filter(w => windowLive(w, now))
   const tightest = bind.length ? bind.reduce((a, b) => (b.usedPct > a.usedPct ? b : a)) : null
   const base = { provider: e.provider, ageSec, source: e.source, plan: e.reading?.plan ?? null, stale }
   // A stated limit beats any percentage (canary C1 rule), until the time it names.
@@ -142,8 +153,14 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
   }
   if (e.reading?.allowed === false) return { ...base, state: 'exhausted', headroomPct: 0, resetsAt: tightest?.resetsAt ?? null, note: 'the provider says ordinary usage is not allowed now' }
   if (e.provider === 'cursor' && !e.reading) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' }
+  // Every window this reading had has reset: its numbers describe a window that is over, so they are not shown.
+  if (e.reading?.available && allBind.length && !bind.length) {
+    return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: `not read since its window ended${e.lastError ? `; last read failed: ${e.lastError}` : ''}` }
+  }
   if (!e.reading || headroom === null) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: e.reading && !e.reading.available ? 'no plan limits on this login' : e.lastError ? `not read: ${e.lastError}` : 'not read yet' }
-  const state: UsageState = headroom <= 0 ? 'exhausted' : headroom < USAGE_LOW_HEADROOM || e.warning ? 'low' : 'ok'
+  // A warning holds only until the window it warned about resets; an old frame cannot keep a new week at "low".
+  const warned = e.warning && !(typeof e.warningUntil === 'number' && e.warningUntil <= now)
+  const state: UsageState = headroom <= 0 ? 'exhausted' : headroom < USAGE_LOW_HEADROOM || warned ? 'low' : 'ok'
   return { ...base, state, headroomPct: headroom, resetsAt: tightest?.resetsAt ?? null, note: stale ? 'reading is old' : '' }
 }
 
@@ -189,7 +206,7 @@ export class UsageMonitor {
     const run = (async () => {
       try {
         const reading = await this.probes[p]()
-        e.reading = reading; e.observedAt = this.now(); e.source = 'probe'; e.lastError = null; e.failures = 0; e.pausedUntil = null; e.warning = false
+        e.reading = reading; e.observedAt = this.now(); e.source = 'probe'; e.lastError = null; e.failures = 0; e.pausedUntil = null; e.warning = false; e.warningUntil = null
         // A fresh reading that says usage is allowed again clears an older limit only when its own reset passed.
         if (e.limitUntil && e.limitUntil <= this.now()) { e.limitUntil = null; e.limitSource = null }
       } catch (error) {
@@ -232,8 +249,8 @@ export class UsageMonitor {
     if (info.status === 'rejected') {
       const resetMs = num(info.resetsAt) ? info.resetsAt * 1000 : this.now() + USAGE_LIMIT_DEFAULT_MS
       e.limitUntil = Math.max(e.limitUntil ?? 0, resetMs); e.limitSource = 'rate_limit_event'
-    } else if (info.status === 'allowed_warning') e.warning = true
-    else if (info.status === 'allowed') { e.warning = false; if (e.limitSource === 'rate_limit_event' && (e.limitUntil ?? 0) <= this.now()) e.limitUntil = null }
+    } else if (info.status === 'allowed_warning') { e.warning = true; e.warningUntil = num(info.resetsAt) ? info.resetsAt * 1000 : null }
+    else if (info.status === 'allowed') { e.warning = false; e.warningUntil = null; if (e.limitSource === 'rate_limit_event' && (e.limitUntil ?? 0) <= this.now()) e.limitUntil = null }
     if (e.source === 'none') e.source = 'passive'
     this.save()
   }

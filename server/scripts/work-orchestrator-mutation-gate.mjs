@@ -110,6 +110,13 @@ const mutations = [
   ['route-usage-on-demand', OR, 'Promise<UsageView[]> => monitor.onDemand(refresh)', 'Promise<UsageView[]> => Promise.resolve(monitor.views())'],
   ['route-usage-refresh-param', OR, "usage: await deps.usage(req.query.refresh === '1')", 'usage: await deps.usage(false)'],
   ['usage-rejected-frame', US, "    if (info.status === 'rejected') {", "    if (false) {"],
+  // 7.0.39 (U1): a window past its reset no longer counts; a warning holds only until its window resets.
+  ['usage-window-live-rule', US, '  return Number.isNaN(t) || t > now\n', '  return true\n'],
+  ['usage-window-expiry-headroom', US, 'BINDING[provider](w.kind) && windowLive(w, now))', 'BINDING[provider](w.kind))'],
+  ['usage-window-expiry-view', US, '  const bind = allBind.filter(w => windowLive(w, now))\n', '  const bind = allBind\n'],
+  ['usage-window-ended-unknown', US, '  if (e.reading?.available && allBind.length && !bind.length) {', '  if (false) {'],
+  ['usage-warning-expiry', US, "  const warned = e.warning && !(typeof e.warningUntil === 'number' && e.warningUntil <= now)\n", '  const warned = e.warning\n'],
+  ['usage-warning-until-set', US, 'e.warningUntil = num(info.resetsAt) ? info.resetsAt * 1000 : null', 'e.warningUntil = null'],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new Error('timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new Error('timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],
