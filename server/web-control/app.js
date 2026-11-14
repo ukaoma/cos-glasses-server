@@ -2325,7 +2325,9 @@
       var yours = ask ? 'Your answer to \u201c' + ask + '\u201d was not sent.' : 'Your answer \u201c' + label + '\u201d was not sent.';
       return now && now.ask ? 'The session asked something new: \u201c' + now.ask + '\u201d. ' + yours : 'The session took another turn. ' + yours;
     },
-    answered: function (label) { return 'Already answered on another screen. \u201c' + label + '\u201d was not sent.'; }
+    answered: function (label) { return 'Already answered on another screen. \u201c' + label + '\u201d was not sent.'; },
+    // Lead 00:54: an earlier answer to this ask went out and its delivery is unknown. Not "already answered", no button.
+    unconfirmed: function () { return 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.'; }
   };
   /** The exact words a choice or a reply sends (contract v1): attributed to COS Control Web, never to the desk. */
   function turnEndPrompt(text) { return TURN_END_PREFIX + turnEndBare(text); }
@@ -2471,6 +2473,7 @@
   function turnEndOutcome(r, how, label, ask) {
     if (how === 'sent') return sessionStatus(TURN_END_SENT(label));
     if (how === 'answered') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.answered(label), 'error'); }
+    if (how === 'unconfirmed') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.unconfirmed(), 'error'); }
     if (how === 'moved' || how === 'changed') {
       // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
       var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;
@@ -5372,7 +5375,8 @@
         if (reason === 'turn_end_ask_moved') {
           view.status(r, '');
           r.teRefusal = { revision: b.revision || null, askNow: b.askNow && typeof b.askNow === 'object' ? b.askNow : null };
-          return b.answered === true ? 'answered' : 'moved';
+          // Strict: answered is true, or the string 'unconfirmed' (X1 01:00); a truthy check would read both as answered.
+          return b.answered === true ? 'answered' : b.answered === 'unconfirmed' ? 'unconfirmed' : 'moved';
         }
         if (reason === 'native_thread_changed' && b.revision) {
           // The box. Send it anyway always carries the revision of THIS refusal, the newest (A3).

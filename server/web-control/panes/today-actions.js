@@ -1173,6 +1173,7 @@
       var Q = K.turnEndQuote;
       if (how === 'sent') O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' };
       else if (how === 'answered') { r.teRefusal = null; O.note = { text: Q.answered(label), kind: 'error' }; }
+      else if (how === 'unconfirmed') { r.teRefusal = null; O.note = { text: Q.unconfirmed(), kind: 'error' }; }
       else if (how === 'moved' || how === 'changed') {
         // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
         var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;

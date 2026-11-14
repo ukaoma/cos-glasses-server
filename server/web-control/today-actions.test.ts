@@ -5089,6 +5089,20 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     await flush()
     expect(turns(h)).toHaveLength(1)
   })
+  it('7.0.37 (lead 00:54, X1 01:00): answered "unconfirmed" is not "already answered": the lead’s words, no button, the reply box stays', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: 'unconfirmed', answeredBy: 'web', askNow: null } } }
+    const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.')
+    expect(h.els['ta-status']!.innerHTML).not.toContain('te-quote')
+    expect(h.els['ta-foot']!.hidden, 'the reply box stays').toBe(false)
+    h.tap('te-quote')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
+  })
   it('7.0.36: answered first on another screen: said, no button, nothing more sent', async () => {
     const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, askNow: null } } }
     const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })

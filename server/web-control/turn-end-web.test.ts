@@ -66,6 +66,7 @@ describe('the row: what the server marks, read as the contract says', () => {
     expect(Q.text('Yes', 'Ship it?')).toBe(PREFIX + 'Yes. This answers your earlier question \u201cShip it?\u201d. You have taken a turn since asking it.')
     expect(Q.text('Yes', 'Ship it?').indexOf(PREFIX), 'the contract words first and unchanged').toBe(0)
     expect(Q.answered('Yes')).toBe('Already answered on another screen. \u201cYes\u201d was not sent.')
+    expect((Q as unknown as { unconfirmed: () => string }).unconfirmed()).toBe('An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.')
     // A question with no words (the switch off): the sentences still read, without empty quotes.
     expect(Q.moved('Yes', '', null)).toBe('The session took another turn. Your answer \u201cYes\u201d was not sent.')
     expect(Q.text('Yes', '')).toBe(PREFIX + 'Yes. This answers your earlier question. You have taken a turn since asking it.')
@@ -228,6 +229,15 @@ describe('the reader’s card and its send', () => {
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
       expect(h.sent).toHaveLength(1)
     } finally { vi.useRealTimers() }
+  })
+  it('7.0.37 (lead 00:54): an earlier answer whose delivery is unknown: the lead’s words, no button, nothing more sent', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1' }, () => Promise.resolve('unconfirmed'))
+    h.fns.sendTurnEndChoice(h.r, 0)
+    await flush()
+    expect(h.status.at(-1)).toEqual({ text: 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.', kind: 'error' })
+    expect(h.r.teQuote ?? null).toBeNull()
+    h.fns.sendTurnEndQuoted(h.r)
+    expect(h.sent).toHaveLength(1)
   })
   it('7.0.36: answered first on another screen: said, no button, nothing more sent', async () => {
     const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1' }, () => Promise.resolve('answered'))
