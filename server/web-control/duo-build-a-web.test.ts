@@ -169,6 +169,43 @@ describe('7.0.2 A1: layout reports from every pane, numbers and fixed labels onl
     expect(dev).toHaveLength(1)
     expect(dev[0]!.data).toMatchObject({ sw: 382, sh: 873, sah: 873, oh: 557, dpr: 3, sat: 47, sab: 34, anyCoarse: true, shortTouch: true, phone: true })
   })
+  // 7.0.38 (lead 07:49, Miles 07:47 "I just need the pings as well"): facts about notifications before anyone designs them.
+  it('caps: once per open, booleans and fixed labels only, the URL’s scheme and nothing else of it, no prompt, nothing registered', () => {
+    const p = page({ w: 382, h: 557 })
+    const asked: string[] = []
+    p.window.location = { protocol: 'https:', host: 'secret-mac.tail1234.ts.net:3143', hostname: 'secret-mac.tail1234.ts.net', href: 'https://secret-mac.tail1234.ts.net:3143/control/?t=tok123#/today', search: '?t=tok123' }
+    p.window.isSecureContext = true
+    p.window.navigator = { standalone: true, serviceWorker: { register: () => { asked.push('register') } } }
+    p.window.PushManager = function () {}
+    p.window.Notification = { permission: 'default', requestPermission: () => { asked.push('prompt') } }
+    p.shellHooks.forEach(fn => fn()); p.shellHooks.forEach(fn => fn())
+    const caps = p.crumbs.filter(c => c.what === 'caps')
+    expect(caps, 'once per open').toHaveLength(1)
+    expect(caps[0]!.data).toEqual({ secure: true, proto: 'https', standalone: false, iosStandalone: true, swApi: true, pushApi: true, notifApi: true, notifPerm: 'default' })
+    const strings = Object.values(caps[0]!.data).filter(v => typeof v === 'string')
+    expect(strings.sort()).toEqual(['default', 'https'])
+    expect(JSON.stringify(caps[0]!.data)).not.toMatch(/secret|tail1234|3143|tok123|control|today/)
+    expect(asked, 'no permission prompt, nothing registered').toEqual([])
+  })
+  it('caps: an older browser with none of it, over plain http, and a permission value it does not know', () => {
+    const p = page({ w: 951, h: 539 })
+    p.window.location = { protocol: 'http:' }
+    p.window.navigator = {}
+    p.shellHooks.forEach(fn => fn())
+    expect(p.crumbs.filter(c => c.what === 'caps')[0]!.data).toEqual({ secure: false, proto: 'http', standalone: false, iosStandalone: false, swApi: false, pushApi: false, notifApi: false, notifPerm: 'none' })
+    const q = page({ w: 382, h: 557 })
+    q.window.location = { protocol: 'chrome-extension:' }
+    q.window.Notification = { permission: 'prompt-ish' }
+    q.shellHooks.forEach(fn => fn())
+    expect(q.crumbs.filter(c => c.what === 'caps')[0]!.data).toMatchObject({ proto: 'other', notifApi: true, notifPerm: 'other' })
+  })
+  it('caps: an installed web app (display-mode standalone) says so', () => {
+    const p = page({ w: 382, h: 557 })
+    const mm = p.window.matchMedia
+    p.window.matchMedia = (q: string) => (/display-mode: standalone/.test(q) ? { matches: true } : mm(q))
+    p.shellHooks.forEach(fn => fn())
+    expect(p.crumbs.filter(c => c.what === 'caps')[0]!.data.standalone).toBe(true)
+  })
   it('focus on any pane: the pane, the field kind, its computed font size, scrollY, the scroll range and scrollWidth', () => {
     const p = page({ w: 951, h: 539, route: { pane: 'sessions', args: [] }, scrollH: 1200 })
     p.window.scrollY = 40; p.field.fs = '16px'

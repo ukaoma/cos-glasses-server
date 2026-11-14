@@ -8565,6 +8565,26 @@
       sat: lrProbe('padding-top:env(safe-area-inset-top)', 'paddingTop'), sab: lrProbe('padding-bottom:env(safe-area-inset-bottom)', 'paddingBottom'),
       anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), rail: typeof sideRail === 'function' ? sideRail() : false, railHit: typeof RAIL === 'object' ? RAIL.hit : 0, phone: isPhone(), cw: w.cw, dw: w.dw, scw: w.scw, wide: w.wide });
   }
+  // 7.0.38 (lead 07:49, Miles 07:47 "I just need the pings as well"): what this browser could do for notifications, so
+  // nobody designs iPhone pings from a guess. Once per open, booleans and short fixed labels only: never the host, the
+  // address or any other part of the URL but its scheme, no token, no permission prompt, nothing registered. Reading
+  // Notification.permission does not ask; nothing here calls requestPermission, register or subscribe.
+  function lrCaps() {
+    if (LR.caps) return;
+    LR.caps = true;
+    var n = window.Notification, nav = window.navigator || {}, proto = String((window.location && window.location.protocol) || '');
+    var perm = n && typeof n.permission === 'string' && /^(default|granted|denied)$/.test(n.permission) ? n.permission : n ? 'other' : 'none';
+    layoutCrumb('caps', {
+      secure: window.isSecureContext === true,
+      proto: /^(https|http|file):$/.test(proto) ? proto.slice(0, -1) : 'other',
+      standalone: lrMatch('(display-mode: standalone)'),
+      iosStandalone: nav.standalone === true,
+      swApi: 'serviceWorker' in nav,
+      pushApi: 'PushManager' in window,
+      notifApi: 'Notification' in window,
+      notifPerm: perm
+    });
+  }
   // The focus line is for touch screens only (QA W3): on a Mac it would only spend the budget.
   function lrFocus() {
     if (!vpTyping()) return;
@@ -8637,7 +8657,7 @@
     // 7.0.17: when the last touch landed, for the zoom breadcrumb only. Passive: it never blocks a gesture.
     document.addEventListener('touchstart', function () { LR.touchAt = Date.now(); }, { capture: true, passive: true });
     document.addEventListener('focusout', function () { setTimeout(lrFit, 0); });
-    shellHooks.push(function () { lrDevice(); lrFit(); });
+    shellHooks.push(function () { lrDevice(); lrCaps(); lrFit(); });
   })();
   // 7.0.17 (Miles 2026-11-10, the Duo web app zooming in and out around the keyboard): on iOS only, the viewport is
   // capped at maximum-scale=1, once, as the page loads. Other platforms keep the viewport exactly as it is. Never while
