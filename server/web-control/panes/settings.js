@@ -129,8 +129,17 @@
       var on = choice === id;
       return '<button type="button" class="cx-set-row cx-set-choice" data-theme-choice="' + id + '" aria-pressed="' + on + '"><span class="cx-set-name">' + esc(label) + '</span><span class="value">' + (on ? '<span class="check">✓</span>' : '') + '</span></button>';
     };
+    var story = window.CosStorySize ? window.CosStorySize.choice() : 'auto';
+    var storyBtn = function (id, label, desc) {
+      var on = story === id;
+      return '<button type="button" class="cx-set-row cx-set-choice" data-story-choice="' + id + '" aria-pressed="' + on + '"><span class="cx-set-text"><span class="cx-set-name">' + esc(label) + '</span>' +
+        (desc ? '<span class="cx-set-desc">' + esc(desc) + '</span>' : '') + '</span><span class="value">' + (on ? '<span class="check">✓</span>' : '') + '</span></button>';
+    };
     return '<section class="cx-set-cat"><h2 class="cx-col-title">This browser</h2>' +
       group('Appearance', '', themeBtn('system', 'Match this device') + themeBtn('light', 'Light') + themeBtn('dark', 'Dark')) +
+      // F1 (Miles 11/13 23:02): the size of Today's summary on this device, built like the theme rows (app.js paintStorySize).
+      group('Today summary size', '', storyBtn('auto', 'Automatic', 'Small on a narrow screen, Medium on a wide one') + storyBtn('large', 'Large', '') +
+        storyBtn('medium', 'Medium', '') + storyBtn('small', 'Small', '')) +
       group('Sign-in', '',
         '<button type="button" class="cx-set-row" id="device-code-btn"><span class="cx-set-text"><span class="cx-set-name">Use COS on another phone or browser</span><span class="cx-set-desc">A QR for your phone’s camera, and a code to type. This is not glasses pairing; pair glasses from COS Control on your Mac.</span></span><span class="chev"></span></button>' +
         '<div id="device-code-panel" class="device-code hidden" aria-live="polite"></div>' +

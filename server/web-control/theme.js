@@ -51,6 +51,17 @@
     apply: function () { return apply(read()); }
   };
   apply(read());
+  // F1 (Miles 11/13 23:02): Today's summary size, kept per device like the theme. auto (nothing saved) | large | medium |
+  // small, as html[data-story-size] before the first paint, so the summary never draws at one size and jumps (app.css
+  // --story-k; Settings, This browser, Appearance).
+  var STORY_KEY = 'cos_web_story_size', STORY = { large: 1, medium: 1, small: 1 };
+  function storyRead() { try { var v = localStorage.getItem(STORY_KEY); return STORY[v] ? v : 'auto'; } catch (_e) { return 'auto'; } }
+  function storyApply(choice) { try { var de = document.documentElement; if (STORY[choice]) de.setAttribute('data-story-size', choice); else if (de.hasAttribute ? de.hasAttribute('data-story-size') : de.removeAttribute) de.removeAttribute('data-story-size'); } catch (_e) { /* the CSS default by width */ } return choice; }
+  window.CosStorySize = {
+    choice: storyRead,
+    set: function (choice) { choice = STORY[choice] ? choice : 'auto'; try { if (choice === 'auto') localStorage.removeItem(STORY_KEY); else localStorage.setItem(STORY_KEY, choice); } catch (_e) {} return storyApply(choice); }
+  };
+  storyApply(storyRead());
   // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
   // never shows a mark that nothing would take away. app.js removes the class when the sign-in card or the app shows.
   document.documentElement.classList.add('fp-wait');

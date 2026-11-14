@@ -7616,6 +7616,17 @@
       b.querySelector('.value').innerHTML = on ? '<span class="check">✓</span>' : '';
     });
   }
+  // F1: the summary size rows (Settings). A new size may shrink the summary, so the held height (storyHold) starts over.
+  function paintStorySize() {
+    var choice = window.CosStorySize ? window.CosStorySize.choice() : 'auto';
+    document.querySelectorAll('[data-story-choice]').forEach(function (b) {
+      var on = b.getAttribute('data-story-choice') === choice;
+      b.setAttribute('aria-pressed', String(on));
+      b.querySelector('.value').innerHTML = on ? '<span class="check">✓</span>' : '';
+    });
+    BRIEF.heldPx = 0;
+    var s = $('today-story'); if (s && s.style) s.style.minHeight = '';
+  }
   var codeTimer = null;
   // A QR as inline SVG from vendor/qrcode-encoder.js (window.COSQR). Only numbers reach the
   // markup; the text is encoded, never inserted. Empty when the encoder did not load.
@@ -7891,6 +7902,7 @@
       return paintNeeds();
     }
     if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); return; }
+    if (t.hasAttribute('data-story-choice') && window.CosStorySize) { window.CosStorySize.set(t.getAttribute('data-story-choice')); paintStorySize(); return; }
     if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
       // 7.0.33 A11: a pick from the menu (the rail, the pane menu, Ask's Go to) starts a new trail (navStamp).
       if (t.closest('.rail, #section-menu, #ask-results')) NAV.fresh = Date.now();

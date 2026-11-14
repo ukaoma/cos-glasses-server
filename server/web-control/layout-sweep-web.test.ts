@@ -112,3 +112,65 @@ describe('F1 fix 2: the Messages list header ends at its column', () => {
     expect(wide.includes('.msg-left .cx-hero {')).toBe(true)
   })
 })
+
+// ── Today's summary (Miles 11/13 23:02 "Build your picks", 23:03 "two steps down when closed and one or two when
+// opened"): full width above the cards, Automatic (Small under 600 px, Medium from 600) unless this device saved Large,
+// Medium or Small (Settings, This browser). WebKit frames: F1_evidence/built_today.cjs.
+const THEME = readFileSync(join(HERE, 'theme.js'), 'utf8')
+const APP_CSS = readFileSync(join(HERE, 'app.css'), 'utf8')
+const HTML = readFileSync(join(HERE, 'index.html'), 'utf8')
+const SETTINGS = readFileSync(join(HERE, 'panes/settings.js'), 'utf8')
+const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
+function themeBlock(store: Record<string, string>) {
+  const start = THEME.indexOf('/* Runs before first paint so the page never flashes')
+  const end = THEME.indexOf('})();', start) + 5
+  const attrs: Record<string, string> = {}, classes = new Set<string>()
+  const de = { setAttribute: (k: string, v: string) => { attrs[k] = v }, removeAttribute: (k: string) => { delete attrs[k] }, getAttribute: (k: string) => attrs[k] ?? null, classList: { add: (c: string) => classes.add(c), remove: (c: string) => classes.delete(c) } }
+  const localStorage = { getItem: (k: string) => (k in store ? store[k]! : null), setItem: (k: string, v: string) => { store[k] = String(v) }, removeItem: (k: string) => { delete store[k] } }
+  const window: any = { matchMedia: () => ({ matches: false, addEventListener: () => {} }) }
+  // eslint-disable-next-line no-new-func
+  new Function('window', 'document', 'localStorage', THEME.slice(start, end))(window, { documentElement: de }, localStorage)
+  return { attrs, store, api: window.CosStorySize }
+}
+describe('Today summary size: kept per device, applied before the first paint', () => {
+  it('nothing saved is Automatic: no attribute, so the CSS default by width applies', () => {
+    const t = themeBlock({})
+    expect(t.attrs['data-story-size']).toBeUndefined()
+    expect(t.api.choice()).toBe('auto')
+  })
+  it('a saved Large, Medium or Small is on <html> at once; anything else reads as Automatic', () => {
+    for (const v of ['large', 'medium', 'small']) expect(themeBlock({ cos_web_story_size: v }).attrs['data-story-size']).toBe(v)
+    expect(themeBlock({ cos_web_story_size: 'huge' }).attrs['data-story-size']).toBeUndefined()
+  })
+  it('set() saves on this device and applies; Automatic forgets the key; the theme key is never touched', () => {
+    const t = themeBlock({ cos_web_theme: 'dark' })
+    t.api.set('small'); expect(t.store.cos_web_story_size).toBe('small'); expect(t.attrs['data-story-size']).toBe('small')
+    t.api.set('auto'); expect('cos_web_story_size' in t.store).toBe(false); expect(t.attrs['data-story-size']).toBeUndefined()
+    expect(t.store.cos_web_theme).toBe('dark')
+  })
+  it('the CSS: Small (0.72) under 600, Medium (0.85) from 600, a saved choice wins; every .story size goes through the factor', () => {
+    const css = strip(APP_CSS)
+    expect(css).toMatch(/:root \{ --story-k: 0\.72; \}/)
+    expect(css).toMatch(/@media \(min-width: 600px\) \{ :root \{ --story-k: 0\.85; \} \}/)
+    expect(css).toMatch(/html\[data-story-size='large'\] \{ --story-k: 1; \}/)
+    expect(css).toMatch(/html\[data-story-size='medium'\] \{ --story-k: 0\.85; \}/)
+    expect(css).toMatch(/html\[data-story-size='small'\] \{ --story-k: 0\.72; \}/)
+    const sizes = [...css.matchAll(/\.story \{([^}]*)\}/g)].map(m => m[1]!).filter(b => /font(-size)?:/.test(b))
+    expect(sizes.length).toBe(5)
+    for (const b of sizes) expect(b).toMatch(/calc\(\d+px \* var\(--story-k\)\)/)
+    expect(css).toMatch(/\.story \{[^}]*max-width: 62ch;/)
+  })
+  it('the sentence sits above the two columns, not inside the left one', () => {
+    const story = HTML.indexOf('id="today-story"'), cols = HTML.indexOf('<div class="today-cols">'), main = HTML.indexOf('<div class="today-main">')
+    expect(story).toBeGreaterThan(0)
+    expect(story).toBeLessThan(cols)
+    expect(cols).toBeLessThan(main)
+    expect(strip(APP_CSS)).not.toMatch(/\.today-cols \.story/)
+  })
+  it('Settings has the four rows; a tap saves the choice and lets the held height start over', () => {
+    for (const id of ['auto', 'large', 'medium', 'small']) expect(SETTINGS).toContain(`storyBtn('${id}'`)
+    expect(APP).toMatch(/data-story-choice'\) && window\.CosStorySize\) \{ window\.CosStorySize\.set\(t\.getAttribute\('data-story-choice'\)\); paintStorySize\(\); return; \}/)
+    const paint = APP.slice(APP.indexOf('function paintStorySize()'), APP.indexOf('var codeTimer = null;'))
+    expect(paint).toContain('BRIEF.heldPx = 0;')
+  })
+})
