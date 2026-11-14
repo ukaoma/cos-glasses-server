@@ -123,7 +123,8 @@
     "COS_WEB_KEY_AUTHORITY",
     "COS_WEB_CONTROL_INTEGRITY",
     "COS_WEB_KEY_DEVICES",
-    "COS_WEB_KEY_ANCHOR_BOOTSTRAP"
+    "COS_WEB_KEY_ANCHOR_BOOTSTRAP",
+    "COS_CONTROL_TSNET_HTTPS"
   ],
   "maintenance": {
     "scope": "cross_boot",

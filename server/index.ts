@@ -247,6 +247,7 @@ import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
+import { controlHttpsOptions, controlTsnetHttpsEnabled, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -447,6 +448,9 @@ const webKeySignerIntegrity: WebControlIntegrity | null = webKeyAuthorityEnabled
 // listener loop below ONLY when the 3144 listener is (flag on at boot, HTTPS available); otherwise null, and no
 // Tailscale call, file or listener change happens. 3143 is never given SNI selection.
 let webKeySignerTls: SignerTls | null = null
+// X1 (iPhone pings): 3143 over https on this Mac's ts.net name (lib/control-tsnet-tls.ts). Null unless
+// COS_CONTROL_TSNET_HTTPS is on at boot and 3143 is planned; then 3143 gains SNI and nothing else changes.
+let controlTsnetTls: ControlTsnetTls | null = null
 // Review W6: enrollment starts only from a device on COS_WEB_KEY_DEVICES (empty: none).
 const webKeyEnrollments = new WebKeyEnrollments(webKeyRegistry, { deviceAllowed: deviceAllowlistFrom() })
 // The ports a COS Control Web cookie is honoured on. Flag off: exactly 6.99.29's [3141, 3143].
@@ -1617,6 +1621,7 @@ async function gracefulShutdown(): Promise<void> {
   stopRoutineScheduler()
   tailscaleNudger.stop()
   webKeySignerTls?.stop()
+  controlTsnetTls?.stop()
   await workReviewRuntime?.close()
   dropP2.stop()
   workIntakeStore?.close()
@@ -1754,6 +1759,11 @@ const certDir = path.join(__dirname, 'certs')
 const listeners: RequiredListener[] = []
 const httpsAvailable = existsSync(path.join(certDir, 'cert.pem'))
 if (!httpsAvailable) console.log('[COS API] No certs found — HTTPS disabled (drop cert.pem/key.pem in server/certs to enable)')
+controlTsnetTls = createControlTsnetTlsForBoot({ enabled: controlTsnetHttpsEnabled(), httpsAvailable }, () => webKeySignerTls, {
+  dir: dataPath(SIGNER_TLS_DIR),
+  selfDnsName: () => tailnetSelf.refresh(),
+})
+registerControlTsnetTls(controlTsnetTls)
 // 6.99.31: with COS_WEB_KEY_AUTHORITY on, the phone key's signer origin (https on 3144, same cert)
 // joins the REQUIRED set like 3143 (lib/listener-startup.ts listenerPlan). Flag off: 6.99.29's set.
 for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT, httpsPort: HTTPS_PORT, signerPort: WEB_KEY_SIGNER_PORT })) {
@@ -1770,7 +1780,9 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
       selfDnsName: () => tailnetSelf.refresh(),
     })
   }
-  const mkcertPair = entry.tls ? { cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) } : null
+  const mkcertFiles = entry.tls ? { cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) } : null
+  // X1: on 3143 only, exact-name SNI for this Mac's ts.net host when COS_CONTROL_TSNET_HTTPS is on; off, the pair alone.
+  const mkcertPair = mkcertFiles && entry.label === 'HTTPS' ? controlHttpsOptions(mkcertFiles, controlTsnetTls) as { cert: Buffer; key: Buffer } : mkcertFiles
   const server = mkcertPair
     ? withRequestTimeout(createHttpsServer(signer ? signerHttpsOptions(mkcertPair, webKeySignerTls) : mkcertPair, handler))
     : withRequestTimeout(createHttpServer(app))
@@ -1780,6 +1792,8 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
 listenRequiredServers(listeners).then(() => {
   // B2: the boot check of the 3144 certificate, then daily (null unless the signer listener exists).
   webKeySignerTls?.start()
+  // X1: 3143's own certificate check, only when the switch is on and the signer's instance does not exist.
+  controlTsnetTls?.start()
   const serverInstanceId = initializeServerInstanceId()
   const startupAdmissionsOpen = maintenanceAdmissionsOpen()
   if (listeners.some(listener => listener.label === 'HTTPS')) {

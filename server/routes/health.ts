@@ -131,6 +131,7 @@ import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbo
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
 import { codexLiveQueueEnabled } from '../lib/codex-live-queue.js'
 import { bootResumeGate } from '../lib/boot-resume.js'
+import { controlTsnetHealthField } from '../lib/control-tsnet-tls.js'
 
 /**
  * 6.49.0: which last hop a Continue takes, and how often each fell back.
@@ -475,6 +476,8 @@ healthRouter.get('/health', async (_req, res) => {
     ...continueReadHealthFields(),
     // 6.89.0 Tailscale self-heal: switch, last nudge and its outcome, count this hour. No address.
     ...tailscaleNudgeHealthField(),
+    // X1 (iPhone pings): 3143 over https on this Mac's ts.net name. Absent with COS_CONTROL_TSNET_HTTPS off; never a host or key.
+    ...controlTsnetHealthField(),
     // 6.62.0: ONE providers object per engine. `act` (plan 3.11): what each provider can do,
     // with a reason for every "no". `observe` (plan 1.10): what COS can see of its sessions.
     providers: mergeProviderSections(
