@@ -1,7 +1,8 @@
 /* COS Control Web: the plan ruler at the top of Sessions > Usage (7.0.41, U1; Miles 2026-11-14 12:16, "Collapsed, tap to
    open"; drawn to lanes/U1_plan_usage_mock/round2 tap-*). One line when closed: the tool closest to its plan limit, with
    its ruler, and the rest in quiet words. Open: each tool's week as a ruler, and the labelled estimate.
-   Data: GET /api/usage/plan[?refresh=1] (routes/work-orchestrator.ts, plan-pane.ts). The server writes every word, so
+   Styles: the end of panes/sessions.css. Data: GET /api/usage/plan[?refresh=1] (routes/work-orchestrator.ts, plan-pane.ts).
+   The server writes every word, so
    the Mac app says the same. This file only draws.
    Rules: a failed, paused, missing or ended reading draws no ruler (never 0%); while reading, numbers are hidden; a
    refresh never changes the height (rows and the estimate block have fixed heights); opening moves the page only on a
@@ -50,7 +51,7 @@
     else if (!p) lead = '<span class="up-warn">' + esc(S.error || 'Plan use was not read.') + '</span>';
     else {
       var top = p.closest && p.lines.filter(function (l) { return l.provider === p.closest; })[0];
-      lead = (top ? '<span class="up-seg">' + who(top) + ruler(top, false) + '<span class="up-what ' + wordsClass(top) + '">' + esc(top.shortLong) + '</span></span>' : '') +
+      lead = (top ? '<span class="up-seg">' + who(top) + ruler(top, false) + '<span class="up-what ' + wordsClass(top) + '"><span class="up-what-l">' + esc(top.shortLong) + '</span><span class="up-what-s">' + esc(top.short) + '</span></span></span>' : '') +
         (p.others ? '<span class="up-quietw up-others">' + esc(p.others) + '</span>' : '');
     }
     if (p && p.readAt && !S.loading) fresh = 'Read ' + esc(clock(p.readAt)) + '. ';
@@ -62,8 +63,8 @@
     var p = S.pane;
     var lines = p && !S.loading ? p.lines : ['claude', 'codex', 'cursor'].map(function (id) { return { provider: id, name: id === 'claude' ? 'Claude' : id === 'codex' ? 'Codex' : 'Cursor', usedPct: null, windowWords: '', long: S.loading ? 'Reading…' : 'Not read.', state: 'not_read', estimate: null }; });
     var rows = lines.map(function (l) {
-      return '<div class="up-lane"><div class="up-lname">' + who(l) + '<small>' + esc(l.windowWords || '') + '</small></div>' +
-        (l.usedPct === null || l.usedPct === undefined ? '' : ruler(l, true)) +
+      return '<div class="up-lane"><div class="up-lname">' + who(l) + (l.windowWords ? '<small>' + esc(l.windowWords) + '</small>' : '') + '</div>' +
+        ruler(l, true) +
         '<div class="up-lwords ' + wordsClass(l) + (l.usedPct === null || l.usedPct === undefined ? ' up-span' : '') + '">' + esc(l.long) + '</div></div>';
     }).join('');
     var est = lines.filter(function (l) { return l.estimate; }).map(function (l) { return '<p><b>Estimate:</b> ' + esc(l.estimate.text) + ' ' + esc(l.estimate.arithmetic) + '</p>'; }).join('');

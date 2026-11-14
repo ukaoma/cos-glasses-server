@@ -124,7 +124,9 @@ describe('the plan ruler on Control Web (Miles: "Collapsed, tap to open")', () =
   it('index.html loads it and the Usage view mounts it after each paint', () => {
     const index = readFileSync(join(HERE, 'index.html'), 'utf8'), app = readFileSync(join(HERE, 'app.js'), 'utf8')
     expect(index).toContain('"planRuler": "/control/panes/plan-ruler.js"')
-    expect(index).toContain('<link rel="stylesheet" href="/control/panes/plan-ruler.css">')
+    // Styles live at the end of sessions.css, so the boot stylesheet list (blank-open-web.test.ts) is unchanged.
+    expect(readFileSync(join(HERE, 'panes', 'sessions.css'), 'utf8')).toContain('.up-toggle {')
+    expect(index).not.toContain('plan-ruler.css')
     expect(app).toContain("if (SX.view === 'usage') ensurePane('planRuler')")
     expect(app.match(/mountPlanRuler\(\)/g)?.length).toBe(4)
   })

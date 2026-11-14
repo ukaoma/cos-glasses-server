@@ -126,7 +126,7 @@ const mutations = [
   ['usage-no-limits-classify', US, "  if (v && v.rate_limits_available === true && v.rate_limits == null) return { code: 'no_limits' }\n", ''],
   ['usage-no-limits-probe-code', US, "      else if (c.code === 'no_limits') finish(", "      else if (false) finish("],
   ['usage-failure-code', US, "const code: UsageFailureCode = error instanceof UsageProbeError ? error.code : 'error'", "const code: UsageFailureCode = 'error'"],
-  ['usage-no-limits-hold-set', US, "        if (code === 'no_limits') e.holdUntil = now + USAGE_NO_LIMITS_HOLD_MS\n", ''],
+  ['usage-failure-hold-set', US, '        e.holdUntil = now + USAGE_FAILURE_HOLD_MS\n', ''],
   ['usage-hold-check', US, '    if (e.holdUntil && e.holdUntil > this.now()) return Promise.resolve()\n', ''],
   ['usage-failure-log', US, "        console.warn(`[work-orchestrator] usage probe ${p} failed: ${code}", "        void (`[work-orchestrator] usage probe ${p} failed: ${code}"],
   ['usage-failure-cleared', US, '        e.lastFailure = null; e.lastFailureAt = null; e.holdUntil = null\n', '        e.lastFailureAt = null; e.holdUntil = null\n'],

@@ -121,7 +121,7 @@ export function planLine(e: UsageEntry, now: number, tz?: string): PlanLine {
     lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null, reason: e.lastFailure ?? null, estimate: null as PlanEstimate | null }
   const none = { usedPct: null, gonePct: null, windowStart: null, resetsAt: null }
   if (e.provider === 'cursor') {
-    return { ...base, ...none, state: 'no_plan', windowWords: 'Cursor does not report its plan to COS', short: 'No plan reading', shortLong: 'No plan reading',
+    return { ...base, ...none, state: 'no_plan', windowWords: '', short: 'No plan reading', shortLong: 'No plan reading',
       long: 'No plan reading. Cursor does not report its plan to COS.', quiet: 'Cursor no plan reading', readAt: null, lastGoodAt: null }
   }
   const found = e.reading?.available ? rulerWindow(e.provider, e.reading.windows) : null

@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, windowLive, probeClaudeUsage, probeCodexUsage,
   CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines,
-  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS, providerOrder, clockWords } from './usage.js'
+  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS, USAGE_FAILURE_HOLD_MS, providerOrder, clockWords } from './usage.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -70,7 +70,12 @@ describe('the monitor', () => {
     now += USAGE_FRESH_MS - 1000
     await m.ensureFresh()
     expect(claude).toHaveBeenCalledTimes(1)
+    // 7.0.41: a failed read holds that provider for 10 minutes, whatever the failure.
+    expect(codex).toHaveBeenCalledTimes(1)
+    now += USAGE_FAILURE_HOLD_MS
+    await m.ensureFresh()
     expect(codex).toHaveBeenCalledTimes(2)
+    now += USAGE_FAILURE_HOLD_MS + 1000
     await m.ensureFresh()
     expect(codex).toHaveBeenCalledTimes(3)
     expect(m.entry('codex').pausedUntil).toBe(now + USAGE_BREAKER_MS)
@@ -329,5 +334,21 @@ describe('7.0.39: which provider Work offers first (Miles, verified G2 turn 2026
     expect(m.views().find(x => x.provider === 'claude')!.answeredAt).toBe(new Date(T).toISOString())
     now += 5000; m.noteAnswered('claude')
     expect(m.entry('claude').answeredAt).toBe(T + 5000)
+  })
+})
+
+describe('7.0.41: reopening Usage never retries a failed read sooner than 10 minutes (lead, after the 429)', () => {
+  it('after a plain error, opening the view again and again within 10 minutes reads nothing; after 10 minutes it reads once', async () => {
+    let now = NOW
+    const claude = vi.fn(async () => { throw new Error('spawn failed') })
+    const m = new UsageMonitor({ probes: { claude, codex: async () => parseCodexUsage(codexFixture)! }, now: () => now })
+    await m.onDemand()
+    expect(claude).toHaveBeenCalledTimes(1)
+    expect(m.entry('claude')).toMatchObject({ lastFailure: 'error', holdUntil: NOW + USAGE_FAILURE_HOLD_MS })
+    for (const step of [60_000, 3 * 60_000, 5 * 60_000]) { now = NOW + step; await m.onDemand(); await m.onDemand(true) }
+    expect(claude).toHaveBeenCalledTimes(1)
+    now = NOW + USAGE_FAILURE_HOLD_MS + 1000
+    await m.onDemand()
+    expect(claude).toHaveBeenCalledTimes(2)
   })
 })

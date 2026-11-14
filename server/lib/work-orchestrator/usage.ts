@@ -20,6 +20,7 @@
  * runs in a fresh empty directory with hooks and MCP off, and is killed by its exact PID after 15 seconds.
  * 7.0.39+: a Claude answer of "limits available" with none (its usage service refused the CLI) holds Claude's probe for
  * 10 minutes, saved across restarts, and counts toward the breaker. Every failed probe logs one line with a code.
+ * 7.0.41: every failed probe holds that provider for 10 minutes, whatever the code.
  */
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
@@ -46,6 +47,9 @@ export const USAGE_LOW_HEADROOM = 15
  *  2026-11-14), COS waits this long before asking again. The CLI's own hold-off dies with its process, so COS keeps one,
  *  saved with the entry so it survives probes and restarts. */
 export const USAGE_NO_LIMITS_HOLD_MS = 10 * 60_000
+/** 7.0.41: the same hold after ANY failed read, so reopening the Usage view (or a plan) cannot retry a failing reader
+ *  sooner than every 10 minutes (lead, 2026-11-14, after the 429). The 3-failure breaker still pauses it for an hour. */
+export const USAGE_FAILURE_HOLD_MS = USAGE_NO_LIMITS_HOLD_MS
 
 /** Why a probe failed, as a code: logged on every failure and served on the usage route (never an account detail). */
 export type UsageFailureCode = 'no_limits' | 'unknown_shape' | 'refused' | 'timed_out' | 'exited' | 'not_found' | 'error'
@@ -308,7 +312,7 @@ export class UsageMonitor {
         e.lastError = safeFailureText(String((error as Error)?.message ?? error).slice(0, 120))
         e.lastFailure = code; e.lastFailureAt = now
         e.failures++
-        if (code === 'no_limits') e.holdUntil = now + USAGE_NO_LIMITS_HOLD_MS
+        e.holdUntil = now + USAGE_FAILURE_HOLD_MS
         if (e.failures >= USAGE_BREAKER_FAILURES) e.pausedUntil = now + USAGE_BREAKER_MS
         // One line per failed read, a code and times only (no plan, account or reply text). Before 7.0.39 only the breaker's
         // pause was logged, so a failed read (Claude's no_limits on 2026-11-14) left no trace in the server log.
