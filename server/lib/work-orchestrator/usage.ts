@@ -249,8 +249,8 @@ export class UsageMonitor {
         e.failures++
         if (code === 'no_limits') e.holdUntil = now + USAGE_NO_LIMITS_HOLD_MS
         if (e.failures >= USAGE_BREAKER_FAILURES) e.pausedUntil = now + USAGE_BREAKER_MS
-        // One line per failed read, a code and times only (no plan, account or reply text): three weeks of failed Claude
-        // reads (Oct 23 to Nov 14) went unseen because only the breaker's pause was ever logged.
+        // One line per failed read, a code and times only (no plan, account or reply text). Before 7.0.39 only the breaker's
+        // pause was logged, so a failed read (Claude's no_limits on 2026-11-14) left no trace in the server log.
         const until = Math.max(e.pausedUntil ?? 0, e.holdUntil ?? 0)
         console.warn(`[work-orchestrator] usage probe ${p} failed: ${code}; ${e.failures} in a row; last good read ${e.observedAt ? new Date(e.observedAt).toISOString() : 'never'}${until > now ? `; next read after ${new Date(until).toISOString()}` : ''}`)
       } finally { delete this.inflight[p]; this.save() }
