@@ -80,11 +80,14 @@ try {
     cwd: scratch, env: { PATH: process.env.PATH, HOME: scratch, COS_DATA_DIR: join(scratch, 'data') }, encoding: 'utf8', timeout: 300_000,
   })
   if (args.includes('--check')) {
+    let badTargets = 0
     for (const [name, file, find] of chosen) {
       const n = readFileSync(join(scratch, file), 'utf8').split(find).length - 1
       console.log(`${n === 1 ? 'ok  ' : 'BAD '} ${name} (${n})`)
+      // Lead 16:4x: a target that matches nothing (or twice) FAILS the check, never a quiet line.
+      if (n !== 1) badTargets++
     }
-    process.exit(0)
+    process.exit(badTargets ? 1 : 0)
   }
   // Green baseline first, over every suite any mutant names.
   const all = [...new Set(chosen.flatMap(m => m[5]))]
