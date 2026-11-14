@@ -1782,6 +1782,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   // never a stored pid, which could have been recycled by the time anyone signals it.
   // Entries are deleted by turnId, so a late unwind cannot delete its successor's entry.
   const inFlight = new Map<string, InFlightTurn>()
+  // X1 (7.0.36, lead 23:42 "first answer counts"): the turn-end asks an answer has been accepted for, by provider,
+  // thread and ask id. The tracker clears an ask only when the session's UserPromptSubmit hook lands, a moment after
+  // delivery, so without this a second surface answering in that moment would reach the session too. Forgotten if
+  // that turn is refused after all (the answer did not go), kept once it may have landed. Bounded, oldest first.
+  const answeredAsks = new Map<string, number>()
+  const ANSWERED_ASKS_MAX = 512
   const cancelDeps: CancelDeps = deps?.cancel ?? {}
   /** A throwing or absent probe reads as the cautious answer, never as a thrown route. */
   const cancelProbe = <T>(read: (() => T) | undefined, fallback: T): T => {
@@ -3008,7 +3014,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         }
       }
     }
+    /** X1 (7.0.36): the ask this turn answered, marked in `answeredAsks`; unmarked if the turn is refused. */
+    let answeredAskKey: string | null = null
     const refuseTurn = (reason: WriteRefusal, extra: Record<string, unknown> = {}): void => {
+      if (answeredAskKey !== null) { answeredAsks.delete(answeredAskKey); answeredAskKey = null }
       respond(refusalStatus(reason), {
         turnId,
         outcome: 'refused',
@@ -3324,8 +3333,20 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (typeof namedAsk === 'string' && binding.provider === 'claude' && isTurnEndAnswerPrompt(prompt) && typeof deps.openTurnEndAsk === 'function') {
         let open: VisibleTurnAsk | null = null
         try { open = deps.openTurnEndAsk(binding.nativeThreadId) } catch { open = null }
+        const askKey = `${binding.provider}:${binding.nativeThreadId.toLowerCase()}:${namedAsk}`
+        if (open && turnEndAskId(open.stoppedAt) === namedAsk && answeredAsks.has(askKey)) {
+          // Another surface's answer to this same ask was accepted first. The first answer counts.
+          return refuseTurn('turn_end_ask_moved', { changed: true, revision: head.digest, answered: true, askNow: null })
+        }
         if (open && turnEndAskId(open.stoppedAt) === namedAsk) {
           answersOpenAsk = true
+          answeredAsks.set(askKey, Date.now())
+          while (answeredAsks.size > ANSWERED_ASKS_MAX) {
+            const oldest = answeredAsks.keys().next()
+            if (oldest.done) break
+            answeredAsks.delete(oldest.value)
+          }
+          answeredAskKey = askKey
         } else {
           return refuseTurn('turn_end_ask_moved', {
             changed: true,

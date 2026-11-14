@@ -5112,6 +5112,36 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(h.calls).toHaveLength(0)
   })
 
+  it('first answer counts: a second answer to the same ask, before the session\'s hook clears it, is refused as answered', async () => {
+    const h = harness(openAsk())
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2: the session replied and ended its turn by asking'
+    const first = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0010', turnEndAskId: ID })
+    expect(first.body.outcome).toBe('completed')
+    // The tracker still says open (the UserPromptSubmit hook has not landed yet). Another surface answers the same ask.
+    const second = await post(base, turnsPath(a.bindingId), {
+      prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Not tonight',
+      epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0011', turnEndAskId: ID,
+    })
+    expect(second.status).toBe(409)
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, askNow: null, deliveryState: 'not_delivered' })
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('an answer that is refused after it was accepted does not use up the ask: the next answer goes', async () => {
+    const h = harness(openAsk())
+    let n = 0
+    h.deps.deliverAttachedTurn = async req => { h.calls.push(req); n++; return n === 1 ? { status: 'aborted' } : { status: 'completed', nativeRevisionAfter: h.head.value } }
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    const first = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0012', turnEndAskId: ID })
+    expect(first.body.reason).toBe('provider_never_opened')
+    const again = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0013', turnEndAskId: ID })
+    expect(again.body.outcome).toBe('completed')
+  })
+
   it('index.ts wires the tracker into the route', async () => {
     const { readFileSync } = await import('node:fs')
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
