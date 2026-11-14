@@ -17,6 +17,12 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 // 7.0.36: app.js's turn-end block, run as written, for the words the session kit shares (TURN_END_QUOTE).
+// 7.0.38: the contract words and the busy line continueSession reads (an answer is never queued or held).
+const TE_WORDS = (() => {
+  const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
+  // eslint-disable-next-line no-new-func
+  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_BUSY: TURN_END_BUSY };')() as { TURN_END_PREFIX: string; TURN_END_BUSY: string }
+})()
 const TE_QUOTE = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
   // eslint-disable-next-line no-new-func
@@ -96,6 +102,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
     // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
     TURN_END_QUOTE: TE_QUOTE,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_BUSY: TE_WORDS.TURN_END_BUSY,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -954,6 +961,7 @@ function readerPage(o: { routes?: Routes; health?: Record<string, unknown> } = {
     clock: () => '9:00', fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0,
     document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } }, window: { COSWeb: { cosChat: c.chat }, scrollTo: () => {} }, loadSessions: () => {},
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_BUSY: TE_WORDS.TURN_END_BUSY,
   }
   // eslint-disable-next-line no-new-func
   const page = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) +
@@ -1149,5 +1157,66 @@ describe('6.99.27: the Sessions reader’s box (Fork and Send) takes photos and 
     expect(t.els['session-clip']!.innerHTML).toBe('')
     t.page.add([PDF()])
     expect(FakeXHR.sent).toEqual([])
+  })
+})
+
+// ── 7.0.38 (lead 07:16, X1 07:12): an answer to a turn-end question is never queued and never held ──
+describe('7.0.38: the reader never queues or holds an answer; an ordinary message still waits as before', () => {
+  const BUSY = 'Not sent. The session is working.'
+  const ANSWER = TE_WORDS.TURN_END_PREFIX + 'Yes, build it'
+  const queued = (t: ReturnType<typeof readerPage>) => t.calls.filter(x => x.method === 'POST' && x.path === P('/queued-turns'))
+  for (const reason of ['native_thread_working', 'native_target_busy', 'target_busy']) {
+    it(`attach refused ${reason}: an answer is not queued, says so, and stays in the box`, async () => {
+      const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason, reasonCopy: 'Busy.' } },
+        ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } } } })
+      t.page.paint()
+      t.els['session-input']!.value = ANSWER
+      t.page.send(false); await flush()
+      expect(queued(t)).toHaveLength(0)
+      expect(t.status()).toContain(BUSY)
+      expect(t.status()).not.toContain('te-quote')
+      expect(t.els['session-input']!.value).toBe(ANSWER)
+    })
+  }
+  it('the turn route says native_thread_working: an answer is not queued', async () => {
+    const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + TURNS]: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } } } })
+    t.page.paint()
+    t.els['session-input']!.value = ANSWER
+    t.page.send(false); await flush()
+    expect(queued(t)).toHaveLength(0)
+    expect(t.status()).toContain(BUSY)
+  })
+  it('COS’s own turn is running (native_turn_in_progress): an answer is not held, and nothing sends it later', async () => {
+    const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + TURNS]: { status: 409, body: { outcome: 'refused', reason: 'native_turn_in_progress' } } } })
+    t.page.paint()
+    t.els['session-input']!.value = ANSWER
+    t.page.send(false); await flush()
+    expect(t.r.held).toHaveLength(0)
+    expect(t.status()).toContain(BUSY)
+    t.page.flushHeld(); await flush()
+    expect(t.calls.filter(x => x.method === 'POST' && x.path === TURNS), 'one try, no resend').toHaveLength(1)
+  })
+  it('an ordinary message on a busy session is still queued, and one behind COS’s turn still held (unchanged)', async () => {
+    const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Busy.' } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } } } })
+    t.page.paint()
+    t.els['session-input']!.value = 'When you are free'
+    t.page.send(false); await flush()
+    expect(queued(t)).toHaveLength(1)
+    expect(t.status()).not.toContain(BUSY)
+    const h = readerPage({ routes: { ...READER_ROUTES, ['POST ' + TURNS]: { status: 409, body: { outcome: 'refused', reason: 'native_turn_in_progress' } } } })
+    h.page.paint()
+    h.els['session-input']!.value = 'After that'
+    h.page.send(false); await flush()
+    expect(h.r.held).toHaveLength(1)
+  })
+  it('words that only quote the contract mid-text are an ordinary message', async () => {
+    const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Busy.' } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } } } })
+    t.page.paint()
+    t.els['session-input']!.value = 'FYI: ' + ANSWER
+    t.page.send(false); await flush()
+    expect(queued(t)).toHaveLength(1)
   })
 })

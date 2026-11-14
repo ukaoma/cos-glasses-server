@@ -2305,6 +2305,8 @@
   // the Mac's prompt, a reply IS the answer here, so Today and the reader offer the choices and the reply box. What is
   // sent is the contract's exact text: it never reads as typed at the desk, and the session may ask him to confirm.
   var TURN_END_PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: ';
+  // 7.0.38 (lead 07:16): an answer that would have waited for the session is not sent, and says so. No button.
+  var TURN_END_BUSY = 'Not sent. The session is working.';
   var TURN_END_LINE = 'A choice or a reply here reaches the session as a message from COS, not typed in the session, and the session may ask you to confirm.';
   /** The turn-end ask on a session row, or null: any other row, an older server, or the switch off. */
   function turnEndOf(s) {
@@ -5315,13 +5317,18 @@
 
   // One attempt to deliver `text`. `opts.held` is a message waiting for a reply to end: its
   // attempts never touch the box or the status line unless they settle it.
-  // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed'.
+  // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed' | 'busy' (an answer the session was too busy to take).
   function continueSession(r, text, opts) {
     var provider = r.provider, id = r.id;
     var draft = opts.held ? { text: opts.held.text, key: opts.held.key, ids: opts.held.ids || [] } : draftFor(text, r, opts.attachmentIds), view = viewOf(r);
     // Files go only to a server that said it takes them (threadTurnAttachments); the caller shows no clip otherwise.
     var files = draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {};
     if (!opts.held) view.status(r, 'Sending');
+    // 7.0.38 (lead 07:16, X1 07:12): an answer to a turn-end question is never queued and never held. It lands now or
+    // it is not sent: a queued or held answer went later with no ask id, whatever happened to the question. A tapped
+    // choice, the box's own answer and Send anyway all carry the contract words in front.
+    var answer = !opts.held && String(draft.text || '').indexOf(TURN_END_PREFIX) === 0;
+    var busy = function () { view.status(r, TURN_END_BUSY, 'error'); return 'busy'; };
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
       // 201 Created on success; any 2xx that says attached counts.
@@ -5338,7 +5345,7 @@
       // Any other refusal is permanent for this thread, and a parked message would never go.
       if (!at.ok) {
         var why = (at.refusal && at.refusal.reason) || '';
-        if (PARKABLE_REFUSALS.test(why)) return parkTurn(r, draft, at.refusal, opts);
+        if (PARKABLE_REFUSALS.test(why)) return answer ? busy() : parkTurn(r, draft, at.refusal, opts);
         var copy = ((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.';
         if (opts.held) settleHeld(r, opts.held, 'refused', copy);
         else {
@@ -5367,11 +5374,11 @@
           return 'sent';
         }
         var reason = b.reason || '';
-        if (reason === 'native_thread_working') return parkTurn(r, draft, b, opts);
+        if (reason === 'native_thread_working') return answer ? busy() : parkTurn(r, draft, b, opts);
         // COS's own reply is still running on this thread. The server's queue counts that
         // thread as free (the running child is COS's), so it cannot park this; the page holds
         // it under the same key and sends it the moment the reply ends.
-        if (reason === 'native_turn_in_progress') { if (!opts.held) view.hold(r, draft); return 'held'; }
+        if (reason === 'native_turn_in_progress') { if (answer) return busy(); if (!opts.held) view.hold(r, draft); return 'held'; }
         // 7.0.36 (X1): an answer named its ask and the session has moved past it, or answered it first elsewhere. Only
         // a turn-end answer names an ask, so only its caller reads this; nothing is sent again from here.
         if (reason === 'turn_end_ask_moved') {
