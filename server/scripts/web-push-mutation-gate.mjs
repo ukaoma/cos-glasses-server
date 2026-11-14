@@ -45,7 +45,8 @@ const mutations = [
   ["route-kind-from-body", "server/routes/web-push.ts", "sendOnePing(deps.store, id, 'test', {", "sendOnePing(deps.store, id, (req.body?.kind ?? 'test') as never, {", "subscribe from his https origin", ["server/routes/web-push.test.ts"]],
   ["3xx-treated-gone", "server/lib/web-push-sender.ts", "const gone = res.status === 404 || res.status === 410", "const gone = res.status >= 300", "a redirect is never followed", ["server/routes/web-push.test.ts"]],
   ["reason-unfiltered", "server/lib/web-push-sender.ts", "return typeof r === 'string' && /^[A-Za-z]{1,40}$/.test(r) ? r : null", "return typeof r === 'string' ? r : null", "Apple's reason: only a plain word is kept", ["server/routes/web-push.test.ts"]],
-  ["add-makes-key", "server/lib/web-push-store.ts", "    if (!validPushKeys(input.keys)) return { ok: false, reason: 'bad_keys' }\n", "    if (!validPushKeys(input.keys)) return { ok: false, reason: 'bad_keys' }\n    this.vapidKeys()\n", "adds a phone (0600), refreshes the same endpoint in place", ["server/routes/web-push.test.ts"]]
+  ["add-makes-key", "server/lib/web-push-store.ts", "    if (!validPushKeys(input.keys)) return { ok: false, reason: 'bad_keys' }\n", "    if (!validPushKeys(input.keys)) return { ok: false, reason: 'bad_keys' }\n    this.vapidKeys()\n", "adds a phone (0600), refreshes the same endpoint in place", ["server/routes/web-push.test.ts"]],
+  ["post-parses-inline", "server/lib/web-push-sender.ts", "resolve({ status: res.statusCode ?? 0, reason: applePushReason(raw) })", "resolve({ status: res.statusCode ?? 0, reason: (() => { try { return JSON.parse(raw).reason ?? null } catch { return null } })() })", "the real POST runs Apple's answer through applePushReason", ["server/routes/web-push.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

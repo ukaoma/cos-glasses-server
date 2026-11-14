@@ -183,6 +183,13 @@ describe('X1 web push: one ping', () => {
     }
   })
 
+  it('the real POST runs Apple\'s answer through applePushReason (it is never run in tests, so its source is pinned; Q1 P14b)', () => {
+    const src = readFileSync(new URL('../lib/web-push-sender.ts', import.meta.url), 'utf8')
+    const post = src.slice(src.indexOf('export const httpsPushPost'), src.indexOf('export interface PingResult'))
+    expect(post).toContain('resolve({ status: res.statusCode ?? 0, reason: applePushReason(raw) })')
+    expect(post).not.toMatch(/JSON\.parse/)
+  })
+
   it('a redirect is never followed: a 3xx is one request, reported, and the device is kept', async () => {
     const r = rig()
     r.answer({ status: 307, reason: null })
