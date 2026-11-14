@@ -108,7 +108,7 @@ describe('7.0.39 thread candidate 1: history in the chat', () => {
     expect(h.feed.innerHTML).toContain('Q x')
   })
   it('entries that are not chats or have no valid time are left out', async () => {
-    const h = load({ [H]: page([entry('ok', day(13)), { id: 'b:n', at: day(13), kind: 'notification', line: 'x' }, entry('bad', 'not a date'), { ...entry('nq', day(13)), question: 5 }], null) })
+    const h = load({ [H]: page([entry('ok', day(13)), { id: 't:n', at: day(13), kind: 'notification', question: 'not a chat', line: 'x' }, entry('bad', 'not a date'), { ...entry('nq', day(13)), question: 5 }], null) })
     h.chat._loadHistory(); await flush()
     expect(h.chat._state.hist.entries.map((e: any) => e.id)).toEqual(['t:ok'])
   })
@@ -160,6 +160,14 @@ describe('7.0.39 thread candidate 1: older entries never move him', () => {
     h.feed.clientHeight = 100000
     h.chat._loadHistory(); await flush(60)
     expect(h.calls.filter(c => /before=/.test(c))).toHaveLength(5)
+  })
+  it('after an older page failed, scrolling near the top does not try again by itself; only Try again does', async () => {
+    const h = load({ [H]: page(Array.from({ length: 8 }, (_, i) => entry('n' + i, day(13, 8 + i))), 'c1'), '/api/cos-thread/history?limit=40&before=c1': new Error('x') }, { wide: true })
+    h.chat._loadHistory(); await flush()
+    await h.chat._loadOlder(); await flush()
+    expect(h.chat._state.hist.olderState).toBe('error')
+    h.feed.scrollTop = 50; h.chat._onHistScroll(); h.chat._onHistScroll(); await flush()
+    expect(h.calls.filter(c => /before=/.test(c)), 'no silent retries').toHaveLength(1)
   })
   it('an older page that fails: says so in the top line with Try again; Try again reads it', async () => {
     let n = 0
