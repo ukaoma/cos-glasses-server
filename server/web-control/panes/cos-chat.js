@@ -1266,15 +1266,22 @@
       C.hist.newerBusy = false;
     }, function () { C.hist.newerBusy = false; });
   }
-  /** Run a repaint that adds entries ABOVE what he is reading, then take up their height so nothing on screen moves. */
+  /** Run a repaint that adds entries ABOVE what he is reading, then put the entry he was looking at back where it was, to
+   *  the fraction of a pixel (WebKit measured 0.5 px off when only the total height was compared). With no entry to hold
+   *  (an empty column), the total height is taken up instead. */
   function keepPlace(paint) {
     var feed = C.host && C.host.querySelector('[data-cos-feed]');
     if (!feed) { paint(); return; }
+    var w = wide(), top0 = w && feed.getBoundingClientRect ? feed.getBoundingClientRect().top : 0;
+    var held = null, at = 0;
+    var cards = feed.querySelectorAll ? feed.querySelectorAll('[data-hist]') : [];
+    for (var i = 0; i < cards.length; i++) { var r = cards[i].getBoundingClientRect(); if (r.bottom > top0) { held = cards[i].getAttribute('data-hist'); at = r.top; break; } }
     var h0 = feed.scrollHeight;
     paint();
-    var d = feed.scrollHeight - h0;
+    var el = held ? feed.querySelector('[data-hist="' + held.replace(/["\\]/g, '') + '"]') : null;
+    var d = el ? el.getBoundingClientRect().top - at : feed.scrollHeight - h0;
     if (!d) return;
-    if (wide()) feed.scrollTop += d; else window.scrollBy(0, d);
+    if (w) feed.scrollTop += d; else window.scrollBy(0, d);
   }
   function histTopHtml() {
     var s = C.hist;
@@ -1310,14 +1317,14 @@
   function histHtml(e) {
     var whole = Object.prototype.hasOwnProperty.call(C.hist.full, e.id);
     var text = whole ? C.hist.full[e.id] : String(e.answer || '');
-    var more = !whole && e.full !== true && !!text && (e.answerChars == null || Number(e.answerChars) > text.length);
+    var fs = C.hist.fullState[e.id] || '';
+    var more = !whole && fs !== 'gone' && e.full !== true && !!text && (e.answerChars == null || Number(e.answerChars) > text.length);
     var t = clockOnly(e.at);
     var title = Number.isInteger(e.messageNo) && e.messageNo > 0 ? 'Message #' + e.messageNo : 'COS';
     var body = text ? W.md(W.structureLensAnswer(text))
       : '<span class="cc-wait">' + (e.status === 'running' ? 'COS is answering.' : e.status === 'failed' ? 'This ask did not finish.'
         : e.status === 'interrupted' ? 'This ask was stopped before it finished.' : 'This answer was not kept.') + '</span>';
-    var fs = C.hist.fullState[e.id] || '';
-    var acts = more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
+    var acts = fs === 'gone' ? '<span class="cc-fine">The rest of this answer was not kept.</span>' : more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
       (fs === 'loading' ? 'Loading the rest…' : 'Show all of it') + '</button>' + (fs === 'error' ? '<span class="cc-fine warn">Couldn’t load the rest.</span>' : '') : '';
     return '<div class="cc-line you"><div class="cc-bubble">' + esc(e.question) + '</div><div class="cc-src">' + esc(t) + '</div></div>' +
       '<div class="cc-line cos" data-hist="' + esc(e.id) + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
@@ -1330,7 +1337,9 @@
     C.hist.fullState[id] = 'loading'; paintHistCard(id);
     api('/api/cos-thread/entry/' + encodeURIComponent(id)).then(function (d) {
       var e = d && d.entry;
-      if (e && typeof e.answer === 'string') { C.hist.full[id] = e.answer; delete C.hist.fullState[id]; }
+      // Only an answer the server says is whole replaces the preview; otherwise the rest was not kept, and the card says so.
+      if (e && typeof e.answer === 'string' && e.full === true) { C.hist.full[id] = e.answer; delete C.hist.fullState[id]; }
+      else if (e && typeof e.answer === 'string') C.hist.fullState[id] = 'gone';
       else C.hist.fullState[id] = 'error';
       paintHistCard(id);
     }, function () { C.hist.fullState[id] = 'error'; paintHistCard(id); });

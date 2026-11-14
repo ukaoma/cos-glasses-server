@@ -217,6 +217,16 @@ describe('7.0.39 thread candidate 1: newer entries and whole answers', () => {
     expect(h.chat._histHtml(long)).toContain('Couldn’t load the rest.')
     expect(h.chat._histHtml(long)).toContain('Show all of it')
   })
+  it('the server has only the preview (entry full:false): the card says the rest was not kept, keeps the preview, no button', async () => {
+    const long = entry('l', day(13), { answer: 'preview', full: false, answerChars: 5000 })
+    const h = load({ [H]: page([long], null), '/api/cos-thread/entry/t%3Al': { entry: { ...long, answer: 'preview', full: false }, source: 'preview' } })
+    h.chat._loadHistory(); await flush()
+    h.tap('hist-full', 't:l'); await flush()
+    const html = h.chat._histHtml(long)
+    expect(html).toContain('The rest of this answer was not kept.')
+    expect(html).not.toContain('Show all of it')
+    expect(html).toContain('<p>preview</p>')
+  })
   it('an answer the server no longer holds (empty preview) says so plainly, with no Show all of it', () => {
     const h = load({})
     const html = h.chat._histHtml(entry('e', day(13), { answer: '', full: false, answerChars: null }))
