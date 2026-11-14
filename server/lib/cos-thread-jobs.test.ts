@@ -82,6 +82,20 @@ describe('the thread store, job side', () => {
     expect([last.newest, last.more]).toEqual(['c1.3.3', false])
   })
 
+  it('the FIRST update cut while a new chat fills the page: newest keeps the old ends and more is set (Q1 V7)', () => {
+    const h = harness(); const t = h.make()
+    for (let n = 1; n <= 3; n++) t.recordJobStarted(job(n))
+    t.recordJobEnd({ ...job(1), status: 'completed', text: 'answer 1' })
+    t.recordJobStarted(job(4))   // a new chat after the cursor: it takes the page's one guaranteed place
+    const page = t.historyPage({ after: 3, afterAnswers: 0, limit: 40, maxBytes: 10 })
+    expect(page.entries.map(e => e.question)).toEqual(['question 4'])
+    expect(page.updated).toEqual([])
+    expect([page.newest, page.more]).toEqual(['c1.4.0', true])
+    const next = t.historyPage({ after: 4, afterAnswers: 0, limit: 40, maxBytes: 10 })
+    expect(next.updated.map(e => e.question)).toEqual(['question 1'])
+    expect([next.newest, next.more]).toEqual(['c1.4.1', false])
+  })
+
   it('an answer row naming a file outside answers/YYYY-MM.jsonl is never read (Q1 T7)', () => {
     const h = harness(); const t = h.make()
     t.recordJobEnd({ ...job(1), status: 'completed', text: 'v'.repeat(ANSWER_HEAD_CHARS + 10) })

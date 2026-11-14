@@ -28,6 +28,9 @@ describe('legacy POST /api/query and the COS thread conversation', () => {
     expect(res.status).toBe(409)
     expect(await res.json()).toMatchObject({ error: 'thread_session_web_only' })
     expect(model.calls).toBe(0)
+    // The refusal releases the route's maintenance lease (a leaked one blocks drains and installs; Q1 V6).
+    const { maintenanceLifecycle } = await import('../lib/maintenance-lifecycle.js')
+    expect(maintenanceLifecycle.snapshot().activeByKind.legacy_query ?? 0).toBe(0)
     const plain = createSession()
     const ok = await fetch(`${base}/query`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'placeholder', sessionId: plain }) })
     expect(ok.status).toBe(200)   // the stream opens (the spy model never finishes it, so it is not read)
