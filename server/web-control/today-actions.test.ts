@@ -15,6 +15,12 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 // 7.0.36: app.js's turn-end block, run as written, for the words the session kit shares (TURN_END_QUOTE).
+// 7.0.38: the contract words and the busy line continueSession reads (an answer is never queued or held).
+const TE_WORDS = (() => {
+  const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
+  // eslint-disable-next-line no-new-func
+  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE, isTurnEndAnswer: isTurnEndAnswer };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any; isTurnEndAnswer: (t: string) => boolean }
+})()
 const TE_QUOTE = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
   // eslint-disable-next-line no-new-func
@@ -96,6 +102,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
     // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
     TURN_END_QUOTE: TE_QUOTE,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, isTurnEndAnswer: TE_WORDS.isTurnEndAnswer,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -1390,6 +1397,7 @@ function needsRegion(opts: { at: string; sessions?: unknown[]; needs?: unknown[]
     state: { sessions: opts.sessions ?? [], serverName: 'Mac' }, TODAY, setBadge: (n: string, on: boolean) => badges.push([n, on]),
     usualProject: () => '', badge: () => '', span: () => '5 min', sessionTitle: (s: any) => s.display_label || 'Session',
     window: { COSWeb: { setStory: (n: string, text: string, hot: boolean) => rail.push([n, text, hot]), ...(opts.qs ? { sessionQuestions: opts.qs } : {}) } },
+    PANES: {},   // 7.0.38: paintNeeds tells an open Today panel (PANES.todayActions.needsChanged); none is loaded here
   }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\nreturn { renderRunning: renderRunning, needsModel: needsModel };\n}')(deps)
@@ -4368,6 +4376,7 @@ function readerPage(routes: Routes) {
     setInterval: (fn: () => void, ms: number) => { intervals.push({ fn, ms }); return intervals.length }, clearInterval: (n: number) => { if (n && intervals[n - 1]) intervals[n - 1]!.cleared = true },
     requestAnimationFrame: () => 0, document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } },
     window: { COSWeb: {}, scrollTo: () => {} },
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_QUOTE: TE_WORDS.TURN_END_QUOTE, isTurnEndAnswer: TE_WORDS.isTurnEndAnswer,
     EventSource: class { url: string; onmessage: any = null; onerror: any = null; readyState = 1; constructor(url: string) { this.url = url; streams.push(this) } close() {} },
   }
   // eslint-disable-next-line no-new-func
@@ -4999,7 +5008,9 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'COS Control pane')
     expect(h.els['ta-status']!.textContent).toBe('Sent “COS Control pane”. It reaches the session as a message from COS; it may ask you to confirm.')
   })
-  it('answered on another screen first: nothing is sent, and it says so', async () => {
+  // 7.0.38 (b), lead 07:16: this test pinned the page's own check, which showed the catch-all before the server was asked
+  // (Miles's phone, 11/14 07:01). A row WITHOUT an ask id (an older server) still gets it: the page has nothing to name.
+  it('an older server (no ask id), answered on another screen first: nothing is sent, and the page says so itself', async () => {
     const m = tmodel()
     const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
     h.ta.open('wait', 'claude|' + SID, h.opener())
@@ -5009,6 +5020,22 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     await flush()
     expect(turns(h)).toHaveLength(0)
     expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen, or the session moved on. Nothing was sent.')
+  })
+  // 7.0.38 (b): WITH an ask id the tap goes to the server, which never delivers to a closed ask (and an answer is never
+  // queued or held), so its answer decides the line: Miles's exact 07:01 case now reads the specific one.
+  it('7.0.38: with an ask id, Today dropped the row but the tap still asks the server; its answer gives the specific line', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, answeredBy: 'web', askNow: null } } }
+    const m = tmodelId()
+    const h = load({ data: { sessions: [TROW] }, routes, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    m.rows = []
+    h.tap('turnend', '0'); h.tap('turnend', '0')
+    await flush()
+    expect(turns(h), 'one tap, one ask, at most once').toHaveLength(1)
+    expect(turns(h)[0]!.body.turnEndAskId).toBe('turn_end:1794600000123')
+    expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen. “Good Morning + Today” was not sent.')
+    expect(h.els['ta-status']!.textContent).not.toContain('or the session moved on')
   })
   // 7.0.36 (X1, lead 00:03): the answer names its ask; a moved one keeps ONE button that sends it quoted.
   const MOVED = (askNow: unknown) => ({ status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', askNow, reasonCopy: 'The session moved past the question you answered.' } })
@@ -5135,5 +5162,608 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     expect(h.els['ta-meta']!.innerHTML).not.toContain('data-ta="turnend"')
     expect(h.els['ta-meta']!.innerHTML).toContain('ta-mac-line')
     expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+})
+
+// ── 7.0.38 (lead 07:09; Miles's phone 11/14 07:01): an open Today panel follows Today's own reads of Needs you ──
+describe('7.0.38: the Today panel’s turn-end question follows Today’s reads (needsChanged)', () => {
+  const PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: '
+  const ASK = 'Build Set D, the larger tap areas for tabs and text buttons?'
+  const TROW = { session_id: SID, provider: 'claude', display_label: 'Orchestrator', alive: true, running: true, running_active: false, agent_state: 'waiting',
+    state_source: 'hook', waiting_kind: 'question', waiting_source: 'turn_end', waiting_detail: ASK, waiting_choices: ['Yes, build it', 'Not now'], waiting_ask_id: 'turn_end:1' }
+  const row = (o: Record<string, unknown> = {}) => ({ kind: 'session', key: 'claude|' + SID, title: 'Orchestrator asked: ' + ASK, why: 'Tap a choice or reply here', where: 'turnend',
+    ask: ASK, choices: ['Yes, build it', 'Not now'], askId: 'turn_end:1', ...o })
+  const model = () => ({ rows: [row()] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true })
+  const turns = (h: { calls: Array<{ method?: string; path: string; body?: any }> }) => h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
+  const CLOSED = 'This question is no longer open.'
+  const ANSWERED = 'Answered. The session carries on.'
+  const opened = async (m = model(), routes: Routes = OK_ROUTES) => {
+    const h = load({ data: { sessions: [TROW] }, routes, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    return h
+  }
+
+  it('Today drops the row: the buttons go, one line says the question is closed, nothing is sent, the reply box and his words stay', async () => {
+    const m = model(), h = await opened(m)
+    expect(h.els['ta-meta']!.innerHTML).toContain('data-ta="turnend"')
+    h.els['ta-input']!.value = 'half typed'
+    const status = h.els['ta-status']!.textContent
+    m.rows = []
+    h.ta.needsChanged()
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).not.toContain('data-ta="turnend"')
+    expect(meta).not.toContain('ta-te-ask')
+    expect(meta).toContain(esc(CLOSED))
+    expect(meta).not.toContain('Tap a choice or reply here')
+    expect(h.els['ta-foot']!.hidden, 'the reply box stays').toBe(false)
+    expect(h.els['ta-input']!.value).toBe('half typed')
+    expect(h.els['ta-status']!.textContent, 'the status line is left alone').toBe(status)
+    expect(turns(h)).toHaveLength(0)
+  })
+  it('a row that stays turn-end but is no longer this session’s also closes it', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = [row({ key: 'claude|other' })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  it('a new ask id: the new question and its own choices draw in place; nothing is sent; the box and his words stay', async () => {
+    const m = model(), h = await opened(m)
+    h.els['ta-input']!.value = 'half typed'
+    m.rows = [row({ askId: 'turn_end:2', ask: 'Which branch?', choices: ['main', 'feature'] })]
+    h.ta.needsChanged()
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('<blockquote class="ta-quote ta-te-ask">Which branch?</blockquote>')
+    expect(meta).toContain('data-ta="turnend" data-id="1">feature</button>')
+    expect(meta).not.toContain(esc(ASK))
+    expect(meta).not.toContain(esc(CLOSED))
+    expect(h.els['ta-foot']!.hidden).toBe(false)
+    expect(h.els['ta-input']!.value).toBe('half typed')
+    expect(turns(h)).toHaveLength(0)
+    h.tap('turnend', '1')
+    await flush()
+    expect(turns(h)[0]!.body.turnEndAskId, 'a tap answers the new ask').toBe('turn_end:2')
+  })
+  it('an older server (no ask id): a changed question draws in place; the same words change nothing', async () => {
+    const m = { rows: [row({ askId: undefined })] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true }
+    const h = await opened(m)
+    const before = h.els['ta-meta']!.innerHTML
+    m.rows = [row({ askId: undefined })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toBe(before)
+    m.rows = [row({ askId: undefined, ask: 'Which branch?', choices: ['main'] })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain('Which branch?')
+  })
+  it('the same ask id read again changes nothing, even with other rows around it', async () => {
+    const m = model(), h = await opened(m)
+    const before = h.els['ta-meta']!.innerHTML
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    m.rows = [row({ key: 'claude|other', askId: 'turn_end:9' }), row()]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML, 'not repainted').toBe('MARK')
+    expect(before).toContain('data-ta="turnend"')
+  })
+  it('this panel’s own delivered choice: when the row goes, its Sent line stays and the head says answered, never closed', async () => {
+    const m = model(), h = await opened(m, { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live' } } })
+    h.tap('turnend', '0')
+    await flush()
+    const sent = 'Sent “Yes, build it”. It reaches the session as a message from COS; it may ask you to confirm.'
+    expect(h.els['ta-status']!.textContent).toBe(sent)
+    m.rows = []
+    h.ta.needsChanged()
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(h.els['ta-status']!.textContent).toBe(sent)
+    expect(meta).toContain(esc(ANSWERED))
+    expect(meta).not.toContain(esc(CLOSED))
+    expect(meta).not.toContain('data-ta="turnend"')
+    expect(h.els['ta-foot']!.hidden).toBe(false)
+  })
+  it('this panel’s own answer typed in the box counts as sent too (delivered)', async () => {
+    const m = model(), h = await opened(m, { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live' } } })
+    h.els['ta-input']!.value = 'Yes, and Set E after'
+    h.tap('send')
+    await flush()
+    expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'Yes, and Set E after')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+  })
+  it('a choice the server refused is not "answered" when the row goes', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, askNow: null } } }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen. “Yes, build it” was not sent.')
+  })
+  it('an answer this panel sent to an OLDER ask does not make a newer closed ask read as answered', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = [row({ askId: 'turn_end:2', ask: 'Which branch?', choices: ['main'] })]
+    h.ta.needsChanged()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
+  it('Today still lists the session, but no longer as a turn-end question (answered, at the Mac): it closes', async () => {
+    for (const where of ['answered', 'mac', 'reply']) {
+      const m = model(), h = await opened(m)
+      m.rows = [row({ where, choices: undefined })]
+      h.ta.needsChanged()
+      expect(h.els['ta-meta']!.innerHTML, where).toContain(esc(CLOSED))
+      expect(h.els['ta-meta']!.innerHTML, where).not.toContain('data-ta="turnend"')
+    }
+  })
+  it('an answer typed in the box that the server refused is not "answered" when the row goes', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'native_thread_changed', changed: true, revision: 'rev2', reasonCopy: 'This thread changed on your Mac since you attached.' } } }
+    const m = model(), h = await opened(m, routes)
+    h.els['ta-input']!.value = 'Yes'
+    h.tap('send')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  it('an answer this panel sent in ANOTHER session with the same words does not make this one read as answered', async () => {
+    const m = { rows: [row({ askId: undefined })] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true }
+    const h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    ;(h.ta as any)._state.wait = { ...(h.ta as any)._state.wait, key: 'claude|other' }
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  it('after it closes, the reply box sends an ordinary message: his words alone, no attribution, no ask id', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = []
+    h.ta.needsChanged()
+    h.els['ta-input']!.value = 'Also check the Duo'
+    h.tap('send')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
+    expect(turns(h)[0]!.body.prompt).toBe('Also check the Duo')
+    expect('turnEndAskId' in turns(h)[0]!.body).toBe(false)
+  })
+  it('Q1 M33: a new ask id with the SAME words is a new question: it redraws, and an answer to the old one is not "answered" for it', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    m.rows = [row({ askId: 'turn_end:2' })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML, 'redrawn for the new id').toContain('data-ta="turnend"')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  for (const o of ['refused', 'ambiguous']) {
+    it(`Q1 07:50 (7): a sent answer the session then reports ${o} is not "Answered" when the row closes`, async () => {
+      const routes: Routes = { ...OK_ROUTES }
+      const m = model(), h = await opened(m, routes)
+      h.tap('turnend', '0')
+      await flush()
+      const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+      routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: o, reasonCopy: 'Server says ' + o + '.' } }
+      for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+      expect(h.els['ta-status']!.textContent, 'the watch read the outcome').toBe('Server says ' + o + '.')
+      m.rows = []
+      h.ta.needsChanged()
+      expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+      expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+    })
+  }
+  for (const o of ['refused', 'ambiguous']) it(`Q1 07:50 (7), closed first: the head says Answered, then the watch reports ${o} and the head turns to closed at once`, async () => {
+    const routes: Routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live' } } }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+    const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: o, reasonCopy: 'Server says ' + o + '.' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-status']!.textContent).toBe('Server says ' + o + '.')
+    expect(h.els['ta-meta']!.innerHTML, 'no new Today read needed').toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
+  // Lead 08:0x: Answered only on confirmed delivery. Queued (accepted, not yet in the session) or unknown is not Answered.
+  it('lead 08:0x: an answer only QUEUED: the head says no longer open, and the Sent line stays', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    const sent = h.els['ta-status']!.textContent
+    expect(sent).toContain('Sent “Yes, build it”')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+    expect(h.els['ta-status']!.textContent).toBe(sent)
+  })
+  it('lead 08:0x: queued, closed, then the watch reports completed: the head turns to Answered', async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+  })
+  it('Q1 08:25: answer A only queued, then an ordinary message B completes: the head stays "no longer open" (B never confirms A)', async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    const keyA = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    h.els['ta-input']!.value = 'Also check the Duo'
+    h.tap('send')
+    await flush()
+    const keyB = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[1] as any).body.clientTurnId
+    expect(keyB).not.toBe(keyA)
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + keyB] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + keyA] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-status']!.textContent, 'B was watched to completion').toBe('Sent into the open session. It is working on it now.')
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
+  it('Q1 07:50 (7), the other side: a sent answer the watch reports completed still reads Answered when the row closes', async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-status']!.textContent).toBe('Sent into the open session. It is working on it now.')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+  })
+  it('closed stays closed: a later read that lists the same ask again does not bring the buttons back', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = []
+    h.ta.needsChanged()
+    m.rows = [row()]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('data-ta="turnend"')
+  })
+  it('closed, then the session asks something new: the new question draws, with its own choices', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = []
+    h.ta.needsChanged()
+    m.rows = [row({ askId: 'turn_end:3', ask: 'Ship it?', choices: ['Yes'] })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain('<blockquote class="ta-quote ta-te-ask">Ship it?</blockquote>')
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(CLOSED))
+  })
+  it('a waiting panel left for another sheet (the pet list): needsChanged paints nothing there', async () => {
+    const m = model(), h = await opened(m)
+    h.ta.open('pet', '', h.opener())
+    await flush()
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toBe('MARK')
+  })
+  it('a running panel or no panel: needsChanged does nothing', async () => {
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: model(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    expect(() => h.ta.needsChanged()).not.toThrow()
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toBe('MARK')
+  })
+  it('does not move him: scrolled past the question, the scroll takes up its change in height; at the top it stays at the top', async () => {
+    const m = model(), h = await opened(m)
+    const meta = h.els['ta-meta']! as any, body = h.els['ta-body']! as any
+    Object.defineProperty(meta, 'offsetHeight', { configurable: true, get: () => meta.innerHTML.includes('data-ta="turnend"') ? 300 : 100 })
+    body.scrollTop = 500
+    m.rows = []
+    h.ta.needsChanged()
+    expect(body.scrollTop, 'the same words stay in view').toBe(300)
+    for (const start of [0, 200]) {
+      const m2 = model(), h2 = await opened(m2)
+      const meta2 = h2.els['ta-meta']! as any, body2 = h2.els['ta-body']! as any
+      Object.defineProperty(meta2, 'offsetHeight', { configurable: true, get: () => meta2.innerHTML.includes('data-ta="turnend"') ? 300 : 100 })
+      body2.scrollTop = start
+      m2.rows = []
+      h2.ta.needsChanged()
+      expect(body2.scrollTop, 'the question still partly in view: left where it is (' + start + ')').toBe(start)
+    }
+    const m3 = model(), h3 = await opened(m3)
+    const meta3 = h3.els['ta-meta']! as any, body3 = h3.els['ta-body']! as any
+    Object.defineProperty(meta3, 'offsetHeight', { configurable: true, get: () => meta3.innerHTML.includes('data-ta="turnend"') ? 0 : 100 })
+    body3.scrollTop = 0
+    m3.rows = []
+    h3.ta.needsChanged()
+    expect(body3.scrollTop, 'not measured yet, at the top: still at the top').toBe(0)
+  })
+  it('app.js: Today’s paintNeeds tells the open panel after drawing Needs you, every time', () => {
+    const m = /  function paintNeeds\(\) \{[\s\S]*?\n  \}\n/.exec(APP)
+    expect(m, 'paintNeeds').not.toBeNull()
+    const did: string[] = []
+    const run = (panes: Record<string, unknown>) => new Function('TODAY', 'needsModel', 'renderStory', 'renderNeeds', 'setBadge', 'todayRailLine', 'window', 'PANES',
+      m![0] + '\npaintNeeds();')({ at: 1 }, () => ({ now: [] }), () => did.push('story'), () => did.push('needs'), () => did.push('badge'), () => '', {}, panes)
+    run({ todayActions: { needsChanged: () => did.push('panel') } })
+    expect(did).toEqual(['story', 'needs', 'panel', 'badge'])
+    expect(() => run({})).not.toThrow()
+  })
+})
+
+// ── 7.0.38 P1 (Miles 11/14 07:14, "the same bug under a new name?"): a send on a binding the server retired ──
+describe('7.0.38: binding_detached re-attaches once, through the normal attach path', () => {
+  const DETACHED = { status: 409, body: { outcome: 'refused', reason: 'binding_detached', reasonCopy: 'That continuation was detached. Attach again.' } }
+  const turnsOn = (h: { calls: Array<{ path: string }> }, b: string) => h.calls.filter(c => c.path === `/api/agent-sessions/bindings/${b}/turns`)
+  const attaches = (h: { calls: Array<{ path: string }> }) => h.calls.filter(c => c.path.endsWith('/attach'))
+  // Attach answers b1 first, then b2 (the server's fresh binding after the queue took the target).
+  const attachSeq = (_b: unknown, n: number) => ({ status: 201, body: { attached: true, bindingId: n === 1 ? 'b1' : 'b2', epoch: 2 + n } })
+  const opened = async (routes: Routes) => {
+    const h = load({ data: { needs: [NEED] }, routes, api: { '/api/work-board/your-move': { available: true, items: [NEED] } } })
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    return h
+  }
+  const send = async (h: Awaited<ReturnType<typeof opened>>, words: string) => { h.els['ta-input']!.value = words; h.tap('send'); await flush() }
+
+  it('the remembered binding was retired: one fresh attach, the same words and key go once on the new binding, and it says Sent', async () => {
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: { status: 202, body: { outcome: 'queued' } } }
+    const h = await opened(routes)
+    await send(h, 'First')
+    expect(turnsOn(h, 'b1')).toHaveLength(1)
+    await send(h, 'Second')
+    expect(turnsOn(h, 'b1'), 'the retired binding is tried once').toHaveLength(2)
+    expect(attaches(h), 'then one fresh attach').toHaveLength(2)
+    expect(turnsOn(h, 'b2')).toHaveLength(1)
+    expect((turnsOn(h, 'b2')[0] as any).body.prompt).toBe('Second')
+    expect((turnsOn(h, 'b2')[0] as any).body.clientTurnId, 'the same key, so a send that did land is never repeated').toBe((turnsOn(h, 'b1')[1] as any).body.clientTurnId)
+    expect(h.els['ta-status']!.textContent).toBe('Sent. Watching for the reply.')
+    expect(h.els['ta-status']!.textContent).not.toContain('detached')
+    expect(JSON.parse(h.store.get('cos_web_bindings') || '{}')['claude|' + SID]?.bindingId, 'the retired one replaced in localStorage').toBe('b2')
+    await send(h, 'Third')
+    expect(turnsOn(h, 'b2'), 'the new binding is remembered for the next send').toHaveLength(2)
+    expect(attaches(h)).toHaveLength(2)
+  })
+  it('detached again on the fresh binding: no loop; one refusal shown, the words stay in the box', async () => {
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: DETACHED }
+    const h = await opened(routes)
+    await send(h, 'First')
+    await send(h, 'Second')
+    expect(turnsOn(h, 'b1')).toHaveLength(2)
+    expect(turnsOn(h, 'b2'), 'one try on the fresh binding').toHaveLength(1)
+    expect(attaches(h), 'one re-attach, never two').toHaveLength(2)
+    expect(h.els['ta-input']!.value).toBe('Second')
+    // Lead (P1 accepted): the page's own line, never the server's "Attach again" (there is no attach control here).
+    expect(h.els['ta-status']!.textContent).toBe('COS lost its link to this session. Send again. Your message is still in the box.')
+    expect(h.els['ta-status']!.textContent).not.toContain('Attach again')
+    // The dead binding is gone from localStorage too, so the next tap attaches fresh and a reload starts clean.
+    expect(JSON.parse(h.store.get('cos_web_bindings') || '{}')['claude|' + SID], 'no stored binding left').toBeUndefined()
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(turnsOn(h, 'b1').length + turnsOn(h, 'b2').length, 'nothing resends without a tap').toBe(3)
+  })
+  it('the open-session caution still asks first: nothing goes until Send anyway, then the re-attach and the send', async () => {
+    const routes: Routes = { ...OK_ROUTES, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 1 } },
+      ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: { status: 202, body: { outcome: 'queued' } } }
+    const h = await opened(routes)
+    await send(h, 'First')
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Send into an open session?')
+    expect(h.calls.some(c => c.method === 'POST')).toBe(false)
+    h.later(450); h.tap('caution-send'); await flush()
+    expect(turnsOn(h, 'b1')).toHaveLength(1)
+    await send(h, 'Second')
+    expect(turnsOn(h, 'b2')).toHaveLength(1)
+    // A fresh Today panel on the same session asks again before its first send, whatever binding the page holds.
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    await send(h, 'Third')
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Send into an open session?')
+    expect(turnsOn(h, 'b2'), 'nothing sent before he answers').toHaveLength(1)
+  })
+  it('after a double detach, the next tap attaches fresh and delivers (it recovers on the first tap after)', async () => {
+    let attachN = 0
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: () => ({ status: 201, body: { attached: true, bindingId: ['b1', 'b2', 'b3'][attachN++] || 'b9', epoch: 3 + attachN } }),
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: DETACHED,
+      ['POST /api/agent-sessions/bindings/b3/turns']: { status: 202, body: { outcome: 'queued' } } }
+    const h = await opened(routes)
+    await send(h, 'First'); await send(h, 'Second')
+    expect(h.els['ta-status']!.textContent).toContain('COS lost its link')
+    h.tap('send'); await flush()
+    expect(turnsOn(h, 'b3')).toHaveLength(1)
+    expect(h.els['ta-status']!.textContent).toBe('Sent. Watching for the reply.')
+  })
+  // Q1 07:50 M16 to M18: the page line is matched on the reason code, only for binding_detached; every binding refusal forgets.
+  it('a second detach with other server words still shows the page line (matched on the code, not the sentence)', async () => {
+    const OTHER = { status: 409, body: { outcome: 'refused', reason: 'binding_detached', reasonCopy: 'Something else entirely.' } }
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : OTHER),
+      ['POST /api/agent-sessions/bindings/b2/turns']: OTHER }
+    const h = await opened(routes)
+    await send(h, 'First'); await send(h, 'Second')
+    expect(h.els['ta-status']!.textContent).toBe('COS lost its link to this session. Send again. Your message is still in the box.')
+  })
+  for (const reason of ['stale_epoch', 'binding_expired', 'binding_not_active', 'binding_unusable', 'unknown_binding']) {
+    it(`${reason} twice: the server’s own words (not the detach line), and the binding is forgotten in localStorage`, async () => {
+      const R = { status: 409, body: { outcome: 'refused', reason, reasonCopy: 'Server words for ' + reason + '.' } }
+      const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+        ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : R),
+        ['POST /api/agent-sessions/bindings/b2/turns']: R }
+      const h = await opened(routes)
+      await send(h, 'First'); await send(h, 'Second')
+      expect(h.els['ta-status']!.textContent).toBe('Server words for ' + reason + '. It is still in the box.')
+      expect(JSON.parse(h.store.get('cos_web_bindings') || '{}')['claude|' + SID], 'forgotten').toBeUndefined()
+    })
+  }
+  it('the other five reasons still re-attach once (unchanged)', async () => {
+    for (const reason of ['stale_epoch', 'binding_expired', 'binding_not_active', 'binding_unusable', 'unknown_binding']) {
+      const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+        ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : { status: 409, body: { outcome: 'refused', reason } }),
+        ['POST /api/agent-sessions/bindings/b2/turns']: { status: 202, body: { outcome: 'queued' } } }
+      const h = await opened(routes)
+      await send(h, 'First'); await send(h, 'Second')
+      expect(turnsOn(h, 'b2'), reason).toHaveLength(1)
+    }
+  })
+})
+
+// ── 7.0.38 (lead 07:16): in Today's panel too, an answer lands now or is not sent ──
+describe('7.0.38: Today’s panel never queues or holds an answer', () => {
+  const PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: '
+  const BUSY = 'The session is working. “Yes, build it” was not sent.'
+  const ASK = 'Build Set D?'
+  const TROW = { session_id: SID, provider: 'claude', display_label: 'Orchestrator', alive: true, running: true, running_active: false, agent_state: 'waiting',
+    state_source: 'hook', waiting_kind: 'question', waiting_source: 'turn_end', waiting_detail: ASK, waiting_choices: ['Yes, build it', 'Not now'], waiting_ask_id: 'turn_end:1' }
+  const model = () => ({ rows: [{ kind: 'session', key: 'claude|' + SID, title: 'Orchestrator asked: ' + ASK, why: 'Tap a choice or reply here', where: 'turnend',
+    ask: ASK, choices: ['Yes, build it', 'Not now'], askId: 'turn_end:1' }] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true })
+  const turns = (h: { calls: Array<{ method?: string; path: string; body?: any }> }) => h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
+  const queued = (h: { calls: Array<{ method?: string; path: string }> }) => h.calls.filter(c => c.method === 'POST' && c.path === P('/queued-turns'))
+  const opened = async (routes: Routes) => {
+    const h = load({ data: { sessions: [TROW] }, routes, model: model(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    return h
+  }
+  const QOK = { ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } } }
+  for (const reason of ['native_thread_working', 'native_turn_in_progress']) {
+    it(`a tapped choice the turn route answers ${reason}: not queued, not held, the line, no button, the box stays`, async () => {
+      const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { outcome: 'refused', reason } } })
+      h.tap('turnend', '0')
+      await flush()
+      expect(queued(h)).toHaveLength(0)
+      expect(h.els['ta-status']!.textContent).toBe(BUSY)
+      expect((h.ta as any)._state.quote, 'no Send anyway behind the line').toBeNull()
+      expect(h.els['ta-foot']!.hidden).toBe(false)
+      for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+      expect(turns(h), 'nothing sends it later').toHaveLength(1)
+      expect(queued(h)).toHaveLength(0)
+    })
+  }
+  for (const reason of ['native_thread_working', 'native_target_busy', 'target_busy']) {
+    it(`a tapped choice whose attach is refused ${reason}: not queued`, async () => {
+      const h = await opened({ ...OK_ROUTES, ...QOK, ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason, reasonCopy: 'Busy.' } } })
+      h.tap('turnend', '0')
+      await flush()
+      expect(queued(h)).toHaveLength(0)
+      expect(h.els['ta-status']!.textContent).toBe(BUSY)
+    })
+  }
+  it('his own words in the box while the question is open: not queued, and they stay in the box', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })
+    h.els['ta-input']!.value = 'Yes, and Set E'
+    h.tap('send')
+    await flush()
+    expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'Yes, and Set E')
+    expect(queued(h)).toHaveLength(0)
+    expect(h.els['ta-status']!.textContent).toBe('The session is working. “Yes, and Set E” was not sent.')
+    expect(h.els['ta-input']!.value).toBe('Yes, and Set E')
+  })
+  // 7.0.38 (lead 07:20, item 4): Send anyway is his deliberate tap and its words say the session moved on, so it may
+  // wait in line, once per tap, marked so the server's queue takes it. Never behind COS's own turn (only a timer would send it).
+  const MOVED = { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', askNow: null } }
+  it('Send anyway on a busy session: one queued turn with the marker and no ask id, the ordinary waiting status, once per tap', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED : { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.innerHTML).toContain('data-ta="te-quote"')
+    h.tap('te-quote'); h.tap('te-quote')
+    await flush()
+    expect(turns(h)).toHaveLength(2)
+    expect(turns(h)[1]!.body.turnEndSendAnyway).toBe(true)
+    expect('turnEndAskId' in turns(h)[1]!.body).toBe(false)
+    expect(queued(h), 'one queued turn').toHaveLength(1)
+    const q = queued(h)[0] as any
+    expect(q.body.turnEndSendAnyway).toBe(true)
+    expect('turnEndAskId' in q.body).toBe(false)
+    expect(q.body.prompt.indexOf(PREFIX)).toBe(0)
+    expect(h.els['ta-status']!.textContent).not.toContain('was not sent')
+    h.tap('te-quote')
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(queued(h), 'the button is spent; nothing more by timer').toHaveLength(1)
+  })
+  it('Send anyway behind COS’s own turn (native_turn_in_progress): not held, the busy line with its label, no button', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED : { status: 409, body: { outcome: 'refused', reason: 'native_turn_in_progress' } } })
+    h.tap('turnend', '0')
+    await flush()
+    h.tap('te-quote')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe(BUSY)
+    expect((h.ta as any)._state.quote).toBeNull()
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(turns(h)).toHaveLength(2)
+    expect(queued(h)).toHaveLength(0)
+  })
+  it('a plain answer (no marker) is never queued even if a caller passed a revision', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })
+    h.els['ta-input']!.value = 'Yes'
+    ;(h.ta as any)._send({ acknowledgedRevision: 'rev1' })
+    await flush()
+    expect(queued(h)).toHaveLength(0)
+  })
+  // His exact 07:01 sequence (sent, the session working, a second tap), under both server orders.
+  for (const order of ['busy gates first (7.0.37)', 'ask check first (X1 7.0.38)']) {
+    it(`his exact sequence, ${order}: the second tap sends nothing more and says why`, async () => {
+      let n = 0
+      const second = order.startsWith('busy') ? { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } }
+        : { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, answeredBy: 'web', askNow: null } }
+      const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: () => (++n === 1 ? { status: 200, body: { outcome: 'completed', via: 'live' } } : second) })
+      h.tap('turnend', '0')
+      await flush()
+      expect(h.els['ta-status']!.textContent).toContain('Sent “Yes, build it”')
+      h.tap('turnend', '0')
+      await flush()
+      for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+      expect(turns(h), 'one more try, refused').toHaveLength(2)
+      expect(queued(h), 'nothing queued').toHaveLength(0)
+      expect(h.els['ta-status']!.textContent).toBe(order.startsWith('busy') ? BUSY : 'Already answered on another screen. “Yes, build it” was not sent.')
+      expect((h.ta as any)._state.quote, 'no button either way').toBeNull()
+    })
+  }
+  it('X1 7.0.38: moved, but the server could not read the head (revision null): the moved line and NO Send anyway', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: null, askNow: null } } })
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session took another turn. Your answer to “Build Set D?” was not sent.')
+    expect((h.ta as any)._state.quote, 'nothing for a button to carry').toBeNull()
+    expect((h.ta as any)._state.note.quote ?? '').toBe('')
+    h.tap('te-quote'); await flush()
+    expect(turns(h)).toHaveLength(1)
+  })
+  it('X1’s "session" surface: moved on because of a peer message (no answered field) reads as moved, with Send anyway', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev5', askNow: null, answeredBy: 'session' } } })
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session took another turn. Your answer to “Build Set D?” was not sent.')
+    expect((h.ta as any)._state.quote).toEqual({ label: 'Yes, build it', ask: 'Build Set D?', revision: 'rev5' })
+  })
+  it('an ordinary message from the box once the question is closed is still queued (unchanged)', async () => {
+    const h = await opened({ ...OK_ROUTES, ...QOK, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } })
+    ;(h.ta as any)._state.wait = { ...(h.ta as any)._state.wait, where: 'closed' }
+    h.els['ta-input']!.value = 'Also check the Duo'
+    h.tap('send')
+    await flush()
+    expect(turns(h)[0]!.body.prompt).toBe('Also check the Duo')
+    expect(queued(h)).toHaveLength(1)
   })
 })

@@ -2327,8 +2327,20 @@
     },
     answered: function (label) { return 'Already answered on another screen. \u201c' + label + '\u201d was not sent.'; },
     // Lead 00:54: an earlier answer to this ask went out and its delivery is unknown. Not "already answered", no button.
-    unconfirmed: function () { return 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.'; }
+    unconfirmed: function () { return 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.'; },
+    // 7.0.38 (lead 07:20): an answer the session was too busy to take now. It is never queued or held, and no button:
+    // a bare busy refusal does not say whether the question was answered, so a button here could send a duplicate.
+    busy: function (label) { return 'The session is working. \u201c' + label + '\u201d was not sent.'; },
+    // 7.0.38 (Q1 07:50 FIX FIRST; lead 08:13 ruling on the words): an answer a 7.0.37 page held behind COS's own turn,
+    // found on reopening or by the timer. It is never sent late (no ask id would go with it). His words go back to the
+    // box only if it is empty.
+    late: function (label) { return '\u201c' + label + '\u201d was not sent. An answer is never sent later. Answer again if the question is still open.'; },
+    /** The words of an answer, without the contract words in front, clipped for a status line. */
+    bare: function (text) { var w = String(text || ''); return (w.indexOf(TURN_END_PREFIX) === 0 ? w.slice(TURN_END_PREFIX.length) : w).trim(); },
+    label: function (text) { var w = TURN_END_QUOTE.bare(text); return w.length > 60 ? w.slice(0, 59).trim() + '\u2026' : w; }
   };
+  /** An answer to a turn-end question (the contract words in front): never queued (but Send anyway) and never held. */
+  function isTurnEndAnswer(text) { return String(text || '').indexOf(TURN_END_PREFIX) === 0; }
   /** The exact words a choice or a reply sends (contract v1): attributed to COS Control Web, never to the desk. */
   function turnEndPrompt(text) { return TURN_END_PREFIX + turnEndBare(text); }
   /** The words as he wrote them: a message that came back to the box already carries the prefix, never twice. */
@@ -2438,7 +2450,11 @@
   var TURN_END_GONE = 'Already answered on another screen, or the session moved on. Nothing was sent.';
   function sendTurnEndChoice(r, i) {
     if (!r || r.sending) return;
-    var te = turnEndOf(readerRowOf(r));
+    // 7.0.38 (b), lead 07:16: the choice he tapped is on the card this reader last drew. When that card named its ask,
+    // the server decides: it delivers only while that ask is open, else says answered, moved or what it asks now (an
+    // answer is never queued or held, continueSession). Without an id (an older server) the row read still decides.
+    var drawn = r.turnEnd && r.turnEnd.id ? r.turnEnd : null;
+    var te = drawn || turnEndOf(readerRowOf(r));
     if (!te) { sessionStatus(TURN_END_GONE); readerMacPaint(r, r.waitingNow); return; }
     var label = te.choices[i];
     if (!label) return;
@@ -2453,7 +2469,7 @@
     var q = r && r.teQuote;
     if (!q || r.sending) return;
     r.teQuote = null;
-    return turnEndSend(r, TURN_END_QUOTE.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
+    return turnEndSend(r, TURN_END_QUOTE.text(q.label, q.ask), { acknowledgedRevision: q.revision, turnEndSendAnyway: true }, q.label, q.ask);
   }
   function turnEndSend(r, text, opts, label, ask) {
     r.sending = true; r.teSending = true; readerMacPaint(r, r.waitingNow);
@@ -2474,6 +2490,7 @@
     if (how === 'sent') return sessionStatus(TURN_END_SENT(label));
     if (how === 'answered') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.answered(label), 'error'); }
     if (how === 'unconfirmed') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.unconfirmed(), 'error'); }
+    if (how === 'busy') return sessionStatus(TURN_END_QUOTE.busy(label), 'error');
     if (how === 'moved' || how === 'changed') {
       // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
       var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;
@@ -2574,6 +2591,8 @@
     var m = TODAY.model = needsModel();
     renderStory(m);
     renderNeeds(m);
+    // 7.0.38 (lead 07:09): an open Today panel redraws its question from this read (a gone one closes, a new one draws).
+    if (PANES.todayActions && PANES.todayActions.needsChanged) PANES.todayActions.needsChanged();
     setBadge('today', m.now.length > 0);
     if (window.COSWeb && window.COSWeb.setStory) window.COSWeb.setStory('today', todayRailLine(m), m.now.length > 0);
   }
@@ -4397,6 +4416,8 @@
   function targetKey(provider, id) { return provider.length + ':' + provider + ':' + id.length + ':' + id; }
   var BINDING_REUSE_MS = 25 * 60000; // the server keeps a binding 30 min
   var PARKABLE_REFUSALS = /^(native_thread_working|native_target_busy|target_busy)$/;
+  var BINDING_LOST = 'COS lost its link to this session. Send again. Your message is still in the box.';
+  var BINDING_LOST_HELD = 'COS lost its link to this session. Send again.';
   // A binding is kept per browser, across reloads: the server allows one live binding per
   // thread, so a reload that forgot it would read its own binding as "target busy".
   var BINDINGS_KEY = 'cos_web_bindings';
@@ -4584,6 +4605,9 @@
       paintWebKeyOffer(r);
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
       var kitR = readerKit(); if (kitR && !kitR.turnFiles()) kitR.ensureCaps().then(function () { paintReaderFiles(); paintWebKeyOffer(r); }, function () {});
+      // 7.0.38 (Q1 07:50 FIX FIRST): a 7.0.37 page held answers behind COS's own turn, and the store outlives the update.
+      // On reopening, each comes back to the box with a not-sent line; none is drawn as waiting or sent by the timer.
+      state.reading.held.filter(function (h) { return isTurnEndAnswer(h.text); }).forEach(function (h) { settleLateAnswer(state.reading, h); });
       renderHeld(state.reading);
       loadQueue(provider, id);
       sxProbeAttach(r);
@@ -5313,13 +5337,21 @@
 
   // One attempt to deliver `text`. `opts.held` is a message waiting for a reply to end: its
   // attempts never touch the box or the status line unless they settle it.
-  // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed'.
+  // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed' | 'busy' (an answer the session was too busy to take).
   function continueSession(r, text, opts) {
     var provider = r.provider, id = r.id;
     var draft = opts.held ? { text: opts.held.text, key: opts.held.key, ids: opts.held.ids || [] } : draftFor(text, r, opts.attachmentIds), view = viewOf(r);
     // Files go only to a server that said it takes them (threadTurnAttachments); the caller shows no clip otherwise.
     var files = draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {};
     if (!opts.held) view.status(r, 'Sending');
+    // 7.0.38 (lead 07:16 and 07:20, X1 07:12): an answer to a turn-end question is never held, and never queued except
+    // Send anyway. It lands now or it is not sent: a queued or held answer went later with no ask id, whatever happened
+    // to the question. A tapped choice, the box's own answer and Send anyway all carry the contract words in front.
+    // Send anyway (his deliberate tap; its words say the session has moved on) may wait in line, marked so the server's
+    // queue takes it; never behind COS's own turn, which only a timer would send.
+    var answer = !opts.held && isTurnEndAnswer(draft.text);
+    var busy = function () { view.status(r, TURN_END_QUOTE.busy(TURN_END_QUOTE.label(draft.text)), 'error'); return 'busy'; };
+    var parkable = !answer || !!opts.turnEndSendAnyway;
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
       // 201 Created on success; any 2xx that says attached counts.
@@ -5336,7 +5368,7 @@
       // Any other refusal is permanent for this thread, and a parked message would never go.
       if (!at.ok) {
         var why = (at.refusal && at.refusal.reason) || '';
-        if (PARKABLE_REFUSALS.test(why)) return parkTurn(r, draft, at.refusal, opts);
+        if (PARKABLE_REFUSALS.test(why)) return parkable ? parkTurn(r, draft, at.refusal, opts) : busy();
         var copy = ((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.';
         if (opts.held) settleHeld(r, opts.held, 'refused', copy);
         else {
@@ -5352,12 +5384,14 @@
       r.stoppedAt = null;
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
         method: 'POST', timeoutMs: 25000,
-        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}, opts.turnEndAskId ? { turnEndAskId: opts.turnEndAskId } : {}),
+        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}, opts.turnEndAskId ? { turnEndAskId: opts.turnEndAskId } : {}, opts.turnEndSendAnyway ? { turnEndSendAnyway: true } : {}),
       }).then(function (t) {
         var b = t.body || {};
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
           if (opts.held) settleHeld(r, opts.held, 'sent');
           else { view.pending(r, draft.text, b.replayed ? 'already sent' : 'sent'); view.clear(r, draft.text); }
+          // 7.0.38 (lead 08:0x): whether it is in the session now (completed) or only accepted (queued), for "Answered".
+          r.lastTurn = { key: draft.key, outcome: b.outcome, via: b.via || '' };
           view.status(r, b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
           view.watch(r, at.binding.bindingId, draft.key);
           // 6.99.29: a turn that went live is in the open session, which now works on it.
@@ -5365,11 +5399,11 @@
           return 'sent';
         }
         var reason = b.reason || '';
-        if (reason === 'native_thread_working') return parkTurn(r, draft, b, opts);
+        if (reason === 'native_thread_working') return parkable ? parkTurn(r, draft, b, opts) : busy();
         // COS's own reply is still running on this thread. The server's queue counts that
         // thread as free (the running child is COS's), so it cannot park this; the page holds
         // it under the same key and sends it the moment the reply ends.
-        if (reason === 'native_turn_in_progress') { if (!opts.held) view.hold(r, draft); return 'held'; }
+        if (reason === 'native_turn_in_progress') { if (answer) return busy(); if (!opts.held) view.hold(r, draft); return 'held'; }
         // 7.0.36 (X1): an answer named its ask and the session has moved past it, or answered it first elsewhere. Only
         // a turn-end answer names an ask, so only its caller reads this; nothing is sent again from here.
         if (reason === 'turn_end_ask_moved') {
@@ -5400,9 +5434,20 @@
             : 'This session changed on your Mac again. Your message is not sent yet.');
           return 'changed';
         }
-        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding)$/.test(reason) && !opts.reattached) {
+        // 7.0.38 (Miles 11/14 07:14): binding_detached too. Every attach per send (the queue drain, the lens, the Mac)
+        // takes the target from an idle binding past 90 s (registry IDLE_LEASE_YIELD_MS), and the page kept sending on
+        // the one it remembered (localStorage, 25 min, so a reload did not help). Once per send, like the others.
+        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding|binding_detached)$/.test(reason)) {
+          // Forgotten in localStorage too (rememberBinding), also after the one retry, so the next tap starts clean.
           rememberBinding(provider, id, null);
-          return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
+          if (!opts.reattached) return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
+          // Lead (P1 accepted, 11/14): the fresh binding was taken too. The server's "Attach again" names a control this page does not
+          // have; say what to do here instead (matched by the reason code, never the server's sentence).
+          if (reason === 'binding_detached') {
+            if (opts.held) settleHeld(r, opts.held, 'refused', BINDING_LOST_HELD);   // returnToBox says where the words are
+            else view.status(r, BINDING_LOST, 'error');
+            return 'refused';
+          }
         }
         var refusedCopy = b.reasonCopy || 'The session did not take that message.';
         if (opts.held) settleHeld(r, opts.held, 'refused', refusedCopy);
@@ -5634,9 +5679,22 @@
     if (!next) { clearInterval(r.heldTimer); return; }
     if (r.flushing) return;
     if (Date.now() - next.since > HELD_MAX_MS) { settleHeld(r, next, 'timeout', 'The session stayed busy for five minutes.'); return; }
+    // 7.0.38 (Q1 07:50): a held answer, from any source, is never sent by this timer.
+    if (isTurnEndAnswer(next.text)) { settleLateAnswer(r, next); return; }
     r.flushing = next;
     continueSession(r, next.text, { held: next }).then(function () {}, function () { /* no answer: keep it, retry */ })
       .finally(function () { r.flushing = null; if (next.cancelled && r.held.indexOf(next) >= 0) settleHeld(r, next, 'cancelled'); });
+  }
+  // 7.0.38 (Q1 07:50, lead 08:0x): a held answer never goes. It leaves the held store; his own words (not the contract
+  // sentence) go back to the box only when the box is empty, never over what he has typed; one line says so either way.
+  function settleLateAnswer(r, h) {
+    r.held = r.held.filter(function (x) { return x !== h; });
+    saveHeld(r);
+    var bubble = heldBubble(h.key); if (bubble) bubble.remove();
+    if (!r.held.some(function (x) { return !x.cancelled; })) clearInterval(r.heldTimer);
+    var input = $('session-input'), words = TURN_END_QUOTE.bare(h.text);
+    if (input && !input.value.trim()) { input.value = words; autoGrow(input); if (typeof unsentSave === 'function') unsentSave(); }
+    sessionStatus(TURN_END_QUOTE.late(TURN_END_QUOTE.label(h.text)), 'error');
   }
   // Ends one held message: sent, refused, timed out or cancelled.
   function settleHeld(r, h, how, copy) {
@@ -5668,7 +5726,9 @@
     var view = viewOf(r);
     return apiAnswer(sessionPath(r.provider, r.id, '/queued-turns'), {
       method: 'POST', timeoutMs: 15000,
-      body: Object.assign({ cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text }, draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {}),
+      body: Object.assign({ cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text }, draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {},
+        // 7.0.38: only Send anyway's tap marks an answer the queue may take (X1's guard refuses any other).
+        opts && opts.turnEndSendAnyway ? { turnEndSendAnyway: true } : {}),
     }).then(function (q) {
       var b = q.body || {};
       if (b.queued === true || b.error === 'duplicate_turn') {
@@ -8529,6 +8589,32 @@
       sat: lrProbe('padding-top:env(safe-area-inset-top)', 'paddingTop'), sab: lrProbe('padding-bottom:env(safe-area-inset-bottom)', 'paddingBottom'),
       anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), rail: typeof sideRail === 'function' ? sideRail() : false, railHit: typeof RAIL === 'object' ? RAIL.hit : 0, phone: isPhone(), cw: w.cw, dw: w.dw, scw: w.scw, wide: w.wide });
   }
+  // 7.0.38 (lead 07:49, Miles 07:47 "I just need the pings as well"): what this browser could do for notifications, so
+  // nobody designs iPhone pings from a guess. Once per open, booleans and short fixed labels only: never the host, the
+  // address or any other part of the URL but its scheme, no token, no permission prompt, nothing registered. Reading
+  // Notification.permission does not ask; nothing here calls requestPermission, register or subscribe.
+  function lrCaps() {
+    if (LR.caps) return;
+    LR.caps = true;
+    var n = window.Notification, nav = window.navigator || {}, proto = String((window.location && window.location.protocol) || '');
+    // The kind of host only, never the host: an IP address (v4 or v6), a Tailscale name (*.ts.net), or anything else.
+    var host = String((window.location && window.location.hostname) || '').toLowerCase();
+    var hostKind = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[?[0-9a-f:]+\]?$/.test(host) && host.indexOf(':') >= 0 ? 'ip' : /\.ts\.net$/.test(host) ? 'ts.net' : 'other';
+    var perm = n && typeof n.permission === 'string' && /^(default|granted|denied)$/.test(n.permission) ? n.permission : n ? 'other' : 'none';
+    layoutCrumb('caps', {
+      secure: window.isSecureContext === true,
+      proto: /^(https|http|file):$/.test(proto) ? proto.slice(0, -1) : 'other',
+      hostKind: hostKind,
+      standalone: lrMatch('(display-mode: standalone)'),
+      iosStandalone: nav.standalone === true,
+      swApi: 'serviceWorker' in nav,
+      pushApi: 'PushManager' in window,
+      // iOS 18.4+: window.pushManager allows a push with no service worker (Declarative Web Push). Its own field.
+      pushMgr: 'pushManager' in window,
+      notifApi: 'Notification' in window,
+      notifPerm: perm
+    });
+  }
   // The focus line is for touch screens only (QA W3): on a Mac it would only spend the budget.
   function lrFocus() {
     if (!vpTyping()) return;
@@ -8601,7 +8687,7 @@
     // 7.0.17: when the last touch landed, for the zoom breadcrumb only. Passive: it never blocks a gesture.
     document.addEventListener('touchstart', function () { LR.touchAt = Date.now(); }, { capture: true, passive: true });
     document.addEventListener('focusout', function () { setTimeout(lrFit, 0); });
-    shellHooks.push(function () { lrDevice(); lrFit(); });
+    shellHooks.push(function () { lrDevice(); lrCaps(); lrFit(); });
   })();
   // 7.0.17 (Miles 2026-11-10, the Duo web app zooming in and out around the keyboard): on iOS only, the viewport is
   // capped at maximum-scale=1, once, as the page loads. Other platforms keep the viewport exactly as it is. Never while

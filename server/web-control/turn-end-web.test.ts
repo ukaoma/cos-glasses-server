@@ -167,11 +167,47 @@ describe('the reader’s card and its send', () => {
     expect(h.sent).toEqual([PREFIX + 'Good Morning + Today'])
     expect(h.status.at(-1)).toEqual({ text: 'Sent “Good Morning + Today”. It reaches the session as a message from COS; it may ask you to confirm.', kind: undefined })
   })
-  it('answered on another screen (the row moved on): nothing is sent, and it says so', () => {
+  // 7.0.38 (b), lead 07:16: this pinned the page's own check for every row. It still holds when no card named an ask
+  // (an older server): the page has no id to send, so it says so itself.
+  it('no card with an ask id (an older server) and the row moved on: nothing is sent, and it says so', () => {
     const h = reader({ ...ROW, waiting_source: undefined, agent_state: 'idle' })
     h.fns.sendTurnEndChoice(h.r, 0)
     expect(h.sent).toEqual([])
     expect(h.status.at(-1)!.text).toBe('Already answered on another screen, or the session moved on. Nothing was sent.')
+  })
+  it('7.0.38: the card named its ask and the row has moved on: the tap sends the drawn choice with that id, once, and the server decides', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => Promise.resolve('answered'))
+    h.fns.readerMacPaint(h.r, false)
+    h.deps.state.sessions = [{ ...ROW, waiting_source: undefined, agent_state: 'idle' }]
+    h.fns.sendTurnEndChoice(h.r, 1); h.fns.sendTurnEndChoice(h.r, 1)
+    await flush()
+    expect(h.sent).toEqual([PREFIX + 'COS Control pane'])
+    expect(h.optsSent[0]).toEqual({ turnEndAskId: 'turn_end:7' })
+    expect(h.status.at(-1)!.text).toBe('Already answered on another screen. “COS Control pane” was not sent.')
+  })
+  it('X1 7.0.38: moved with revision null: the reader shows the moved line and NO Send anyway', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => { (h.r as any).teRefusal = { revision: null, askNow: null }; return Promise.resolve('moved') })
+    h.fns.readerMacPaint(h.r, false)
+    h.fns.sendTurnEndChoice(h.r, 0)
+    await flush()
+    expect(h.status.at(-1)!.text).toBe('The session took another turn. Your answer to “Where should the overnight mail intel show up first?” was not sent.')
+    expect(h.status.at(-1)!.action ?? '').toBe('')
+    expect((h.r as any).teQuote).toBeNull()
+  })
+  it('7.0.38: a busy session: the reader’s line names the choice, with no button', async () => {
+    const h = reader({ ...ROW, waiting_ask_id: 'turn_end:7' }, () => Promise.resolve('busy'))
+    h.fns.readerMacPaint(h.r, false)
+    h.fns.sendTurnEndChoice(h.r, 0)
+    await flush()
+    expect(h.status.at(-1)).toEqual({ text: 'The session is working. “Good Morning + Today” was not sent.', kind: 'error' })
+    expect((h.r as any).teQuote ?? null).toBeNull()
+  })
+  it('7.0.38: a card WITHOUT an id still reads the row (unchanged), even when one was drawn', () => {
+    const h = reader(ROW)
+    h.fns.readerMacPaint(h.r, false)
+    h.deps.state.sessions = []
+    h.fns.sendTurnEndChoice(h.r, 0)
+    expect(h.sent).toEqual([])
   })
   it('7.0.36: the tap names its ask when the server gave one, and only then', async () => {
     const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1794600000123' })
@@ -206,7 +242,7 @@ describe('the reader’s card and its send', () => {
     h.fns.sendTurnEndQuoted(h.r); h.fns.sendTurnEndQuoted(h.r)
     await flush()
     expect(h.sent).toEqual([PREFIX + 'Good Morning + Today', PREFIX + 'Good Morning + Today. This answers your earlier question “Where should the overnight mail intel show up first?”. You have taken a turn since asking it.'])
-    expect(h.optsSent[1]).toEqual({ acknowledgedRevision: 'rev9' })
+    expect(h.optsSent[1], '7.0.38: the tap’s own marker, so the queue may take it').toEqual({ acknowledgedRevision: 'rev9', turnEndSendAnyway: true })
     expect(h.status.at(-1)).toEqual({ text: 'Sent “Good Morning + Today”. It reaches the session as a message from COS; it may ask you to confirm.', kind: undefined })
     h.fns.sendTurnEndQuoted(h.r)
     expect(h.sent, 'the button is spent').toHaveLength(2)

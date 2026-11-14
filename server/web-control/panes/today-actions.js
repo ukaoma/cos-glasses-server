@@ -1109,7 +1109,7 @@
     box.innerHTML = html;
     // The reply box shows only where a reply can be the answer; what was typed stays in it, hidden.
     var foot = $('ta-foot');
-    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply' && w !== 'turnend'; }
+    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply' && w !== 'turnend' && w !== 'closed'; }
   }
   // Where a waiting session's question is answered: 'here' (its cards in this sheet), 'answered' (on some screen just
   // now), 'mac' (a Claude session's own prompt, or a held question that went back to the Mac), or 'reply' (a Codex or
@@ -1118,6 +1118,8 @@
   // reply box stays a Codex or Cursor one.
   function waitWhere() {
     if (O.qCount) return 'here';
+    // 7.0.38 (lead 07:09): Today read again and the question this panel drew is gone from it.
+    if (O.wait && O.wait.where === 'closed') return 'closed';
     // 7.0.18: a turn that ended asking him is answered by a reply (a choice or his own words), so the reply box shows.
     if (O.wait && O.wait.where === 'turnend') return 'turnend';
     if (O.r && W.sessionQuestions && W.sessionQuestions.answeredFor && W.sessionQuestions.answeredFor(O.r.id)) return 'answered';
@@ -1144,6 +1146,41 @@
       }).join('') + '</div>' : '') +
       '<p class="ta-sub ta-te-line">' + esc(TURN_END_LINE) + '</p>';
   }
+  // 7.0.38 (lead 07:09): the panel's copy of a turn-end question follows Today's own reads. Nothing here sends.
+  var TURN_END_CLOSED = 'This question is no longer open.';
+  function answeredLine() { return (W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.'; }
+  // 7.0.38 (lead 08:0x): "Answered" only when delivery is confirmed: the turn came back completed, or the watch later
+  // reports it completed. Queued or unknown waits (pending); a refused or ambiguous watch clears both.
+  // Q1 08:25: the pending mark is tied to its own turn (its clientTurnId), so another turn's result never promotes it.
+  function markSent(r, key) {
+    if (r && r.lastTurn && r.lastTurn.outcome === 'completed') { O.teSent = key; O.teSentPending = null; }
+    else O.teSentPending = { ask: key, turn: r && r.lastTurn ? r.lastTurn.key : '' };
+  }
+  /** Which ask a Needs you row names: its session, and the server's id or (an older server) its words. */
+  function teKey(w) { return !w ? '' : String(w.key || '') + (w.askId ? '|id:' + w.askId : '|ask:' + String(w.ask || '').trim()); }
+  /** Today painted its Needs you again (app.js paintNeeds). An open turn-end panel redraws from it: the same ask stays,
+   *  a new ask draws in its place (also after it closed: the session asked again), a gone one closes. The reply box,
+   *  its words and the status line are left alone. */
+  function needsChanged() {
+    if (!O.open || O.open.kind !== 'wait' || !O.wait || (O.wait.where !== 'turnend' && O.wait.where !== 'closed')) return;
+    var nm = T.needs ? T.needs() : null;
+    if (!nm || !Array.isArray(nm.rows)) return;
+    var key = O.wait.key;
+    var now = nm.rows.filter(function (x) { return x.kind === 'session' && x.key === key && x.where === 'turnend'; })[0] || null;
+    if (now && teKey(now) === teKey(O.wait)) return;
+    var next = now || Object.assign({}, O.wait, { where: 'closed' });
+    keepPlace(function () { O.wait = next; paintMeta(); });
+  }
+  /** Redraw the top of the sheet without moving what he is reading: when he has scrolled past it, the scroll takes
+   *  up the change in its height. */
+  function keepPlace(paint) {
+    var body = $('ta-body'), meta = $('ta-meta');
+    var top = body ? body.scrollTop || 0 : 0, h = meta ? meta.offsetHeight || 0 : 0;
+    paint();
+    if (!body || !meta || top <= 0 || top < h) return;
+    var d = (meta.offsetHeight || 0) - h;
+    if (d) body.scrollTop = top + d;
+  }
   /** Still waiting on this answer? The latest session list decides; a reply from anywhere clears it on the server. */
   function turnEndStill() {
     var nm = T.needs ? T.needs() : null, key = O.wait && O.wait.key;
@@ -1153,7 +1190,9 @@
     var r = O.r, w = O.wait; if (!r || !w || r.sending) return;
     var label = (Array.isArray(w.choices) ? w.choices : [])[i];
     if (!label) return;
-    if (!turnEndStill()) { O.note = { text: 'Already answered on another screen, or the session moved on. Nothing was sent.', kind: '' }; paintNote(); return; }
+    // 7.0.38 (b), lead 07:16: with the ask's id the server decides (delivered only while that ask is open; else answered,
+    // moved, or what it asks now). Without one (an older server) Today's latest read still decides here.
+    if (!w.askId && !turnEndStill()) { O.note = { text: 'Already answered on another screen, or the session moved on. Nothing was sent.', kind: '' }; paintNote(); return; }
     O.quote = null;
     // 7.0.36 (X1): the answer names its ask (an older server ignores the id), as the reader's choice does.
     return choiceSend(r, turnEndAnswer(label), w.askId ? { turnEndAskId: w.askId } : {}, label, w.ask ? String(w.ask).trim() : '');
@@ -1162,18 +1201,20 @@
   function sendQuoted() {
     var r = O.r, q = O.quote; if (!r || !q || r.sending) return;
     O.quote = null;
-    return choiceSend(r, K.turnEndQuote.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
+    return choiceSend(r, K.turnEndQuote.text(q.label, q.ask), { acknowledgedRevision: q.revision, turnEndSendAnyway: true }, q.label, q.ask);
   }
   function choiceSend(r, text, opts, label, ask) {
+    var sentKey = teKey(O.wait);
     r.sending = true; setSending(true); paintMeta();
     var done = function () { r.sending = false; if (O.r === r) { setSending(false); paintMeta(); } };
     return K.send(r, text, opts).then(function (how) {
       done();
       if (O.r !== r) return;
       var Q = K.turnEndQuote;
-      if (how === 'sent') O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' };
+      if (how === 'sent') { markSent(r, sentKey); O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' }; }
       else if (how === 'answered') { r.teRefusal = null; O.note = { text: Q.answered(label), kind: 'error' }; }
       else if (how === 'unconfirmed') { r.teRefusal = null; O.note = { text: Q.unconfirmed(), kind: 'error' }; }
+      else if (how === 'busy') O.note = { text: Q.busy(label), kind: 'error' };
       else if (how === 'moved' || how === 'changed') {
         // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
         var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;
@@ -1197,6 +1238,8 @@
   // W1 A5: the head line says the state once. At the Mac's prompt the line below says where; the head does not repeat it.
   var GENERIC_WAIT = /^Waiting for (you|your answer)(\. Paused until you answer\.)?$/;
   function waitWhy(where) {
+    // 7.0.38: the head line no longer asks him to tap. This panel's own delivered answer says answered; else, closed.
+    if (where === 'closed') return O.teSent && O.teSent === teKey(O.wait) ? answeredLine() : TURN_END_CLOSED;
     var why = O.wait ? String(O.wait.why || '') : '';
     if (!why) return 'Waiting for you';
     return where === 'mac' && GENERIC_WAIT.test(why) ? 'Waiting for your answer' : why;
@@ -1486,11 +1529,13 @@
     r.sending = true; setSending(true);
     var done = function () { r.sending = false; if (O.r === r) setSending(false); };
     // 7.0.18: his own words in answer to a turn-end ask carry the same attribution as a choice ('Other' in the contract).
-    if (O.open && O.open.kind === 'wait' && waitWhere() === 'turnend' && turnEndStill()) text = turnEndAnswer(text);
+    // 7.0.38: once the question is closed (waitWhere 'closed') his words go as an ordinary message, no attribution, no id.
+    var teAnswer = O.open && O.open.kind === 'wait' && waitWhere() === 'turnend' && turnEndStill() ? teKey(O.wait) : '';
+    if (teAnswer) text = turnEndAnswer(text);
     var sending = K.send(r, text, opts || {});
     // continueSession picks the key at once (draftFor): keep it until the Mac takes the words.
     if (r.draft) keepDraft(r, text, r.draft);
-    return sending.then(function () { done(); }, function (err) {
+    return sending.then(function (how) { done(); if (how === 'sent' && teAnswer && O.r === r) markSent(r, teAnswer); }, function (err) {
       done();
       if (O.r !== r) return;
       var why = err && err.name === 'AbortError'
@@ -1538,12 +1583,14 @@
         if (o === 'completed') {
           clearInterval(O.watch);
           // 6.99.29: a turn delivered LIVE is in the open session, which now works on it; it is not done.
+          if (O.teSentPending && O.teSentPending.turn === key) { O.teSent = O.teSentPending.ask; O.teSentPending = null; paintMeta(); }
           if (s.body.via === 'live') { K.feed.noteGate(r, true); O.note = { text: 'Sent into the open session. It is working on it now.', kind: '' }; }
           else { O.note = { text: 'Done. The reply is below.', kind: '' }; loadLast(r); }
           paintNote(); VIEW.stateChanged(r);
         }
-        else if (o === 'refused') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); }
-        else if (o === 'ambiguous') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); }
+        // 7.0.38 (Q1 07:50): an answer the session then refused, or whose landing COS cannot tell, is not "Answered".
+        else if (o === 'refused') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = null; O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); paintMeta(); }
+        else if (o === 'ambiguous') { clearInterval(O.watch); O.teSent = ''; O.teSentPending = null; O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); paintMeta(); }
       }).catch(function () {});
     }, 3000);
   }
@@ -1610,6 +1657,7 @@
     open: open, close: close, restore: restore, summary: summary, summaryMax: SUMMARY_MAX,
     isOpen: function () { return !!O.open; },
     _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
+    needsChanged: needsChanged,
     _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater, _kb: KB, _fitNow: applyFit, _revive: revive
   });
 })();
