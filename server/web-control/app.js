@@ -5402,7 +5402,10 @@
             : 'This session changed on your Mac again. Your message is not sent yet.');
           return 'changed';
         }
-        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding)$/.test(reason) && !opts.reattached) {
+        // 7.0.38 (Miles 11/14 07:14): binding_detached too. Every attach per send (the queue drain, the lens, the Mac)
+        // takes the target from an idle binding past 90 s (registry IDLE_LEASE_YIELD_MS), and the page kept sending on
+        // the one it remembered (localStorage, 25 min, so a reload did not help). Once per send, like the others.
+        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding|binding_detached)$/.test(reason) && !opts.reattached) {
           rememberBinding(provider, id, null);
           return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
         }

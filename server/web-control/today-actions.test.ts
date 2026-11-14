@@ -5378,3 +5378,83 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     expect(() => run({})).not.toThrow()
   })
 })
+
+// ── 7.0.38 P1 (Miles 11/14 07:14, "the same bug under a new name?"): a send on a binding the server retired ──
+describe('7.0.38: binding_detached re-attaches once, through the normal attach path', () => {
+  const DETACHED = { status: 409, body: { outcome: 'refused', reason: 'binding_detached', reasonCopy: 'That continuation was detached. Attach again.' } }
+  const turnsOn = (h: { calls: Array<{ path: string }> }, b: string) => h.calls.filter(c => c.path === `/api/agent-sessions/bindings/${b}/turns`)
+  const attaches = (h: { calls: Array<{ path: string }> }) => h.calls.filter(c => c.path.endsWith('/attach'))
+  // Attach answers b1 first, then b2 (the server's fresh binding after the queue took the target).
+  const attachSeq = (_b: unknown, n: number) => ({ status: 201, body: { attached: true, bindingId: n === 1 ? 'b1' : 'b2', epoch: 2 + n } })
+  const opened = async (routes: Routes) => {
+    const h = load({ data: { needs: [NEED] }, routes, api: { '/api/work-board/your-move': { available: true, items: [NEED] } } })
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    return h
+  }
+  const send = async (h: Awaited<ReturnType<typeof opened>>, words: string) => { h.els['ta-input']!.value = words; h.tap('send'); await flush() }
+
+  it('the remembered binding was retired: one fresh attach, the same words and key go once on the new binding, and it says Sent', async () => {
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: { status: 202, body: { outcome: 'queued' } } }
+    const h = await opened(routes)
+    await send(h, 'First')
+    expect(turnsOn(h, 'b1')).toHaveLength(1)
+    await send(h, 'Second')
+    expect(turnsOn(h, 'b1'), 'the retired binding is tried once').toHaveLength(2)
+    expect(attaches(h), 'then one fresh attach').toHaveLength(2)
+    expect(turnsOn(h, 'b2')).toHaveLength(1)
+    expect((turnsOn(h, 'b2')[0] as any).body.prompt).toBe('Second')
+    expect((turnsOn(h, 'b2')[0] as any).body.clientTurnId, 'the same key, so a send that did land is never repeated').toBe((turnsOn(h, 'b1')[1] as any).body.clientTurnId)
+    expect(h.els['ta-status']!.textContent).toBe('Sent. Watching for the reply.')
+    expect(h.els['ta-status']!.textContent).not.toContain('detached')
+    await send(h, 'Third')
+    expect(turnsOn(h, 'b2'), 'the new binding is remembered for the next send').toHaveLength(2)
+    expect(attaches(h)).toHaveLength(2)
+  })
+  it('detached again on the fresh binding: no loop; one refusal shown, the words stay in the box', async () => {
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: DETACHED }
+    const h = await opened(routes)
+    await send(h, 'First')
+    await send(h, 'Second')
+    expect(turnsOn(h, 'b1')).toHaveLength(2)
+    expect(turnsOn(h, 'b2'), 'one try on the fresh binding').toHaveLength(1)
+    expect(attaches(h), 'one re-attach, never two').toHaveLength(2)
+    expect(h.els['ta-input']!.value).toBe('Second')
+    for (let k = 0; k < 5; k++) { h.runTimers(); h.tick(); h.later(60000); await flush() }
+    expect(turnsOn(h, 'b1').length + turnsOn(h, 'b2').length, 'nothing resends without a tap').toBe(3)
+  })
+  it('the open-session caution still asks first: nothing goes until Send anyway, then the re-attach and the send', async () => {
+    const routes: Routes = { ...OK_ROUTES, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 1 } },
+      ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : DETACHED),
+      ['POST /api/agent-sessions/bindings/b2/turns']: { status: 202, body: { outcome: 'queued' } } }
+    const h = await opened(routes)
+    await send(h, 'First')
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Send into an open session?')
+    expect(h.calls.some(c => c.method === 'POST')).toBe(false)
+    h.later(450); h.tap('caution-send'); await flush()
+    expect(turnsOn(h, 'b1')).toHaveLength(1)
+    await send(h, 'Second')
+    expect(turnsOn(h, 'b2')).toHaveLength(1)
+    // A fresh Today panel on the same session asks again before its first send, whatever binding the page holds.
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    await send(h, 'Third')
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Send into an open session?')
+    expect(turnsOn(h, 'b2'), 'nothing sent before he answers').toHaveLength(1)
+  })
+  it('the other five reasons still re-attach once (unchanged)', async () => {
+    for (const reason of ['stale_epoch', 'binding_expired', 'binding_not_active', 'binding_unusable', 'unknown_binding']) {
+      const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+        ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : { status: 409, body: { outcome: 'refused', reason } }),
+        ['POST /api/agent-sessions/bindings/b2/turns']: { status: 202, body: { outcome: 'queued' } } }
+      const h = await opened(routes)
+      await send(h, 'First'); await send(h, 'Second')
+      expect(turnsOn(h, 'b2'), reason).toHaveLength(1)
+    }
+  })
+})
