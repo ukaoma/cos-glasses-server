@@ -18,6 +18,8 @@
  *
  * How it stops: no timer by default; three failed probes in a row pause that provider's probe for an hour. Each probe
  * runs in a fresh empty directory with hooks and MCP off, and is killed by its exact PID after 15 seconds.
+ * 7.0.39+: a Claude answer of "limits available" with none (its usage service refused the CLI) holds Claude's probe for
+ * 10 minutes, saved across restarts, and counts toward the breaker. Every failed probe logs one line with a code.
  */
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
@@ -40,6 +42,16 @@ export const USAGE_BREAKER_FAILURES = 3
 export const USAGE_BREAKER_MS = 60 * 60_000
 export const USAGE_LIMIT_DEFAULT_MS = 60 * 60_000
 export const USAGE_LOW_HEADROOM = 15
+/** 7.0.39+: after Claude answers "limits available" with no limits (its usage service refused the CLI, HTTP 429 on
+ *  2026-11-14), COS waits this long before asking again. The CLI's own hold-off dies with its process, so COS keeps one,
+ *  saved with the entry so it survives probes and restarts. */
+export const USAGE_NO_LIMITS_HOLD_MS = 10 * 60_000
+
+/** Why a probe failed, as a code: logged on every failure and served on the usage route (never an account detail). */
+export type UsageFailureCode = 'no_limits' | 'unknown_shape' | 'refused' | 'timed_out' | 'exited' | 'not_found' | 'error'
+export class UsageProbeError extends Error {
+  constructor(readonly code: UsageFailureCode, message: string) { super(message) }
+}
 
 export interface UsageWindow { kind: string; usedPct: number; resetsAt: string | null; durationMins?: number }
 export interface UsageReading {
@@ -64,10 +76,17 @@ export interface UsageEntry {
   warning: boolean
   /** 7.0.39+: when the window an `allowed_warning` frame warned about resets. Past it, the warning no longer counts. */
   warningUntil?: number | null
+  /** 7.0.39+: the last failure's code and time; cleared by a good read. */
+  lastFailure?: UsageFailureCode | null
+  lastFailureAt?: number | null
+  /** 7.0.39+: no probe before this time (after a "no limits" answer). Kept across restarts, unlike the breaker's pause. */
+  holdUntil?: number | null
 }
 export type UsageState = 'ok' | 'low' | 'exhausted' | 'unknown'
 /** What the planner sees: one line per provider. */
-export interface UsageView { provider: UsageProvider; state: UsageState; headroomPct: number | null; resetsAt: string | null; ageSec: number | null; source: string; plan: string | null; stale: boolean; note: string }
+export interface UsageView { provider: UsageProvider; state: UsageState; headroomPct: number | null; resetsAt: string | null; ageSec: number | null; source: string; plan: string | null; stale: boolean; note: string
+  /** 7.0.39+: why the last read failed (null after a good read), and when the last good read was. */
+  reason?: UsageFailureCode | null; lastGoodAt?: string | null }
 
 /** The windows that bind: Claude's 5-hour session and weekly all-models; every Codex window; Cursor's included. */
 const BINDING: Record<UsageProvider, (kind: string) => boolean> = {
@@ -78,6 +97,16 @@ const BINDING: Record<UsageProvider, (kind: string) => boolean> = {
 
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const iso = (s: number) => new Date(s * 1000).toISOString()
+
+/** 7.0.39+: what a successful `get_usage` reply means. `no_limits`: the CLI says plan limits apply but gives none, which
+ *  is what it answers when its own read of the usage service failed (HTTP 429 on Miles's Mac, 2026-11-14). It is not an
+ *  unknown shape and must never read as one. */
+export function classifyClaudeUsage(r: unknown): { reading: UsageReading } | { code: 'no_limits' | 'unknown_shape' } {
+  const v = r && typeof r === 'object' ? r as Record<string, any> : null
+  if (v && v.rate_limits_available === true && v.rate_limits == null) return { code: 'no_limits' }
+  const reading = parseClaudeUsage(r)
+  return reading ? { reading } : { code: 'unknown_shape' }
+}
 
 /** Claude `get_usage` response (`response.response`). Classify on `kind`, never on a label. Null when the shape is not one we know. */
 export function parseClaudeUsage(r: unknown): UsageReading | null {
@@ -146,7 +175,8 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
   const allBind = (e.reading?.windows ?? []).filter(w => BINDING[e.provider](w.kind))
   const bind = allBind.filter(w => windowLive(w, now))
   const tightest = bind.length ? bind.reduce((a, b) => (b.usedPct > a.usedPct ? b : a)) : null
-  const base = { provider: e.provider, ageSec, source: e.source, plan: e.reading?.plan ?? null, stale }
+  const base = { provider: e.provider, ageSec, source: e.source, plan: e.reading?.plan ?? null, stale,
+    reason: e.lastFailure ?? null, lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null }
   // A stated limit beats any percentage (canary C1 rule), until the time it names.
   if (e.limitUntil && e.limitUntil > now) {
     return { ...base, state: 'exhausted', headroomPct: 0, resetsAt: new Date(e.limitUntil).toISOString(), source: e.limitSource ?? 'provider_limit', note: 'plan limit reached' }
@@ -203,19 +233,26 @@ export class UsageMonitor {
     if (this.inflight[p]) return this.inflight[p]!
     const e = this.entries[p]
     if (e.pausedUntil && e.pausedUntil > this.now()) return Promise.resolve()
+    if (e.holdUntil && e.holdUntil > this.now()) return Promise.resolve()
     const run = (async () => {
       try {
         const reading = await this.probes[p]()
         e.reading = reading; e.observedAt = this.now(); e.source = 'probe'; e.lastError = null; e.failures = 0; e.pausedUntil = null; e.warning = false; e.warningUntil = null
+        e.lastFailure = null; e.lastFailureAt = null; e.holdUntil = null
         // A fresh reading that says usage is allowed again clears an older limit only when its own reset passed.
         if (e.limitUntil && e.limitUntil <= this.now()) { e.limitUntil = null; e.limitSource = null }
       } catch (error) {
+        const now = this.now()
+        const code: UsageFailureCode = error instanceof UsageProbeError ? error.code : 'error'
         e.lastError = String((error as Error)?.message ?? error).slice(0, 120)
+        e.lastFailure = code; e.lastFailureAt = now
         e.failures++
-        if (e.failures >= USAGE_BREAKER_FAILURES) {
-          e.pausedUntil = this.now() + USAGE_BREAKER_MS
-          console.warn(`[work-orchestrator] usage probe ${p} paused for 1 h after ${e.failures} failures: ${e.lastError}`)
-        }
+        if (code === 'no_limits') e.holdUntil = now + USAGE_NO_LIMITS_HOLD_MS
+        if (e.failures >= USAGE_BREAKER_FAILURES) e.pausedUntil = now + USAGE_BREAKER_MS
+        // One line per failed read, a code and times only (no plan, account or reply text): three weeks of failed Claude
+        // reads (Oct 23 to Nov 14) went unseen because only the breaker's pause was ever logged.
+        const until = Math.max(e.pausedUntil ?? 0, e.holdUntil ?? 0)
+        console.warn(`[work-orchestrator] usage probe ${p} failed: ${code}; ${e.failures} in a row; last good read ${e.observedAt ? new Date(e.observedAt).toISOString() : 'never'}${until > now ? `; next read after ${new Date(until).toISOString()}` : ''}`)
       } finally { delete this.inflight[p]; this.save() }
     })()
     this.inflight[p] = run
@@ -321,21 +358,23 @@ export function probeClaudeUsage(spawnFn: SpawnLines = spawnLines, timeoutMs = U
       done = true; clearTimeout(timer); child.end(); setTimeout(() => child.kill(), 2000).unref?.()
       if (err) reject(err); else resolve(value!)
     }
-    const timer = setTimeout(() => { child.kill(); finish(new Error('timed out')) }, timeoutMs)
+    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)
     child.onLine(o => {
       if (o.type !== 'control_response' || o.response?.request_id !== 'cos_usage') return
-      if (o.response?.subtype !== 'success') return finish(new Error('get_usage refused'))
-      const reading = parseClaudeUsage(o.response.response)
-      if (reading) finish(null, reading); else finish(new Error('unknown get_usage shape'))
+      if (o.response?.subtype !== 'success') return finish(new UsageProbeError('refused', 'get_usage refused'))
+      const c = classifyClaudeUsage(o.response.response)
+      if ('reading' in c) finish(null, c.reading)
+      else if (c.code === 'no_limits') finish(new UsageProbeError('no_limits', 'Claude gave no plan limits (its usage service may be refusing reads)'))
+      else finish(new UsageProbeError('unknown_shape', 'unknown get_usage shape'))
     })
-    child.onExit(code => finish(new Error(`exited ${code ?? 'on error'} before answering`)))
+    child.onExit(code => finish(new UsageProbeError('exited', `exited ${code ?? 'on error'} before answering`)))
     for (const line of CLAUDE_USAGE_LINES) child.write(JSON.stringify(line))
   }))
 }
 
 export function probeCodexUsage(spawnFn: SpawnLines = spawnLines, timeoutMs = USAGE_PROBE_TIMEOUT_MS): Promise<UsageReading> {
   const bin = resolveProviderBinary('codex')
-  if (!bin.ok) return Promise.reject(new Error('codex not found'))
+  if (!bin.ok) return Promise.reject(new UsageProbeError('not_found', 'codex not found'))
   return withScratch(dir => new Promise((resolve, reject) => {
     const child = spawnFn(bin.path, ['app-server'], dir)
     let done = false
@@ -344,15 +383,15 @@ export function probeCodexUsage(spawnFn: SpawnLines = spawnLines, timeoutMs = US
       done = true; clearTimeout(timer); child.end(); setTimeout(() => child.kill(), 2000).unref?.()
       if (err) reject(err); else resolve(value!)
     }
-    const timer = setTimeout(() => { child.kill(); finish(new Error('timed out')) }, timeoutMs)
+    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)
     child.onLine(o => {
       if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }
       if (o.id !== 2) return
-      if (o.error) return finish(new Error('rateLimits/read refused'))
+      if (o.error) return finish(new UsageProbeError('refused', 'rateLimits/read refused'))
       const reading = parseCodexUsage(o.result)
-      if (reading) finish(null, reading); else finish(new Error('unknown rateLimits shape'))
+      if (reading) finish(null, reading); else finish(new UsageProbeError('unknown_shape', 'unknown rateLimits shape'))
     })
-    child.onExit(code => finish(new Error(`exited ${code ?? 'on error'} before answering`)))
+    child.onExit(code => finish(new UsageProbeError('exited', `exited ${code ?? 'on error'} before answering`)))
     child.write(JSON.stringify(CODEX_INIT))
   }))
 }

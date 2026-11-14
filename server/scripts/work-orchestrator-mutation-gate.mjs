@@ -96,7 +96,7 @@ const mutations = [
   ['usage-codex-allowed-gate', US, "  if (e.reading?.allowed === false) return { ...base, state: 'exhausted'", "  if (false) return { ...base, state: 'exhausted'"],
   ['usage-limit-beats-percent', US, '  if (e.limitUntil && e.limitUntil > now) {', '  if (false) {'],
   ['usage-binding-windows', US, "  claude: kind => kind === 'session' || kind === 'weekly_all',", "  claude: () => true,"],
-  ['usage-breaker', US, '        if (e.failures >= USAGE_BREAKER_FAILURES) {', '        if (false) {'],
+  ['usage-breaker', US, '        if (e.failures >= USAGE_BREAKER_FAILURES) e.pausedUntil', '        if (false) e.pausedUntil'],
   ['usage-fresh-window', US, 'now - this.entries[p].observedAt! > maxAgeMs)', 'now - this.entries[p].observedAt! > -1)'],
   // 6.83.0 release: usage is read on demand; the timer is opt-in (COS_WORK_USAGE_POLL=1) and off by default.
   ['usage-poll-opt-in', US, "return env.COS_WORK_USAGE_POLL === '1' }", "return env.COS_WORK_USAGE_POLL !== '0' }"],
@@ -117,8 +117,18 @@ const mutations = [
   ['usage-window-ended-unknown', US, '  if (e.reading?.available && allBind.length && !bind.length) {', '  if (false) {'],
   ['usage-warning-expiry', US, "  const warned = e.warning && !(typeof e.warningUntil === 'number' && e.warningUntil <= now)\n", '  const warned = e.warning\n'],
   ['usage-warning-until-set', US, 'e.warningUntil = num(info.resetsAt) ? info.resetsAt * 1000 : null', 'e.warningUntil = null'],
+  // 7.0.39 (U1): "limits available" with none is its own result, held 10 minutes across probes and restarts, logged once.
+  ['usage-no-limits-classify', US, "  if (v && v.rate_limits_available === true && v.rate_limits == null) return { code: 'no_limits' }\n", ''],
+  ['usage-no-limits-probe-code', US, "      else if (c.code === 'no_limits') finish(", "      else if (false) finish("],
+  ['usage-failure-code', US, "const code: UsageFailureCode = error instanceof UsageProbeError ? error.code : 'error'", "const code: UsageFailureCode = 'error'"],
+  ['usage-no-limits-hold-set', US, "        if (code === 'no_limits') e.holdUntil = now + USAGE_NO_LIMITS_HOLD_MS\n", ''],
+  ['usage-hold-check', US, '    if (e.holdUntil && e.holdUntil > this.now()) return Promise.resolve()\n', ''],
+  ['usage-failure-log', US, "        console.warn(`[work-orchestrator] usage probe ${p} failed: ${code}", "        void (`[work-orchestrator] usage probe ${p} failed: ${code}"],
+  ['usage-failure-cleared', US, '        e.lastFailure = null; e.lastFailureAt = null; e.holdUntil = null\n', '        e.lastFailureAt = null; e.holdUntil = null\n'],
+  ['usage-view-reason', US, 'reason: e.lastFailure ?? null,', 'reason: null,'],
+  ['usage-view-last-good', US, 'lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null', 'lastGoodAt: null'],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
-  ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new Error('timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new Error('timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
+  ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],
   // The plan contract.
   ['wc-orchestrator-keys-gated', WC, "  const topKeys = ['workID','revision','question','context','sessions','history','updates','mode','planner','effort','items','references', ...(orchestrator ? ORCHESTRATOR_KEYS : [])]", "  const topKeys = ['workID','revision','question','context','sessions','history','updates','mode','planner','effort','items','references', ...ORCHESTRATOR_KEYS]"],

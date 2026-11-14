@@ -5,7 +5,10 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, probeClaudeUsage, probeCodexUsage,
-  CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines } from './usage.js'
+  CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines,
+  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS } from './usage.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const claudeFixture = JSON.parse(readFileSync(join(here, '__fixtures__', 'claude-get-usage-2026-10-20.json'), 'utf8'))
@@ -194,5 +197,58 @@ describe('the probes on the wire', () => {
     const f = fakeSpawn(() => {})
     await expect(probeClaudeUsage(f.spawnFn, 50)).rejects.toThrow('timed out')
     expect(f.killed()).toBeGreaterThan(0)
+  })
+})
+
+describe('7.0.39: Claude answering "limits available" with none (its usage service refused the CLI)', () => {
+  const noLimits = { session: {}, subscription_type: 'max', rate_limits_available: true, rate_limits: null, behaviors: null }
+  it('is its own result, never "unknown shape", on the wire too', async () => {
+    expect(classifyClaudeUsage(noLimits)).toEqual({ code: 'no_limits' })
+    expect(classifyClaudeUsage({ rate_limits_available: true, rate_limits: { five_hour: {} } })).toEqual({ code: 'unknown_shape' })
+    expect(classifyClaudeUsage(claudeFixture)).toHaveProperty('reading')
+    const f = fakeSpawn((line, emit) => { if (line.request?.subtype === 'get_usage') emit({ type: 'control_response', response: { subtype: 'success', request_id: 'cos_usage', response: noLimits } }) })
+    const err = await probeClaudeUsage(f.spawnFn, 2000).catch(e => e)
+    expect(err).toBeInstanceOf(UsageProbeError)
+    expect([err.code, err.message]).toEqual(['no_limits', 'Claude gave no plan limits (its usage service may be refusing reads)'])
+  })
+  it('holds Claude for 10 minutes across probes and restarts, and counts toward the breaker', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos usage.'))
+    try {
+      let now = NOW
+      const path = join(dir, 'usage.json')
+      const claude = vi.fn(async () => { throw new UsageProbeError('no_limits', 'Claude gave no plan limits') })
+      const codex = vi.fn(async () => parseCodexUsage(codexFixture)!)
+      const m = new UsageMonitor({ path, probes: { claude, codex }, now: () => now })
+      await m.ensureFresh(); expect(claude).toHaveBeenCalledTimes(1)
+      expect(m.entry('claude').holdUntil).toBe(NOW + USAGE_NO_LIMITS_HOLD_MS)
+      now += 3 * 60_000
+      await m.ensureFresh(); await m.onDemand(true); expect(claude).toHaveBeenCalledTimes(1)
+      // A restart keeps the hold (the breaker's pause does not survive a restart; this must).
+      const again = new UsageMonitor({ path, probes: { claude, codex }, now: () => now })
+      await again.ensureFresh(); expect(claude).toHaveBeenCalledTimes(1)
+      now = NOW + USAGE_NO_LIMITS_HOLD_MS + 1000
+      await m.ensureFresh(); expect(claude).toHaveBeenCalledTimes(2)
+      now += USAGE_NO_LIMITS_HOLD_MS + 1000
+      await m.ensureFresh(); expect(claude).toHaveBeenCalledTimes(3)
+      expect(m.entry('claude')).toMatchObject({ failures: 3, pausedUntil: now + USAGE_BREAKER_MS })
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('every failed read logs one line with a code and no account detail; the view says the reason and the last good read', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      let now = NOW, fail = false
+      const claude = vi.fn(async () => { if (fail) throw new UsageProbeError('no_limits', 'Claude gave no plan limits'); return parseClaudeUsage(claudeFixture)! })
+      const m = new UsageMonitor({ probes: { claude, codex: async () => parseCodexUsage(codexFixture)! }, now: () => now })
+      await m.refresh('claude')
+      fail = true; now += 60_000
+      await m.refresh('claude')
+      const lines = warn.mock.calls.map(c => String(c[0])).filter(l => l.includes('usage probe claude'))
+      expect(lines).toEqual([`[work-orchestrator] usage probe claude failed: no_limits; 1 in a row; last good read ${new Date(NOW).toISOString()}; next read after ${new Date(now + USAGE_NO_LIMITS_HOLD_MS).toISOString()}`])
+      expect(lines[0]).not.toMatch(/max|subscription|email|account/i)
+      expect(m.views().find(v => v.provider === 'claude')).toMatchObject({ reason: 'no_limits', lastGoodAt: new Date(NOW).toISOString() })
+      fail = false; now += USAGE_NO_LIMITS_HOLD_MS + 1000
+      await m.refresh('claude')
+      expect(m.views().find(v => v.provider === 'claude')).toMatchObject({ reason: null, lastGoodAt: new Date(now).toISOString() })
+    } finally { warn.mockRestore() }
   })
 })
