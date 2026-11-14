@@ -1,3 +1,30 @@
+## 7.0.39 - Settings keeps the rail on screen on the open Duo, and the picked day in Meetings is clearly marked
+
+2026-11-14. 7.0.38 plus two Control Web changes (F1); everything in 7.0.38 is in this update too, see its entry below. Miles, 07:14: the Settings rail stopped part way down the open Duo; 08:20: the picked day in Meetings should be clearly marked; 10:01, after the pictures: "The calendar view looks much better. Good to proceed and push that".
+
+**On for everyone:**
+- **Settings keeps the rail on screen on a touch screen 600 px and wider** (the open Duo). Settings now scrolls inside its own frame, as the message reader and Sessions already do: the page is one screen, the rail is a column beside it, and only Settings scrolls.
+  - Before, Settings scrolled the whole page, and when Safari left the view stranded after the keyboard closed (his phone read a visible height of 0 from 13:07:41Z to 13:09:00Z), the rail ended part way down the screen with Settings running on below it.
+  - A field he taps with the keyboard up (the Pings numbers and times, Summaries per day, the gallery search) is brought into view inside Settings; a field already in view does not move.
+  - Leaving Settings and coming back starts at its top, as before. "Change pet" on Today still lands on the Pet section.
+  - Under 600 px wide (the folded Duo, phones) and with a mouse, nothing changes.
+- **Meetings: the day you picked is clearly marked.** It is filled with the dark accent the main buttons use, its number in the light text colour (5.25:1 in the light theme, 9.18:1 in the dark one), at every width. Today keeps its outline; when the day you picked is today, both show. The meetings dot on a picked day is light too. The calendar's size and spacing do not change.
+- **For developers:** html.pg-frame, and one numbers-only web.layout row (pg-frame) when the frame comes on and after the keyboard closes, at most 8 a page.
+
+**Also in this build (no change on screen):** 7.0.38's own entry is corrected (the held-answer line is "“<label>” was not sent. An answer is never sent later. Answer again if the question is still open."; a G2 dictation or the contract words count as his answer even inside a block), and the package no longer carries four old test-gate scripts (live-cues-v3, mac-voice-assignment-6930, dictation-parity-6920, mac-window-voices-6930).
+
+**Not seen on his phone yet:**
+- **The Settings frame cannot be proven in a test browser.** Safari's stranded view is simulated there by moving the visible area; that a one-screen page clears it is shown on his phone by the reader and Sessions frames, and for Settings only his phone can prove it.
+- **The picked day** was checked in F1's before-and-after pictures in WebKit, not on his phone.
+
+**Not covered, said plainly:**
+- **Only Settings is framed.** The same stranded view can still leave the rail part way down on other pages that scroll the whole page. A test browser found seven when the question card makes them long: Today, the Messages list, the COS chat, Meetings, Memories, Work and a Work card's page. Framing those is scoped, not built, until his phone shows Settings holds.
+- **The Mac app** is not changed (its picked day is on the 0.5.394 list).
+
+**Tested on this build:** <filled at the cut>
+
+**Tests:** <filled at the cut>
+
 ## 7.0.38 - Answers that land now or say why, a session link that recovers, and bigger tap areas
 
 2026-11-14. 7.0.37 plus the changes below; everything in 7.0.37 is in this update too (see its entry). Miles, 2026-11-14: 07:01 (a second tap on an answered question in Today's panel), 07:14 ("The continutaiton thing seems like the same bug under a new name?"), 07:47 ("I just need the pings as well"); Set D "Yes, build it" (07:01).
