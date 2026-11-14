@@ -21,6 +21,7 @@ const strip = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '')
 const APP = strip(readFileSync(join(HERE, 'app.css'), 'utf8'))
 const CHAT = strip(readFileSync(join(HERE, 'panes/cos-chat.css'), 'utf8'))
 const WORK = strip(readFileSync(join(HERE, 'panes/work.css'), 'utf8'))
+const SPK = strip(readFileSync(join(HERE, 'panes/speakers.css'), 'utf8'))
 
 /** Every `@media <query> { ... }` block body, in source order, by brace matching. */
 function mediaBlocks(src: string, query: string): Array<{ at: number; body: string }> {
@@ -129,5 +130,19 @@ describe('Set D: Work text buttons, Mentioned, the stage menu and the card foot'
   })
   it('a focused stage menu draws its ring at the visible edge, not around the 44 px box', () => {
     expect(rule(b!.body, '.wk-stage:focus-visible')).toMatch(/outline-offset:\s*calc\(-1 \* var\(--wk-tap\)\)/)
+  })
+})
+
+describe('Set D: the Speakers tab strip does not clip its words\' hit layers', () => {
+  it('under 600 px it scrolls sideways (which clips top and bottom), so it carries 7 px inside and gives them back outside', () => {
+    const narrow = mediaBlocks(SPK, '(max-width: 599px)').find(b => b.body.includes('#pane-speakers .sp-controls > .cx-switch {'))
+    expect(rule(narrow!.body, '#pane-speakers .sp-controls > .cx-switch')).toMatch(/overflow-x:\s*auto/)
+    const touch = mediaBlocks(SPK, '(max-width: 599px) and (any-pointer: coarse)')[0]
+    expect(touch).toBeTruthy()
+    const d = rule(touch.body, '#pane-speakers .sp-controls > .cx-switch')
+    const pad = d.match(/padding-block:\s*(\d+)px/), mar = d.match(/margin-block:\s*-(\d+)px/)
+    expect(pad && mar).toBeTruthy()
+    expect(mar![1]).toBe(pad![1])
+    expect(31 + 2 * Number(pad![1])).toBeGreaterThanOrEqual(44)   // the 31 px words' layer fits inside the strip
   })
 })

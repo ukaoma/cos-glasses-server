@@ -265,3 +265,10 @@
 }
 .sp-ccard > p, .sp-pad p, .sp-sheet > p, .sp-confirm p { font-size: 13px; line-height: 1.45; }
 .sp-parts { margin: 0 0 12px; }
+
+/* F1 Set D (2026-11-14): under 600 px the tab strip scrolls sideways, and a scroller clips its children top and bottom
+   too, so the words' 44 px hit layer (app.css) was cut to their 31 px box. Room inside the strip, taken back outside:
+   the row keeps its height. */
+@media (max-width: 599px) and (any-pointer: coarse) {
+  #pane-speakers .sp-controls > .cx-switch { padding-block: 7px; margin-block: -7px; }
+}
