@@ -53,6 +53,18 @@ export class UsageProbeError extends Error {
   constructor(readonly code: UsageFailureCode, message: string) { super(message) }
 }
 
+/** The only failure words a client may read (route note, Work chat, log): the fixed messages the probes write. Anything
+ *  else, such as an exception's own text (it can carry a path with the owner's user name), becomes "unexpected error" and
+ *  its detail is kept nowhere. Applied when a failure is stored and again when a view is drawn, so a reason saved by an
+ *  older build is checked too. */
+const SAFE_FAILURE_TEXT = new Set(['Claude gave no plan limits (its usage service may be refusing reads)', 'codex not found',
+  'get_usage refused', 'rateLimits/read refused', 'timed out', 'unknown get_usage shape', 'unknown rateLimits shape', 'unexpected error',
+  'not probed inside a test']) // runtime.ts's test-only stand-in probe
+export function safeFailureText(text: string | null | undefined): string {
+  if (!text) return 'unexpected error'
+  return SAFE_FAILURE_TEXT.has(text) || /^exited (?:-?\d+|on error) before answering$/.test(text) ? text : 'unexpected error'
+}
+
 export interface UsageWindow { kind: string; usedPct: number; resetsAt: string | null; durationMins?: number }
 export interface UsageReading {
   plan: string | null
@@ -185,9 +197,9 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
   if (e.provider === 'cursor' && !e.reading) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' }
   // Every window this reading had has reset: its numbers describe a window that is over, so they are not shown.
   if (e.reading?.available && allBind.length && !bind.length) {
-    return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: `not read since its window ended${e.lastError ? `; last read failed: ${e.lastError}` : ''}` }
+    return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: `not read since its window ended${e.lastError ? `; last read failed: ${safeFailureText(e.lastError)}` : ''}` }
   }
-  if (!e.reading || headroom === null) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: e.reading && !e.reading.available ? 'no plan limits on this login' : e.lastError ? `not read: ${e.lastError}` : 'not read yet' }
+  if (!e.reading || headroom === null) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: e.reading && !e.reading.available ? 'no plan limits on this login' : e.lastError ? `not read: ${safeFailureText(e.lastError)}` : 'not read yet' }
   // A warning holds only until the window it warned about resets; an old frame cannot keep a new week at "low".
   const warned = e.warning && !(typeof e.warningUntil === 'number' && e.warningUntil <= now)
   const state: UsageState = headroom <= 0 ? 'exhausted' : headroom < USAGE_LOW_HEADROOM || warned ? 'low' : 'ok'
@@ -244,7 +256,7 @@ export class UsageMonitor {
       } catch (error) {
         const now = this.now()
         const code: UsageFailureCode = error instanceof UsageProbeError ? error.code : 'error'
-        e.lastError = String((error as Error)?.message ?? error).slice(0, 120)
+        e.lastError = safeFailureText(String((error as Error)?.message ?? error).slice(0, 120))
         e.lastFailure = code; e.lastFailureAt = now
         e.failures++
         if (code === 'no_limits') e.holdUntil = now + USAGE_NO_LIMITS_HOLD_MS

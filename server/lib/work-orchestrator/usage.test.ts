@@ -263,3 +263,22 @@ describe('7.0.39: Claude answering "limits available" with none (its usage servi
     } finally { warn.mockRestore() }
   })
 })
+
+describe('7.0.39: an exception\'s own text never reaches a client', () => {
+  it('a probe that throws raw text (a path with a user name) is stored, drawn and logged as "unexpected error"; an older saved reason is checked too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const raw = 'spawn /Users/someone/.local/bin/claude ENOENT'
+      const m = new UsageMonitor({ probes: { claude: async () => { throw new Error(raw) }, codex: async () => parseCodexUsage(codexFixture)! }, now: () => NOW })
+      await m.refresh('claude')
+      expect(m.entry('claude')).toMatchObject({ lastError: 'unexpected error', lastFailure: 'error' })
+      const view = m.views().find(v => v.provider === 'claude')!
+      expect(view.note).toBe('not read: unexpected error')
+      const logged = warn.mock.calls.map(c => String(c[0])).join('\n')
+      expect(`${JSON.stringify(m.views())}\n${logged}`).not.toMatch(/Users|someone|ENOENT|spawn/)
+      const saved = { provider: 'claude' as const, reading: null, observedAt: null, source: 'probe' as const, lastError: raw, failures: 1, pausedUntil: null, limitUntil: null, limitSource: null, warning: false }
+      expect(viewOf(saved, NOW).note).toBe('not read: unexpected error')
+      expect(viewOf({ ...saved, lastError: 'exited 1 before answering' }, NOW).note).toBe('not read: exited 1 before answering')
+    } finally { warn.mockRestore() }
+  })
+})

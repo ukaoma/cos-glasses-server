@@ -129,6 +129,7 @@ const mutations = [
   ['usage-failure-cleared', US, '        e.lastFailure = null; e.lastFailureAt = null; e.holdUntil = null\n', '        e.lastFailureAt = null; e.holdUntil = null\n'],
   ['usage-view-reason', US, 'reason: e.lastFailure ?? null,', 'reason: null,'],
   ['usage-view-last-good', US, 'lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null', 'lastGoodAt: null'],
+  ['usage-failure-text-safe', US, "before answering$/.test(text) ? text : 'unexpected error'", 'before answering$/.test(text) ? text : text'],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
   ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],
