@@ -5420,6 +5420,15 @@ describe('X1 7.0.38: the ask check over the real tracker (age-out, switch off, r
     expect(r.calls).toHaveLength(0)
   })
 
+  it('a G2 dictation wrapped in another session\'s message (lead 08:02): answered by the glasses, never moved, no Send anyway', async () => {
+    const r = rig(null)
+    r.feed(asked()); await r.tracker.tick()
+    r.feed([env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<cross-session-message from="local_glasses">Yes, check readiness\n[COS-G2 turn ctg2-00000009 · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ctg2-00000009 --session <your session id> --provider claude]</cross-session-message>', prompt_id: 'p-g2' })])
+    const res = await answer(r, 'ct-rt-0013')
+    expect(res.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'glasses' })
+    expect(r.calls).toHaveLength(0)
+  })
+
   it('the same through a restart: the replayed peer message still reads as moved on, never answered at the Mac', async () => {
     const ledger = new SessionHookLedger(join(dir, 'events.jsonl'))
     rig(ledger).feed([...asked(), env('UserPromptSubmit', STOPPED + 60_000, { prompt: '<task-notification>\n<task-id>b1</task-id> ' + 'done '.repeat(150) + '</task-notification>', prompt_id: 'p-task' })])

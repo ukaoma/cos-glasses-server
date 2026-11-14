@@ -44,7 +44,12 @@ const mutations = [
   ["replay-loses-open", "server/lib/turn-end-ask.ts", "      const capture = p.turn_ask !== undefined ? projectedTurnAsk(p.turn_ask) : captureTurnAsk(p.tool_input, this.deps.words())", "      const capture = captureTurnAsk(p.tool_input, this.deps.words())", "restart, the ask still open", ["server/routes/agent-session-bindings.test.ts"]],
   ["early-path-sets-mark", "server/routes/agent-session-bindings.ts", "        if (!early.open) {\n", "        if (!early.open) {\n          answeredAsks.set(`claude:${binding.nativeThreadId.toLowerCase()}:${namedAsk}`, { at: Date.now(), by: turnAskAnswerSurface(prompt, true), state: 'unconfirmed' })\n", "a second tap during an in-flight first answer", ["server/routes/agent-session-bindings.test.ts"]],
   ["machine-child-moved", "server/lib/turn-end-ask.ts", "      if (current && !child && (p.prompt_machine_only", "      if (current && (p.prompt_machine_only", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
-  ["g2-dictation-moved", "server/lib/session-hook-events.ts", "  if (prompt.includes('[COS-G2 turn')) return false\n", "", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
+  ["person-marker-ignored", "server/lib/session-hook-events.ts", "  if (personTurnMarker(prompt) !== null) return false\n", "", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
+  ["person-marker-ignored-route", "server/lib/session-hook-events.ts", "  if (personTurnMarker(prompt) !== null) return false\n", "", "a G2 dictation wrapped in another session's message (lead 08:02)", ["server/routes/agent-session-bindings.test.ts"]],
+  ["marker-footer-missed", "server/lib/turn-footer.ts", "  if (footer) return /WEB/i.test(footer[0]) ? 'web_footer' : 'g2_footer'\n", "", "personTurnMarker names every mark", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-web-as-g2", "server/lib/turn-footer.ts", "/WEB/i.test(footer[0]) ? 'web_footer' : 'g2_footer'", "'g2_footer'", "personTurnMarker names every mark", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-contract-missed", "server/lib/turn-footer.ts", "  if (PERSON_CONTRACT_RE.test(text)) return 'contract'\n", "", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]],
+  ["marker-contract-anchored", "server/lib/turn-footer.ts", "const PERSON_CONTRACT_RE = /Answer sent from", "const PERSON_CONTRACT_RE = /^Answer sent from", "a prompt the machine wrote clears the ask as moved on", ["server/lib/turn-end-ask.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }
@@ -104,7 +109,7 @@ try {
     const killers = [...output.matchAll(/FAIL\s+(server\/\S+\.test\.ts > [^\n]+)/g)].map(match => match[1].trim())
     if (result.status === 0 || result.error || !killers.length) { survivors.push(`${name}: SURVIVED or harness failed`); console.log(`${name} SURVIVED\n${output.slice(-1500)}`); continue }
     const killer = killers.find(line => line.includes(killerName))
-    if (!killer) { survivors.push(`${name}: killed, but not by "${killerName}" (${killers.join(' | ')})`); console.log(`${name} KILLED BY THE WRONG TEST: ${killers.join(' | ')}`); continue }
+    if (!killer) { survivors.push(`${name}: WRONG KILLER, expected "${killerName}", killed by: ${killers.join(' | ')}`); console.log(`${name} KILLED BY THE WRONG TEST: ${killers.join(' | ')}`); continue }
     killed++
     console.log(`${name} KILLED by ${killer}`)
   }

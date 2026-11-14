@@ -18,6 +18,7 @@ import { deriveSessionState, derivedRowFields, derivedStatusFields, type Registr
 import { statusDraftWithDerived } from './session-stream-events.js'
 import { __resetSessionHooksForTests, __setTurnEndAskTrackerForTests, deriveForRow, openTurnEndAsk, sessionSignalStore, startSessionHooksRuntime, turnEndAskAnswered, turnEndAskStats } from './session-hooks-runtime.js'
 import { dataPath } from './data-dir.js'
+import { personTurnMarker } from './turn-footer.js'
 import { DEAD_GRACE_MS } from './session-state-derive.js'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
@@ -674,6 +675,17 @@ describe('the runtime: deriveForRow and the counters', () => {
     }
   })
 
+  it('X1 7.0.38: personTurnMarker names every mark COS puts on a person\'s turn, anywhere, and nothing else', () => {
+    expect(personTurnMarker('a\n[COS-G2 turn ct1 · verify: x]')).toBe('g2_footer')
+    expect(personTurnMarker('<cross-session-message from="x">a [cos-g2 turn ct1]</cross-session-message>')).toBe('g2_footer')
+    expect(personTurnMarker('a\n[COS-WEB turn ct1 · verify: x]')).toBe('web_footer')
+    expect(personTurnMarker('x Answer sent from COS Control Web through COS, not typed in this session: Yes')).toBe('contract')
+    expect(personTurnMarker('Answer sent from COS Control on the Mac through COS, not typed in this session: No')).toBe('contract')
+    for (const none of ['Commands run, go', '<system-reminder>Answer sent from you</system-reminder>', 'through COS', 'COS-G2', '[COS turn x]', 42, null]) {
+      expect(personTurnMarker(none)).toBeNull()
+    }
+  })
+
   it('X1 7.0.38: the ledger keeps one boolean, set from the WHOLE prompt, so a replay of clipped words still knows', () => {
     const blocksOnly = '<cross-session-message from="local_1">' + 'x'.repeat(900) + '</cross-session-message>'
     const typedAfter = '<system-reminder>' + 'y'.repeat(900) + '</system-reminder>\nYes, ship it'
@@ -682,7 +694,9 @@ describe('the runtime: deriveForRow and the counters', () => {
     expect('prompt_machine_only' in typed).toBe(false)
     expect(String(typed.prompt).length).toBeLessThan(typedAfter.length)
     expect('prompt_machine_only' in projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: 'Commands run, go' })).toBe(false)
-    expect('prompt_machine_only' in projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: '<cross-session-message from="g">Yes [COS-G2 turn ct1]</cross-session-message>' })).toBe(false)
+    for (const inner of ['Yes [COS-G2 turn ct1]', 'Yes [COS-WEB turn ct2]', 'Answer sent from COS Control Web through COS, not typed in this session: Yes']) {
+      expect('prompt_machine_only' in projectHookPayload('UserPromptSubmit', { session_id: SID, prompt: `<cross-session-message from="g">${inner}</cross-session-message>` })).toBe(false)
+    }
   })
 
   it('X1 7.0.38: a prompt the machine wrote clears the ask as moved on, never as answered; one he typed is still his answer', async () => {
@@ -744,16 +758,23 @@ describe('the runtime: deriveForRow and the counters', () => {
         expect(r.answered).toMatchObject({ by: 'mac' })
         expect([r.byTurn, r.byReply]).toEqual([0, 1])
       }
-      // Q1 (08:0x): a G2 dictation reaches a session wrapped in another session's message, its verify footer inside the
-      // block. It is his answer, from the glasses, as in 7.0.37: never "moved on".
-      for (const dictated of [
-        '<cross-session-message from="local_g2">Yes, ship it\n[COS-G2 turn ctg2-0001 verify]</cross-session-message>',
-        '<system-reminder>x</system-reminder>\n<cross-session-message from="local_g2">Approved [COS-G2 turn ctg2-0002]</cross-session-message>',
-      ]) {
-        const r = await roundWith(dictated)
-        expect(r.answered).toMatchObject({ by: 'glasses' })
+      // Lead 08:02: a turn Miles made through COS is never machine only, whatever wraps it. One per mark, each inside
+      // another session's message block, each keeping the surface it had in 7.0.37 (turnAskAnswerSurface).
+      const wrap = (inner: string) => `<cross-session-message from="local_relay">${inner}</cross-session-message>`
+      for (const [mark, inner, surface] of [
+        ['g2_footer', 'Yes, ship it\n[COS-G2 turn ctg2-00000001 · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ctg2-00000001 --session <your session id> --provider claude]', 'glasses'],
+        ['web_footer', 'Approved\n[COS-WEB turn ctweb-0000001 · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ctweb-0000001 --session <your session id> --provider claude]', 'mac'],
+        ['contract web', 'Answer sent from COS Control Web through COS, not typed in this session: Approved', 'web'],
+        ['contract mac app', 'Answer sent from COS Control on the Mac through COS, not typed in this session: Not yet', 'mac_app'],
+        ['contract other surface', 'Answer sent from COS Glasses through COS, not typed in this session: Yes', 'mac'],
+      ] as const) {
+        const r = await roundWith(wrap(inner))
+        expect({ mark, by: (r.answered as { by?: string } | null)?.by }).toEqual({ mark, by: surface })
         expect([r.byTurn, r.byReply]).toEqual([0, 1])
       }
+      // A G2 dictation after a reminder block is his too.
+      const afterReminder = await roundWith('<system-reminder>x</system-reminder>\n' + wrap('Approved [COS-G2 turn ctg2-00000002]'))
+      expect(afterReminder.answered).toMatchObject({ by: 'glasses' })
       // Q1 S17: a COS-spawned Continue child carries words someone sent through COS. Blocks or not, it is a reply by COS.
       const child = await roundWith('<cross-session-message from="local_1">Lead to X1: go</cross-session-message>', true)
       expect(child.answered).toMatchObject({ by: 'cos' })
