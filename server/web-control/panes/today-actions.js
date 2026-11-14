@@ -1580,8 +1580,9 @@
           else { O.note = { text: 'Done. The reply is below.', kind: '' }; loadLast(r); }
           paintNote(); VIEW.stateChanged(r);
         }
-        else if (o === 'refused') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); }
-        else if (o === 'ambiguous') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); }
+        // 7.0.38 (Q1 07:50): an answer the session then refused, or whose landing COS cannot tell, is not "Answered".
+        else if (o === 'refused') { clearInterval(O.watch); O.teSent = ''; O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); paintMeta(); }
+        else if (o === 'ambiguous') { clearInterval(O.watch); O.teSent = ''; O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); paintMeta(); }
       }).catch(function () {});
     }, 3000);
   }

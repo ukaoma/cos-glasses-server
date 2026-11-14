@@ -21,7 +21,7 @@ const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const TE_WORDS = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
   // eslint-disable-next-line no-new-func
-  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any }
+  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE, isTurnEndAnswer: isTurnEndAnswer };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any; isTurnEndAnswer: (t: string) => boolean }
 })()
 const TE_QUOTE = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
@@ -102,7 +102,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
     // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
     TURN_END_QUOTE: TE_QUOTE,
-    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, isTurnEndAnswer: TE_WORDS.isTurnEndAnswer,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -961,7 +961,7 @@ function readerPage(o: { routes?: Routes; health?: Record<string, unknown> } = {
     clock: () => '9:00', fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0,
     document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } }, window: { COSWeb: { cosChat: c.chat }, scrollTo: () => {} }, loadSessions: () => {},
-    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_QUOTE: TE_WORDS.TURN_END_QUOTE,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, isTurnEndAnswer: TE_WORDS.isTurnEndAnswer, TURN_END_QUOTE: TE_WORDS.TURN_END_QUOTE,
   }
   // eslint-disable-next-line no-new-func
   const page = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) +
@@ -1218,5 +1218,41 @@ describe('7.0.38: the reader never queues or holds an answer; an ordinary messag
     t.els['session-input']!.value = 'FYI: ' + ANSWER
     t.page.send(false); await flush()
     expect(queued(t)).toHaveLength(1)
+  })
+})
+
+// ── 7.0.38 (Q1 07:50 FIX FIRST): an answer a 7.0.37 page held is never sent by the held timer ──
+describe('7.0.38: a held answer (from before the update, or any source) is never sent late', () => {
+  const ANSWER = TE_WORDS.TURN_END_PREFIX + 'Yes, build it'
+  const turnPosts = (t: ReturnType<typeof readerPage>) => t.calls.filter(x => x.method === 'POST' && x.path === TURNS)
+  it('the held timer finds an answer: nothing is sent, his words (without the contract words) come back with a not-sent line', async () => {
+    const t = readerPage({ routes: READER_ROUTES })
+    t.page.paint()
+    t.r.held = [{ text: ANSWER, key: 'k-old', since: Date.now() }] as any
+    t.page.flushHeld(); await flush()
+    expect(turnPosts(t)).toHaveLength(0)
+    expect(t.r.held).toHaveLength(0)
+    expect(t.els['session-input']!.value).toBe('Yes, build it')
+    expect(t.status()).toContain('“Yes, build it” was not sent. An answer is never sent later. Answer again if the question is still open.')
+    expect(JSON.stringify([...t.store.entries()])).not.toContain('k-old')
+  })
+  it('an answer behind an ordinary held message: the message goes, then the answer comes back unsent', async () => {
+    const t = readerPage({ routes: READER_ROUTES })
+    t.page.paint()
+    t.r.held = [{ text: 'After that, check the Duo', key: 'k1', since: Date.now() }, { text: ANSWER, key: 'k2', since: Date.now() }] as any
+    t.page.flushHeld(); await flush()
+    t.page.flushHeld(); await flush()
+    expect(turnPosts(t).map(c => (c as any).body.prompt)).toEqual(['After that, check the Duo'])
+    expect(t.r.held).toHaveLength(0)
+  })
+  it('the 60-character clip on the busy line (Q1 M12): a long answer is cut with an ellipsis', async () => {
+    const long = 'Yes, and also please rebuild the Duo layout pass and the rail before lunch today'
+    const t = readerPage({ routes: { ...READER_ROUTES, ['POST ' + TURNS]: { status: 409, body: { outcome: 'refused', reason: 'native_thread_working' } } } })
+    t.page.paint()
+    t.els['session-input']!.value = TE_WORDS.TURN_END_PREFIX + long
+    t.page.send(false); await flush()
+    const clip = long.slice(0, 59).trim() + '…'
+    expect(t.status()).toContain('The session is working. “' + clip + '” was not sent.')
+    expect(clip.length).toBe(60)
   })
 })

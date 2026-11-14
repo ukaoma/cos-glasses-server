@@ -307,3 +307,29 @@ describe('production reader and Today hook coverage', () => {
     t.panes.readerMedia = t.W.readerMedia; named(t.host, 'Retry images').click(); await flush(); expect(t.calls).toHaveLength(1)
   })
 })
+
+// 7.0.38 (Q1 07:50 FIX FIRST): reopening a session whose held store has an answer from a 7.0.37 page
+describe('7.0.38: reopening a session settles a held answer before it is drawn or timed', () => {
+  it('the answer is settled (never sent, never drawn as waiting); an ordinary held message still waits and is timed', async () => {
+    const t = load(), reader = t.document.createElement('section'); t.document.ids.set('session-reader', reader)
+    const PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: '
+    const held = [{ text: PREFIX + 'Yes, build it', key: 'k-ans', since: 1 }, { text: 'Check the Duo', key: 'k-msg', since: 1 }]
+    const noop = () => {}, state: any = {}
+    const settled: string[] = [], drawn: string[][] = [], timed: number[] = []
+    const deps = { window: t.window, document: t.document, state, $: t.document.getElementById, clearInterval: noop, readStore: () => ({ 'codex|session-one': held }), HELD_KEY: 'held',
+      newFeed: () => ({}), SX: { view: 'sessions', rows: [] }, sxSave: noop, paintSessionsHero: noop, sxSame: () => false, sxKey: () => '',
+      skeletonRows: () => '', api: async () => ({ recent_turns: [] }), sessionPath: () => '/session', SX_TURNS: 40, sxTitle: () => 'S', sxTruncNote: () => '',
+      sxBadge: () => '', sxFullButton: () => '', esc, sxSubtitle: () => '', renderTurns: () => '', readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,
+      setLive: noop, sxNoteList: noop, paintReaderFiles: noop, readerKit: () => null, loadQueue: noop, sxProbeAttach: noop, paintWebKeyOffer: noop, requestAnimationFrame: noop, watchSession: noop, sxEmpty: (s: string) => s,
+      isTurnEndAnswer: (s: string) => String(s).indexOf(PREFIX) === 0,
+      settleLateAnswer: (r: any, h: any) => { r.held = r.held.filter((x: any) => x !== h); settled.push(h.key) },
+      renderHeld: (r: any) => { drawn.push(r.held.map((h: any) => h.key)) },
+      startHeldTimer: (r: any) => { timed.push(r.held.length) }, sessionStatus: noop,
+    }
+    new Function('deps', 'with(deps){' + region(APP, '  function openSession(provider, id)', '  // ACTIVITY') + 'openSession("codex", "session-one");}')(deps)
+    await flush()
+    expect(settled).toEqual(['k-ans'])
+    expect(drawn).toEqual([['k-msg']])
+    expect(timed).toEqual([1])
+  })
+})

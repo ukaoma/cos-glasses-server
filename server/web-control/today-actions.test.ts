@@ -19,7 +19,7 @@ const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const TE_WORDS = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
   // eslint-disable-next-line no-new-func
-  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any }
+  return new Function(APP.slice(a, b) + '\nreturn { TURN_END_PREFIX: TURN_END_PREFIX, TURN_END_QUOTE: TURN_END_QUOTE, isTurnEndAnswer: isTurnEndAnswer };')() as { TURN_END_PREFIX: string; TURN_END_QUOTE: any; isTurnEndAnswer: (t: string) => boolean }
 })()
 const TE_QUOTE = (() => {
   const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
@@ -102,7 +102,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
     // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
     TURN_END_QUOTE: TE_QUOTE,
-    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX,
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, isTurnEndAnswer: TE_WORDS.isTurnEndAnswer,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -4376,6 +4376,7 @@ function readerPage(routes: Routes) {
     setInterval: (fn: () => void, ms: number) => { intervals.push({ fn, ms }); return intervals.length }, clearInterval: (n: number) => { if (n && intervals[n - 1]) intervals[n - 1]!.cleared = true },
     requestAnimationFrame: () => 0, document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } },
     window: { COSWeb: {}, scrollTo: () => {} },
+    TURN_END_PREFIX: TE_WORDS.TURN_END_PREFIX, TURN_END_QUOTE: TE_WORDS.TURN_END_QUOTE, isTurnEndAnswer: TE_WORDS.isTurnEndAnswer,
     EventSource: class { url: string; onmessage: any = null; onerror: any = null; readyState = 1; constructor(url: string) { this.url = url; streams.push(this) } close() {} },
   }
   // eslint-disable-next-line no-new-func
@@ -5332,6 +5333,62 @@ describe('7.0.38: the Today panel’s turn-end question follows Today’s reads 
     expect(turns(h)[0]!.body.prompt).toBe('Also check the Duo')
     expect('turnEndAskId' in turns(h)[0]!.body).toBe(false)
   })
+  it('Q1 M33: a new ask id with the SAME words is a new question: it redraws, and an answer to the old one is not "answered" for it', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    m.rows = [row({ askId: 'turn_end:2' })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML, 'redrawn for the new id').toContain('data-ta="turnend"')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  for (const o of ['refused', 'ambiguous']) {
+    it(`Q1 07:50 (7): a sent answer the session then reports ${o} is not "Answered" when the row closes`, async () => {
+      const routes: Routes = { ...OK_ROUTES }
+      const m = model(), h = await opened(m, routes)
+      h.tap('turnend', '0')
+      await flush()
+      const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+      routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: o, reasonCopy: 'Server says ' + o + '.' } }
+      for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+      expect(h.els['ta-status']!.textContent, 'the watch read the outcome').toBe('Server says ' + o + '.')
+      m.rows = []
+      h.ta.needsChanged()
+      expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+      expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+    })
+  }
+  for (const o of ['refused', 'ambiguous']) it(`Q1 07:50 (7), closed first: the head says Answered, then the watch reports ${o} and the head turns to closed at once`, async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+    const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: o, reasonCopy: 'Server says ' + o + '.' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-status']!.textContent).toBe('Server says ' + o + '.')
+    expect(h.els['ta-meta']!.innerHTML, 'no new Today read needed').toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
+  it('Q1 07:50 (7), the other side: a sent answer the watch reports completed still reads Answered when the row closes', async () => {
+    const routes: Routes = { ...OK_ROUTES }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    const key = (h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0] as any).body.clientTurnId
+    routes['GET /api/agent-sessions/bindings/b1/turns/' + key] = { status: 200, body: { outcome: 'completed', via: 'live' } }
+    for (let k = 0; k < 3; k++) { h.tick(); h.later(3000); h.tick(); await flush() }
+    expect(h.els['ta-status']!.textContent).toBe('Sent into the open session. It is working on it now.')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+  })
   it('closed stays closed: a later read that lists the same ask again does not bring the buttons back', async () => {
     const m = model(), h = await opened(m)
     m.rows = []
@@ -5491,6 +5548,28 @@ describe('7.0.38: binding_detached re-attaches once, through the normal attach p
     expect(turnsOn(h, 'b3')).toHaveLength(1)
     expect(h.els['ta-status']!.textContent).toBe('Sent. Watching for the reply.')
   })
+  // Q1 07:50 M16 to M18: the page line is matched on the reason code, only for binding_detached; every binding refusal forgets.
+  it('a second detach with other server words still shows the page line (matched on the code, not the sentence)', async () => {
+    const OTHER = { status: 409, body: { outcome: 'refused', reason: 'binding_detached', reasonCopy: 'Something else entirely.' } }
+    const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+      ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : OTHER),
+      ['POST /api/agent-sessions/bindings/b2/turns']: OTHER }
+    const h = await opened(routes)
+    await send(h, 'First'); await send(h, 'Second')
+    expect(h.els['ta-status']!.textContent).toBe('COS lost its link to this session. Send again. Your message is still in the box.')
+  })
+  for (const reason of ['stale_epoch', 'binding_expired', 'binding_not_active', 'binding_unusable', 'unknown_binding']) {
+    it(`${reason} twice: the server’s own words (not the detach line), and the binding is forgotten in localStorage`, async () => {
+      const R = { status: 409, body: { outcome: 'refused', reason, reasonCopy: 'Server words for ' + reason + '.' } }
+      const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,
+        ['POST /api/agent-sessions/bindings/b1/turns']: (_b: unknown, n: number) => (n === 1 ? { status: 202, body: { outcome: 'queued' } } : R),
+        ['POST /api/agent-sessions/bindings/b2/turns']: R }
+      const h = await opened(routes)
+      await send(h, 'First'); await send(h, 'Second')
+      expect(h.els['ta-status']!.textContent).toBe('Server words for ' + reason + '. It is still in the box.')
+      expect(JSON.parse(h.store.get('cos_web_bindings') || '{}')['claude|' + SID], 'forgotten').toBeUndefined()
+    })
+  }
   it('the other five reasons still re-attach once (unchanged)', async () => {
     for (const reason of ['stale_epoch', 'binding_expired', 'binding_not_active', 'binding_unusable', 'unknown_binding']) {
       const routes: Routes = { ...OK_ROUTES, ['POST ' + P('/attach')]: attachSeq,

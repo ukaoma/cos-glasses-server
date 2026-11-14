@@ -2330,8 +2330,16 @@
     unconfirmed: function () { return 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.'; },
     // 7.0.38 (lead 07:20): an answer the session was too busy to take now. It is never queued or held, and no button:
     // a bare busy refusal does not say whether the question was answered, so a button here could send a duplicate.
-    busy: function (label) { return 'The session is working. \u201c' + label + '\u201d was not sent.'; }
+    busy: function (label) { return 'The session is working. \u201c' + label + '\u201d was not sent.'; },
+    // 7.0.38 (Q1 07:50 FIX FIRST): an answer a 7.0.37 page held behind COS's own turn, found on reopening. It is never
+    // sent late (no ask id would go with it); the words come back to the box.
+    late: function (label) { return '\u201c' + label + '\u201d was not sent. An answer is never sent later. Answer again if the question is still open.'; },
+    /** The words of an answer, without the contract words in front, clipped for a status line. */
+    bare: function (text) { var w = String(text || ''); return (w.indexOf(TURN_END_PREFIX) === 0 ? w.slice(TURN_END_PREFIX.length) : w).trim(); },
+    label: function (text) { var w = TURN_END_QUOTE.bare(text); return w.length > 60 ? w.slice(0, 59).trim() + '\u2026' : w; }
   };
+  /** An answer to a turn-end question (the contract words in front): never queued (but Send anyway) and never held. */
+  function isTurnEndAnswer(text) { return String(text || '').indexOf(TURN_END_PREFIX) === 0; }
   /** The exact words a choice or a reply sends (contract v1): attributed to COS Control Web, never to the desk. */
   function turnEndPrompt(text) { return TURN_END_PREFIX + turnEndBare(text); }
   /** The words as he wrote them: a message that came back to the box already carries the prefix, never twice. */
@@ -4408,6 +4416,7 @@
   var BINDING_REUSE_MS = 25 * 60000; // the server keeps a binding 30 min
   var PARKABLE_REFUSALS = /^(native_thread_working|native_target_busy|target_busy)$/;
   var BINDING_LOST = 'COS lost its link to this session. Send again. Your message is still in the box.';
+  var BINDING_LOST_HELD = 'COS lost its link to this session. Send again.';
   // A binding is kept per browser, across reloads: the server allows one live binding per
   // thread, so a reload that forgot it would read its own binding as "target busy".
   var BINDINGS_KEY = 'cos_web_bindings';
@@ -4595,6 +4604,9 @@
       paintWebKeyOffer(r);
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
       var kitR = readerKit(); if (kitR && !kitR.turnFiles()) kitR.ensureCaps().then(function () { paintReaderFiles(); paintWebKeyOffer(r); }, function () {});
+      // 7.0.38 (Q1 07:50 FIX FIRST): a 7.0.37 page held answers behind COS's own turn, and the store outlives the update.
+      // On reopening, each comes back to the box with a not-sent line; none is drawn as waiting or sent by the timer.
+      state.reading.held.filter(function (h) { return isTurnEndAnswer(h.text); }).forEach(function (h) { settleLateAnswer(state.reading, h); });
       renderHeld(state.reading);
       loadQueue(provider, id);
       sxProbeAttach(r);
@@ -5336,12 +5348,8 @@
     // to the question. A tapped choice, the box's own answer and Send anyway all carry the contract words in front.
     // Send anyway (his deliberate tap; its words say the session has moved on) may wait in line, marked so the server's
     // queue takes it; never behind COS's own turn, which only a timer would send.
-    var answer = !opts.held && String(draft.text || '').indexOf(TURN_END_PREFIX) === 0;
-    var busy = function () {
-      var w = String(draft.text).slice(TURN_END_PREFIX.length).trim();
-      view.status(r, TURN_END_QUOTE.busy(w.length > 60 ? w.slice(0, 59).trim() + '\u2026' : w), 'error');
-      return 'busy';
-    };
+    var answer = !opts.held && isTurnEndAnswer(draft.text);
+    var busy = function () { view.status(r, TURN_END_QUOTE.busy(TURN_END_QUOTE.label(draft.text)), 'error'); return 'busy'; };
     var parkable = !answer || !!opts.turnEndSendAnyway;
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
@@ -5433,7 +5441,7 @@
           // Lead (P1 accepted, 11/14): the fresh binding was taken too. The server's "Attach again" names a control this page does not
           // have; say what to do here instead (matched by the reason code, never the server's sentence).
           if (reason === 'binding_detached') {
-            if (opts.held) settleHeld(r, opts.held, 'refused', BINDING_LOST);
+            if (opts.held) settleHeld(r, opts.held, 'refused', BINDING_LOST_HELD);   // returnToBox says where the words are
             else view.status(r, BINDING_LOST, 'error');
             return 'refused';
           }
@@ -5668,9 +5676,17 @@
     if (!next) { clearInterval(r.heldTimer); return; }
     if (r.flushing) return;
     if (Date.now() - next.since > HELD_MAX_MS) { settleHeld(r, next, 'timeout', 'The session stayed busy for five minutes.'); return; }
+    // 7.0.38 (Q1 07:50): a held answer, from any source, is never sent by this timer.
+    if (isTurnEndAnswer(next.text)) { settleLateAnswer(r, next); return; }
     r.flushing = next;
     continueSession(r, next.text, { held: next }).then(function () {}, function () { /* no answer: keep it, retry */ })
       .finally(function () { r.flushing = null; if (next.cancelled && r.held.indexOf(next) >= 0) settleHeld(r, next, 'cancelled'); });
+  }
+  // 7.0.38 (Q1 07:50): a held answer never goes: his words (without the contract words) come back to the box, said so.
+  function settleLateAnswer(r, h) {
+    var line = TURN_END_QUOTE.late(TURN_END_QUOTE.label(h.text));
+    h.text = TURN_END_QUOTE.bare(h.text);
+    settleHeld(r, h, 'refused', line);
   }
   // Ends one held message: sent, refused, timed out or cancelled.
   function settleHeld(r, h, how, copy) {
