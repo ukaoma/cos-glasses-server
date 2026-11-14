@@ -32,6 +32,19 @@ export function pingTopic(kind: PingKind, vapidPublicKey: string): string {
 
 export type PushPost = (url: string, headers: Record<string, string>, body: Buffer, timeoutMs: number) => Promise<{ status: number; reason: string | null }>
 
+/**
+ * Apple's `reason` code from an error body (BadJwtToken, ExpiredSubscription, ...), or null. Only a plain word is
+ * kept: anything else (a URL, an id, text from a body Apple did not write) never reaches a response or a log line.
+ */
+export function applePushReason(raw: string): string | null {
+  try {
+    const r = JSON.parse(raw).reason
+    return typeof r === 'string' && /^[A-Za-z]{1,40}$/.test(r) ? r : null
+  } catch {
+    return null
+  }
+}
+
 /** The real POST. Reads at most 4 KB of Apple's answer, keeps only its `reason` code. Never logs the URL. */
 export const httpsPushPost: PushPost = (url, headers, body, timeoutMs) => new Promise(resolve => {
   const req = request(url, { method: 'POST', headers: { ...headers, 'Content-Length': String(body.length) }, timeout: timeoutMs }, res => {
@@ -39,9 +52,7 @@ export const httpsPushPost: PushPost = (url, headers, body, timeoutMs) => new Pr
     res.setEncoding('utf8')
     res.on('data', chunk => { if (raw.length < 4096) raw += chunk })
     res.on('end', () => {
-      let reason: string | null = null
-      try { const r = JSON.parse(raw).reason; if (typeof r === 'string' && /^[A-Za-z]{1,40}$/.test(r)) reason = r } catch { /* no JSON: no reason */ }
-      resolve({ status: res.statusCode ?? 0, reason })
+      resolve({ status: res.statusCode ?? 0, reason: applePushReason(raw) })
     })
   })
   req.on('timeout', () => { req.destroy(); resolve({ status: 0, reason: 'IdleTimeout' }) })

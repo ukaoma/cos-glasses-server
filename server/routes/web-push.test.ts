@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { b64u, fromB64u, vapidPublicKeyObject } from '../lib/web-push-crypto.js'
 import { isAllowedPushEndpoint, MAX_PUSH_DEVICES, PUSH_DIR_MODE, PUSH_FILE_MODE, WebPushStore } from '../lib/web-push-store.js'
-import { PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
+import { applePushReason, PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
 import { createWebPushRouter, webPushEnabled } from './web-push.js'
 import { isPublicApiRequest } from '../lib/api-auth.js'
 
@@ -103,6 +103,8 @@ describe('X1 web push: the store', () => {
     const p = phone()
     const a = store.add({ endpoint: p.subscription.endpoint, keys: p.subscription.keys, origin: ORIGIN, label: 'iPhone\u0007 Duo' })
     expect(a.ok).toBe(true)
+    // Adding a phone writes only devices.json: the key is still made on its first read, never here (Q1 P8).
+    expect(existsSync(join(dir, 'vapid.json'))).toBe(false)
     expect(mode(join(dir, 'devices.json'))).toBe(0o600)
     const again = store.add({ endpoint: p.subscription.endpoint, keys: p.subscription.keys, origin: ORIGIN })
     expect(again).toEqual(a)
@@ -170,6 +172,15 @@ describe('X1 web push: one ping', () => {
     const s2 = rig()
     s2.answer({ status: 404, reason: null })
     expect((await sendOnePing(s2.store, s2.id, 'test', { post: s2.post })).removed).toBe(true)
+  })
+
+  it('Apple\'s reason: only a plain word is kept; a URL, an id or other text in the body never comes back (Q1 P14)', () => {
+    expect(applePushReason('{"reason":"BadJwtToken"}')).toBe('BadJwtToken')
+    expect(applePushReason('{"reason":"ExpiredSubscription","timestamp":1}')).toBe('ExpiredSubscription')
+    for (const raw of ['{"reason":"https://web.push.apple.com/QGuQyavXutnMH6cTPXQ8xsAeBCs"}', '{"reason":"Bad Jwt"}', '{"reason":"x".repeat(41)}',
+      `{"reason":"${'x'.repeat(41)}"}`, '{"reason":42}', '{"reason":""}', 'not json', '']) {
+      expect(applePushReason(raw)).toBeNull()
+    }
   })
 
   it('a redirect is never followed: a 3xx is one request, reported, and the device is kept', async () => {
