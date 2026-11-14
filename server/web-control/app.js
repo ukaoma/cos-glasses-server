@@ -2311,8 +2311,22 @@
     if (!s || s.waiting_source !== 'turn_end' || s.agent_state !== 'waiting') return null;
     var clean = function (v, n) { return String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n); };
     var choices = Array.isArray(s.waiting_choices) ? s.waiting_choices.filter(function (c) { return typeof c === 'string' && clean(c, 40); }).map(function (c) { return clean(c, 40); }).slice(0, 2) : [];
-    return { ask: clean(s.waiting_detail, 160), choices: choices };
+    // 7.0.36 (X1): the ask's own id, so an answer is addressed to this question. An older server sends none: ''.
+    var id = typeof s.waiting_ask_id === 'string' && /^turn_end:\d{1,16}$/.test(s.waiting_ask_id) ? s.waiting_ask_id : '';
+    return { ask: clean(s.waiting_detail, 160), choices: choices, id: id };
   }
+  // 7.0.36 (lead 00:03, X1): the words for an answer the session moved past. One source, used here and on Today's panel.
+  var TURN_END_QUOTE = {
+    // (4) the one button, (5) what it sends: the contract words first and unchanged, then the question it answers.
+    button: function (label) { return 'Send \u201c' + label + '\u201d anyway'; },
+    text: function (label, ask) { return turnEndPrompt(label) + '. This answers your earlier question' + (ask ? ' \u201c' + ask + '\u201d' : '') + '. You have taken a turn since asking it.'; },
+    // (2) a newer ask, (3) no new ask, (6) answered first elsewhere.
+    moved: function (label, ask, now) {
+      var yours = ask ? 'Your answer to \u201c' + ask + '\u201d was not sent.' : 'Your answer \u201c' + label + '\u201d was not sent.';
+      return now && now.ask ? 'The session asked something new: \u201c' + now.ask + '\u201d. ' + yours : 'The session took another turn. ' + yours;
+    },
+    answered: function (label) { return 'Already answered on another screen. \u201c' + label + '\u201d was not sent.'; }
+  };
   /** The exact words a choice or a reply sends (contract v1): attributed to COS Control Web, never to the desk. */
   function turnEndPrompt(text) { return TURN_END_PREFIX + turnEndBare(text); }
   /** The words as he wrote them: a message that came back to the box already carries the prefix, never twice. */
@@ -2366,7 +2380,7 @@
     if (held.length) return { where: 'here', ask: askedHere(held) };
     // 7.0.18: a turn that ended asking him is answered by a reply, here or anywhere: never "at the Mac".
     var te = row && typeof turnEndOf === 'function' ? turnEndOf(row) : null;
-    if (te) return { where: 'turnend', ask: te.ask, choices: te.choices };
+    if (te) return { where: 'turnend', ask: te.ask, choices: te.choices, askId: te.id };
     if (q && q.answeredFor && q.answeredFor(id)) return { where: 'answered', ask: '' };
     // X1 contract: a card built from the server's `waiting` list carries its own words; a held one gone back to the Mac
     // has the words this page saw while it was held.
@@ -2426,17 +2440,25 @@
     if (!te) { sessionStatus(TURN_END_GONE); readerMacPaint(r, r.waitingNow); return; }
     var label = te.choices[i];
     if (!label) return;
+    r.teQuote = null;
+    // 7.0.36 (X1): the answer names its ask. The server delivers it past the head the asking turn itself moved, while
+    // that ask is still the session's open one; an older server ignores the id.
+    return turnEndSend(r, turnEndPrompt(label), te.id ? { turnEndAskId: te.id } : {}, label, te.ask);
+  }
+  // His tap on Send anyway: the quoted words, with the refusal's revision and NO ask id, so the server takes it as an
+  // ordinary Continue anyway (X1 00:06). Only a tap sends it, once per tap.
+  function sendTurnEndQuoted(r) {
+    var q = r && r.teQuote;
+    if (!q || r.sending) return;
+    r.teQuote = null;
+    return turnEndSend(r, TURN_END_QUOTE.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
+  }
+  function turnEndSend(r, text, opts, label, ask) {
     r.sending = true; r.teSending = true; readerMacPaint(r, r.waitingNow);
     var done = function () { r.sending = false; r.teSending = false; if (state.reading === r) readerMacPaint(r, r.waitingNow); };
-    return continueSession(r, turnEndPrompt(label), {}).then(function (how) {
+    return continueSession(r, text, opts).then(function (how) {
       done();
-      if (state.reading !== r) return how;
-      if (how === 'sent') sessionStatus(TURN_END_SENT(label));
-      else if (how === 'changed') {
-        // The box under it would offer Continue anyway for the composer's words, not this choice: a choice says it plainly.
-        r.refusal = null; r.sendAnyway = null; renderVerdict(r);
-        sessionStatus('The session moved on before this reached it. \u201c' + label + '\u201d was not sent.', 'error');
-      } else if (how === 'refused') sessionStatus('The session did not take \u201c' + label + '\u201d. Try again, or answer it on your Mac.', 'error');
+      if (state.reading === r) turnEndOutcome(r, how, label, ask);
       return how;
     }, function (err) {
       done();
@@ -2444,6 +2466,33 @@
       var why = err && err.name === 'AbortError' ? 'No answer from your Mac yet. It may still land; tapping again is safe, it will not post twice.' : (err && err.message) || 'Could not reach your Mac.';
       sessionStatus('Not sent: ' + why, 'error');
     });
+  }
+  // What a turn-end answer's outcome says. An answer the session moved past keeps ONE way to send it: the button.
+  function turnEndOutcome(r, how, label, ask) {
+    if (how === 'sent') return sessionStatus(TURN_END_SENT(label));
+    if (how === 'answered') { r.teRefusal = null; return sessionStatus(TURN_END_QUOTE.answered(label), 'error'); }
+    if (how === 'moved' || how === 'changed') {
+      // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
+      var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;
+      var now = how === 'moved' && r.teRefusal ? r.teRefusal.askNow : null;
+      // The box under it would offer Continue anyway for the composer's words, not this choice: the button replaces it.
+      r.refusal = null; r.sendAnyway = null; r.teRefusal = null; renderVerdict(r);
+      if (now) showAskNow(r, now);
+      r.teQuote = rev ? { label: label, ask: ask, revision: rev } : null;
+      return sessionStatus(TURN_END_QUOTE.moved(label, ask, now), 'error',
+        r.teQuote ? ' <button type="button" class="link-btn" data-action="te-quote">' + esc(TURN_END_QUOTE.button(label)) + '</button>' : '');
+    }
+    if (how === 'refused') sessionStatus('The session did not take “' + label + '”. Try again, or answer it on your Mac.', 'error');
+  }
+  // What the session asks now, from the refusal itself, drawn at once in place of the old ask (the next session read
+  // replaces the row with the server's own).
+  function showAskNow(r, now) {
+    var row = readerRowOf(r);
+    if (!row || !now || typeof now.id !== 'string') return;
+    row.waiting_source = 'turn_end'; row.agent_state = 'waiting'; row.waiting_ask_id = now.id;
+    row.waiting_detail = typeof now.ask === 'string' ? now.ask : '';
+    row.waiting_choices = Array.isArray(now.choices) ? now.choices.slice() : [];
+    readerMacPaint(r, r.waitingNow);
   }
   function readerMacPaint(r, waiting) {
     var el = $('session-mac-q');
@@ -2477,7 +2526,7 @@
       var k = splitSessionId(s.provider, s.session_id || s.id);
       seen[k.provider + '|' + String(k.id).toLowerCase()] = 1;
       var w = whereFor(k.provider, k.id, s);
-      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id, where: w.where, ask: w.ask, choices: w.choices || [] });
+      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id, where: w.where, ask: w.ask, choices: w.choices || [], askId: w.askId || '' });
     });
     // A question this page holds for a session the list has not shown waiting yet: its own row, so every held
     // question is in front of you (two at once each get one).
@@ -5300,7 +5349,7 @@
       r.stoppedAt = null;
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
         method: 'POST', timeoutMs: 25000,
-        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}),
+        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}, opts.turnEndAskId ? { turnEndAskId: opts.turnEndAskId } : {}),
       }).then(function (t) {
         var b = t.body || {};
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
@@ -5318,6 +5367,13 @@
         // thread as free (the running child is COS's), so it cannot park this; the page holds
         // it under the same key and sends it the moment the reply ends.
         if (reason === 'native_turn_in_progress') { if (!opts.held) view.hold(r, draft); return 'held'; }
+        // 7.0.36 (X1): an answer named its ask and the session has moved past it, or answered it first elsewhere. Only
+        // a turn-end answer names an ask, so only its caller reads this; nothing is sent again from here.
+        if (reason === 'turn_end_ask_moved') {
+          view.status(r, '');
+          r.teRefusal = { revision: b.revision || null, askNow: b.askNow && typeof b.askNow === 'object' ? b.askNow : null };
+          return b.answered === true ? 'answered' : 'moved';
+        }
         if (reason === 'native_thread_changed' && b.revision) {
           // The box. Send it anyway always carries the revision of THIS refusal, the newest (A3).
           var changedBox = function (copy) { r.sendAnyway = b.revision; view.status(r, ''); r.refusal = { copy: copy, changed: true, fork: true }; view.verdict(r); };
@@ -7922,6 +7978,7 @@
     if (action === 'send-anyway') { var rev = state.reading && state.reading.sendAnyway; if (state.reading) state.reading.sendAnyway = null; return sendSessionTurn(false, { acknowledgedRevision: rev }); }
     if (action === 'stop-session') return stopSession();
     if (action === 'drop-after') return dropHeld();
+    if (action === 'te-quote') return sendTurnEndQuoted(state.reading);
     if (action === 'unqueue') return removeQueued(t.getAttribute('data-turn-key'));
     if (action === 'revoke-all') {
       if (!window.COSWeb.armTap(t, t.querySelector('.grow').firstChild, 'Tap again to sign out every browser')) return;
@@ -8375,6 +8432,7 @@
       return { provider: provider, id: id, draft: null, held: [], view: view, verdict: null, refusal: null, cautionAck: false, feed: newFeed(), live: null, queued: 0 };
     },
     send: function (r, text, opts) { return continueSession(r, text, opts || {}); },
+    turnEndQuote: TURN_END_QUOTE,
     newKey: newTurnKey,
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,

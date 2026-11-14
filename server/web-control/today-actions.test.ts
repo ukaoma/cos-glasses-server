@@ -14,6 +14,12 @@ import vm from 'node:vm'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
+// 7.0.36: app.js's turn-end block, run as written, for the words the session kit shares (TURN_END_QUOTE).
+const TE_QUOTE = (() => {
+  const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
+  // eslint-disable-next-line no-new-func
+  return new Function(APP.slice(a, b) + '\nreturn TURN_END_QUOTE;')() as { button: (l: string) => string; text: (l: string, a: string) => string; moved: (l: string, a: string, n: unknown) => string; answered: (l: string) => string }
+})()
 // 6.99.30: what every request learns about the Mac (the unreachable sentence, its clock, whether it answers), shared by
 // api() and the reader's apiAnswer(): it sits between api() and the state in app.js, so a slice of the reader gets it here.
 const TRANSPORT = APP.slice(APP.indexOf('  // ── what every request learns about the Mac'), APP.indexOf('  // ── state ─'))
@@ -88,6 +94,8 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {},
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
+    // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
+    TURN_END_QUOTE: TE_QUOTE,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
@@ -5001,6 +5009,72 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     await flush()
     expect(turns(h)).toHaveLength(0)
     expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen, or the session moved on. Nothing was sent.')
+  })
+  // 7.0.36 (X1, lead 00:03): the answer names its ask; a moved one keeps ONE button that sends it quoted.
+  const MOVED = (askNow: unknown) => ({ status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', askNow, reasonCopy: 'The session moved past the question you answered.' } })
+  const tmodelId = () => { const m = tmodel(); (m.rows[0] as Record<string, unknown>).askId = 'turn_end:1794600000123'; return m }
+  it('7.0.36: the tap names its ask when the row has one; a row without one sends exactly as before', async () => {
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '0')
+    await flush()
+    expect(turns(h)[0]!.body.turnEndAskId).toBe('turn_end:1794600000123')
+    const old = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: tmodel(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    old.ta.open('wait', 'claude|' + SID, old.opener())
+    await flush()
+    old.tap('turnend', '0')
+    await flush()
+    expect('turnEndAskId' in turns(old)[0]!.body).toBe(false)
+  })
+  it('7.0.36: moved past it, with a newer ask: says so, draws the new ask, and the button sends the quoted words with the revision and no id, once', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.turnEndAskId ? MOVED({ id: 'turn_end:2', ask: 'Which branch?', choices: ['main', 'feature'] }) : { status: 202, body: { outcome: 'queued' } } }
+    const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '1')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
+    expect(h.els['ta-status']!.textContent).toBe('The session asked something new: “Which branch?”. Your answer to “Where should the overnight mail intel show up first?” was not sent.')
+    expect(h.els['ta-status']!.innerHTML).toContain('<button type="button" class="link-btn" data-ta="te-quote">Send “COS Control pane” anyway</button>')
+    expect(h.els['ta-meta']!.innerHTML, 'the new ask, drawn at once').toContain('data-ta="turnend" data-id="1">feature</button>')
+    expect(h.els['ta-verdict']!.innerHTML, 'no Continue anyway box for the reply box’s words').not.toContain('send-anyway')
+    h.tap('te-quote'); h.tap('te-quote')
+    await flush()
+    expect(turns(h)).toHaveLength(2)
+    expect(turns(h)[1]!.body.prompt).toBe(PREFIX + 'COS Control pane. This answers your earlier question “Where should the overnight mail intel show up first?”. You have taken a turn since asking it.')
+    expect(turns(h)[1]!.body.acknowledgedRevision).toBe('rev9')
+    expect('turnEndAskId' in turns(h)[1]!.body).toBe(false)
+    expect(h.els['ta-status']!.textContent).toBe('Sent “COS Control pane”. It reaches the session as a message from COS; it may ask you to confirm.')
+    h.tap('te-quote')
+    await flush()
+    expect(turns(h), 'the button is spent').toHaveLength(2)
+  })
+  it('an older server (or Codex) refuses on the moved head: the reply box’s Continue anyway box is cleared, and the choice keeps its own button with that revision', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: (body: any) => body.acknowledgedRevision ? { status: 202, body: { outcome: 'queued' } } : { status: 409, body: { reason: 'native_thread_changed', changed: true, revision: 'rev2', reasonCopy: 'This thread changed on your Mac since you attached.' } } }
+    const h = load({ data: { sessions: [TROW] }, routes, model: tmodel(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-verdict']!.innerHTML, 'no Continue anyway for the reply box’s words').not.toContain('send-anyway')
+    expect(h.els['ta-status']!.textContent).toBe('The session took another turn. Your answer to “Where should the overnight mail intel show up first?” was not sent.')
+    h.tap('te-quote')
+    await flush()
+    expect(turns(h)[1]!.body.acknowledgedRevision).toBe('rev2')
+  })
+  it('7.0.36: answered first on another screen: said, no button, nothing more sent', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, askNow: null } } }
+    const h = load({ data: { sessions: [TROW] }, routes, model: tmodelId(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    h.tap('turnend', '0')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen. “Good Morning + Today” was not sent.')
+    expect(h.els['ta-status']!.innerHTML).not.toContain('te-quote')
+    h.tap('te-quote')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
   })
   it('his own words in the box go with the same attribution, and leave the box', async () => {
     const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: tmodel(), questions: 0, mac: 0, qLoad: { state: 'ok' } })

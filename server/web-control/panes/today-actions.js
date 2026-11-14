@@ -584,6 +584,7 @@
     }
     if (what === 'send') return sendReply();
     if (what === 'turnend') return sendChoice(Number(id));
+    if (what === 'te-quote') return sendQuoted();
     if (what === 'approve-phone' && K.approvePhone && O.r) return K.approvePhone(phoneApprovalOptions(O.r));
     if (what === 'att-remove' || what === 'att-retry') {
       var fb = filesBox(); if (!fb) return;
@@ -1152,14 +1153,35 @@
     var label = (Array.isArray(w.choices) ? w.choices : [])[i];
     if (!label) return;
     if (!turnEndStill()) { O.note = { text: 'Already answered on another screen, or the session moved on. Nothing was sent.', kind: '' }; paintNote(); return; }
+    O.quote = null;
+    // 7.0.36 (X1): the answer names its ask (an older server ignores the id), as the reader's choice does.
+    return choiceSend(r, turnEndAnswer(label), w.askId ? { turnEndAskId: w.askId } : {}, label, w.ask ? String(w.ask).trim() : '');
+  }
+  // His tap on Send anyway: the quoted words with the refusal's revision and no ask id (X1 00:06). Once per tap.
+  function sendQuoted() {
+    var r = O.r, q = O.quote; if (!r || !q || r.sending) return;
+    O.quote = null;
+    return choiceSend(r, K.turnEndQuote.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
+  }
+  function choiceSend(r, text, opts, label, ask) {
     r.sending = true; setSending(true); paintMeta();
     var done = function () { r.sending = false; if (O.r === r) { setSending(false); paintMeta(); } };
-    return K.send(r, turnEndAnswer(label), {}).then(function (how) {
+    return K.send(r, text, opts).then(function (how) {
       done();
       if (O.r !== r) return;
-      if (how === 'sent') O.note = { text: 'Sent \u201c' + label + '\u201d. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' };
-      else if (how === 'changed') { r.refusal = null; r.sendAnyway = null; paintVerdict(); O.note = { text: 'The session moved on before this reached it. \u201c' + label + '\u201d was not sent.', kind: 'error' }; }
-      else if (how === 'refused') O.note = { text: 'The session did not take \u201c' + label + '\u201d. Try again, or answer it on your Mac.', kind: 'error' };
+      var Q = K.turnEndQuote;
+      if (how === 'sent') O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' };
+      else if (how === 'answered') { r.teRefusal = null; O.note = { text: Q.answered(label), kind: 'error' }; }
+      else if (how === 'moved' || how === 'changed') {
+        // 'changed' is an older server or a Codex session: the moved head's refusal, its revision in sendAnyway.
+        var rev = how === 'moved' ? r.teRefusal && r.teRefusal.revision : r.sendAnyway;
+        var now = how === 'moved' && r.teRefusal ? r.teRefusal.askNow : null;
+        // The box would offer Continue anyway for the reply box's words, not this choice: the button replaces it.
+        r.refusal = null; r.sendAnyway = null; r.teRefusal = null; paintVerdict();
+        if (now && typeof now.id === 'string') { O.wait = Object.assign({}, O.wait, { ask: now.ask || '', choices: Array.isArray(now.choices) ? now.choices.slice() : [], askId: now.id }); paintMeta(); }
+        O.quote = rev ? { label: label, ask: ask, revision: rev } : null;
+        O.note = { text: Q.moved(label, ask, now), kind: 'error', quote: O.quote ? Q.button(label) : '' };
+      } else if (how === 'refused') O.note = { text: 'The session did not take “' + label + '”. Try again, or answer it on your Mac.', kind: 'error' };
       paintNote();
     }, function (err) {
       done();
@@ -1400,7 +1422,13 @@
     watch: function (r, bindingId, key) { watchTurn(r, bindingId, key); },
     queue: function () {}
   };
-  function paintNote() { W.setStatus($('ta-status'), O.note.text, O.note.kind === 'error'); if (KB.on) fit(); }
+  function paintNote() {
+    var el = $('ta-status');
+    W.setStatus(el, O.note.text, O.note.kind === 'error');
+    // 7.0.36: a turn-end answer the session moved past keeps its one way to send, after the words.
+    if (el && O.note.quote) el.innerHTML = esc(O.note.text) + ' <button type="button" class="link-btn" data-ta="te-quote">' + esc(O.note.quote) + '</button>';
+    if (KB.on) fit();
+  }
   // A copy of the reader's renderVerdict (app.js): the same boxes and words, with Open session where the reader offers
   // Fork and Refresh, which live only in the reader.
   function paintVerdict() {

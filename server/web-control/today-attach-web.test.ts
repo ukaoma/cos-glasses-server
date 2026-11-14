@@ -16,6 +16,12 @@ import vm from 'node:vm'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
+// 7.0.36: app.js's turn-end block, run as written, for the words the session kit shares (TURN_END_QUOTE).
+const TE_QUOTE = (() => {
+  const a = APP.indexOf('  // ── A turn that ended asking you (7.0.18'), b = APP.indexOf('  function askedTitle(s) {', a)
+  // eslint-disable-next-line no-new-func
+  return new Function(APP.slice(a, b) + '\nreturn TURN_END_QUOTE;')()
+})()
 // 6.99.30: what every request learns about the Mac (the unreachable sentence, its clock, whether it answers), shared by
 // api() and the reader's apiAnswer(): it sits between api() and the state in app.js, so a slice of the reader gets it here.
 const TRANSPORT = APP.slice(APP.indexOf('  // ── what every request learns about the Mac'), APP.indexOf('  // ── state ─'))
@@ -88,6 +94,8 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
     fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {},
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
+    // 7.0.36: the turn-end words the kit hands Today's panel, app.js's own.
+    TURN_END_QUOTE: TE_QUOTE,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
