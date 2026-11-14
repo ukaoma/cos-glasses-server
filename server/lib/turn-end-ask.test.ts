@@ -905,6 +905,12 @@ describe('the runtime: deriveForRow and the counters', () => {
       const runtime = startSessionHooksRuntime({ port: 3141 })
       try {
         expect(seen).toEqual([expect.objectContaining({ type: 'asked', sessionId: SID, at: stoppedAt, replay: true, question: 'Canary: which color?' })])
+        // Q1 E5: the flag comes down when the replay ends. A live reply after boot is replay false and keeps its words;
+        // a flag left up would mark every live breadcrumb as replay and null its answer.
+        const at = Date.now()
+        sessionSignalStore.apply({ ts: at, ppid: 4242, event: 'UserPromptSubmit', sessionId: SID, payload: { session_id: SID, prompt: 'Green, actually', prompt_id: 'cebe20a1-0000-4000-8000-00000000c019' } }, false)
+        expect(seen).toHaveLength(2)
+        expect(seen[1]).toMatchObject({ type: 'settled', sessionId: SID, at, replay: false, outcome: 'answered', by: 'mac', answer: 'Green, actually' })
       } finally {
         off()
         runtime.stop()
@@ -1005,6 +1011,20 @@ describe('candidate 3: onTurnAskEvent, one asked and one settled per stopped ask
     const OTHER = '8b2f1d66-2222-4333-8444-555566667777'
     r2.store.apply(env('PostToolUse', r2.clock.now, { tool_name: WRAP_UP_TOOL, tool_input: C17_INPUT, prompt_id: PID2 }, OTHER), false)
     expect(seen.filter(e => e.type === 'settled')).toEqual([expect.objectContaining({ askKey: key, outcome: 'aged_out' })])
+  })
+
+  it(`aged_out: a stopped ask dropped for room at ${MAX_TURN_ASKS} tracked sessions, the oldest, once (Q1 E11)`, () => {
+    const r = rig()
+    const ids: string[] = []
+    for (let i = 0; i <= MAX_TURN_ASKS; i++) {
+      const id = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`
+      ids.push(id)
+      r.store.apply(env('PostToolUse', T0 + 10 * i, wrapUp(0).payload, id), false)
+      r.store.apply(env('Stop', T0 + 10 * i + 5, { last_assistant_message: 'done', prompt_id: PROMPT }, id), false)
+    }
+    expect(r.tracker.stats().tracked).toBe(MAX_TURN_ASKS)
+    expect(seen.filter(e => e.type === 'asked')).toHaveLength(MAX_TURN_ASKS + 1)
+    expect(seen.filter(e => e.type === 'settled')).toEqual([expect.objectContaining({ type: 'settled', askKey: `${ids[0]}:${PROMPT}`, sessionId: ids[0], outcome: 'aged_out' })])
   })
 
   it('a stop that came first: asked when the late wrap_up arms it, at the stop\'s time', () => {

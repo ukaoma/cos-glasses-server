@@ -2,7 +2,7 @@
 // X1 (candidate 3, S1 11:37): the turn-ask breadcrumbs (onTurnAskEvent in lib/turn-end-ask.ts). Same harness as
 // answer-never-queued-mutation-gate.mjs: disposable copy, green baseline, each target matched exactly once, each mutant
 // killed by the test named for it (WRONG KILLER fails), byte-for-byte restoration. `--check` stops after the check.
-// Not mutated: the size-cap eviction's aged_out (MAX_TURN_ASKS), reported like the 8 h age-out but untested.
+// Q1 13:36 (E5, E11): the replay flag coming down after boot, and the size-cap eviction's aged_out, are mutated too.
 import { mkdtempSync, cpSync, existsSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
@@ -30,6 +30,8 @@ const mutations = [
   ["words-ignored", "server/lib/turn-end-ask.ts", "question: words ? state.capture.ask : null", "question: state.capture.ask", "words off (COS_WAITING_QUESTION_WORDS=0)", ["server/lib/turn-end-ask.test.ts"]],
   ["replay-answer-kept", "server/lib/turn-end-ask.ts", "const words = this.replaying || !this.deps.words() ? null : replyWords(reply.prompt)", "const words = !this.deps.words() ? null : replyWords(reply.prompt)", "during replay: replay true", ["server/lib/turn-end-ask.test.ts"]],
   ["replay-flag-ignored", "server/lib/turn-end-ask.ts", "replay: this.replaying,", "replay: false,", "during replay: replay true", ["server/lib/turn-end-ask.test.ts"]],
+  ["runtime-replay-stuck", "server/lib/session-hooks-runtime.ts", "    if (tracker) tracker.replaying = false\n", "", "an ask replayed from the ledger at boot", ["server/lib/turn-end-ask.test.ts"]],
+  ["size-cap-settle-missing", "server/lib/turn-end-ask.ts", "      this.emitSettled(oldest, now, 'aged_out')\n", "", "dropped for room", ["server/lib/turn-end-ask.test.ts"]],
   ["runtime-replay-unset", "server/lib/session-hooks-runtime.ts", "  if (tracker) tracker.replaying = true\n", "", "an ask replayed from the ledger at boot", ["server/lib/turn-end-ask.test.ts"]],
   ["listener-throw-escapes", "server/lib/turn-end-ask.ts", "    try { listener(e) } catch { /* a listener's failure never reaches the tracker */ }\n", "    listener(e)\n", "listeners run in order", ["server/lib/turn-end-ask.test.ts"]],
   ["unsubscribe-broken", "server/lib/turn-end-ask.ts", "  return () => { turnAskListeners.delete(listener) }", "  return () => {}", "listeners run in order", ["server/lib/turn-end-ask.test.ts"]],
