@@ -8599,14 +8599,20 @@
     if (LR.caps) return;
     LR.caps = true;
     var n = window.Notification, nav = window.navigator || {}, proto = String((window.location && window.location.protocol) || '');
+    // The kind of host only, never the host: an IP address (v4 or v6), a Tailscale name (*.ts.net), or anything else.
+    var host = String((window.location && window.location.hostname) || '').toLowerCase();
+    var hostKind = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[?[0-9a-f:]+\]?$/.test(host) && host.indexOf(':') >= 0 ? 'ip' : /\.ts\.net$/.test(host) ? 'ts.net' : 'other';
     var perm = n && typeof n.permission === 'string' && /^(default|granted|denied)$/.test(n.permission) ? n.permission : n ? 'other' : 'none';
     layoutCrumb('caps', {
       secure: window.isSecureContext === true,
       proto: /^(https|http|file):$/.test(proto) ? proto.slice(0, -1) : 'other',
+      hostKind: hostKind,
       standalone: lrMatch('(display-mode: standalone)'),
       iosStandalone: nav.standalone === true,
       swApi: 'serviceWorker' in nav,
       pushApi: 'PushManager' in window,
+      // iOS 18.4+: window.pushManager allows a push with no service worker (Declarative Web Push). Its own field.
+      pushMgr: 'pushManager' in window,
       notifApi: 'Notification' in window,
       notifPerm: perm
     });

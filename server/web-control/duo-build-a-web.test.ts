@@ -181,9 +181,9 @@ describe('7.0.2 A1: layout reports from every pane, numbers and fixed labels onl
     p.shellHooks.forEach(fn => fn()); p.shellHooks.forEach(fn => fn())
     const caps = p.crumbs.filter(c => c.what === 'caps')
     expect(caps, 'once per open').toHaveLength(1)
-    expect(caps[0]!.data).toEqual({ secure: true, proto: 'https', standalone: false, iosStandalone: true, swApi: true, pushApi: true, notifApi: true, notifPerm: 'default' })
+    expect(caps[0]!.data).toEqual({ secure: true, proto: 'https', hostKind: 'ts.net', standalone: false, iosStandalone: true, swApi: true, pushApi: true, pushMgr: false, notifApi: true, notifPerm: 'default' })
     const strings = Object.values(caps[0]!.data).filter(v => typeof v === 'string')
-    expect(strings.sort()).toEqual(['default', 'https'])
+    expect(strings.sort()).toEqual(['default', 'https', 'ts.net'])
     expect(JSON.stringify(caps[0]!.data)).not.toMatch(/secret|tail1234|3143|tok123|control|today/)
     expect(asked, 'no permission prompt, nothing registered').toEqual([])
   })
@@ -192,12 +192,33 @@ describe('7.0.2 A1: layout reports from every pane, numbers and fixed labels onl
     p.window.location = { protocol: 'http:' }
     p.window.navigator = {}
     p.shellHooks.forEach(fn => fn())
-    expect(p.crumbs.filter(c => c.what === 'caps')[0]!.data).toEqual({ secure: false, proto: 'http', standalone: false, iosStandalone: false, swApi: false, pushApi: false, notifApi: false, notifPerm: 'none' })
+    expect(p.crumbs.filter(c => c.what === 'caps')[0]!.data).toEqual({ secure: false, proto: 'http', hostKind: 'other', standalone: false, iosStandalone: false, swApi: false, pushApi: false, pushMgr: false, notifApi: false, notifPerm: 'none' })
     const q = page({ w: 382, h: 557 })
     q.window.location = { protocol: 'chrome-extension:' }
     q.window.Notification = { permission: 'prompt-ish' }
     q.shellHooks.forEach(fn => fn())
     expect(q.crumbs.filter(c => c.what === 'caps')[0]!.data).toMatchObject({ proto: 'other', notifApi: true, notifPerm: 'other' })
+  })
+  it('caps: the host KIND only (an IP, a Tailscale name, or other), never the host; window.pushManager is its own field', () => {
+    const kind = (hostname: string, extra: Record<string, unknown> = {}) => {
+      const p = page({ w: 382, h: 557 })
+      p.window.location = { protocol: 'https:', hostname, host: hostname + ':3143' }
+      Object.assign(p.window, extra)
+      p.shellHooks.forEach(fn => fn())
+      const d = p.crumbs.filter(c => c.what === 'caps')[0]!.data
+      expect(JSON.stringify(d), hostname).not.toContain(hostname.replace(/[\[\]]/g, ''))
+      return d
+    }
+    expect(kind('100.112.7.9').hostKind).toBe('ip')
+    expect(kind('[fd7a:115c:a1e0::1]').hostKind).toBe('ip')
+    expect(kind('fd7a:115c:a1e0::1').hostKind).toBe('ip')
+    expect(kind('miles-mac.tail1234.ts.net').hostKind).toBe('ts.net')
+    expect(kind('MILES-MAC.TAIL1234.TS.NET').hostKind).toBe('ts.net')
+    expect(kind('ts.net.example.com').hostKind).toBe('other')
+    expect(kind('localhost').hostKind).toBe('other')
+    expect(kind('192.168.1.10.nip.io').hostKind).toBe('other')
+    expect(kind('miles-mac.local', { pushManager: {} }).pushMgr).toBe(true)
+    expect(kind('miles-mac.local', { PushManager: function () {} })).toMatchObject({ pushApi: true, pushMgr: false })
   })
   it('caps: an installed web app (display-mode standalone) says so', () => {
     const p = page({ w: 382, h: 557 })
