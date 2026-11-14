@@ -2574,6 +2574,8 @@
     var m = TODAY.model = needsModel();
     renderStory(m);
     renderNeeds(m);
+    // 7.0.38 (lead 07:09): an open Today panel redraws its question from this read (a gone one closes, a new one draws).
+    if (PANES.todayActions && PANES.todayActions.needsChanged) PANES.todayActions.needsChanged();
     setBadge('today', m.now.length > 0);
     if (window.COSWeb && window.COSWeb.setStory) window.COSWeb.setStory('today', todayRailLine(m), m.now.length > 0);
   }

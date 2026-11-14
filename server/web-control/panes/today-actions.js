@@ -1109,7 +1109,7 @@
     box.innerHTML = html;
     // The reply box shows only where a reply can be the answer; what was typed stays in it, hidden.
     var foot = $('ta-foot');
-    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply' && w !== 'turnend'; }
+    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply' && w !== 'turnend' && w !== 'closed'; }
   }
   // Where a waiting session's question is answered: 'here' (its cards in this sheet), 'answered' (on some screen just
   // now), 'mac' (a Claude session's own prompt, or a held question that went back to the Mac), or 'reply' (a Codex or
@@ -1118,6 +1118,8 @@
   // reply box stays a Codex or Cursor one.
   function waitWhere() {
     if (O.qCount) return 'here';
+    // 7.0.38 (lead 07:09): Today read again and the question this panel drew is gone from it.
+    if (O.wait && O.wait.where === 'closed') return 'closed';
     // 7.0.18: a turn that ended asking him is answered by a reply (a choice or his own words), so the reply box shows.
     if (O.wait && O.wait.where === 'turnend') return 'turnend';
     if (O.r && W.sessionQuestions && W.sessionQuestions.answeredFor && W.sessionQuestions.answeredFor(O.r.id)) return 'answered';
@@ -1144,6 +1146,34 @@
       }).join('') + '</div>' : '') +
       '<p class="ta-sub ta-te-line">' + esc(TURN_END_LINE) + '</p>';
   }
+  // 7.0.38 (lead 07:09): the panel's copy of a turn-end question follows Today's own reads. Nothing here sends.
+  var TURN_END_CLOSED = 'This question is no longer open.';
+  function answeredLine() { return (W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.'; }
+  /** Which ask a Needs you row names: its session, and the server's id or (an older server) its words. */
+  function teKey(w) { return !w ? '' : String(w.key || '') + (w.askId ? '|id:' + w.askId : '|ask:' + String(w.ask || '').trim()); }
+  /** Today painted its Needs you again (app.js paintNeeds). An open turn-end panel redraws from it: the same ask stays,
+   *  a new ask draws in its place (also after it closed: the session asked again), a gone one closes. The reply box,
+   *  its words and the status line are left alone. */
+  function needsChanged() {
+    if (!O.open || O.open.kind !== 'wait' || !O.wait || (O.wait.where !== 'turnend' && O.wait.where !== 'closed')) return;
+    var nm = T.needs ? T.needs() : null;
+    if (!nm || !Array.isArray(nm.rows)) return;
+    var key = O.wait.key;
+    var now = nm.rows.filter(function (x) { return x.kind === 'session' && x.key === key && x.where === 'turnend'; })[0] || null;
+    if (now && teKey(now) === teKey(O.wait)) return;
+    var next = now || Object.assign({}, O.wait, { where: 'closed' });
+    keepPlace(function () { O.wait = next; paintMeta(); });
+  }
+  /** Redraw the top of the sheet without moving what he is reading: when he has scrolled past it, the scroll takes
+   *  up the change in its height. */
+  function keepPlace(paint) {
+    var body = $('ta-body'), meta = $('ta-meta');
+    var top = body ? body.scrollTop || 0 : 0, h = meta ? meta.offsetHeight || 0 : 0;
+    paint();
+    if (!body || !meta || top <= 0 || top < h) return;
+    var d = (meta.offsetHeight || 0) - h;
+    if (d) body.scrollTop = top + d;
+  }
   /** Still waiting on this answer? The latest session list decides; a reply from anywhere clears it on the server. */
   function turnEndStill() {
     var nm = T.needs ? T.needs() : null, key = O.wait && O.wait.key;
@@ -1165,13 +1195,14 @@
     return choiceSend(r, K.turnEndQuote.text(q.label, q.ask), { acknowledgedRevision: q.revision }, q.label, q.ask);
   }
   function choiceSend(r, text, opts, label, ask) {
+    var sentKey = teKey(O.wait);
     r.sending = true; setSending(true); paintMeta();
     var done = function () { r.sending = false; if (O.r === r) { setSending(false); paintMeta(); } };
     return K.send(r, text, opts).then(function (how) {
       done();
       if (O.r !== r) return;
       var Q = K.turnEndQuote;
-      if (how === 'sent') O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' };
+      if (how === 'sent') { O.teSent = sentKey; O.note = { text: 'Sent “' + label + '”. It reaches the session as a message from COS; it may ask you to confirm.', kind: '' }; }
       else if (how === 'answered') { r.teRefusal = null; O.note = { text: Q.answered(label), kind: 'error' }; }
       else if (how === 'unconfirmed') { r.teRefusal = null; O.note = { text: Q.unconfirmed(), kind: 'error' }; }
       else if (how === 'moved' || how === 'changed') {
@@ -1197,6 +1228,8 @@
   // W1 A5: the head line says the state once. At the Mac's prompt the line below says where; the head does not repeat it.
   var GENERIC_WAIT = /^Waiting for (you|your answer)(\. Paused until you answer\.)?$/;
   function waitWhy(where) {
+    // 7.0.38: the head line no longer asks him to tap. This panel's own delivered answer says answered; else, closed.
+    if (where === 'closed') return O.teSent && O.teSent === teKey(O.wait) ? answeredLine() : TURN_END_CLOSED;
     var why = O.wait ? String(O.wait.why || '') : '';
     if (!why) return 'Waiting for you';
     return where === 'mac' && GENERIC_WAIT.test(why) ? 'Waiting for your answer' : why;
@@ -1486,11 +1519,13 @@
     r.sending = true; setSending(true);
     var done = function () { r.sending = false; if (O.r === r) setSending(false); };
     // 7.0.18: his own words in answer to a turn-end ask carry the same attribution as a choice ('Other' in the contract).
-    if (O.open && O.open.kind === 'wait' && waitWhere() === 'turnend' && turnEndStill()) text = turnEndAnswer(text);
+    // 7.0.38: once the question is closed (waitWhere 'closed') his words go as an ordinary message, no attribution, no id.
+    var teAnswer = O.open && O.open.kind === 'wait' && waitWhere() === 'turnend' && turnEndStill() ? teKey(O.wait) : '';
+    if (teAnswer) text = turnEndAnswer(text);
     var sending = K.send(r, text, opts || {});
     // continueSession picks the key at once (draftFor): keep it until the Mac takes the words.
     if (r.draft) keepDraft(r, text, r.draft);
-    return sending.then(function () { done(); }, function (err) {
+    return sending.then(function (how) { done(); if (how === 'sent' && teAnswer && O.r === r) O.teSent = teAnswer; }, function (err) {
       done();
       if (O.r !== r) return;
       var why = err && err.name === 'AbortError'
@@ -1610,6 +1645,7 @@
     open: open, close: close, restore: restore, summary: summary, summaryMax: SUMMARY_MAX,
     isOpen: function () { return !!O.open; },
     _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
+    needsChanged: needsChanged,
     _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater, _kb: KB, _fitNow: applyFit, _revive: revive
   });
 })();

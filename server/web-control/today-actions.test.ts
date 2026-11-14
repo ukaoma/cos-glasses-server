@@ -1390,6 +1390,7 @@ function needsRegion(opts: { at: string; sessions?: unknown[]; needs?: unknown[]
     state: { sessions: opts.sessions ?? [], serverName: 'Mac' }, TODAY, setBadge: (n: string, on: boolean) => badges.push([n, on]),
     usualProject: () => '', badge: () => '', span: () => '5 min', sessionTitle: (s: any) => s.display_label || 'Session',
     window: { COSWeb: { setStory: (n: string, text: string, hot: boolean) => rail.push([n, text, hot]), ...(opts.qs ? { sessionQuestions: opts.qs } : {}) } },
+    PANES: {},   // 7.0.38: paintNeeds tells an open Today panel (PANES.todayActions.needsChanged); none is loaded here
   }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\nreturn { renderRunning: renderRunning, needsModel: needsModel };\n}')(deps)
@@ -5135,5 +5136,245 @@ describe('7.0.18: a turn that ended asking you, in Today’s overlay', () => {
     expect(h.els['ta-meta']!.innerHTML).not.toContain('data-ta="turnend"')
     expect(h.els['ta-meta']!.innerHTML).toContain('ta-mac-line')
     expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+})
+
+// ── 7.0.38 (lead 07:09; Miles's phone 11/14 07:01): an open Today panel follows Today's own reads of Needs you ──
+describe('7.0.38: the Today panel’s turn-end question follows Today’s reads (needsChanged)', () => {
+  const PREFIX = 'Answer sent from COS Control Web through COS, not typed in this session: '
+  const ASK = 'Build Set D, the larger tap areas for tabs and text buttons?'
+  const TROW = { session_id: SID, provider: 'claude', display_label: 'Orchestrator', alive: true, running: true, running_active: false, agent_state: 'waiting',
+    state_source: 'hook', waiting_kind: 'question', waiting_source: 'turn_end', waiting_detail: ASK, waiting_choices: ['Yes, build it', 'Not now'], waiting_ask_id: 'turn_end:1' }
+  const row = (o: Record<string, unknown> = {}) => ({ kind: 'session', key: 'claude|' + SID, title: 'Orchestrator asked: ' + ASK, why: 'Tap a choice or reply here', where: 'turnend',
+    ask: ASK, choices: ['Yes, build it', 'Not now'], askId: 'turn_end:1', ...o })
+  const model = () => ({ rows: [row()] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true })
+  const turns = (h: { calls: Array<{ method?: string; path: string; body?: any }> }) => h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
+  const CLOSED = 'This question is no longer open.'
+  const ANSWERED = 'Answered. The session carries on.'
+  const opened = async (m = model(), routes: Routes = OK_ROUTES) => {
+    const h = load({ data: { sessions: [TROW] }, routes, model: m, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    return h
+  }
+
+  it('Today drops the row: the buttons go, one line says the question is closed, nothing is sent, the reply box and his words stay', async () => {
+    const m = model(), h = await opened(m)
+    expect(h.els['ta-meta']!.innerHTML).toContain('data-ta="turnend"')
+    h.els['ta-input']!.value = 'half typed'
+    const status = h.els['ta-status']!.textContent
+    m.rows = []
+    h.ta.needsChanged()
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).not.toContain('data-ta="turnend"')
+    expect(meta).not.toContain('ta-te-ask')
+    expect(meta).toContain(esc(CLOSED))
+    expect(meta).not.toContain('Tap a choice or reply here')
+    expect(h.els['ta-foot']!.hidden, 'the reply box stays').toBe(false)
+    expect(h.els['ta-input']!.value).toBe('half typed')
+    expect(h.els['ta-status']!.textContent, 'the status line is left alone').toBe(status)
+    expect(turns(h)).toHaveLength(0)
+  })
+  it('a row that stays turn-end but is no longer this session’s also closes it', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = [row({ key: 'claude|other' })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  it('a new ask id: the new question and its own choices draw in place; nothing is sent; the box and his words stay', async () => {
+    const m = model(), h = await opened(m)
+    h.els['ta-input']!.value = 'half typed'
+    m.rows = [row({ askId: 'turn_end:2', ask: 'Which branch?', choices: ['main', 'feature'] })]
+    h.ta.needsChanged()
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('<blockquote class="ta-quote ta-te-ask">Which branch?</blockquote>')
+    expect(meta).toContain('data-ta="turnend" data-id="1">feature</button>')
+    expect(meta).not.toContain(esc(ASK))
+    expect(meta).not.toContain(esc(CLOSED))
+    expect(h.els['ta-foot']!.hidden).toBe(false)
+    expect(h.els['ta-input']!.value).toBe('half typed')
+    expect(turns(h)).toHaveLength(0)
+    h.tap('turnend', '1')
+    await flush()
+    expect(turns(h)[0]!.body.turnEndAskId, 'a tap answers the new ask').toBe('turn_end:2')
+  })
+  it('an older server (no ask id): a changed question draws in place; the same words change nothing', async () => {
+    const m = { rows: [row({ askId: undefined })] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true }
+    const h = await opened(m)
+    const before = h.els['ta-meta']!.innerHTML
+    m.rows = [row({ askId: undefined })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toBe(before)
+    m.rows = [row({ askId: undefined, ask: 'Which branch?', choices: ['main'] })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain('Which branch?')
+  })
+  it('the same ask id read again changes nothing, even with other rows around it', async () => {
+    const m = model(), h = await opened(m)
+    const before = h.els['ta-meta']!.innerHTML
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    m.rows = [row({ key: 'claude|other', askId: 'turn_end:9' }), row()]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML, 'not repainted').toBe('MARK')
+    expect(before).toContain('data-ta="turnend"')
+  })
+  it('this panel’s own delivered choice: when the row goes, its Sent line stays and the head says answered, never closed', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    const sent = 'Sent “Yes, build it”. It reaches the session as a message from COS; it may ask you to confirm.'
+    expect(h.els['ta-status']!.textContent).toBe(sent)
+    m.rows = []
+    h.ta.needsChanged()
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(h.els['ta-status']!.textContent).toBe(sent)
+    expect(meta).toContain(esc(ANSWERED))
+    expect(meta).not.toContain(esc(CLOSED))
+    expect(meta).not.toContain('data-ta="turnend"')
+    expect(h.els['ta-foot']!.hidden).toBe(false)
+  })
+  it('this panel’s own answer typed in the box counts as sent too', async () => {
+    const m = model(), h = await opened(m)
+    h.els['ta-input']!.value = 'Yes, and Set E after'
+    h.tap('send')
+    await flush()
+    expect(turns(h)[0]!.body.prompt).toBe(PREFIX + 'Yes, and Set E after')
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(ANSWERED))
+  })
+  it('a choice the server refused is not "answered" when the row goes', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'turn_end_ask_moved', changed: true, revision: 'rev9', answered: true, askNow: null } } }
+    const m = model(), h = await opened(m, routes)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-status']!.textContent).toBe('Already answered on another screen. “Yes, build it” was not sent.')
+  })
+  it('an answer this panel sent to an OLDER ask does not make a newer closed ask read as answered', async () => {
+    const m = model(), h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    m.rows = [row({ askId: 'turn_end:2', ask: 'Which branch?', choices: ['main'] })]
+    h.ta.needsChanged()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(ANSWERED))
+  })
+  it('Today still lists the session, but no longer as a turn-end question (answered, at the Mac): it closes', async () => {
+    for (const where of ['answered', 'mac', 'reply']) {
+      const m = model(), h = await opened(m)
+      m.rows = [row({ where, choices: undefined })]
+      h.ta.needsChanged()
+      expect(h.els['ta-meta']!.innerHTML, where).toContain(esc(CLOSED))
+      expect(h.els['ta-meta']!.innerHTML, where).not.toContain('data-ta="turnend"')
+    }
+  })
+  it('an answer typed in the box that the server refused is not "answered" when the row goes', async () => {
+    const routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: { status: 409, body: { reason: 'native_thread_changed', changed: true, revision: 'rev2', reasonCopy: 'This thread changed on your Mac since you attached.' } } }
+    const m = model(), h = await opened(m, routes)
+    h.els['ta-input']!.value = 'Yes'
+    h.tap('send')
+    await flush()
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  it('an answer this panel sent in ANOTHER session with the same words does not make this one read as answered', async () => {
+    const m = { rows: [row({ askId: undefined })] as Array<Record<string, unknown>>, now: [], later: [], failed: [], settled: true }
+    const h = await opened(m)
+    h.tap('turnend', '0')
+    await flush()
+    ;(h.ta as any)._state.wait = { ...(h.ta as any)._state.wait, key: 'claude|other' }
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain(esc(CLOSED))
+  })
+  it('after it closes, the reply box sends an ordinary message: his words alone, no attribution, no ask id', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = []
+    h.ta.needsChanged()
+    h.els['ta-input']!.value = 'Also check the Duo'
+    h.tap('send')
+    await flush()
+    expect(turns(h)).toHaveLength(1)
+    expect(turns(h)[0]!.body.prompt).toBe('Also check the Duo')
+    expect('turnEndAskId' in turns(h)[0]!.body).toBe(false)
+  })
+  it('closed stays closed: a later read that lists the same ask again does not bring the buttons back', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = []
+    h.ta.needsChanged()
+    m.rows = [row()]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('data-ta="turnend"')
+  })
+  it('closed, then the session asks something new: the new question draws, with its own choices', async () => {
+    const m = model(), h = await opened(m)
+    m.rows = []
+    h.ta.needsChanged()
+    m.rows = [row({ askId: 'turn_end:3', ask: 'Ship it?', choices: ['Yes'] })]
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toContain('<blockquote class="ta-quote ta-te-ask">Ship it?</blockquote>')
+    expect(h.els['ta-meta']!.innerHTML).not.toContain(esc(CLOSED))
+  })
+  it('a waiting panel left for another sheet (the pet list): needsChanged paints nothing there', async () => {
+    const m = model(), h = await opened(m)
+    h.ta.open('pet', '', h.opener())
+    await flush()
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    m.rows = []
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toBe('MARK')
+  })
+  it('a running panel or no panel: needsChanged does nothing', async () => {
+    const h = load({ data: { sessions: [TROW] }, routes: OK_ROUTES, model: model(), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    expect(() => h.ta.needsChanged()).not.toThrow()
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    h.els['ta-meta']!.innerHTML = 'MARK'
+    h.ta.needsChanged()
+    expect(h.els['ta-meta']!.innerHTML).toBe('MARK')
+  })
+  it('does not move him: scrolled past the question, the scroll takes up its change in height; at the top it stays at the top', async () => {
+    const m = model(), h = await opened(m)
+    const meta = h.els['ta-meta']! as any, body = h.els['ta-body']! as any
+    Object.defineProperty(meta, 'offsetHeight', { configurable: true, get: () => meta.innerHTML.includes('data-ta="turnend"') ? 300 : 100 })
+    body.scrollTop = 500
+    m.rows = []
+    h.ta.needsChanged()
+    expect(body.scrollTop, 'the same words stay in view').toBe(300)
+    for (const start of [0, 200]) {
+      const m2 = model(), h2 = await opened(m2)
+      const meta2 = h2.els['ta-meta']! as any, body2 = h2.els['ta-body']! as any
+      Object.defineProperty(meta2, 'offsetHeight', { configurable: true, get: () => meta2.innerHTML.includes('data-ta="turnend"') ? 300 : 100 })
+      body2.scrollTop = start
+      m2.rows = []
+      h2.ta.needsChanged()
+      expect(body2.scrollTop, 'the question still partly in view: left where it is (' + start + ')').toBe(start)
+    }
+    const m3 = model(), h3 = await opened(m3)
+    const meta3 = h3.els['ta-meta']! as any, body3 = h3.els['ta-body']! as any
+    Object.defineProperty(meta3, 'offsetHeight', { configurable: true, get: () => meta3.innerHTML.includes('data-ta="turnend"') ? 0 : 100 })
+    body3.scrollTop = 0
+    m3.rows = []
+    h3.ta.needsChanged()
+    expect(body3.scrollTop, 'not measured yet, at the top: still at the top').toBe(0)
+  })
+  it('app.js: Today’s paintNeeds tells the open panel after drawing Needs you, every time', () => {
+    const m = /  function paintNeeds\(\) \{[\s\S]*?\n  \}\n/.exec(APP)
+    expect(m, 'paintNeeds').not.toBeNull()
+    const did: string[] = []
+    const run = (panes: Record<string, unknown>) => new Function('TODAY', 'needsModel', 'renderStory', 'renderNeeds', 'setBadge', 'todayRailLine', 'window', 'PANES',
+      m![0] + '\npaintNeeds();')({ at: 1 }, () => ({ now: [] }), () => did.push('story'), () => did.push('needs'), () => did.push('badge'), () => '', {}, panes)
+    run({ todayActions: { needsChanged: () => did.push('panel') } })
+    expect(did).toEqual(['story', 'needs', 'panel', 'badge'])
+    expect(() => run({})).not.toThrow()
   })
 })
