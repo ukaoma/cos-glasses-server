@@ -1626,6 +1626,23 @@ export class PermissionBroker {
   questionsPollIntervalMs(): number { return this.pendingCount() > 0 ? 3_000 : QUESTIONS_POLL_INTERVAL_MS }
 
   /** The pending items, oldest first, for `GET /api/session-questions`. */
+  /**
+   * X1 (session catch-up): the open questions of ONE session, ids and kinds only, with NO side effect. Unlike list(),
+   * a question past its deadline is skipped, not settled (the timer or the next list() settles it).
+   */
+  peekPendingFor(sessionId: string): Array<{ id: string; kind: string }> {
+    const key = typeof sessionId === 'string' ? sessionId.toLowerCase() : ''
+    if (!key) return []
+    const now = this.deps.now()
+    const out: Array<{ id: string; kind: string }> = []
+    for (const item of this.items.values()) {
+      if (item.state !== 'pending' || now >= item.deadlineAt || !item.lensVisible) continue
+      if (item.sessionId !== key) continue
+      out.push({ id: item.id, kind: String(item.kind) })
+    }
+    return out
+  }
+
   list(): SessionQuestionView[] {
     const now = this.deps.now()
     const extended = this.extendedQuestionsView()

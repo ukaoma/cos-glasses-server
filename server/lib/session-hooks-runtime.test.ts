@@ -93,6 +93,27 @@ describe('deriveForRow', () => {
     expect(ended).toEqual([id, id])
   })
 
+  it('X1 catch-up: observe false derives the same state and changes nothing (no ended notice, no two-scan memory)', () => {
+    const ended: string[] = []
+    const off = onSessionRowEnded(sessionId => { ended.push(sessionId) })
+    try {
+      const sid = 'a1b2c3d4-0000-4000-8000-0000000000c1'
+      const t0 = 3_000_000
+      // Two observing scans build the memory, as two list requests do.
+      deriveForRow({ sessionId: sid, registry: dead, transcript, now: t0 })
+      deriveForRow({ sessionId: sid, registry: dead, transcript, now: t0 + 5 })
+      // A catch-up at the moment the row would end: it derives ended, tells no one, and moves no count.
+      const peek = deriveForRow({ sessionId: sid, registry: dead, transcript, now: t0 + DEAD_GRACE_MS, observe: false })
+      expect(peek).toMatchObject({ agent_state: 'ended' })
+      expect(ended).toEqual([])
+      const again = deriveForRow({ sessionId: sid, registry: dead, transcript, now: t0 + DEAD_GRACE_MS, observe: false })
+      expect(again?.deadScans).toBe(peek?.deadScans)
+      // The probe can fail: the observing derive does tell its listeners.
+      expect(deriveForRow({ sessionId: sid, registry: dead, transcript, now: t0 + DEAD_GRACE_MS })).toMatchObject({ agent_state: 'ended' })
+      expect(ended).toEqual([sid])
+    } finally { off() }
+  })
+
   it('returns nothing for a row it has no facts for, and nothing at all when the feature is off', () => {
     expect(deriveForRow({ sessionId: id })).toBeUndefined()
     process.env.COS_SESSION_HOOKS = '0'

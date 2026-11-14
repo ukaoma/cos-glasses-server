@@ -78,7 +78,7 @@ import {
   type LockHolderSnapshot,
 } from '../lib/occupancy-probes.js'
 import type { OccupancyDirs } from '../lib/thread-occupancy.js'
-import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead } from '../lib/agent-session-turns.js'
+import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead, type SessionTurn } from '../lib/agent-session-turns.js'
 import { redactLocalPathsDeep } from '../lib/local-path-redact.js'
 import { isNativeMacCaller } from '../lib/native-mac-caller.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
@@ -381,13 +381,14 @@ const CODEX_HOLDER_FACTS: RegistryFacts = { alive: true, status: null, waitingFo
  * when a writer-lock holder exists: passing "dead" facts for every unloaded thread would end
  * each of them after two scans (session-state-derive.ts).
  */
-function deriveCodexRow(sessionId: string, held: boolean, facts: CodexRolloutFacts | null, now: number, remember = true): DerivedSessionState | undefined {
+function deriveCodexRow(sessionId: string, held: boolean, facts: CodexRolloutFacts | null, now: number, remember = true, observe = true): DerivedSessionState | undefined {
   return deriveForRow({
     sessionId,
     registry: held ? CODEX_HOLDER_FACTS : undefined,
     transcript: facts ? { inFlight: facts.open, lastActivityAt: facts.mtimeMs } : undefined,
     now,
     remember,
+    ...(observe ? {} : { observe: false }),
     attachedTurn: isAttachedTurnActive(sessionStreamKey('codex', sessionId)),
   })
 }
@@ -886,6 +887,56 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/tool-images/:image
     res.status(503).json({ error: 'image_unavailable' })
   }
 })
+
+/**
+ * X1 (session catch-up, the build after 7.0.42): ONE session's latest turns and live state, for
+ * GET .../catch-up (routes/agent-session-bindings.ts). It is the detail route's BROWSER answer, nothing more:
+ *   - the same turns reader, the same previews rule, the same path redaction, link markers only with `cards`;
+ *   - never the native Mac helper's unredacted user turns, whoever calls;
+ *   - the state derived with `observe: false`, so the read changes nothing (no ended notification, no two-scan
+ *     memory, the ask peeked, not aged out).
+ * Null when there is no such session. Throws only when the transcript cannot be read at all.
+ */
+export interface SessionCatchUpView {
+  turns: SessionTurn[]
+  agentState: string | null
+  ended: boolean
+  working: boolean
+}
+export async function readSessionCatchUpView(provider: AgentProvider, sessionId: string, opts: { cards: boolean; turns: number }): Promise<SessionCatchUpView | null> {
+  const found = await findAgentSessionFile(provider, sessionId, agentSessionRoots())
+  if (!found) return null
+  const st = await stat(found)
+  const images = await agentSessionOutputImages.context(provider, sessionId, found)
+  let recent = await readRecentSessionTurns(provider, found, opts.turns, undefined, images.project)
+  if (recent && !sessionFilesSetting.read().enabled) recent = { ...recent, turns: withoutPreviews(recent.turns) }
+  const now = Date.now()
+  const activity = await readSessionActivity(provider, found)
+  const running = runningForThread(provider, sessionId, activityClockMs(st.mtimeMs, activity))
+  let derived: DerivedSessionState | undefined
+  if (provider === 'claude') {
+    const peer = (await liveClaudePeerRecords()).find(p => p.sessionId === sessionId.toLowerCase())
+    derived = deriveForRow({
+      sessionId,
+      registry: peer ? registryFacts(peer) : undefined,
+      transcript: { inFlight: running.occupied.get(sessionId)?.activeRecently === true, lastActivityAt: activity.lastActivityAt ? Date.parse(activity.lastActivityAt) : null },
+      attachedTurn: isAttachedTurnActive(sessionStreamKey('claude', sessionId)),
+      remember: false,
+      observe: false,
+    })
+  } else if (provider === 'cursor' && signalFor(sessionId)) {
+    derived = deriveForRow({ sessionId, remember: false, observe: false })
+  } else if (provider === 'codex') {
+    derived = deriveCodexRow(sessionId, running.occupied.has(sessionId), codexRolloutFacts(found, now), now, false, false)
+  }
+  const raw = recent ? recent.turns : []
+  const redacted = redactLocalPathsDeep(raw) as SessionTurn[]
+  const turns = opts.cards ? redacted : redacted.map(turn => (typeof turn.text === 'string' && turn.text.includes('](cos-file:') ? { ...turn, text: withoutLinkMarkers(turn.text) } : turn))
+  const agentState = typeof derived?.agent_state === 'string' ? derived.agent_state : null
+  // Hooks off or nothing derived: the transcript scan's own "in flight" is the evidence.
+  const working = agentState !== null ? agentState === 'running' : running.occupied.get(sessionId)?.activeRecently === true
+  return { turns, agentState, ended: agentState === 'ended', working }
+}
 
 agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')

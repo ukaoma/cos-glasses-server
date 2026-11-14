@@ -1564,6 +1564,20 @@ export class AgentSessionBindingRegistry {
   }
 
   /**
+   * X1 (session catch-up): `attachBlocked` with NO side effect. The same holder rule, without the lazy release of a
+   * dead boot's pin, so a read changes nothing. Such a pin therefore still reads as blocking here (the cautious answer:
+   * catch-up says `not_now`, and the real attach releases it when it runs).
+   */
+  wouldBlockAttach(provider: unknown, nativeThreadId: unknown, now: number): boolean {
+    if (!this.available()) return false
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return false
+    const id = this.targets.get(makeTargetKey(provider, nativeThreadId))
+    if (id === undefined) return false
+    const record = this.records.get(id)
+    return record ? holderBlocksAttach(record, now) : false
+  }
+
+  /**
    * Remember a completed turn so a repeat replays rather than re-delivers.
    *
    * Records the FIRST result for a turn id and never overwrites it: a repeat must

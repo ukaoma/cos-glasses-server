@@ -378,6 +378,19 @@ export class TurnEndAskTracker {
     return { ask: state.capture.ask, choices: [...state.capture.choices], stoppedAt: state.stoppedAt }
   }
 
+  /**
+   * X1 (session catch-up): what visibleAsk would show, with NO side effect. An ask past its 8 hours reads as null here
+   * but is neither deleted, counted nor reported (the next visibleAsk does that). For a read that must change nothing.
+   */
+  peekAsk(sessionId: string, now = this.deps.now()): VisibleTurnAsk | null {
+    if (!this.deps.enabled()) return null
+    const key = sessionId.toLowerCase()
+    const state = this.asks.get(key) ?? (key.length < 36 ? [...this.asks.values()].find(s => s.sessionId.startsWith(key)) : undefined)
+    if (!state || state.stoppedAt === null || state.visibleAt === null) return null
+    if (now - state.stoppedAt > TURN_ASK_MAX_AGE_MS) return null
+    return { ask: state.capture.ask, choices: [...state.capture.choices], stoppedAt: state.stoppedAt }
+  }
+
   /** X1 (the one queue): every ask a row would show now, oldest stop first. */
   visibleAsks(now = this.deps.now()): QueueTurnAsk[] {
     if (!this.deps.enabled()) return []

@@ -501,7 +501,7 @@ export function onSessionRowEnded(listener: (sessionId: string) => void): () => 
  * Derive with the two-scan memory kept here, keyed by full id when known. Rows the
  * caller has no facts for at all get nothing, so an older payload stays byte-identical.
  */
-export function deriveForRow(input: { sessionId: string; registry?: RegistryFacts; transcript?: TranscriptFacts; now?: number; remember?: boolean; attachedTurn?: boolean }): DerivedSessionState | undefined {
+export function deriveForRow(input: { sessionId: string; registry?: RegistryFacts; transcript?: TranscriptFacts; now?: number; remember?: boolean; attachedTurn?: boolean; observe?: boolean }): DerivedSessionState | undefined {
   // Off means off: with the feature disabled every row is byte-identical to 6.47.0.
   if (!sessionHooksEnabled()) return undefined
   const signal = signalFor(input.sessionId)
@@ -517,8 +517,11 @@ export function deriveForRow(input: { sessionId: string; registry?: RegistryFact
     prevDeadScans: prev?.scans ?? 0,
     prevDeadSince: prev?.since ?? null,
     attachedTurn: input.attachedTurn === true,
-    ...(turnEndAskTracker ? { turnEndAsk: turnEndAskTracker.visibleAsk(key, now) } : {}),
+    // X1 (session catch-up): `observe: false` derives the same state and changes nothing (the peek, no ended
+    // notification, no two-scan memory). Every other caller keeps today's behaviour.
+    ...(turnEndAskTracker ? { turnEndAsk: input.observe === false ? turnEndAskTracker.peekAsk(key, now) : turnEndAskTracker.visibleAsk(key, now) } : {}),
   })
+  if (input.observe === false) return derived
   if (derived.agent_state === 'ended') {
     turnEndAskTracker?.sessionRowEnded(key)
     for (const listener of rowEndedListeners) {
@@ -548,6 +551,16 @@ export function turnEndAskStats(): (TurnEndAskCounters & { tracked: number }) | 
  */
 export function openTurnEndAsk(sessionId: string, now = Date.now()): VisibleTurnAsk | null {
   return turnEndAskTracker ? turnEndAskTracker.visibleAsk(sessionId, now) : null
+}
+
+/** X1 (session catch-up): the same ask as openTurnEndAsk, read with no side effect (TurnEndAskTracker.peekAsk). */
+export function peekTurnEndAsk(sessionId: string, now = Date.now()): VisibleTurnAsk | null {
+  return turnEndAskTracker ? turnEndAskTracker.peekAsk(sessionId, now) : null
+}
+
+/** X1 (session catch-up): whether turn-end asks are tracked at all (COS_TURN_END_ASKS on and the runtime started). */
+export function turnEndAsksTracked(): boolean {
+  return turnEndAskTracker !== null
 }
 
 /** X1 (7.0.36): who answered the ask that stopped at `stoppedAt` (a prompt cleared it), or null. */

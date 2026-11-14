@@ -676,6 +676,28 @@ describe('the runtime: deriveForRow and the counters', () => {
     }
   })
 
+  it('X1 catch-up: an observe-false derive shows the open ask and, past 8 hours, peeks it: never aged out or counted', async () => {
+    const clock = { now: T0 + 200_000 }
+    const tracker = new TurnEndAskTracker({ now: () => clock.now, enabled: () => true, words: () => true, readDeskIdleSeconds: async () => 300, deskIdleSeconds: () => 90, pollMs: 3_600_000 })
+    trackers.push(tracker)
+    __setTurnEndAskTrackerForTests(tracker)
+    const off = sessionSignalStore.subscribe((signal, e, child) => tracker.observe(e, child, signal))
+    try {
+      feed()
+      await tracker.tick()
+      expect(deriveForRow({ sessionId: SID, now: clock.now, observe: false })).toMatchObject({ agent_state: 'waiting', waiting_source: 'turn_end' })
+      const before = turnEndAskStats()
+      clock.now = T0 + 4_700 + TURN_ASK_MAX_AGE_MS + 1
+      deriveForRow({ sessionId: SID, now: clock.now, observe: false })
+      expect(turnEndAskStats()).toEqual(before)
+      // The probe can fail: the observing derive ages it out, counted.
+      deriveForRow({ sessionId: SID, now: clock.now })
+      expect(turnEndAskStats()).toMatchObject({ tracked: before!.tracked - 1, agedOut: before!.agedOut + 1 })
+    } finally {
+      off()
+    }
+  })
+
   it('X1 7.0.39: personTurnMarker counts a mark only where a real turn has it: a whole footer line, or the answer words at the start', () => {
     const g2 = '[COS-G2 turn ctg2-00000001 · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ctg2-00000001 --session <your session id> --provider claude]'
     const web = g2.replace(/COS-G2/, 'COS-WEB')
@@ -931,6 +953,33 @@ describe('the runtime: deriveForRow and the counters', () => {
 })
 
 // X1 (candidate 3, S1 11:37): the COS thread's session-question breadcrumbs.
+describe('X1 catch-up: peekAsk reads the open ask and changes nothing', () => {
+  it('the same ask as visibleAsk while open; past 8 hours null, but still tracked and unreported until visibleAsk ages it out', async () => {
+    const seen: TurnAskEvent[] = []
+    const off = onTurnAskEvent(e => seen.push(e))
+    try {
+      const r = rig()
+      r.store.apply(env('UserPromptSubmit', T0 - 10_000, { prompt: 'go', prompt_id: PROMPT }), false)
+      r.store.apply(wrapUp(T0), false)
+      r.store.apply(stop(T0 + 4_700), false)
+      r.desk.idle = 300
+      await r.tracker.tick()
+      expect(r.tracker.peekAsk(SID)).toEqual(r.tracker.visibleAsk(SID))
+      expect(r.tracker.peekAsk(SID)).not.toBeNull()
+      const before = r.tracker.stats()
+      r.clock.now = T0 + 4_700 + TURN_ASK_MAX_AGE_MS + 1
+      expect(r.tracker.peekAsk(SID)).toBeNull()
+      expect(r.tracker.peekAsk(SID)).toBeNull()
+      expect(r.tracker.stats()).toEqual(before)
+      expect(seen.filter(e => e.type === 'settled')).toEqual([])
+      // The probe can fail: visibleAsk does age it out, counted and reported.
+      expect(r.tracker.visibleAsk(SID)).toBeNull()
+      expect(r.tracker.stats()).toMatchObject({ agedOut: before.agedOut + 1, tracked: before.tracked - 1 })
+      expect(seen.filter(e => e.type === 'settled')).toEqual([expect.objectContaining({ outcome: 'aged_out' })])
+    } finally { off() }
+  })
+})
+
 describe('candidate 3: onTurnAskEvent, one asked and one settled per stopped ask', () => {
   const PID2 = 'bebe20a1-0000-4000-8000-00000000c018'
   let seen: TurnAskEvent[] = []

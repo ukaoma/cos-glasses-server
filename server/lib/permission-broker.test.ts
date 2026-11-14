@@ -981,6 +981,24 @@ describe('the broker, driven directly', () => {
     expect(sent).toEqual([{}])
   })
 
+  it('X1 catch-up: peekPendingFor lists one session\'s open questions and never settles an expired one (list() does)', async () => {
+    const { broker, clock } = brokerWith({ timeoutMs: () => 110_000 })
+    brokers.push(broker)
+    const admission = await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, {}, clock.now))
+    if (!admission.ok) throw new Error('not admitted')
+    const { channel } = fakeChannel(true)
+    const id = broker.park(admission.request, channel)
+    expect(broker.peekPendingFor(SESSION)).toEqual([{ id, kind: expect.any(String) }])
+    expect(broker.peekPendingFor('ffffffff-0000-4000-8000-000000000000')).toEqual([])
+    expect(broker.peekPendingFor(SESSION.toUpperCase())).toEqual([{ id, kind: expect.any(String) }])
+    clock.now += 111_000
+    expect(broker.peekPendingFor(SESSION)).toEqual([])
+    expect(broker.stats().counters.expired).toBe(0)
+    // The probe can fail: list() settles the same item.
+    broker.list()
+    expect(broker.stats().counters.expired).toBe(1)
+  })
+
   it('retracts on the session moving on without us, and only then', async () => {
     const { broker, clock } = brokerWith()
     brokers.push(broker)

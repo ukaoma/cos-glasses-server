@@ -5585,3 +5585,369 @@ describe('X1 7.0.38: the ask is read before the busy gates', () => {
     expect(h.calls).toHaveLength(1)
   })
 })
+
+// X1 (session catch-up, the build after 7.0.42; Work card task:personal:ce1f04b2f016). GET .../catch-up: one session
+// caught up at one instant, read only. Contract: lanes/X1_session_refresh_scope.md.
+describe('X1 catch-up: one read for every stale state, and nothing written', () => {
+  const ASK_ID = (at: number) => `turn_end:${at}`
+  const catchUpPath = (q = '', provider = 'claude', threadId = SID) => `/api/agent-sessions/${provider}/${threadId}/catch-up${q ? `?${q}` : ''}`
+  interface CuTurn { role: 'user' | 'assistant'; text: string; at?: string }
+  function turn(i: number, role: 'user' | 'assistant' = i % 2 ? 'assistant' : 'user'): CuTurn {
+    return { role, text: `turn ${i}`, at: new Date(NOW + i * 1000).toISOString() }
+  }
+  /** The real registry, with the two catch-up reads forwarded (wire() predates them). */
+  function wireCU(r: AgentSessionBindingRegistry): BindingRegistry {
+    return { ...wire(r), getByThread: (p, t, n) => r.getByThread(p, t, n), wouldBlockAttach: (p, t, n) => r.wouldBlockAttach(p, t, n) }
+  }
+  function rig(over: Partial<AgentSessionBindingsDeps> = {}) {
+    const clock = { now: NOW }
+    const state = {
+      turns: [turn(1), turn(2)] as CuTurn[],
+      agentState: 'idle' as string | null, ended: false, working: false,
+      ask: null as { ask: string; choices: string[]; stoppedAt: number } | null,
+      answered: null as { by: string; answeredAt: number } | null,
+      queue: [] as Array<{ clientTurnId: string; status: string }>,
+      prompts: [] as Array<{ id: string; kind: string }>,
+      head: 'native-head-1',
+      viewCalls: 0,
+      view: 'ok' as 'ok' | 'missing' | 'throws',
+    }
+    const registry = openRegistry()
+    const deps = writeDeps({
+      now: () => clock.now,
+      bindings: wireCU(registry),
+      nativeHead: () => state.head,
+      turnEndAskAnswered: () => state.answered,
+      catchUp: {
+        view: async () => {
+          state.viewCalls++
+          if (state.view === 'throws') throw new Error('unreadable')
+          if (state.view === 'missing') return null
+          return { turns: state.turns, agentState: state.agentState, ended: state.ended, working: state.working }
+        },
+        peekAsk: () => state.ask,
+        asksTracked: () => true,
+        queued: () => state.queue,
+        pendingPrompts: () => state.prompts,
+        bootId: 'boot-A',
+      },
+      ...over,
+    })
+    return { clock, state, registry, deps }
+  }
+  async function cu(base: string, q = '', headers: Record<string, string> = {}, threadId = SID) {
+    const res = await fetch(`${base}${catchUpPath(q, 'claude', threadId)}`, { headers })
+    const text = await res.text()
+    return { status: res.status, body: text ? JSON.parse(text) : null, retryAfter: res.headers.get('retry-after'), cache: res.headers.get('cache-control') }
+  }
+
+  // ---------------------------------------------------------------- binding states (stale rows 1, 2, 7)
+
+  it('binding active and this page\'s: reattach already, no reason, and the sentence says nothing about the link', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const a = await attached(base)
+    const res = await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}`)
+    expect(res.status).toBe(200)
+    expect(res.cache).toBe('private, no-store')
+    expect(res.body.binding).toEqual({ state: 'active', holder: 'this', otherWorking: false, reattach: 'already', reason: null })
+    expect(res.body.summaryCodes.some((c: string) => c.startsWith('binding_'))).toBe(false)
+  })
+
+  it('row 1, detached (another attach took it after 90 s idle, as at 07:00): state detached, the other holder, not_now while it is fresh', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const a = await attached(base)
+    r.clock.now = NOW + 91_000
+    const b = await attached(base)
+    expect(b.bindingId).toMatch(/^bnd-/)
+    const res = await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}`)
+    expect(res.body.binding).toMatchObject({ state: 'detached', holder: 'other', reattach: 'not_now', reason: 'native_target_busy' })
+    expect(res.body.summaryCodes).toContain('binding_other')
+    // Past its own 90 s, the other holder yields: safe.
+    r.clock.now = NOW + 91_000 + 91_000
+    const later = await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}`)
+    expect(later.body.binding).toMatchObject({ state: 'detached', reattach: 'safe' })
+    expect(later.body.summaryCodes).toContain('binding_relink')
+  })
+
+  it('row 2, expired (the page\'s 25-minute memory outlived the server\'s 30): state expired, reason binding_expired, safe', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const a = await attached(base)
+    r.clock.now = NOW + 31 * 60_000
+    const res = await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}`)
+    expect(res.body.binding).toMatchObject({ state: 'expired', holder: 'none', reattach: 'safe', reason: 'binding_expired' })
+  })
+
+  it('no binding remembered: state none; a turn running reads not_now (never a re-attach mid-turn)', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    expect((await cu(base)).body.binding).toEqual({ state: 'none', holder: 'none', otherWorking: false, reattach: 'safe', reason: null })
+    r.state.working = true
+    r.state.agentState = 'running'
+    r.clock.now += 3_000   // past the 3 s replay
+    const busy = await cu(base)
+    expect(busy.body.binding).toMatchObject({ reattach: 'not_now', reason: 'native_thread_working' })
+    expect(busy.body.session).toEqual({ ended: false, working: true, agentState: 'running' })
+    expect(busy.body.summaryCodes).toContain('working')
+  })
+
+  it('attach off on this server: reattach no, reason attach_disabled, the rest still answered', async () => {
+    const r = rig({ attachEnabled: false })
+    const base = await start(r.deps)
+    const res = await cu(base)
+    expect(res.status).toBe(200)
+    expect(res.body.binding).toMatchObject({ reattach: 'no', reason: 'attach_disabled' })
+    expect(res.body.turns).toHaveLength(2)
+  })
+
+  // ---------------------------------------------------------------- transcript (row 4) and head (row 3)
+
+  it('row 4, the cursor: none gives the window (gap), the cursor back gives only what is new, an unknown one gives the window again', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const first = await cu(base)
+    expect(first.body).toMatchObject({ gap: true })
+    expect(first.body.turns).toHaveLength(2)
+    expect(first.body.summaryCodes[0]).toBe('new_window')
+    r.state.turns = [...r.state.turns, turn(3), turn(4)]
+    const next = await cu(base, `after=${encodeURIComponent(first.body.cursor)}`)
+    expect(next.body.gap).toBe(false)
+    expect(next.body.turns.map((t: CuTurn) => t.text)).toEqual(['turn 3', 'turn 4'])
+    expect(next.body.summary.startsWith('2 new messages.')).toBe(true)
+    const same = await cu(base, `after=${encodeURIComponent(next.body.cursor)}`)
+    expect(same.body).toMatchObject({ gap: false, turns: [] })
+    expect(same.body.summary.startsWith('No new messages.')).toBe(true)
+    const unknown = await cu(base, 'after=c1..AAAAAAAAAAAAAAAA')
+    expect(unknown.body.gap).toBe(true)
+    expect(unknown.body.turns).toHaveLength(4)
+  })
+
+  it('row 3, the thread moved at the Mac: changed true against the revision the page saw, false when it is the same, null with none', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const seen = (await cu(base)).body.revision
+    expect(seen).toBe(opaqueRevision('native-head-1'))
+    expect((await cu(base, `revision=${seen}`)).body.changed).toBe(false)
+    r.state.head = 'native-head-2'
+    r.clock.now += 3_000
+    const moved = await cu(base, `revision=${seen}`)
+    expect(moved.body).toMatchObject({ changed: true, revision: opaqueRevision('native-head-2') })
+    r.clock.now += 3_000
+    expect((await cu(base)).body.changed).toBeNull()
+  })
+
+  // ---------------------------------------------------------------- the question (row 5)
+
+  it('row 5, the open question with its id; the one he saw answered at the Mac; the one he saw gone with no answer', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    r.state.ask = { ask: 'Run the check?', choices: ['Yes', 'No'], stoppedAt: NOW - 5_000 }
+    const open = await cu(base)
+    expect(open.body.question).toEqual({ id: ASK_ID(NOW - 5_000), ask: 'Run the check?', choices: ['Yes', 'No'], stoppedAt: NOW - 5_000 })
+    expect(open.body.summaryCodes).toContain('waiting_question')
+    r.state.ask = null
+    r.state.answered = { by: 'mac', answeredAt: NOW - 1_000 }
+    const answered = await cu(base, `ask=${ASK_ID(NOW - 5_000)}`)
+    expect(answered.body.lastAnswered).toEqual({ by: 'mac', at: new Date(NOW - 1_000).toISOString() })
+    expect(answered.body.summaryCodes).toContain('answered_mac')
+    r.state.answered = null
+    r.clock.now += 3_000
+    const gone = await cu(base, `ask=${ASK_ID(NOW - 5_000)}`)
+    expect(gone.body.lastAnswered).toBeNull()
+    expect(gone.body.summaryCodes).toContain('question_closed')
+  })
+
+  it('turn-end asks not tracked (the switch off): questionKnown false, question null, no question sentence', async () => {
+    const r = rig()
+    r.deps.catchUp = { ...r.deps.catchUp!, asksTracked: () => false }
+    const base = await start(r.deps)
+    r.state.ask = { ask: 'x', choices: [], stoppedAt: NOW }
+    const res = await cu(base)
+    expect(res.body).toMatchObject({ questionKnown: false, question: null })
+    expect(res.body.summaryCodes).not.toContain('waiting_question')
+  })
+
+  // ---------------------------------------------------------------- queue (row 6), restart (row 8), prompts
+
+  it('row 6, queued turns with positions (waiting only), counted in the sentence; the broker\'s prompts for this session', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    r.state.queue = [{ clientTurnId: 'q1', status: 'delivering' }, { clientTurnId: 'q2', status: 'waiting' }, { clientTurnId: 'q3', status: 'waiting' }]
+    r.state.prompts = [{ id: 'pq-1', kind: 'permission' }]
+    const res = await cu(base)
+    expect(res.body.queued).toEqual([
+      { clientTurnId: 'q1', status: 'delivering', position: null },
+      { clientTurnId: 'q2', status: 'waiting', position: 1 },
+      { clientTurnId: 'q3', status: 'waiting', position: 2 },
+    ])
+    expect(res.body.queueKnown).toBe(true)
+    expect(res.body.pendingPrompts).toEqual([{ id: 'pq-1', kind: 'permission' }])
+    expect(res.body.summaryCodes).toContain('queued_n')
+  })
+
+  it('row 8, a restart under an open reader: restartedSince from the x-cos-boot header (never the URL)', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    expect((await cu(base, '', { 'x-cos-boot': 'boot-OLD' })).body).toMatchObject({ bootId: 'boot-A', restartedSince: true })
+    expect((await cu(base, '', { 'x-cos-boot': 'boot-A' })).body.restartedSince).toBe(false)
+    r.clock.now += 3_000
+    expect((await cu(base)).body.restartedSince).toBe(false)
+  })
+
+  it('an ended session: ended true, "This session has ended." follows the transcript clause, no link or working clause', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    r.state.ended = true
+    r.state.agentState = 'ended'
+    const res = await cu(base)
+    expect(res.body.session.ended).toBe(true)
+    expect(res.body.summaryCodes[1]).toBe('ended')
+    expect(res.body.summaryCodes.some((c: string) => c.startsWith('binding_') || c === 'working')).toBe(false)
+  })
+
+  // ---------------------------------------------------------------- refusals, limits, cap
+
+  it('refusals: bad_provider 400, invalid_request 400 for each malformed field, session_not_found 404, catch_up_read_failed 500', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const bad = await fetch(`${base}/api/agent-sessions/gemini/${SID}/catch-up`)
+    expect(bad.status).toBe(400)
+    expect((await bad.json()).reason).toBe('bad_provider')
+    for (const q of ['after=nope', 'binding=bad%20id&epoch=1', 'binding=bnd-0123456789abcdef', 'epoch=x', 'revision=has%20space', 'ask=turn_end:abc']) {
+      const res = await cu(base, q)
+      expect(res.status, q).toBe(400)
+      expect(res.body.reason, q).toBe('invalid_request')
+    }
+    r.state.view = 'missing'
+    expect((await cu(base)).body).toMatchObject({ reason: 'session_not_found' })
+    r.state.view = 'throws'
+    const failed = await cu(base, 'revision=r2')
+    expect(failed.status).toBe(500)
+    expect(failed.body.reason).toBe('catch_up_read_failed')
+  })
+
+  it('the same ask again under 3 s is replayed (cached true, nothing read again); over 20 a minute from one client is 429 with Retry-After', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    const a = await cu(base)
+    const b = await cu(base)
+    expect(a.body.cached).toBe(false)
+    expect(b.body.cached).toBe(true)
+    expect(r.state.viewCalls).toBe(1)
+    // Each a different request (a different revision seen), so none is a replay.
+    for (let i = 0; i < 19; i++) expect((await cu(base, `revision=r${i}`)).status).toBe(200)
+    const over = await cu(base, 'revision=over')
+    expect(over.status).toBe(429)
+    expect(over.body).toMatchObject({ reason: 'catch_up_rate_limited' })
+    expect(Number(over.retryAfter)).toBeGreaterThan(0)
+    r.clock.now = NOW + 61_000
+    expect((await cu(base, 'revision=after-a-minute')).status).toBe(200)
+  })
+
+  it('the 256 KB cap: oldest turns dropped, gap set, the body fits', async () => {
+    const r = rig()
+    const base = await start(r.deps)
+    r.state.turns = Array.from({ length: 40 }, (_, i) => ({ role: 'assistant' as const, text: `${i} ${'x'.repeat(20_000)}`, at: new Date(NOW + i).toISOString() }))
+    const res = await fetch(`${base}${catchUpPath()}`)
+    const text = await res.text()
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(256 * 1024)
+    const body = JSON.parse(text)
+    expect(body.gap).toBe(true)
+    expect(body.turns.length).toBeLessThan(40)
+    expect(body.turns[body.turns.length - 1].text.startsWith('39 ')).toBe(true)
+  })
+
+  it('without catch-up readers the route does not exist (an older wiring answers 404 like an older server)', async () => {
+    const base = await start(writeDeps())
+    const res = await fetch(`${base}${catchUpPath()}`)
+    expect(res.status).toBe(404)
+  })
+
+  // ---------------------------------------------------------------- read only, in fact (condition 1)
+
+  it('ZERO CALLS: across every state, catch-up calls only the registry\'s reads, the guard\'s peek, and never a delivery, a fork or openTurnEndAsk', async () => {
+    const r = rig()
+    const regCalls: string[] = []
+    const realReg = r.registry
+    const proxyReg = new Proxy(realReg, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv)
+        return typeof v === 'function' ? (...args: unknown[]) => { regCalls.push(String(prop)); return (v as (...a: unknown[]) => unknown).apply(target, args) } : v
+      },
+    }) as unknown as AgentSessionBindingRegistry
+    const guardCalls: string[] = []
+    const realGuard = new TargetGuard(null)
+    const proxyGuard = new Proxy(realGuard, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv)
+        return typeof v === 'function' ? (...args: unknown[]) => { guardCalls.push(String(prop)); return (v as (...a: unknown[]) => unknown).apply(target, args) } : v
+      },
+    }) as unknown as TargetGuard
+    const forbidden: string[] = []
+    r.deps.bindings = proxyReg as unknown as BindingRegistry
+    r.deps.guard = proxyGuard
+    r.deps.deliverAttachedTurn = async () => { forbidden.push('deliverAttachedTurn'); return { status: 'completed' } }
+    r.deps.deliverLiveTurn = (async () => { forbidden.push('deliverLiveTurn'); return null }) as never
+    r.deps.deliverCodexLiveTurn = (async () => { forbidden.push('deliverCodexLiveTurn'); return null }) as never
+    r.deps.forkThread = (async () => { forbidden.push('forkThread'); return null }) as never
+    r.deps.openTurnEndAsk = () => { forbidden.push('openTurnEndAsk'); return null }
+    const base = await start(r.deps)
+    const a = await attached(base)
+    regCalls.length = 0
+    guardCalls.length = 0
+    r.state.ask = { ask: 'q', choices: [], stoppedAt: NOW - 1 }
+    r.state.queue = [{ clientTurnId: 'q1', status: 'waiting' }]
+    await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}`)
+    r.clock.now = NOW + 31 * 60_000
+    await cu(base, `binding=${a.bindingId}&epoch=${a.epoch}&ask=${ASK_ID(NOW - 1)}`)
+    r.clock.now += 3_000
+    await cu(base)
+    r.state.working = true
+    r.clock.now += 3_000
+    await cu(base)
+    const allowedReg = new Set(['available', 'checkQueuedPrompt', 'getByThread', 'wouldBlockAttach'])
+    expect(regCalls.filter(c => !allowedReg.has(c))).toEqual([])
+    expect(regCalls).toContain('checkQueuedPrompt')
+    expect(regCalls).toContain('wouldBlockAttach')
+    expect(guardCalls.filter(c => c !== 'peekFencedReason')).toEqual([])
+    expect(guardCalls).toContain('peekFencedReason')
+    expect(forbidden).toEqual([])
+    // A read never extends the binding: its expiry is what the attach set.
+    expect(realReg.get(a.bindingId)?.expiresAt).toBe(NOW + 30 * 60_000)
+  })
+
+  /** A named answer through the real turns route (first-answer marks are set only there). */
+  async function namedAnswer(base: string, a: Awaited<ReturnType<typeof attached>>, clientTurnId: string, askId: string) {
+    return post(base, turnsPath(a.bindingId), { prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Yes', epoch: a.epoch, targetKey: a.targetKey, clientTurnId, turnEndAskId: askId })
+  }
+
+  it('first-answer marks: catch-up reports an accepted answer\'s mark but never drops it; the next answer is still refused as answered', async () => {
+    const r = rig()
+    r.state.ask = { ask: 'Run it?', choices: ['Yes', 'No'], stoppedAt: NOW - 5_000 }
+    r.deps.openTurnEndAsk = () => r.state.ask
+    const base = await start(r.deps)
+    const a = await attached(base)
+    const first = await namedAnswer(base, a, 'ct-cu-0001', ASK_ID(NOW - 5_000))
+    expect(first.body.outcome).toBe('completed')
+    // The session's hook has not landed: the ask is still open, and the mark holds it.
+    const seen = await cu(base, `ask=${ASK_ID(NOW - 5_000)}`)
+    expect(seen.body.lastAnswered).toMatchObject({ by: 'web' })
+    const second = await namedAnswer(base, a, 'ct-cu-0002', ASK_ID(NOW - 5_000))
+    expect(second.status).toBe(409)
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true })
+  })
+
+  it('first-answer marks: catch-up never sets one; an answer after a catch-up of the open ask is still delivered', async () => {
+    const r = rig()
+    r.state.ask = { ask: 'Run it?', choices: ['Yes', 'No'], stoppedAt: NOW - 5_000 }
+    r.deps.openTurnEndAsk = () => r.state.ask
+    const base = await start(r.deps)
+    const a = await attached(base)
+    await cu(base, `ask=${ASK_ID(NOW - 5_000)}`)
+    await cu(base, `ask=${ASK_ID(NOW - 5_000)}&binding=${a.bindingId}&epoch=${a.epoch}`)
+    const res = await namedAnswer(base, a, 'ct-cu-0003', ASK_ID(NOW - 5_000))
+    expect(res.body.outcome).toBe('completed')
+  })
+})

@@ -420,6 +420,26 @@ describe('a target has at most one live binding', () => {
     expect(reg2.create(attachRequest({ bindingId: 'bind-10', nativeThreadId: OTHER, now: T0 + IDLE_LEASE_YIELD_MS - 1 })).reason).toBe('target_busy')
   })
 
+  it('X1 catch-up: wouldBlockAttach answers as attachBlocked does and never releases a dead boot\'s pin (attachBlocked does)', () => {
+    const reg = open({ pinBootReap: () => true })
+    const first = attachLive(reg)
+    reg.pin(first.bindingId, 'job-a', T0 + 1_000)
+    reg.unpin(first.bindingId, 'job-a', T0 + 2_000)
+    const early = T0 + 2_000 + IDLE_LEASE_YIELD_MS - 1
+    const later = T0 + 2_000 + IDLE_LEASE_YIELD_MS
+    expect(reg.wouldBlockAttach('claude', THREAD, early)).toBe(true)
+    expect(reg.wouldBlockAttach('claude', THREAD, later)).toBe(false)
+    expect(reg.wouldBlockAttach('claude', 'not a thread id', later)).toBe(false)
+    const reaps: string[] = []
+    const realReap = reg.reapOrphanedPins.bind(reg)
+    reg.reapOrphanedPins = ((now: number, only?: string) => { reaps.push('reap'); return realReap(now, only) }) as typeof reg.reapOrphanedPins
+    reg.wouldBlockAttach('claude', THREAD, later)
+    expect(reaps).toEqual([])
+    // The probe can fail: the side-effecting twin does reap.
+    reg.attachBlocked('claude', THREAD, later)
+    expect(reaps).toEqual(['reap'])
+  })
+
   it('6.49.1: a PINNED lease never yields, however old', () => {
     const reg = open()
     const first = attachLive(reg)

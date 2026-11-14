@@ -135,6 +135,7 @@ import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, QUEUE
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
 import { TURN_END_ASK_ID_RE, turnEndAskId } from '../lib/session-state-derive.js'
 import { isTurnEndAnswerPrompt, turnAskAnswerSurface, type VisibleTurnAsk } from '../lib/turn-end-ask.js'
+import { CATCH_UP_MAX_BYTES, CATCH_UP_TURNS, CATCH_UP_WAIT_REASONS, CatchUpLimiter, answeredSurface, bindingReason, bindingStateFor, catchUpSummary, isCursor, turnsSince } from '../lib/session-catch-up.js'
 import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
@@ -159,6 +160,10 @@ import {
 export interface BindingRegistry {
   /** Every binding the server knows, terminal ones included. Filtering is this route's job. */
   list: () => readonly NativeBinding[]
+  /** X1 (session catch-up): the binding holding a thread now, or null. A read. */
+  getByThread?: (provider: string, nativeThreadId: string, now: number) => NativeBinding | null
+  /** X1 (session catch-up): `attachBlocked` with no side effect (no lazy pin release). A read. */
+  wouldBlockAttach?: (provider: string, nativeThreadId: string, now: number) => boolean
   /**
    * Idempotency. Optional so a caller can wire a registry without them, but a
    * turns route built on such a registry cannot make a repeated POST safe - the
@@ -321,6 +326,28 @@ export type AttachedTurnResult =
    */
   | { ok: boolean; delivery: 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' | 'cancelled' }
 
+/** X1 (session catch-up): one session's turns and state, the detail route's BROWSER answer (readSessionCatchUpView). */
+export interface CatchUpView {
+  turns: Array<{ role: string; text: string; at?: string }>
+  agentState: string | null
+  ended: boolean
+  working: boolean
+}
+export interface CatchUpReaders {
+  /** Null: no such session. Throws only when the transcript cannot be read at all. */
+  view: (provider: 'claude' | 'codex' | 'cursor', sessionId: string, opts: { cards: boolean; turns: number }) => Promise<CatchUpView | null>
+  /** The open turn-end ask, peeked (TurnEndAskTracker.peekAsk): never aged out or reported by this read. */
+  peekAsk?: (sessionId: string) => VisibleTurnAsk | null
+  /** Turn-end asks are tracked at all (COS_TURN_END_ASKS on). False: `questionKnown` is false. */
+  asksTracked?: () => boolean
+  /** The thread's queue rows (readQueue: a file read, pruned in memory, never written). */
+  queued?: (provider: string, threadId: string, now: number) => ReadonlyArray<{ clientTurnId: string; status: string }>
+  /** The broker's open prompts for this session (PermissionBroker.peekPendingFor: never settles one). */
+  pendingPrompts?: (sessionId: string) => ReadonlyArray<{ id: string; kind: string }>
+  /** This server's boot (serverMetrics.bootId). */
+  bootId: string
+}
+
 export interface AgentSessionBindingsDeps {
   /**
    * G2 authority Tier 1, with web origin (6.99.29): where each turn came from. With it, every turn
@@ -393,6 +420,12 @@ export interface AgentSessionBindingsDeps {
   openTurnEndAsk?: (sessionId: string) => VisibleTurnAsk | null
   /** X1 (7.0.36): who answered the session's ask that stopped at `stoppedAt` (a prompt cleared it), or null. */
   turnEndAskAnswered?: (sessionId: string, stoppedAt: number) => { by: string } | null
+  /**
+   * X1 (session catch-up, the build after 7.0.42): the readers GET .../catch-up uses. Every one is a READ with no side
+   * effect (the contract in lanes/X1_session_refresh_scope.md; the zero-calls test pins it). Absent: the route is not
+   * mounted, so an older wiring answers 404 exactly as an older server does.
+   */
+  catchUp?: CatchUpReaders
 
   /** `deliverAttachedTurn` from `server/lib/attached-provider-adapter.ts`. */
   deliverAttachedTurn?: (request: AttachedTurnRequest) => Promise<unknown> | unknown
@@ -1246,6 +1279,15 @@ export class TargetGuard {
       spawns: evidence.spawns,
     })
     this.persistFences([...this.fences.values()])
+  }
+
+  /**
+   * X1 (session catch-up): the fence on a target, read with NO side effect. Unlike fencedReason, a settled-cancel fence
+   * is not re-checked or released here, so it may still read as fenced (the cautious answer: catch-up says `no`).
+   */
+  peekFencedReason(targetKey: string): WriteRefusal | null {
+    const row = this.fences.get(targetKey)
+    return row === undefined ? null : row.reason as WriteRefusal
   }
 
   fencedReason(targetKey: string): WriteRefusal | null {
@@ -2242,6 +2284,190 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       cancel: cancelFieldFor(provider, threadId, cancelReason),
       ...(await continueNoteFor(provider, threadId, continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]))),
     })
+  })
+
+  // ------------------------------------------------------------------ catch-up
+  //
+  // GET /api/agent-sessions/:provider/:threadId/catch-up  (X1, the build after 7.0.42; Work card
+  // task:personal:ce1f04b2f016). ONE session, caught up at one instant, for the reader's "Check for new" line and the
+  // pull from its title strip. Contract: lanes/X1_session_refresh_scope.md (response shape, verdicts, refusals, the
+  // fixed sentence set).
+  //
+  // READ ONLY, IN FACT (lead 15:59, condition 1). It calls readers only: the detail's browser view
+  // (readSessionCatchUpView, `observe: false`), the registry's checkQueuedPrompt, getByThread and wouldBlockAttach (no
+  // lazy pin release), the guard's peekFencedReason (no settled-cancel release), the occupancy detector, the head
+  // reader, the tracker's peekAsk and answeredAsk, the first-answer marks by get() only, readQueue, and the broker's
+  // peekPendingFor (never settles). It never sends, resends, attaches, pins, renews (a read never extends a binding's
+  // 30 minutes), marks, answers or drains, and logs nothing per request. Its limiter's counters are memory only.
+  // The re-attach stays the page's own POST .../attach, made only when this says "safe", inside his refresh.
+  const catchUpLimiter = new CatchUpLimiter()
+  const CATCH_UP_THREAD_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+  const CATCH_UP_REVISION_RE = /^[A-Za-z0-9._:-]{1,128}$/
+  type CatchUpBinding = { state: 'active' | 'detached' | 'expired' | 'unknown' | 'none'; holder: 'this' | 'other' | 'none'; otherWorking: boolean; reattach: 'already' | 'safe' | 'not_now' | 'no'; reason: string | null }
+  const catchUpBinding = (provider: string, threadId: string, bindingId: string | null, epoch: number | null, now: number, working: boolean): CatchUpBinding => {
+    const out: CatchUpBinding = { state: 'none', holder: 'none', otherWorking: false, reattach: 'no', reason: null }
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(threadId)) return { ...out, state: bindingId !== null ? 'unknown' : 'none', reason: 'unsupported_provider' }
+    let available = false
+    try { available = deps.bindings.available() === true } catch { return { ...out, state: bindingId !== null ? 'unknown' : 'none', reason: 'binding_registry_unavailable' } }
+    if (!available) return { ...out, state: bindingId !== null ? 'unknown' : 'none', reason: 'binding_registry_degraded' }
+    const key = targetKey(provider, threadId)
+    if (bindingId !== null && epoch !== null) {
+      let check: RegistryCheck | null = null
+      try { check = deps.bindings.checkQueuedPrompt ? deps.bindings.checkQueuedPrompt({ bindingId, epoch, targetKey: key }, now) : null } catch { check = null }
+      if (check && check.ok === true) return { state: 'active', holder: 'this', otherWorking: false, reattach: 'already', reason: null }
+      const reason = bindingReason(check ? (check as { reason?: string }).reason : 'binding_registry_unavailable')
+      out.state = bindingStateFor(reason)
+      out.reason = reason
+    }
+    let holder: NativeBinding | null = null
+    try { holder = deps.bindings.getByThread ? deps.bindings.getByThread(provider, threadId, now) : null } catch { holder = null }
+    if (holder) { out.holder = 'other'; out.otherWorking = isPinned(holder) }
+    if (!attachEnabled) return { ...out, reattach: 'no', reason: 'attach_disabled' }
+    if (!canDetect) return { ...out, reattach: 'no', reason: 'detector_unavailable' }
+    const fenced = guard.peekFencedReason(key)
+    if (fenced !== null) return { ...out, reattach: 'no', reason: fenced }
+    let occupancy: AttachabilityBody
+    try { occupancy = runOccupancy(provider, threadId) } catch { return { ...out, reattach: 'no', reason: 'probe_failed' } }
+    if (!occupancy.attachable) {
+      const reason = String(occupancy.reason ?? 'probe_failed')
+      return { ...out, reattach: CATCH_UP_WAIT_REASONS.has(reason) || queueableRefusal(reason) ? 'not_now' : 'no', reason }
+    }
+    let blocked = false
+    try { blocked = deps.bindings.wouldBlockAttach ? deps.bindings.wouldBlockAttach(provider, threadId, now) === true : holder !== null } catch { blocked = true }
+    if (blocked) return { ...out, reattach: 'not_now', reason: out.otherWorking ? 'native_turn_in_progress' : 'native_target_busy' }
+    if (working) return { ...out, reattach: 'not_now', reason: 'native_thread_working' }
+    return { ...out, reattach: 'safe' }
+  }
+  if (deps.catchUp) router.get('/agent-sessions/:provider/:threadId/catch-up', async (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const cu = deps.catchUp!
+    const provider = String(req.params.provider ?? '').toLowerCase()
+    if (provider !== 'claude' && provider !== 'codex' && provider !== 'cursor') {
+      res.status(400).json({ error: 'provider must be claude, codex, or cursor', reason: 'bad_provider' })
+      return
+    }
+    const threadId = String(req.params.threadId ?? '')
+    const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+    const after = str(req.query.after)
+    const bindingId = str(req.query.binding)
+    const epochRaw = str(req.query.epoch)
+    const revisionSeen = str(req.query.revision)
+    const askSeen = str(req.query.ask)
+    const cards = req.query.cards === '1'
+    const bootHeader = req.headers['x-cos-boot']
+    const bootSeen = typeof bootHeader === 'string' && bootHeader.length > 0 ? bootHeader : null
+    const epoch = epochRaw === null ? null : /^\d{1,15}$/.test(epochRaw) ? Number(epochRaw) : Number.NaN
+    if (!CATCH_UP_THREAD_RE.test(threadId)
+      || (after !== null && !isCursor(after))
+      || (bindingId !== null && !BINDING_ID_RE.test(bindingId))
+      || Number.isNaN(epoch) || (bindingId !== null && epoch === null)
+      || (revisionSeen !== null && !CATCH_UP_REVISION_RE.test(revisionSeen))
+      || (askSeen !== null && !TURN_END_ASK_ID_RE.test(askSeen))
+      || (bootSeen !== null && bootSeen.length > 128)) {
+      res.status(400).json({ error: 'invalid catch-up request', reason: 'invalid_request' })
+      return
+    }
+    const now = readNow() ?? Date.now()
+    const client = `${req.socket?.remoteAddress ?? ''}|${req.headers['x-cos-token'] ? 'token' : 'cookie'}`
+    const requestKey = [provider, threadId, after, bindingId, epochRaw, revisionSeen, askSeen, cards ? '1' : '', bootSeen].join('\u0001')
+    const limited = catchUpLimiter.check(client, requestKey, now)
+    if (limited?.kind === 'replay') { res.json({ ...limited.body, cached: true }); return }
+    if (limited?.kind === 'refused') {
+      res.set('Retry-After', String(limited.retryAfterS))
+      res.status(429).json({ error: 'too many catch-ups', reason: 'catch_up_rate_limited', retryAfter: limited.retryAfterS })
+      return
+    }
+
+    let view: CatchUpView | null
+    try {
+      view = await cu.view(provider, threadId, { cards, turns: CATCH_UP_TURNS })
+    } catch (error) {
+      console.error(`[catch-up] read failed provider=${provider}: ${error instanceof Error ? error.message : error}`)
+      res.status(500).json({ error: 'Failed to read agent session', reason: 'catch_up_read_failed' })
+      return
+    }
+    if (!view) { res.status(404).json({ error: 'Session not found', reason: 'session_not_found' }); return }
+
+    const since = turnsSince(view.turns, after)
+    let revision: string | null = null
+    if (isBindableProvider(provider) && isValidNativeThreadId(threadId)) {
+      try { revision = (await readHead(provider, threadId))?.digest ?? null } catch { revision = null }
+    }
+    const changed = revision !== null && revisionSeen !== null ? revision !== revisionSeen : null
+
+    let asksOn = false
+    try { asksOn = typeof cu.asksTracked === 'function' && cu.asksTracked() === true } catch { asksOn = false }
+    let open: VisibleTurnAsk | null = null
+    if (asksOn && typeof cu.peekAsk === 'function') { try { open = cu.peekAsk(threadId) } catch { open = null } }
+    const openId = open ? turnEndAskId(open.stoppedAt) : null
+    const question = open ? { id: openId, ask: open.ask, choices: [...open.choices], stoppedAt: open.stoppedAt } : null
+    let lastAnswered: { by: string; at: string | null } | null = null
+    let questionClosed = false
+    if (asksOn && askSeen !== null) {
+      // The first-answer marks by get() only: a mark is never set or dropped here.
+      const mark = answeredAsks.get(`claude:${threadId.toLowerCase()}:${askSeen}`)
+      let answered: { by: string; answeredAt?: number } | null = null
+      if (askSeen !== openId) {
+        try { answered = (deps.turnEndAskAnswered?.(threadId, Number(askSeen.slice('turn_end:'.length))) as { by: string; answeredAt?: number } | null) ?? null } catch { answered = null }
+      }
+      if (!answered && mark) answered = { by: mark.by, answeredAt: mark.at }
+      if (answered) lastAnswered = { by: answered.by, at: typeof answered.answeredAt === 'number' && Number.isFinite(answered.answeredAt) ? new Date(answered.answeredAt).toISOString() : null }
+      else if (askSeen !== openId) questionClosed = true
+    }
+
+    let pendingPrompts: Array<{ id: string; kind: string }> = []
+    if (typeof cu.pendingPrompts === 'function') { try { pendingPrompts = cu.pendingPrompts(threadId).map(p => ({ id: String(p.id), kind: String(p.kind) })) } catch { pendingPrompts = [] } }
+    let queueKnown = typeof cu.queued === 'function'
+    let queued: Array<{ clientTurnId: string; status: string; position: number | null }> = []
+    if (queueKnown) {
+      try {
+        let position = 0
+        queued = cu.queued!(provider, threadId, now).map(row => ({ clientTurnId: row.clientTurnId, status: row.status, position: row.status === 'waiting' ? ++position : null }))
+      } catch { queueKnown = false; queued = [] }
+    }
+    const waitingToSend = queued.filter(row => row.status === 'waiting' || row.status === 'delivering').length
+
+    const binding = catchUpBinding(provider, threadId, bindingId, epoch, now, view.working)
+    const restartedSince = bootSeen !== null && bootSeen !== cu.bootId
+    let turns = since.turns
+    let gap = since.gap
+    const build = () => {
+      const { summary, codes } = catchUpSummary({
+        gap, newTurns: turns.length, ended: view!.ended, answeredBy: answeredSurface(lastAnswered?.by), questionClosed,
+        waitingQuestion: question !== null, reattach: binding.reattach, holder: binding.holder, restarted: restartedSince,
+        working: view!.working, queued: waitingToSend,
+      })
+      return {
+        at: new Date(now).toISOString(),
+        cached: false,
+        bootId: cu.bootId,
+        restartedSince,
+        session: { ended: view!.ended, working: view!.working, agentState: view!.agentState },
+        turns,
+        cursor: since.cursor,
+        gap,
+        revision,
+        changed,
+        question,
+        questionKnown: asksOn,
+        lastAnswered,
+        pendingPrompts,
+        binding,
+        queued,
+        queueKnown,
+        summary,
+        summaryCodes: codes,
+      }
+    }
+    let body = build()
+    // The cap: drop the oldest turns until it fits, and say the window is partial.
+    while (turns.length > 0 && Buffer.byteLength(JSON.stringify(body)) > CATCH_UP_MAX_BYTES) {
+      turns = turns.slice(1)
+      gap = true
+      body = build()
+    }
+    catchUpLimiter.record(client, requestKey, now, body)
+    res.json(body)
   })
 
   // ------------------------------------------------------------------ cancel

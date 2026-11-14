@@ -1,4 +1,5 @@
 import { webPushRoutesMounted } from '../lib/web-push-mounted.js'
+import { sessionCatchUpMounted } from '../lib/session-catch-up.js'
 import { API_AUTH_BY_LOCAL } from '../lib/api-auth.js'
 import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
 import { calendarStatus } from '../lib/calendar-source.js'
@@ -340,6 +341,9 @@ healthRouter.get('/health', async (_req, res) => {
     // only when index.ts mounted them at boot, which it does only with COS_WEB_PUSH on (lib/web-push-mounted.ts).
     // An older server omits it: treat absent as false.
     webPush: webPushRoutesMounted(),
+    // X1 (session catch-up, the build after 7.0.42): GET /api/agent-sessions/:provider/:id/catch-up exists. The page
+    // shows "Check for new" and the pull only when this is true; an older server omits it (read as false).
+    sessionCatchUp: sessionCatchUpMounted(),
     // Static: this build carries the scheduler. The live schedule is under
     // capabilities.morningBrief and may be absent while the runtime boots.
     morningBrief: true,

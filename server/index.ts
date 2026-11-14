@@ -33,7 +33,8 @@ import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
 import { sessionIndexRouter } from './routes/session-index.js'
-import { agentSessionsRouter } from './routes/agent-sessions.js'
+import { agentSessionsRouter, readSessionCatchUpView } from './routes/agent-sessions.js'
+import { markSessionCatchUpMounted } from './lib/session-catch-up.js'
 import { createSessionOrganizerRouter } from './routes/session-organizer.js'
 import { agentSessionStreamRouter } from './routes/agent-session-stream.js'
 import { createLiveEventsRouter, liveEventsEnabled, realLiveSources } from './routes/live-events.js'
@@ -41,7 +42,7 @@ import { LiveEventsHub } from './lib/live-events.js'
 import { createAttachedTurnStream } from './lib/session-stream-producer.js'
 import { claudeSessionsRouter } from './routes/claude-sessions.js'
 import { createSessionHooksRouter } from './routes/session-hooks.js'
-import { openTurnEndAsk, turnEndAskAnswered, cachedHookStatus, isCosSpawnedPid, registryEntrypointSync, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
+import { openTurnEndAsk, peekTurnEndAsk, turnEndAsksTracked, turnEndAskAnswered, cachedHookStatus, isCosSpawnedPid, registryEntrypointSync, claudeDeskRunning, onSessionRowEnded, deskIdleSeconds, deskTurnEndedAt, haltHandedOffTurn, providerHookSeen, registerDrainKickStats, registryIdleAfterStop, sessionHooksEnabled, sessionSignalStore, signalFor, startSessionHooksRuntime } from './lib/session-hooks-runtime.js'
 import { clearingHaltOnSpawn, writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, setDeskCancelReaders, threadCancel } from './lib/session-cancel.js'
@@ -1531,7 +1532,18 @@ app.use('/api', createAgentSessionBindingsRouter({
     haltHandedOffTurn: (sessionId, marker, turn) => haltHandedOffTurn(sessionId, marker, turn),
     ledger: row => appendSessionCancelLedger(row),
   },
+  // X1 (session catch-up, the build after 7.0.42): GET .../catch-up, read only (lanes/X1_session_refresh_scope.md).
+  catchUp: {
+    view: (provider, sessionId, opts) => readSessionCatchUpView(provider, sessionId, opts),
+    peekAsk: sessionId => peekTurnEndAsk(sessionId),
+    asksTracked: () => turnEndAsksTracked(),
+    queued: (provider, threadId, now) => readQueue(provider, threadId, now),
+    pendingPrompts: sessionId => permissionBroker.peekPendingFor(sessionId),
+    bootId: serverMetrics.bootId,
+  },
 }))
+// health's features.sessionCatchUp: the route above exists.
+markSessionCatchUpMounted()
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)
 app.use('/api', meetingRouter)
