@@ -29,7 +29,7 @@ function rule(css: string, sel: string): string {
 }
 
 /** The frame's code from app.js (pgFrameOn, pgFrameSync, its row), run against a fake <html>, shell, rail and workspace. */
-function frame(hidden = false, bad = false) {
+function frame(hidden = false, bad = false, applies = true) {
   const cls = new Set<string>(), rows: Array<{ what: string; data: any }> = [], hooks: Array<(w: string) => void> = []
   const de = { classList: { toggle: (c: string, on: boolean) => { if (on) cls.add(c); else cls.delete(c) }, contains: (c: string) => cls.has(c) } }
   const box = (t: number, b: number) => ({ getBoundingClientRect: () => ({ top: t, bottom: b }) })
@@ -37,14 +37,16 @@ function frame(hidden = false, bad = false) {
   const rail = box(0, 787), scrolled: string[] = []
   const field = { id: 'f', scrollIntoView: (o: any) => scrolled.push(o.block) }, outside = { id: 'o', scrollIntoView: (o: any) => scrolled.push('outside') }
   const ws = { scrollTop: 4200, scrollHeight: 17400, contains: (e: any) => e === field }
-  const win = { COSWeb: { onKeyboard: (fn: (w: string) => void) => hooks.push(fn) }, scrollY: 0, getComputedStyle: () => ({ position: 'static' }) }
+  const media: string[] = []
+  const win = { COSWeb: { onKeyboard: (fn: (w: string) => void) => hooks.push(fn) }, scrollY: 0, getComputedStyle: () => ({ position: 'static' }),
+    matchMedia: (q: string) => { media.push(q); return { matches: applies } } }
   const doc: any = { documentElement: de, body: {}, activeElement: field, scrollingElement: { scrollHeight: 787 }, querySelector: (q: string) => (q === '.rail' ? rail : null) }
   const src = APP.slice(APP.indexOf('  var PG_FRAME_PANES'), APP.indexOf('  var RD_FRAME = { hooked: false, n: 0 };'))
   const make = new Function('document', 'window', 'getComputedStyle', '$', 'parseRoute', 'viewportFit', 'layoutCrumb', 'requestAnimationFrame',
     src + '\nreturn { pgFrameSync: pgFrameSync, pgFrameOn: pgFrameOn };')
   const api = make(doc, win, win.getComputedStyle, (id: string) => (id === 'app-shell' ? shell : id === 'workspace' ? ws : null), () => ({ pane: 'today', args: [] }),
     () => ({ bad, top: 0, height: 787 }), (what: string, data: any) => { rows.push({ what, data }); return true }, (fn: () => void) => fn())
-  return { cls, rows, hooks, doc, field, outside, scrolled, shellNoClass: () => { delete (shell as any).classList }, ...api }
+  return { cls, rows, hooks, doc, field, outside, scrolled, media, shellNoClass: () => { delete (shell as any).classList }, ...api }
 }
 
 describe('Settings frame: the rail stays a column of the visible box', () => {
@@ -86,6 +88,15 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
     f.doc.activeElement = f.doc.body; f.hooks[0]('open'); expect(f.scrolled).toHaveLength(2)  // nothing focused
     f.doc.activeElement = f.field; f.pgFrameSync({ pane: 'today', args: [] }); f.hooks[0]('open')
     expect(f.scrolled).toHaveLength(2)                                                          // not framed: Safari's own pan
+  })
+  it('under 600 px or with a mouse (the CSS frame does not apply), a keyboard opening in Settings scrolls nothing', () => {
+    const f = frame(false, false, false)
+    f.pgFrameSync({ pane: 'settings', args: [] }); expect(f.cls.has('pg-frame')).toBe(true)
+    f.hooks[0]('open'); f.hooks[0]('move')
+    expect(f.scrolled).toHaveLength(0)
+    expect(f.media).toContain('(min-width: 600px) and (pointer: coarse)')
+    // the query is the CSS block's own
+    expect(CSS).toContain('@media (min-width: 600px) and (pointer: coarse) {\n  html.pg-frame,')
   })
   it('the route runs it beside the other frames; the sign-in gate takes the class off', () => {
     expect(APP).toContain("if (typeof rdFrameSync === 'function') rdFrameSync(r);\n    if (typeof pgFrameSync === 'function') pgFrameSync(r);")

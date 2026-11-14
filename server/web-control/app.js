@@ -3213,6 +3213,12 @@
     } catch (_e) { /* a report never stops the page */ }
     return false;
   }
+  // The frame applies only where app.css's block does (600 px and up, touch). The class alone is set at every width, so
+  // anything that acts on the frame asks this (Q1 08:4x: under 600 px a keyboard must not scroll the page).
+  function pgFrameApplies() {
+    var de = document.documentElement;
+    return !!(de && de.classList && de.classList.contains('pg-frame') && window.matchMedia && window.matchMedia('(min-width: 600px) and (pointer: coarse)').matches);
+  }
   function pgFrameHook() {
     if (PG_FRAME_LOG.hooked || !window.COSWeb || typeof window.COSWeb.onKeyboard !== 'function') return;
     PG_FRAME_LOG.hooked = true;
@@ -3220,7 +3226,7 @@
       if (what === 'after') pgFrameCrumb('kb-after');
       // The keyboard up in a framed pane: the field he tapped is brought into the workspace's view, 'nearest', so a field
       // already in view moves nothing. Safari's own pan moves the visual viewport, not a scroller inside the page.
-      if ((what === 'open' || what === 'move') && document.documentElement.classList.contains('pg-frame')) {
+      if ((what === 'open' || what === 'move') && pgFrameApplies()) {
         var f = document.activeElement, ws = $('workspace');
         if (f && ws && f !== document.body && ws.contains(f) && f.scrollIntoView) requestAnimationFrame(function () { if (document.activeElement === f) f.scrollIntoView({ block: 'nearest' }); });
       }
