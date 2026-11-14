@@ -1,7 +1,26 @@
-## 7.0.43 (unreleased)
+## 7.0.43 - The question card in a session's reader no longer hides behind its own Submit, the plan ruler on Usage, and Refresh that keeps the page
+
+2026-11-14. A fix build on 7.0.42; everything in 7.0.42 is in this update too (see its entry).
 
 **On for everyone, one line each:**
-- Control Web: in a session's reader on a phone, a waiting question's card no longer draws "Not answered yet", Submit and Leave for the Mac on top of the question and its options. The reader's scroll area is smaller than the card (110 px folded), so the sticky footer pinned itself over them; in the reader the card now scrolls in order (question, options, then Submit). Today's page and sheet keep the sticky footer. (F1, lead 16:46, W1's OK; reader-qfoot-web.test.ts; measured on 7.0.42 in lanes/F1_evidence/reader_qcard_finding.md)
+- Control Web: in a session's reader on a phone, a waiting question's card no longer draws "Not answered yet", Submit and Leave for the Mac over the question and its options. The reader's scroll area is smaller than the card at every size (110 px folded), so the sticky footer pinned itself over them. In the reader the card now scrolls in order: question, options, then Submit. Today's page and sheet keep the sticky footer.
+- Control Web and server: Sessions > Usage gains the plan ruler at its top, closed by default (Miles: "Collapsed, tap to open"). The closed row shows the tool closest to its plan limit ("96% used, resets tonight 10:31 PM") and the rest in quiet words; a tap opens each tool's week as a ruler. It reads plan usage when Usage opens and the last reading is older than 10 minutes, or on Refresh when it is older than 2 minutes, never on a timer (Miles 12:38: "When I open Usage"). Each read is one `claude -p` usage request (no model turn) and one `codex app-server` rate-limit read.
+- Control Web: Refresh on Threads, Settings and Dictation keeps what is on screen while it reads again and swaps the new rows in place, instead of going blank. Text being typed keeps its text, focus and caret. A failed refresh keeps the old rows with "Could not refresh. Showing what was there at 3:41 PM." and Try again.
+- server: /api/health says whether the push routes are mounted (`features.webPush`, from the mount itself, never the environment). It changes nothing a person sees; the Settings button that reads it comes in a later build.
+
+**In detail:**
+- **The question card in the reader.** (F1, W1's file.) One rule in questions.css: `#session-questions .sq-foot { position: static; }`. Measured in WebKit on 7.0.42: 44 to 60 px of overlap when scrolled, and folded the reader opened showing only the footer; after, 0 px at 382 x 557, 449 x 798 and 1119 x 787. Still true after this fix: folded, the reader opens at its newest line, so the card's end shows first until he scrolls up (the folded-reader scope, lanes/F1_folded_reader_scope.md, is the next step).
+- **The plan ruler.** (U1.) `GET /api/usage/plan` answers for Claude and Codex the share of the plan's week used, the share gone and when it resets; for Cursor, "No plan reading". A failed, paused, missing or ended reading has no number, so it never reads as 0% used. An estimate of when a tool reaches its limit shows only past the first 12 hours of its week. Any failed read holds that tool for 10 minutes; three failed reads in a row pause it for an hour. This browser remembers open or closed.
+- **Refresh keeps the page.** (F1, triage A4 step 1.) A Settings section whose read fails on refresh keeps what it showed; a first load that fails still shows its error. After adding a dictionary word or correction, the list re-reads without going blank.
+- **The push flag.** (X1.) Set only by index.ts right after it mounts the push router, inside `if (webPushEnabled())`; a throw while mounting leaves it false. An older server omits it, which reads as false.
+
+**Not covered, said plainly:**
+- **Not on a real phone:** the card fix, the ruler and Refresh were measured with Control Web tests and WebKit on fake routes.
+- **Two quick taps on Settings Refresh:** the second answer lands as a plain load (no kept sections, no typed-text restore, no failed line). Rare; not fixed here.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
 
 ## 7.0.42 - Notes in the COS thread, COS's look-back by day, and https on the ts.net name that holds across a restart
 
