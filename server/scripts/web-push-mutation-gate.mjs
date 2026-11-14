@@ -62,7 +62,9 @@ const mutations = [
   // Lead 15:18: health's features.webPush says whether the routes exist.
   ["health-flag-always-true", "server/routes/health.ts", "webPush: webPushRoutesMounted(),", "webPush: true,", "is false while the push routes are not mounted", ["server/routes/health.test.ts"]],
   ["mark-is-noop", "server/lib/web-push-mounted.ts", "  mounted = true\n", "", "is false while the push routes are not mounted", ["server/routes/health.test.ts"]],
-  ["index-mark-missing", "server/index.ts", "  markWebPushRoutesMounted()\n}", "}", "index.ts marks it inside the COS_WEB_PUSH block", ["server/routes/health.test.ts"]]
+  ["index-mark-missing", "server/index.ts", "  markWebPushRoutesMounted()\n}", "}", "index.ts marks it inside the COS_WEB_PUSH block", ["server/routes/health.test.ts"]],
+  ["mark-after-block", "server/index.ts", "  markWebPushRoutesMounted()\n}", "}\nmarkWebPushRoutesMounted()", "index.ts marks it inside the COS_WEB_PUSH block", ["server/routes/health.test.ts"]],
+  ["mounted-starts-true", "server/lib/web-push-mounted.ts", "let mounted = false", "let mounted = true", "a freshly loaded module reads false", ["server/lib/web-push-mounted.test.ts"]]
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }

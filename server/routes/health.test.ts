@@ -158,7 +158,10 @@ describe('features.webPush (X1, lead 15:18: W1\'s Settings button)', () => {
     expect(block.indexOf('markWebPushRoutesMounted()')).toBeGreaterThan(block.indexOf('app.use(\'/api\', createWebPushRouter({'))
     expect(block.indexOf('app.use(\'/api\', createWebPushRouter({')).toBeGreaterThan(0)
     expect(index.split('markWebPushRoutesMounted()').length - 1).toBe(1)
+    // Q1 P4: inside the block's OWN closing brace, at its indent, not after the brace.
+    expect(index).toContain("  // health's features.webPush: true only now that the routes exist.\n  markWebPushRoutesMounted()\n}\napp.use('/api', diagRouter)")
   })
+
 })
 
 describe('morning brief capability', () => {
