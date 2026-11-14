@@ -797,19 +797,25 @@ export class CosThread {
       const stop = from + entries.length
       // Chats already sent (before `from`) whose job ended since the cursor was given: the page replaces them by id.
       const updated: CosThreadChatEntry[] = []
+      // The ends this page carries, up to. When the byte cap cuts the updates, `newest` says only as far as the last one
+      // sent and `more` is set, so the page asks again and the rest are never lost (Q1 2026-11-14).
+      let endsThrough = this.answerSeq
       if (query.afterAnswers !== undefined) {
         const changed = [...this.answers.entries()]
           .filter(([clientId, a]) => a.seq > query.afterAnswers! && (this.historyByClient.get(clientId) ?? Infinity) < from)
           .sort((a, b) => a[1].seq - b[1].seq)
-          .map(([clientId]) => this.historyByClient.get(clientId)!)
-        for (const row of this.readTurns(changed)) {
-          const e = this.chatEntry(row)
+        const rows = this.readTurns(changed.map(([clientId]) => this.historyByClient.get(clientId)!))
+        for (let i = 0; i < rows.length; i++) {
+          const e = this.chatEntry(rows[i]!)
           const b = size(e)
-          if (entries.length + updated.length && bytes + b > cap) break
+          if (entries.length + updated.length && bytes + b > cap) {
+            endsThrough = i > 0 ? changed[i - 1]![1].seq : query.afterAnswers
+            break
+          }
           updated.push(e); bytes += b
         }
       }
-      return { protocol: 1, entries, older: from > 0 ? cursorOf(from) : null, newest: cursorOf(stop, this.answerSeq), more: stop < n, updated }
+      return { protocol: 1, entries, older: from > 0 ? cursorOf(from) : null, newest: cursorOf(stop, endsThrough), more: stop < n || endsThrough < this.answerSeq, updated }
     }
     const end = Math.min(Math.max(0, query.before ?? n), n)
     const start = Math.max(0, end - limit)

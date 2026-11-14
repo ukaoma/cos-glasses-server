@@ -20,6 +20,7 @@ import {
   maintenanceErrorPayload,
 } from '../lib/maintenance-lifecycle.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from '../lib/message-era.js'
+import { isCosThreadSession } from '../lib/conversation.js'
 import { keyAnswerDoneFields } from '../lib/key-answer-fields.js'
 import { isProfilePreference } from '../../shared/key-preference.js'
 
@@ -52,6 +53,13 @@ queryRouter.post('/query', async (req, res) => {
   // Glasses Settings default is Agent. Only an explicit "ask" stays read-only —
   // omit/unknown must not silently force Ask (6.16.3 durable-only gap).
   const cursorExecutionMode = req.body.cursorExecutionMode === 'ask' ? 'ask' as const : 'agent' as const
+
+  // 7.0.39: the pinned COS thread's conversation is reached only by a cosThread Ask on /api/query-jobs. Run here, a
+  // chat would land in it numbered, on the display bus, and outside the thread store (Q1 2026-11-14).
+  if (typeof sessionId === 'string' && isCosThreadSession(sessionId)) {
+    maintenanceLease.release()
+    return res.status(409).json({ error: 'thread_session_web_only', detail: 'That conversation is the pinned COS thread. Ask from the thread.' })
+  }
 
   // Once a reset era exists, reject pre-era clients before they can stamp a
   // five-digit number into the fresh namespace. Companion learns the era from

@@ -73,8 +73,8 @@ One chat, `t:<clientId>`, with its whole answer:
 ## Thread-only chats (7.0.39 candidate 2)
 
 `POST /api/query-jobs` with `source: 'web'` and `cosThread: true` is an Ask from the pinned thread. The page sends it only
-when `/api/health` says `features.cosThreadOnly: true`; on an older server the Ask stays an ordinary numbered one and is
-never lost.
+when `/api/health` says `features.cosThreadOnly: true` (durable jobs on AND Drop it on); on an older server, or with
+Drop it off, the Ask stays an ordinary numbered one and is never lost.
 
 | What | Rule |
 | --- | --- |
@@ -84,9 +84,10 @@ never lost.
 | Archive | a thread conversation is never written to a day file (daily mirror, clear, end, `POST /archive/now`) |
 | Display bus | no `start`, `done` or `error` event, so the lens never lists it |
 | Model | unchanged: the conversation's history builds the prompt like any other |
-| Refusals | `cosThread` without `source: 'web'`: 400 `cos_thread_web_only`. A non-thread Ask naming a thread conversation: 409 `thread_session_web_only`. `cosThread` other than `true`: 400 `invalid_cos_thread` |
+| Refusals | `cosThread` while Drop it is off: 409 `cos_thread_off`. `cosThread` without `source: 'web'`: 400 `cos_thread_web_only`. A non-thread Ask naming a thread conversation, on `/api/query-jobs` or the legacy `POST /api/query`: 409 `thread_session_web_only`. `cosThread` other than `true`: 400 `invalid_cos_thread` |
 
-**The thread keeps it.** When the job starts, the question becomes the thread's turn. When it ends, in any status, an
+**The thread keeps it.** When the job starts (not at the 202: no admission hook exists without `index.ts`), the question
+becomes the thread's turn; until it appears in history the page keeps its own pending bubble. When it ends, in any status, an
 answer row is appended: the status, the first 2,000 characters, the length, and, for a completed answer longer than that,
 where the whole answer is in `cos-thread/answers/YYYY-MM.jsonl` (with its SHA-256). `GET /cos-thread/entry/:id` reads it
 from there (`source: 'ledger'`).
@@ -103,7 +104,8 @@ an earlier one (a boot ends a job caught mid-start `interrupted`, then resumes i
 skipped. Tested by killing the process at each step (`server/lib/cos-thread-never-lost.test.ts`).
 
 **Cursors.** `newest` is `c1.<chats>.<ends>`. `after=<newest>` answers new chats in `entries` and, in `updated`, chats
-already sent whose job ended since. A cursor without the second part (candidate 1, or `older`) still works.
+already sent whose job ended since. When the byte cap cuts `updated`, `newest` stops at the last end sent and `more` is
+true, so the next read carries the rest. A cursor without the second part (candidate 1, or `older`) still works.
 
 **`GET /api/cos-thread?threadOnly=1`.** A page that sends `cosThread` reads the thread this way. When the thread's
 conversation is not a thread conversation (one from before the update, numbered, in Messages), the next Ask starts fresh

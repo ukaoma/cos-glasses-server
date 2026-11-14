@@ -42,11 +42,13 @@ beforeEach(async () => {
   process.env.COS_DATA_DIR = root
   process.env.COS_DURABLE_QUERY_JOBS = '1'
   process.env.COS_QUERY_JOB_DIR = root
+  process.env.COS_DROP_IT = '1'   // the thread exists only while Drop it is on
 })
 afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn()
   delete process.env.COS_DURABLE_QUERY_JOBS
   delete process.env.COS_QUERY_JOB_DIR
+  delete process.env.COS_DROP_IT
   delete process.env.COS_DATA_DIR
   await rm(root, { recursive: true, force: true })
   vi.resetModules()

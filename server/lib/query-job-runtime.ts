@@ -9,6 +9,7 @@ import { resolve } from 'node:path'
 import { acquireModelSessionRunLock, callModelStreaming } from './model-router.js'
 import { emitDisplay } from './display-bus.js'
 import { cosThreadStore } from './cos-thread.js'
+import { dropItEnabled } from './drop-settings.js'
 import { resolveQueryAttachments } from './query-attachments.js'
 import { getMediaStore } from './media-store.js'
 import { dataPath } from './data-dir.js'
@@ -98,6 +99,11 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
   // 6.99.10: Ask from COS Control Web (`source: 'web'`): the server picks the conversation and mints the message
   // number (lib/web-ask-admission.ts). Every other caller is untouched.
   if (isWebAsk(input) && !carriesBoundTo(input)) {
+    // 7.0.39: the pinned COS thread exists only while Drop it is on (its routes answer 404 drop_it_off otherwise). A
+    // thread Ask with it off would run in a conversation no list and no thread route shows (Q1 2026-11-14).
+    if (input.cosThread === true && !dropItEnabled()) {
+      throw new QueryJobAdmissionPreparationError(409, 'cos_thread_off', 'The COS thread is off on this server. Turn on Drop it, or ask without the thread.')
+    }
     try {
       input = await prepareWebAsk(input, {
         currentMax: webAskCurrentMax,

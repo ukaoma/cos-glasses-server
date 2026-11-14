@@ -2,7 +2,7 @@ import { API_AUTH_BY_LOCAL } from '../lib/api-auth.js'
 import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
 import { calendarStatus } from '../lib/calendar-source.js'
 import { TURN_FILE_MAX_BYTES } from '../lib/turn-file-store.js'
-import { dropItCapability } from '../lib/drop-settings.js'
+import { dropItCapability, dropItEnabled } from '../lib/drop-settings.js'
 import { PREP_CAPABILITY } from '../../shared/prep.js'
 import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
 import { macLiveVoicesSnapshot } from '../lib/mac-window-replay.js'
@@ -333,7 +333,8 @@ healthRouter.get('/health', async (_req, res) => {
     // 7.0.39 (persistent COS thread, candidate 2; docs/cos-thread.md): POST /api/query-jobs takes `cosThread: true` with
     // source 'web' (no message number, no display bus, kept out of every list). A page sends it only when this is true,
     // so on an older server a thread chat stays an ordinary numbered Ask and is never lost.
-    cosThreadOnly: durableJobs.enabled,
+    // Drop it gates the thread itself (its routes answer 404 while it is off), so it gates this too (Q1 2026-11-14).
+    cosThreadOnly: durableJobs.enabled && dropItEnabled(),
     // Static: this build carries the scheduler. The live schedule is under
     // capabilities.morningBrief and may be absent while the runtime boots.
     morningBrief: true,

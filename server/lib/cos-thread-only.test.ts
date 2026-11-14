@@ -50,12 +50,14 @@ beforeEach(async () => {
   process.env.COS_DATA_DIR = root
   process.env.COS_DURABLE_QUERY_JOBS = '1'
   process.env.COS_QUERY_JOB_DIR = root
+  process.env.COS_DROP_IT = '1'   // the thread exists only while Drop it is on
   mocks.callModelStreaming.mockImplementation(scriptedRun)
 })
 afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn()
   delete process.env.COS_DURABLE_QUERY_JOBS
   delete process.env.COS_QUERY_JOB_DIR
+  delete process.env.COS_DROP_IT
   delete process.env.COS_DATA_DIR
   await rm(root, { recursive: true, force: true })
   vi.resetModules()
@@ -180,6 +182,14 @@ describe('a chat sent with cosThread stays in the thread', () => {
       expect(out.status, code).toBe(status)
       expect(out.body.error.code, code).toBe(code)
     }
+    // Drop it off: no thread, so no thread Ask (Q1). Nothing is created.
+    process.env.COS_DROP_IT = '0'
+    const sessionsBefore = h.conversation.getRecentSessions(24 * 3600_000).length
+    const off = await h.post('/query-jobs', threadAsk('ok while off'))
+    expect([off.status, off.body.error.code]).toEqual([409, 'cos_thread_off'])
+    expect(h.conversation.getRecentSessions(24 * 3600_000).length).toBe(sessionsBefore)
+    expect((await h.getJson('/cos-thread/history')).entries.map((e: any) => e.question)).not.toContain('ok while off')
+    process.env.COS_DROP_IT = '1'
     // A thread Ask naming an ordinary conversation never runs in it: it gets a thread conversation of its own.
     const plain = h.conversation.createSession()
     const odd = await h.post('/query-jobs', threadAsk('ok aimed at a plain one', { sessionId: plain }))

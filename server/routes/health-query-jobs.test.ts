@@ -64,8 +64,17 @@ describe('public durable-query capability health', () => {
     // 6.84.1: GET /api/query-jobs/active is detectable from health (docs/active-query-jobs.md).
     expect(body.features.activeQueryJobs).toBe(true)
     expect(body.features.activeQueryJobsProtocol).toBe(1)
-    // 7.0.39: the page sends cosThread only when this is true (docs/cos-thread.md).
-    expect(body.features.cosThreadOnly).toBe(true)
+    // 7.0.39: the page sends cosThread only when this is true (docs/cos-thread.md), and only while Drop it is on.
+    const saved = process.env.COS_DROP_IT
+    try {
+      process.env.COS_DROP_IT = '0'
+      expect((await (await fetch(`${base}/api/health`)).json() as any).features.cosThreadOnly).toBe(false)
+      process.env.COS_DROP_IT = '1'
+      expect((await (await fetch(`${base}/api/health`)).json() as any).features.cosThreadOnly).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env.COS_DROP_IT
+      else process.env.COS_DROP_IT = saved
+    }
     expect(body.cursor_models).toMatchObject({
       source: expect.any(String),
       options: [

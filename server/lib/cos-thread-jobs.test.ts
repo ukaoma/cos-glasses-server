@@ -66,6 +66,31 @@ describe('the thread store, job side', () => {
     expect(t.view({ isThreadSession: () => true }).next.mode).toBe('continue')
   })
 
+  it('updates cut by the byte cap: newest stops at the last end sent and more is set, so the rest come next (Q1)', () => {
+    const h = harness(); const t = h.make()
+    for (let n = 1; n <= 3; n++) t.recordJobStarted(job(n))
+    const cursor = { place: 3, ends: 0 }
+    for (let n = 1; n <= 3; n++) t.recordJobEnd({ ...job(n), status: 'completed', text: `answer ${n}` })
+    const first = t.historyPage({ after: cursor.place, afterAnswers: cursor.ends, limit: 40, maxBytes: 10 })
+    expect(first.updated.map(e => e.question)).toEqual(['question 1'])
+    expect([first.newest, first.more]).toEqual(['c1.3.1', true])
+    const second = t.historyPage({ after: 3, afterAnswers: 1, limit: 40, maxBytes: 10 })
+    expect(second.updated.map(e => e.question)).toEqual(['question 2'])
+    expect([second.newest, second.more]).toEqual(['c1.3.2', true])
+    const last = t.historyPage({ after: 3, afterAnswers: 2, limit: 40 })
+    expect(last.updated.map(e => e.question)).toEqual(['question 3'])
+    expect([last.newest, last.more]).toEqual(['c1.3.3', false])
+  })
+
+  it('an answer row naming a file outside answers/YYYY-MM.jsonl is never read (Q1 T7)', () => {
+    const h = harness(); const t = h.make()
+    t.recordJobEnd({ ...job(1), status: 'completed', text: 'v'.repeat(ANSWER_HEAD_CHARS + 10) })
+    expect(t.storedAnswer(job(1).clientJobId)).toHaveLength(ANSWER_HEAD_CHARS + 10)
+    const ledger = join(h.dir, 'ledger.jsonl')
+    writeFileSync(ledger, readFileSync(ledger, 'utf8').replace('"file":"answers/2026-11.jsonl"', '"file":"answers/../answers/2026-11.jsonl"'))
+    expect(h.make().storedAnswer(job(1).clientJobId)).toBeUndefined()
+  })
+
   it('every answer row survives a restart, and a later generation replaces an earlier one', () => {
     const h = harness(); const t = h.make()
     t.recordJobEnd({ ...job(1), status: 'failed', text: 'first try' })
