@@ -353,3 +353,5 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .cc .tl-day::after { content: ''; flex: 1; height: 1px; background: var(--hairline); }
 /* The fraction of a pixel that keeps his place exact when older entries arrive (cos-chat.js keepPlace); 0 to 1 px. */
 .cc-hist-trim { height: 0; margin: 0; padding: 0; }
+/* A message number an older thread chat had, beside its time, quieter than the time itself (lead 10:09). */
+.cc .cc-hist-no { color: var(--tertiary); }

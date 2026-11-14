@@ -1298,7 +1298,8 @@
   function histTopLine() {
     var s = C.hist;
     if (s.state === 'error') return '<p class="tl-start" data-hist-top>Couldn’t load the thread’s history. <button type="button" class="link-btn" data-cos="hist-retry">Try again</button></p>';
-    if (!s.older) return '';
+    // Lead 10:09: the true start says so, once, so a reader never takes a failed load for the beginning (or the reverse).
+    if (!s.older) return s.state === 'ready' ? '<p class="tl-start" data-hist-top>This is the start of your COS thread.</p>' : '';
     if (s.olderState === 'error') return '<p class="tl-start" data-hist-top>Couldn’t load earlier entries. <button type="button" class="link-btn" data-cos="hist-older">Try again</button></p>';
     return '<p class="tl-start" data-hist-top>' + (s.olderState === 'loading' ? 'Loading earlier entries.' : 'Earlier entries load as you scroll up.') + '</p>';
   }
@@ -1332,15 +1333,17 @@
     var fs = C.hist.fullState[e.id] || '';
     var more = !whole && fs !== 'gone' && e.full !== true && !!text && (e.answerChars == null || Number(e.answerChars) > text.length);
     var t = clockOnly(e.at);
-    var title = Number.isInteger(e.messageNo) && e.messageNo > 0 ? 'Message #' + e.messageNo : 'COS';
+    // Lead 10:09: one persistent thread, so no numbered titles. The answer says who spoke, COS, and when; a message number
+    // the chat had is quiet text beside the time ("#12"), so he can match it to Recent. None is drawn when there is none.
+    var no = Number.isInteger(e.messageNo) && e.messageNo > 0 ? '<span class="cc-hist-no">#' + e.messageNo + '</span> ' : '';
     var body = text ? W.md(W.structureLensAnswer(text))
       : '<span class="cc-wait">' + (e.status === 'running' ? 'COS is answering.' : e.status === 'failed' ? 'This ask did not finish.'
         : e.status === 'interrupted' ? 'This ask was stopped before it finished.' : 'This answer was not kept.') + '</span>';
-    var acts = fs === 'gone' ? '<span class="cc-fine">The rest of this answer was not kept.</span>' : more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
+    var acts = fs === 'gone' ? '<span class="cc-fine">Only the start of this answer was kept.</span>' : more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
       (fs === 'loading' ? 'Loading the rest…' : 'Show all of it') + '</button>' + (fs === 'error' ? '<span class="cc-fine warn">Couldn’t load the rest.</span>' : '') : '';
     return '<div class="cc-line you"><div class="cc-bubble">' + esc(e.question) + '</div><div class="cc-src">' + esc(t) + '</div></div>' +
       '<div class="cc-line cos" data-hist="' + esc(e.id) + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
-      '<p class="cc-card-title"><span>' + esc(title) + '</span><span class="cx-time">' + esc(t) + '</span></p>' +
+      '<p class="cc-card-title"><span>COS</span><span class="cx-time">' + no + esc(t) + '</span></p>' +
       '<div class="cc-answer md">' + body + '</div>' + (acts ? '<div class="cc-acts">' + acts + '</div>' : '') + '</div></div>';
   }
   // "Show all of it": the whole answer (S1's GET /api/cos-thread/entry/:id), drawn in place in its own card.

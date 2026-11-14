@@ -82,13 +82,34 @@ describe('7.0.39 thread candidate 1: history in the chat', () => {
     expect(html.indexOf('Q a')).toBeLessThan(html.indexOf('Q b'))
     expect(html.indexOf('tl-day')).toBeLessThan(html.indexOf('Q a'))
     expect(html).toContain('<div class="cc-bubble">Q a</div><div class="cc-src">')
-    expect(html).toContain('<span>Message #472</span>')
-    expect(html).toContain('<span>COS</span>')
+    // Lead 10:09: no numbered titles; the speaker is COS, and a number the chat had is quiet text beside the time.
+    expect(html).not.toContain('Message #')
+    expect((html.match(/<p class="cc-card-title"><span>COS<\/span>/g) || []).length).toBe(2)
+    expect(html).toContain('<span class="cx-time"><span class="cc-hist-no">#472</span> ')
+    expect((html.match(/cc-hist-no/g) || []).length, 'none drawn for the chat with no number').toBe(1)
   })
-  it('the start of the thread (older null): no top line', async () => {
+  it('the true start of the thread (older null): one quiet line says so, and only once the history is read', async () => {
     const h = load({ [H]: page([entry('a', day(13))], null) })
+    expect(h.chat._state.hist.state).toBe('idle')
     h.chat._loadHistory(); await flush()
-    expect(h.feed.innerHTML).not.toContain('tl-start')
+    expect(h.feed.innerHTML).toContain('<p class="tl-start" data-hist-top>This is the start of your COS thread.</p>')
+    expect((h.feed.innerHTML.match(/This is the start/g) || []).length).toBe(1)
+    expect(h.feed.innerHTML).not.toContain('Earlier entries load')
+  })
+  it('while the history is still loading, nothing claims the start of the thread (other lines already on screen)', async () => {
+    const h = load({ [H]: () => new Promise(() => {}) })
+    h.chat._state.items = [{ id: 'n1', createdAt: day(13, 9), kind: 'note', title: 'A note', text: 'x', status: 'open' }]
+    h.chat._loadHistory(); await flush()
+    expect(h.chat._state.hist.state).toBe('loading')
+    h.chat._paintFeed(false)
+    expect(h.feed.innerHTML.length).toBeGreaterThan(0)
+    expect(h.feed.innerHTML).not.toContain('This is the start')
+  })
+  it('a failed history read never reads as the start of the thread', async () => {
+    const h = load({ [H]: new Error('down') })
+    h.chat._loadHistory(); await flush()
+    expect(h.feed.innerHTML).toContain('Couldn’t load the thread’s history. <button type="button" class="link-btn" data-cos="hist-retry">Try again</button>')
+    expect(h.feed.innerHTML).not.toContain('This is the start')
   })
   it('day lines: "Today, …" for today, the weekday and date otherwise, the year only when it is not this year', () => {
     const h = load({})
@@ -203,6 +224,16 @@ describe('7.0.39 thread candidate 1: newer entries and whole answers', () => {
     h.chat._loadNewer(); await flush(40)
     expect(h.calls.filter(c => /after=/.test(c)), 'the next poll reads again').toHaveLength(10)
   })
+  it('Q1 K3: a poll and a focus read at once make one read, not two (one run at a time)', async () => {
+    let release: (v: unknown) => void = () => {}
+    const h = load({ [H]: page([entry('a', day(13, 9))], null, 'n0'),
+      '/api/cos-thread/history?limit=40&after=*': () => new Promise(r => { release = r }) }, { wide: true })
+    h.chat._loadHistory(); await flush()
+    h.chat._loadNewer(); h.chat._loadNewer(); await flush()
+    expect(h.calls.filter(c => /after=/.test(c))).toHaveLength(1)
+    release({ protocol: 1, entries: [], updated: [], newest: 'n0', more: false, older: null }); await flush()
+    expect(h.chat._state.hist.newerBusy).toBe(false)
+  })
   it('a newer read that fails leaves nothing busy; the history turning off mid-run leaves nothing busy', async () => {
     let fail = true
     const h = load({ [H]: page([entry('a', day(13, 9))], null, 'n0'),
@@ -261,7 +292,7 @@ describe('7.0.39 thread candidate 1: newer entries and whole answers', () => {
     h.chat._loadHistory(); await flush()
     h.tap('hist-full', 't:l'); await flush()
     const html = h.chat._histHtml(long)
-    expect(html).toContain('The rest of this answer was not kept.')
+    expect(html).toContain('Only the start of this answer was kept.')
     expect(html).not.toContain('Show all of it')
     expect(html).toContain('<p>preview</p>')
   })
