@@ -29,6 +29,13 @@
    finishes, POST /api/cos-thread/turn once with its answer. "New thread" in the header posts /api/cos-thread/new.
    Without the capability, the old rule stands: one conversation per day, kept in this browser.
 
+   7.0.39 candidate 2 (S1's docs/cos-thread.md "Thread-only chats"): when /api/health says features.cosThreadOnly and the
+   history routes exist, an Ask from the thread's composer carries `cosThread: true`. It takes no message number and stays
+   out of Messages and off the lens; the server records its turn and whole answer, so no /cos-thread/turn is posted. The
+   thread is read with ?threadOnly=1. The page's own card stands until the history has the chat. A failed or stopped one
+   is asked again as the next generation of the same clientJobId (one entry). A running chat this page did not send is
+   followed through /api/query-jobs/by-client. The header reads "One running thread. What you ask here stays here."
+
    The rail badge on Messages (7.0.9, Miles 11/08: "notifications would just be for net new messages") is a number for
    `unread` only: what COS sent since the chat was last open on any device (the server keeps readAt, and the first
    7.0.9 open marked everything older as read). A dot, with no number, says something in the chat waits on your reply
@@ -59,7 +66,10 @@
     onAnswered: null,       // messages.js: re-read Recent when a web Ask lands
     thread: null,           // 6.99.16: the last GET /api/cos-thread answer
     // 7.0.39 (thread candidate 1): the thread's history, oldest first, from GET /api/cos-thread/history (S1).
-    hist: { entries: [], older: null, newest: '', state: 'idle', olderState: 'idle', newerBusy: false, full: {}, fullState: {} },
+    hist: { entries: [], older: null, newest: '', state: 'idle', olderState: 'idle', newerBusy: false, full: {}, fullState: {},
+      // 7.0.39 candidate 2, by clientJobId: a running chat's reattach ('trying', 'on', 'ended', 'gone'), a Retry being
+      // admitted, and why one did not go through.
+      attach: {}, retrying: {}, retryErr: {} },
     threadCarried: '',      // the thread's newest session started fresh: 'summary' (it carried a digest) or 'plain'
     threadBusy: false,
     threadSession: '',      // 7.0.2: the session the COS thread's next Ask continues ('' when it starts fresh)
@@ -117,6 +127,9 @@
       thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1),
       // 7.0.39: the thread's history routes (S1, docs/cos-thread.md). Protocol stays 1; history >= 1 says they exist.
       history: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1 && Number(drop.thread.history) >= 1),
+      // 7.0.39 candidate 2 (S1, docs/cos-thread.md "Thread-only chats"): only /api/health's features.cosThreadOnly says the
+      // server keeps a cosThread Ask in the thread. Absent (an older server): the Ask stays an ordinary numbered one.
+      threadOnly: !!(h && h.features && h.features.cosThreadOnly === true),
       // 6.99.19: Prep (capabilities.prep, protocol 1). Absent on an older server: "Prep me" stays a plain Ask.
       prep: prepCapsOf(caps.prep),
       // 11/07: how many files a session turn takes (threadTurnAttachments). 0 (an older server): words only, and Today's
@@ -128,7 +141,7 @@
       webKeySigner: h && h.webKeySigner === 1 ? 1 : 0
     };
     if (next.prep && next.prep.serverInstanceId) PREP_INST = next.prep.serverInstanceId;
-    var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread;
+    var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread || C.caps.threadOnly !== next.threadOnly;
     var filesChanged = !!C.caps && C.caps.dropFiles !== next.dropFiles;
     C.caps = next;
     if (!next.dropIt) { clearRail(); C.summary = null; }
@@ -347,17 +360,18 @@
   }
 
   // ── the chat ──────────────────────────────────────────
-  function chatMode() { return dropOn() ? (threadOn() ? (historyOn() ? 'drop-thread-history' : 'drop-thread') : 'drop') : 'ask'; }
+  function chatMode() { return dropOn() ? (threadOn() ? (historyOn() ? (threadOnlyOn() ? 'drop-thread-only' : 'drop-thread-history') : 'drop-thread') : 'drop') : 'ask'; }
   function chatSkeleton() {
-    var drop = dropOn();
+    var drop = dropOn(), only = threadOnlyOn();
     return '<section class="cc" data-cos-chat data-mode="' + chatMode() + '" data-tint="messages" aria-label="' + (drop ? 'COS chat' : 'Ask COS') + '">' +
       '<header class="cc-head"><span class="cc-avatar big">' + MARK + '</span><div class="cc-head-text"><h2 class="cc-title">' + (drop ? 'COS' : 'Ask COS') + '</h2>' +
-        '<p class="cc-sub">' + (drop ? 'Text it anything: a thought, an ask, a reminder. It texts back.' : 'Ask anything, with photos or files. Each answer lands in Messages with its number, here and on the glasses.') + '</p></div>' +
+        // 7.0.39 candidate 2: the mock's words (thread A). A chat sent here stays here, so there is no thread line to show.
+        '<p class="cc-sub">' + (only ? 'One running thread. What you ask here stays here.' : drop ? 'Text it anything: a thought, an ask, a reminder. It texts back.' : 'Ask anything, with photos or files. Each answer lands in Messages with its number, here and on the glasses.') + '</p></div>' +
         '<div class="cc-head-acts"><button type="button" class="link-btn cc-all" data-cos="all">All messages</button>' +
         (drop ? '<button type="button" class="link-btn" data-cos="read-all">Mark all read</button>' : '') +
         // 7.0.39 (Miles 11/13, his pick): one thread, always. New thread goes once the history reads.
         (threadOn() && !historyOn() ? '<button type="button" class="link-btn" data-cos="new-thread">New thread</button>' : '') + '</div>' +
-        (threadOn() ? '<p class="cc-thread" data-cos-thread role="status">' + esc(threadLine()) + '</p>' : '') + '</header>' +
+        (threadOn() && !only ? '<p class="cc-thread" data-cos-thread role="status">' + esc(threadLine()) + '</p>' : '') + '</header>' +
       '<div class="cc-feed' + (historyOn() ? ' cc-history' : '') + '" data-cos-feed aria-live="polite"></div>' +
       composerHtml(CHAT, { drop: drop, placeholder: drop ? 'Ask COS or drop a thought' : 'Ask COS anything', label: 'Message to COS' }) +
       '</section>';
@@ -671,12 +685,14 @@
       }
     }, function () {}).then(function () { a.recovering = false; paintAsk(a, true); });
   }
+  // 7.0.39 candidate 2: a thread-only chat has no number, and its card reads as the thread's own (COS, his time).
+  function askTitle(a) { return a.threadOnly ? 'COS' : a.no ? 'Message #' + a.no : 'Asking COS'; }
   function askHtml(a, linked) {
     var running = a.status === 'sending' || a.status === 'queued' || a.status === 'running';
-    var title = a.no ? 'Message #' + a.no : 'Asking COS';
+    var title = askTitle(a);
     var body = answerHtml(a);
     // "COS is answering" only while it is; a finished Ask with no words says so (issue 2).
-    if (!body) body = a.status === 'completed' ? emptyAnswerHtml(a) : askRunning(a) ? '<span class="cc-wait">COS is answering. It also lands in Messages on the glasses.</span>' : '';
+    if (!body) body = a.status === 'completed' ? emptyAnswerHtml(a) : askRunning(a) ? '<span class="cc-wait">' + (a.threadOnly ? 'COS is answering.' : 'COS is answering. It also lands in Messages on the glasses.') + '</span>' : '';
     var acts = '';
     if (running && a.jobId) {
       acts = (C.caps && C.caps.steer && a.steerable !== false ? '<button type="button" class="link-btn cc-text-btn" data-cos="steer" data-cid="' + a.cid + '">Steer</button>' : '') +
@@ -689,13 +705,14 @@
         : '<button type="button" class="cx-btn primary" data-cos="again" data-cid="' + a.cid + '">Ask again</button>';
     }
     // A drop that became a question already shows its words as the drop: only the answer card is added.
-    return (linked ? '' : '<div class="cc-line you"><div class="cc-bubble">' + esc(a.query) + '</div>' + sentAttsHtml(a.atts) + '<div class="cc-src">' + (a.replyKey ? 'Replied on the web' : 'Asked on the web') + '</div></div>') +
+    return (linked ? '' : '<div class="cc-line you"><div class="cc-bubble">' + esc(a.query) + '</div>' + sentAttsHtml(a.atts) + '<div class="cc-src">' + (a.threadOnly ? esc(clockOnly(new Date(a.at).toISOString())) : a.replyKey ? 'Replied on the web' : 'Asked on the web') + '</div></div>') +
       '<div class="cc-line cos" data-ask="' + a.cid + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
       '<p class="cc-card-title"><span data-ask-title>' + esc(title) + '</span><span class="cx-time" data-ask-state>' + esc(askState(a)) + '</span></p>' +
       '<div class="cc-answer md" data-ask-body>' + body + '</div>' +
       '<div class="cc-steps-slot" data-ask-steps>' + stepsHtml(a) + '</div>' +
       '<div data-ask-relay-slot>' + relayHtml(a) + '</div>' +
       (a.error ? '<p class="cc-fine warn">' + esc(a.error) + '</p>' : '') +
+      (a.againError ? '<p class="cc-fine warn">' + esc(a.againError) + '</p>' : '') +
       '<div class="cc-acts" data-ask-acts>' + acts + '</div>' +
       (a.steering ? '<form class="cc-steer" data-cos-steer="' + a.cid + '"><input class="field" type="text" maxlength="2000" placeholder="Steer the answer" aria-label="Steer the answer"><button type="submit" class="cx-btn">Send</button></form>' : '') +
       '</div></div>';
@@ -742,7 +759,7 @@
     var el = document.querySelector('[data-ask="' + a.cid + '"]');
     if (!el) return a.replyKey ? paintReplyFeed(a.replyKey) : paintFeed(false);
     var running = a.status === 'sending' || a.status === 'queued' || a.status === 'running';
-    var title = el.querySelector('[data-ask-title]'); if (title) title.textContent = a.no ? 'Message #' + a.no : 'Asking COS';
+    var title = el.querySelector('[data-ask-title]'); if (title) title.textContent = askTitle(a);
     var st = el.querySelector('[data-ask-state]'); if (st) st.textContent = askState(a);
     var body = el.querySelector('[data-ask-body]'); var text = a.response || a.partial;
     if (body && text && body.getAttribute('data-len') !== String(text.length) + (a.response ? 'r' : '')) { body.innerHTML = answerHtml(a); body.setAttribute('data-len', String(text.length) + (a.response ? 'r' : '')); }
@@ -1195,6 +1212,9 @@
   // older page is added above with the scroll taking up its height, and a newer one below sticks only when he is already
   // at the end (paintFeed).
   function historyOn() { return threadOn() && !!(C.caps && C.caps.history); }
+  // 7.0.39 candidate 2: an Ask from the thread's composer carries cosThread only when the server says it keeps it, and
+  // only where the history can show it again (a thread-only chat is in no other list).
+  function threadOnlyOn() { return historyOn() && !!(C.caps && C.caps.threadOnly); }
   var HIST_PAGE = 40, HIST_POLL_MS = 30000, HIST_FILL_PAGES = 5, HIST_NEWER_PAGES = 5;
   function histValid(e) {
     return !!(e && typeof e.id === 'string' && /^t:/.test(e.id) && typeof e.at === 'string' && W.toDate(e.at) && e.kind === 'chat' && typeof e.question === 'string');
@@ -1231,6 +1251,7 @@
       C.hist.state = 'ready';
       paintFeed(true);
       fillUp(0);
+      reattach();
     }, function () { C.hist.state = 'error'; paintFeed(false); });
   }
   // A short history does not fill the column, so no scroll can ask for more: read older pages until it does (bounded).
@@ -1266,7 +1287,7 @@
     api(histUrl('&after=' + encodeURIComponent(C.hist.newest))).then(function (d) {
       var got = d && Array.isArray(d.entries) ? d.entries : [];
       if (d && typeof d.newest === 'string' && d.newest) C.hist.newest = d.newest;
-      if (got.length || (d && Array.isArray(d.updated) && d.updated.length)) { histMerge(got.concat(d.updated || []), 'newer'); paintFeed(false); }
+      if (got.length || (d && Array.isArray(d.updated) && d.updated.length)) { histMerge(got.concat(d.updated || []), 'newer'); paintFeed(false); reattach(); }
       if (d && d.more === true && got.length) return loadNewer(n + 1);
       done();
     }, done);
@@ -1331,7 +1352,9 @@
     var whole = Object.prototype.hasOwnProperty.call(C.hist.full, e.id);
     var text = whole ? C.hist.full[e.id] : String(e.answer || '');
     var fs = C.hist.fullState[e.id] || '';
-    var more = !whole && fs !== 'gone' && e.full !== true && !!text && (e.answerChars == null || Number(e.answerChars) > text.length);
+    // 7.0.39 candidate 2: a chat whose job did not finish keeps only the start of its partial answer; there is no rest.
+    var ended = !e.status || e.status === 'completed';
+    var more = ended && !whole && fs !== 'gone' && e.full !== true && !!text && (e.answerChars == null || Number(e.answerChars) > text.length);
     var t = clockOnly(e.at);
     // Lead 10:09: one persistent thread, so no numbered titles. The answer says who spoke, COS, and when; a message number
     // the chat had is quiet text beside the time ("#12"), so he can match it to Recent. None is drawn when there is none.
@@ -1341,6 +1364,16 @@
         : e.status === 'interrupted' ? 'This ask was stopped before it finished.' : 'This answer was not kept.') + '</span>';
     var acts = fs === 'gone' ? '<span class="cc-fine">Only the start of this answer was kept.</span>' : more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
       (fs === 'loading' ? 'Loading the rest…' : 'Show all of it') + '</button>' + (fs === 'error' ? '<span class="cc-fine warn">Couldn’t load the rest.</span>' : '') : '';
+    // A failed or stopped chat shows what came through, says it did not finish, and (from its job) offers Ask again: the
+    // next generation of the same chat, so it stays one entry (S1's contract).
+    if (e.status === 'failed' || e.status === 'interrupted') {
+      if (text) acts = '<span class="cc-fine">' + (e.status === 'failed' ? 'This ask did not finish.' : 'This ask was stopped before it finished.') + '</span>' + acts;
+      if (retryableEntry(e)) {
+        var busy = !!C.hist.retrying[e.clientJobId], why = C.hist.retryErr[e.clientJobId];
+        acts += '<button type="button" class="cx-btn primary" data-cos="hist-again" data-id="' + esc(e.id) + '"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Asking again…' : 'Ask again') + '</button>' +
+          (why ? '<span class="cc-fine warn">' + esc(why) + '</span>' : '');
+      }
+    }
     return '<div class="cc-line you"><div class="cc-bubble">' + esc(e.question) + '</div><div class="cc-src">' + esc(t) + '</div></div>' +
       '<div class="cc-line cos" data-hist="' + esc(e.id) + '"><span class="cc-avatar">' + MARK + '</span><div class="cc-card">' +
       '<p class="cc-card-title"><span>COS</span><span class="cx-time">' + no + esc(t) + '</span></p>' +
@@ -1376,6 +1409,106 @@
     if (near) loadOlder();
   }
 
+  // ── thread-only chats (7.0.39, candidate 2; S1's docs/cos-thread.md "Thread-only chats") ──
+  // A chat still running that this page did not send (another tab, or before a reload): find its job by its client id and
+  // follow it as a live card, once per page. A job already ended, or gone, stays the history's card; the next read of the
+  // newer entries brings its end.
+  function jobGen(e) { return Number.isInteger(e && e.generation) && e.generation >= 1 ? e.generation : 1; }
+  function reattach() {
+    if (!historyOn() || !askOn()) return;
+    var live = {}; C.asks.forEach(function (a) { live[a.cid] = 1; });
+    C.hist.entries.forEach(function (e) {
+      var cid = e.clientJobId;
+      if (e.status !== 'running' || typeof cid !== 'string' || !cid || live[cid] || C.hist.attach[cid]) return;
+      var gen = jobGen(e);
+      C.hist.attach[cid] = 'trying';
+      api('/api/query-jobs/by-client/' + encodeURIComponent(cid) + '?generation=' + gen).then(function (d) {
+        var job = d && d.job;
+        if (!job || C.asks.some(function (x) { return x.cid === cid; })) { C.hist.attach[cid] = 'gone'; return; }
+        var a = threadAsk(cid, gen, e.question, Date.parse(e.at), e.threadId, [], []);
+        a.status = 'running';
+        take(a, job);
+        if (!askRunning(a)) { C.hist.attach[cid] = 'ended'; loadNewer(); return; }
+        C.hist.attach[cid] = 'on';
+        C.asks.push(a);
+        paintFeed(false);
+        poll(a);
+      }, function () { C.hist.attach[cid] = 'gone'; });
+    });
+  }
+  /** A thread-only Ask as this page tracks it (one of its own, a reattached one, or a Retry). */
+  function threadAsk(cid, gen, query, at, threadId, attachmentIds, atts) {
+    return { cid: cid, gen: gen, query: query, at: at, status: 'sending', partial: '', dropId: '', atts: atts || [], replyKey: '',
+      threaded: true, threadOnly: true, conv: { kind: 'thread', threadId: threadId || '' },
+      again: { attachmentIds: (attachmentIds || []).slice(0, MAX_ATTS), atts: (atts || []).slice(0, MAX_ATTS), sessionId: '', replyKey: '', context: '', contextRef: '' } };
+  }
+  function retryableEntry(e) {
+    return threadOnlyOn() && askOn() && (e.status === 'failed' || e.status === 'interrupted') && typeof e.clientJobId === 'string' && !!e.clientJobId &&
+      Number.isInteger(e.generation) && e.generation >= 1;
+  }
+  // POST /api/query-jobs, and on a lost answer the job by its client id and generation before anything is called failed.
+  function admitJob(a, body) {
+    var admit = function (retry) {
+      return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 }).catch(function (err) {
+        if (err && err.code === 'timeout') {
+          return api('/api/query-jobs/by-client/' + a.cid + '?generation=' + (a.gen || 1)).catch(function () { if (retry) return admit(false); throw err; });
+        }
+        throw err;
+      });
+    };
+    return admit(true);
+  }
+  // The two refusals a thread-only Ask can meet (S1's contract), in words; '' for any other.
+  // thread_session_web_only (409): an Ask without the thread mark named the thread's conversation. This page's read of the
+  // Mac was out of date, so it reads /api/health again; the next Ask carries the mark.
+  // invalid_cos_thread (400): the mark was not exactly true. This page never sends that, so it is an older copy of it.
+  function threadOnlyError(err, fromBox) {
+    var code = err && err.code, tail = fromBox ? ' Your words are still in the box.' : '';
+    if (code === 'thread_session_web_only') {
+      C.capsLoading = null;
+      api('/api/health').then(fromHealth, function () {});
+      return 'Not sent. This page asked outside your COS thread, so it checked your Mac again. Ask again.' + tail;
+    }
+    if (code === 'invalid_cos_thread') return 'Not sent. Your Mac did not take this page’s thread mark (invalid_cos_thread). Reload the page, then ask again.' + tail;
+    return '';
+  }
+  /** Ask again for a thread-only chat: the next generation of the same clientJobId, so the thread keeps one entry. Its first
+   *  try's conversation is the server's to keep (no sessionId is sent). `old`: this page's own failed card, put back with
+   *  why when the Retry is not taken; without one (a history card), the why is drawn on that card. */
+  function retryJob(src) {
+    var R = C.hist;
+    if (!askOn() || R.retrying[src.cid]) return Promise.resolve(null);
+    R.retrying[src.cid] = true; delete R.retryErr[src.cid];
+    var a = threadAsk(src.cid, src.gen + 1, src.query, src.at, src.threadId, src.attachmentIds, src.atts);
+    C.asks = C.asks.filter(function (x) { return x.cid !== src.cid; });
+    C.asks.push(a);
+    paintFeed(false);
+    var body = { clientJobId: a.cid, generation: a.gen, query: a.query, source: 'web', cosThread: true, activityToolMode: 'status' };
+    if (C.model) body.model = C.model;
+    if (C.effort) body.effort = C.effort;
+    if (a.again.attachmentIds.length) body.attachmentIds = a.again.attachmentIds.slice();
+    if (C.caps && C.caps.steer) body.steerable = true;
+    return admitJob(a, body).then(function (d) {
+      var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
+      delete R.retrying[src.cid];
+      take(a, job); paintAsk(a); poll(a);
+      return a;
+    }, function (err) {
+      delete R.retrying[src.cid];
+      C.asks = C.asks.filter(function (x) { return x !== a; });
+      var why = threadOnlyError(err, false) || 'Ask again did not go through: ' + ((err && err.message) || 'the Mac did not answer');
+      if (src.old) { src.old.retried = false; src.old.againError = why; C.asks.push(src.old); }
+      else R.retryErr[src.cid] = why;
+      paintFeed(false);
+      return null;
+    });
+  }
+  function retryEntry(id) {
+    var e = C.hist.entries.filter(function (x) { return x.id === id; })[0];
+    if (!e || !retryableEntry(e)) return Promise.resolve(null);
+    return retryJob({ cid: e.clientJobId, gen: e.generation, query: e.question, at: Date.parse(e.at), threadId: e.threadId, attachmentIds: [], atts: [] });
+  }
+
   // ── the COS thread (6.99.16) ──────────────────────────
   var THREAD_REF = 'Summary carried over from earlier in this COS thread';
   function threadLine() {
@@ -1400,7 +1533,9 @@
     paintThread();
   }
   function loadThread() {
-    return api('/api/cos-thread').then(function (t) { setThread(t); return t; }, function () { return null; });
+    // 7.0.39 candidate 2: a page that sends cosThread reads ?threadOnly=1, so a conversation from before the update (one
+    // numbered, in Messages) is not continued: the next Ask starts fresh with the digest (reason 'thread_only').
+    return api('/api/cos-thread' + (threadOnlyOn() ? '?threadOnly=1' : '')).then(function (t) { setThread(t); return t; }, function () { return null; });
   }
   // What the next Ask in the thread sends: a sessionId to continue, or none and the digest to carry.
   function threadPlan() {
@@ -1418,7 +1553,8 @@
   }
   // Once per Ask, when it has finished: the thread records it, with the answer when there is one.
   function postTurn(a) {
-    if (!a.threaded || !a.sessionId || a.turnState) return;
+    // A thread-only chat's turn and whole answer are written by the server itself (S1), so nothing is posted for it.
+    if (!a.threaded || a.threadOnly || !a.sessionId || a.turnState) return;
     a.turnState = 'posting';
     var body = { clientId: a.cid, sessionId: a.sessionId, query: String(a.query).slice(0, 20000) };
     if (a.status === 'completed' && typeof a.response === 'string' && a.response) body.answer = a.response.slice(0, 40000);
@@ -1462,6 +1598,10 @@
     var a = { cid: uuid(), query: text, at: Date.now(), status: 'sending', partial: '', dropId: dropId || '', atts: opts.atts || [], replyKey: opts.replyKey || '' };
     // 7.0.2 (A6): what Ask again sends: the same words, files and conversation.
     a.again = { attachmentIds: (opts.attachmentIds || []).slice(0, MAX_ATTS), atts: (opts.atts || []).slice(0, MAX_ATTS), sessionId: opts.sessionId || '', replyKey: opts.replyKey || '', context: opts.context || '', contextRef: opts.contextRef || '' };
+    // 7.0.39 candidate 2: kept in the thread, with no message number, when the server says it does that. Known before the
+    // first paint, so the pending card already reads as the thread's.
+    a.gen = 1;
+    a.threadOnly = threadOn() && !opts.replyKey && threadOnlyOn();
     C.asks.push(a);
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(true);
     var body = { clientJobId: a.cid, generation: 1, query: text, source: 'web', activityToolMode: 'status' };
@@ -1470,6 +1610,7 @@
     // 6.99.16: an Ask from the chat's own composer belongs to the COS thread (a Reply keeps its turn's conversation).
     // An Ask again only reaches here once askAgain has confirmed the conversation is still this one (skeptic, 7.0.2).
     a.threaded = threadOn() && !opts.replyKey;
+    if (a.threadOnly) body.cosThread = true;
     // A Reply never takes the chat's session: with no session of its own it starts a conversation, as its card says.
     if (!a.threaded && !opts.replyKey && C.session && C.session.id) body.sessionId = C.session.id;
     // A reply continues the turn's own conversation (kept when it is still live; else the server starts a new one).
@@ -1479,15 +1620,7 @@
     a.conv = a.replyKey ? { kind: 'reply', sessionId: opts.sessionId || '' } : a.threaded ? { kind: 'thread', threadId: '' } : { kind: 'chat', sessionId: body.sessionId || '' };
     if (opts.attachmentIds && opts.attachmentIds.length) body.attachmentIds = opts.attachmentIds.slice(0, MAX_ATTS);
     if (C.caps && C.caps.steer) body.steerable = true;
-    var admit = function (retry) {
-      return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 }).catch(function (err) {
-        // A lost answer: the job may exist. Ask for it by its client id before saying anything failed.
-        if (err && err.code === 'timeout') {
-          return api('/api/query-jobs/by-client/' + a.cid + '?generation=1').catch(function () { if (retry) return admit(false); throw err; });
-        }
-        throw err;
-      });
-    };
+    // A lost answer: the job may exist. admitJob asks for it by its client id before saying anything failed.
     var prepare = (a.threaded ? threadPlan().then(function (plan) {
       a.conv.threadId = threadIdOf(C.thread);
       if (plan.sessionId) { body.sessionId = plan.sessionId; C.threadSession = plan.sessionId; }
@@ -1500,7 +1633,7 @@
       if (opts.expect && !sameConversation(opts.expect, a)) throw Object.assign(new Error(MOVED_ON), { code: 'conversation_moved' });
       withContext(body, opts.context, opts.contextRef);
     });
-    prepare.then(function () { return admit(true); }).then(function (d) {
+    prepare.then(function () { return admitJob(a, body); }).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
       take(a, job);
       var before = defaultSession();
@@ -1520,11 +1653,11 @@
         return;
       }
       a.status = 'failed';
-      a.error = err && err.code === 'durable_query_jobs_disabled' ? 'Ask needs the durable query jobs switch on your Mac.'
+      a.error = threadOnlyError(err, !opts.reask) || (err && err.code === 'durable_query_jobs_disabled' ? 'Ask needs the durable query jobs switch on your Mac.'
         : err && /attachment/.test(String(err.code || '')) ? 'An attachment could not be read: ' + ((err && err.message) || err.code) +
           // An Ask again never came from the box (QA): say what to do instead of pointing at it.
           (opts.reask ? ' Attach the file again in the box and ask again.' : ' Your words and files are still in the box.')
-          : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer');
+          : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer'));
       if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
       if (done) done(false);
     });
@@ -1679,6 +1812,13 @@
     var a = C.asks.filter(function (x) { return x.cid === cid; })[0];
     // A Prep card is never resent as a plain Ask (QA W4): Prep has its own Run.
     if (!a || a.retried || a.checking || a.againBlocked || a.prepDraftId || !(a.status === 'failed' || a.status === 'interrupted') || !a.jobId) return Promise.resolve(null);
+    // 7.0.39 candidate 2: a thread-only chat is asked again as its next generation; there is one thread, so it cannot have
+    // moved on, and the server keeps the first try's conversation.
+    if (a.threadOnly) {
+      a.retried = true; a.againError = '';
+      var t = a.again || {};
+      return retryJob({ cid: a.cid, gen: a.gen || 1, query: a.query, at: a.at, threadId: a.conv && a.conv.threadId, attachmentIds: t.attachmentIds || [], atts: t.atts || [], old: a });
+    }
     a.checking = true;
     return conversationGone(a).then(function (why) {
       a.checking = false;
@@ -1698,7 +1838,7 @@
     var started = Date.now();
     var tick = function () {
       if (!a.jobId) return;
-      api('/api/query-jobs/' + a.jobId + '?generation=1&trail=1').then(function (d) {
+      api('/api/query-jobs/' + a.jobId + '?generation=' + (a.gen || 1) + '&trail=1').then(function (d) {
         if (d && d.job) take(a, d.job);
         paintAsk(a);
         if (['completed', 'failed', 'canceled', 'interrupted'].indexOf(a.status) >= 0) return finished(a);
@@ -1824,7 +1964,7 @@
     var a = C.asks.filter(function (x) { return x.cid === cid; })[0];
     if (!a || !a.jobId || !text.trim()) return;
     a.steering = false;
-    api('/api/query-jobs/' + a.jobId + '/steer', { method: 'POST', body: { generation: 1, steerId: uuid(), text: text.trim() } }).then(function (r) {
+    api('/api/query-jobs/' + a.jobId + '/steer', { method: 'POST', body: { generation: a.gen || 1, steerId: uuid(), text: text.trim() } }).then(function (r) {
       W.toast(r && r.state === 'accepted' ? 'COS has it.' : 'Too late to steer this one.');
     }, function (err) { W.toast((err && err.message) || 'The steer did not go through.'); });
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
@@ -1832,7 +1972,7 @@
   function cancel(cid) {
     var a = C.asks.filter(function (x) { return x.cid === cid; })[0];
     if (!a || !a.jobId) return;
-    api('/api/query-jobs/' + a.jobId + '/cancel', { method: 'POST', body: { generation: 1 } }).then(function (d) { if (d && d.job) take(a, d.job); paintAsk(a); }, function (err) { W.toast((err && err.message) || 'Cancel did not go through.'); });
+    api('/api/query-jobs/' + a.jobId + '/cancel', { method: 'POST', body: { generation: a.gen || 1 } }).then(function (d) { if (d && d.job) take(a, d.job); paintAsk(a); }, function (err) { W.toast((err && err.message) || 'Cancel did not go through.'); });
   }
 
   // ── Prep (6.99.19, PREP_CONTRACT_v1) ──────────────────
@@ -2463,6 +2603,7 @@
     if (what === 'hist-full') return loadFull(t.getAttribute('data-id'));
     if (what === 'hist-older') { C.hist.olderState = 'idle'; return loadOlder(); }
     if (what === 'hist-retry') { C.hist.state = 'idle'; return loadHistory(); }
+    if (what === 'hist-again') return retryEntry(t.getAttribute('data-id'));
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -2736,6 +2877,7 @@
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
-    _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn
+    _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
+    _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread
   };
 })();
