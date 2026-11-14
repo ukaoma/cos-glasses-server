@@ -232,10 +232,16 @@ describe('the reader’s card and its send', () => {
   })
   it('7.0.37 (lead 00:54): an earlier answer whose delivery is unknown: the lead’s words, no button, nothing more sent', async () => {
     const h = reader({ ...ROW, waiting_ask_id: 'turn_end:1' }, () => Promise.resolve('unconfirmed'))
+    // A box already showing for the reply box's own words stays exactly as it was (Q1 01:1x).
+    const box = { copy: 'This thread changed on your Mac.', changed: true }
+    Object.assign(h.r, { refusal: box, sendAnyway: 'revA' })
     h.fns.sendTurnEndChoice(h.r, 0)
     await flush()
     expect(h.status.at(-1)).toEqual({ text: 'An answer was just sent and COS could not confirm it arrived. Look at the session before answering again.', kind: 'error' })
     expect(h.r.teQuote ?? null).toBeNull()
+    expect(h.r.refusal, 'the reply box is left alone').toBe(box)
+    expect(h.r.sendAnyway).toBe('revA')
+    expect(h.verdicts, 'nothing repainted').toHaveLength(0)
     h.fns.sendTurnEndQuoted(h.r)
     expect(h.sent).toHaveLength(1)
   })
