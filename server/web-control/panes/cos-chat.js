@@ -1424,27 +1424,32 @@
   // did); the words are the page's.
   var NOTE_DONE = { replied: 'You replied.', acted: 'You acted on it.', dismissed: 'You dismissed it.', closed: 'It was closed.', seen: 'You saw it.' };
   var QUESTION_DONE = { moved_on: 'The session moved on before an answer.', session_ended: 'The session ended before an answer.', aged_out: 'It went unanswered.' };
-  function noteLink(label, attrs, quiet) {
-    return '<button type="button" class="cc-note-link' + (quiet ? ' quiet' : '') + '" data-cos="tl-open" ' + attrs + '>' + label + '</button>';
+  // A real link (WebKit draws a <button> as one box that cannot wrap, so a long title broke the line). Its href is the same
+  // address W.go makes; the click still goes through W.go (onClick), which marks the step for Back, so the link's own
+  // default lands on the address already set and adds nothing.
+  function hashOf(pane, args) { return '#/' + [pane].concat(args).map(function (x) { return encodeURIComponent(String(x)); }).join('/'); }
+  function noteLink(label, attrs, quiet, href) {
+    return '<a class="cc-note-link' + (quiet ? ' quiet' : '') + '" href="' + esc(href) + '" data-cos="tl-open" ' + attrs + '>' + label + '</a>';
   }
   function noteHtml(e) {
     var r = e.ref || {}, s = '';
     if (e.kind === 'notification') {
       var q = '“' + esc(e.line) + '”';
-      s = 'COS sent ' + (r.id ? noteLink(q, 'data-kind="notification" data-id="' + esc(r.id) + '"') : q) + '.' + (NOTE_DONE[e.outcome] ? ' ' + NOTE_DONE[e.outcome] : '');
+      s = 'COS sent ' + (r.id ? noteLink(q, 'data-kind="notification" data-id="' + esc(r.id) + '"', false, hashOf('messages', ['cos'])) : q) + '.' + (NOTE_DONE[e.outcome] ? ' ' + NOTE_DONE[e.outcome] : '');
     } else if (e.kind === 'session_question') {
-      s = 'A ' + (r.type === 'session' && r.id ? noteLink('session', 'data-kind="session" data-provider="' + esc(r.provider || 'claude') + '" data-sid="' + esc(r.id) + '"') : 'session') +
+      var prov = r.provider || 'claude';
+      s = 'A ' + (r.type === 'session' && r.id ? noteLink('session', 'data-kind="session" data-provider="' + esc(prov) + '" data-sid="' + esc(r.id) + '"', false, hashOf('sessions', [prov, r.id])) : 'session') +
         ' asked “' + esc(e.line) + '”.';
       if (e.outcome === 'answered') s += typeof e.answer === 'string' && e.answer ? ' You answered “' + esc(e.answer) + '”.' : ' You answered.';
       else if (QUESTION_DONE[e.outcome]) s += ' ' + QUESTION_DONE[e.outcome];
     } else if (e.kind === 'meeting') {
       s = 'Meeting recorded: ' + (r.domain && r.month && r.filename
-        ? noteLink(esc(e.line), 'data-kind="meeting" data-domain="' + esc(r.domain) + '" data-month="' + esc(r.month) + '" data-file="' + esc(r.filename) + '"') : esc(e.line));
+        ? noteLink(esc(e.line), 'data-kind="meeting" data-domain="' + esc(r.domain) + '" data-month="' + esc(r.month) + '" data-file="' + esc(r.filename) + '"', false, hashOf('meetings', [r.domain, r.month, r.filename])) : esc(e.line));
     } else if (e.kind === 'message') {
       // Lead 11:5x: "Asked on glasses" only when the row says so; never a device the row does not carry. The number links
       // to the message only in the era the Mac is on now (an older era's number names another message there).
       var no = Number.isInteger(r.no) && r.no > 0 ? r.no : 0;
-      var num = !no ? '' : C.msgEra && r.era === C.msgEra ? noteLink('#' + no, 'data-kind="message" data-no="' + no + '"', true) : '<span class="cc-note-no">#' + no + '</span>';
+      var num = !no ? '' : C.msgEra && r.era === C.msgEra ? noteLink('#' + no, 'data-kind="message" data-no="' + no + '"', true, hashOf('messages', ['m', no])) : '<span class="cc-note-no">#' + no + '</span>';
       s = (e.surface === 'glasses' ? 'Asked on glasses' : 'Asked in Messages') + ': “' + esc(e.line) + '”' + (num ? ' ' + num : '');
     }
     return '<p class="cc-note" data-hist="' + esc(e.id) + '"><span></span><span class="cc-note-text">' + s + '</span><span class="cc-note-t">' + esc(clockOnly(e.at)) + '</span></p>';

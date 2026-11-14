@@ -363,8 +363,7 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
   font-size: 13.5px; line-height: 1.45; color: var(--sub); }
 .cc .cc-note-text { min-width: 0; overflow-wrap: anywhere; }
 .cc .cc-note-t { font: 400 11px/1.3 var(--mono); color: var(--tertiary); white-space: nowrap; }
-.cc .cc-note-link { position: relative; display: inline; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit;
-  cursor: pointer; text-align: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
+.cc .cc-note-link { position: relative; color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px;
   text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
 .cc .cc-note-link.quiet, .cc .cc-note-no { color: var(--tertiary); }
 @media (any-pointer: coarse) { .cc .cc-note-link::after { content: ''; position: absolute; inset: -12px -6px; } }

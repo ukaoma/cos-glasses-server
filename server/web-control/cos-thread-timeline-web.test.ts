@@ -125,7 +125,7 @@ describe('7.0.41 thread candidate 3: the words of a note', () => {
     expect(words(h, note('q', at(14, 9), 'session_question', { outcome: 'session_ended' }))).toContain('The session ended before an answer.')
     expect(words(h, note('q', at(14, 9), 'session_question', { outcome: 'aged_out' }))).toContain('It went unanswered.')
     const open = h.chat._noteHtml(note('q', at(14, 9), 'session_question'))
-    expect(open).toMatch(/A <button[^>]*>session<\/button> asked “Line q”\.<\/span>/)
+    expect(open).toMatch(/A <a [^>]*>session<\/a> asked “Line q”\.<\/span>/)
   })
   it('a meeting shows its title', () => {
     const h = load({})
@@ -146,6 +146,21 @@ describe('7.0.41 thread candidate 3: the words of a note', () => {
     expect(h.chat._noteHtml(m({ ref: { type: 'message', no: 1039, era: 'era-1' } }))).toContain('<span class="cc-note-no">#1039</span>')
     h.chat._state.msgEra = ''
     expect(h.chat._noteHtml(m({}))).not.toContain('data-kind="message"')
+  })
+  it('links are real links (a long title wraps in the line, WebKit does not wrap a button) to the address W.go makes', () => {
+    const h = load({})
+    h.chat._state.msgEra = 'E'
+    const html = [
+      h.chat._noteHtml(note('n', at(14, 9), 'notification')),
+      h.chat._noteHtml({ ...note('q', at(14, 9), 'session_question'), ref: { type: 'session', provider: 'claude', id: 's 1' } }),
+      h.chat._noteHtml({ ...note('m', at(14, 9), 'meeting'), ref: { type: 'meeting', domain: 'quilt', month: '2026-11', filename: 'a b.md' } }),
+      h.chat._noteHtml({ ...note('g', at(14, 9), 'message'), ref: { type: 'message', no: 7, era: 'E' } }),
+    ].join('')
+    expect(html).not.toContain('<button')
+    expect(html).toContain('href="#/messages/cos" data-cos="tl-open" data-kind="notification"')
+    expect(html).toContain('href="#/sessions/claude/s%201" data-cos="tl-open"')
+    expect(html).toContain('href="#/meetings/quilt/2026-11/a%20b.md" data-cos="tl-open"')
+    expect(html).toContain('href="#/messages/m/7" data-cos="tl-open"')
   })
   it('quiet: one line with its time, no box, label, pill, chip or icon', () => {
     const h = load({})
