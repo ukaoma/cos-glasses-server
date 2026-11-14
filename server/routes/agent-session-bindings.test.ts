@@ -5501,20 +5501,26 @@ describe('X1 7.0.38: the ask is read before the busy gates', () => {
     expect(h.calls).toHaveLength(0)
   })
 
-  it('a second tap during an in-flight first answer: unconfirmed, not native_turn_in_progress, never delivered twice', async () => {
+  it('a second tap during an in-flight first answer: unconfirmed, not native_turn_in_progress; it sets no mark and delivers nothing', async () => {
     const held = heldDelivery()
     const h = harness({ ask: theAsk, held })
     const base = await start(h.deps)
     const a = await attached(base)
     const first = tap(base, a, 'ct-early-0003')
     while (held.calls.length === 0) await new Promise(r => setTimeout(r, 2))
-    const second = await tap(base, a, 'ct-early-0004')
+    // The second tap comes from the Mac app, so a mark it set would name mac_app; the first answer's mark names web.
+    const MAC = 'Answer sent from COS Control on the Mac through COS, not typed in this session: Not yet'
+    const second = await post(base, turnsPath(a.bindingId), { prompt: MAC, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-early-0004', turnEndAskId: ID })
     expect(second.status).toBe(409)
-    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: 'unconfirmed', answeredBy: 'web', askNow: null })
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: 'unconfirmed', answeredBy: 'web', askNow: null, deliveryState: 'not_delivered' })
     expect(held.calls).toHaveLength(1)
     held.open()
-    await first
+    expect((await first).body.outcome).toBe('completed')
+    // The mark is still the first answer's, now proven delivered: the refused tap neither set nor replaced it.
+    const third = await tap(base, a, 'ct-early-0012')
+    expect(third.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'web' })
     expect(held.calls).toHaveLength(1)
+    expect(held.calls[0]!.prompt).toContain('Approved')
   })
 
   it('an open ask with the session busy still gets the busy reason, and the refused tap uses nothing up: the next one goes', async () => {
