@@ -1788,7 +1788,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   // thread and ask id. The tracker clears an ask only when the session's UserPromptSubmit hook lands, a moment after
   // delivery, so without this a second surface answering in that moment would reach the session too. Forgotten if
   // that turn is refused after all (the answer did not go), kept once it may have landed. Bounded, oldest first.
-  const answeredAsks = new Map<string, { at: number; by: string }>()
+  // `state`: the accepted turn's outcome as far as this server knows it. `delivered` is a proven delivery; `unconfirmed`
+  // is an outcome that may or may not have landed (lead 00:58), or one not settled yet.
+  const answeredAsks = new Map<string, { at: number; by: string; state: 'delivered' | 'unconfirmed' }>()
   const ANSWERED_ASKS_MAX = 512
   const cancelDeps: CancelDeps = deps?.cancel ?? {}
   /** A throwing or absent probe reads as the cautious answer, never as a thrown route. */
@@ -2983,6 +2985,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
     const attemptExit = (): 'sent' | 'not_sent' | 'unknown' => (proven ? 'sent' : liveMay || spawnMay ? 'unknown' : 'not_sent')
 
     const respond = (status: number, payload: Record<string, unknown>): void => {
+      // X1 (7.0.36, lead 00:58): the first-answer mark learns this turn's outcome. A proven delivery is `delivered`; an
+      // outcome that may have landed stays `unconfirmed`, so a second answer is told so, never "already answered".
+      if (answeredAskKey !== null && payload.deliveryState === 'delivered') {
+        const mark = answeredAsks.get(answeredAskKey)
+        if (mark) mark.state = 'delivered'
+      }
       if (!res.headersSent) {
         res.status(status).json(payload)
         const outcome = typeof payload.outcome === 'string' ? payload.outcome : String(status)
@@ -3339,13 +3347,18 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         let open: VisibleTurnAsk | null = null
         try { open = deps.openTurnEndAsk(binding.nativeThreadId) } catch { open = null }
         const askKey = `${binding.provider}:${binding.nativeThreadId.toLowerCase()}:${namedAsk}`
-        if (open && turnEndAskId(open.stoppedAt) === namedAsk && answeredAsks.has(askKey)) {
-          // Another surface's answer to this same ask was accepted first. The first answer counts.
-          return refuseTurn('turn_end_ask_moved', { changed: true, revision: head.digest, answered: true, answeredBy: answeredAsks.get(askKey)?.by ?? 'cos', askNow: null })
+        const mark = answeredAsks.get(askKey)
+        if (open && turnEndAskId(open.stoppedAt) === namedAsk && mark) {
+          // Another surface's answer to this same ask was accepted first. The first answer counts. If that turn's
+          // delivery was not proven, say so: "unconfirmed", never "already answered" (lead 00:58).
+          return refuseTurn('turn_end_ask_moved', { changed: true, revision: head.digest, answered: mark.state === 'delivered' ? true : 'unconfirmed', answeredBy: mark.by, askNow: null })
         }
+        // The mark never outlives its ask: once the ask is no longer open (the session's hook cleared it, or a newer ask
+        // opened), any mark for it is gone, whatever its state.
+        if (mark && !(open && turnEndAskId(open.stoppedAt) === namedAsk)) answeredAsks.delete(askKey)
         if (open && turnEndAskId(open.stoppedAt) === namedAsk) {
           answersOpenAsk = true
-          answeredAsks.set(askKey, { at: Date.now(), by: turnAskAnswerSurface(prompt, true) })
+          answeredAsks.set(askKey, { at: Date.now(), by: turnAskAnswerSurface(prompt, true), state: 'unconfirmed' })
           while (answeredAsks.size > ANSWERED_ASKS_MAX) {
             const oldest = answeredAsks.keys().next()
             if (oldest.done) break

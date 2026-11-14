@@ -5198,7 +5198,7 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
     expect(h.calls[0]!.prompt).toContain('You have taken a turn since asking it.')
   })
 
-  it('an accepted answer whose delivery is UNKNOWN keeps its mark: a second answer is told answered, not sent too (Q1)', async () => {
+  it('an accepted answer whose delivery is UNKNOWN keeps its mark: a second answer is told unconfirmed, not sent too and not "already answered" (lead 00:58)', async () => {
     const h = harness(openAsk())
     let live = 0
     h.deps.deliverLiveTurn = async () => { live++; return { ok: false, reason: 'unverified' } }
@@ -5211,8 +5211,30 @@ describe('X1 7.0.36: a turn-end answer addressed to its open ask', () => {
       prompt: 'Answer sent from COS Control Web through COS, not typed in this session: Not tonight',
       epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0021', turnEndAskId: ID,
     })
-    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: true, answeredBy: 'web' })
+    expect(second.body).toMatchObject({ reason: 'turn_end_ask_moved', answered: 'unconfirmed', answeredBy: 'web', askNow: null })
     expect(live).toBe(1)
+  })
+
+  it('the unconfirmed mark never outlives its ask: once the ask closes it is gone, so it can never answer for a later state', async () => {
+    const ask = openAsk()
+    const h = harness(ask)
+    let live = 0
+    h.deps.deliverLiveTurn = async () => { live++; return live === 1 ? { ok: false, reason: 'unverified' } : { ok: true, reason: 'delivered', verifiedBy: 'enqueue', pid: 4242 } as never }
+    const base = await start(h.deps)
+    const a = await attached(base)
+    h.head.value = 'h2'
+    const first = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0023', turnEndAskId: ID })
+    expect(first.body.deliveryState).toBe('unknown')
+    // The session's hook clears the ask (nothing recorded as answered): the answer is moved, and the mark is dropped.
+    ask.value = null
+    const closed = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0024', turnEndAskId: ID })
+    expect(closed.body).toMatchObject({ reason: 'turn_end_ask_moved', askNow: null })
+    expect('answered' in closed.body).toBe(false)
+    // Proof the mark is gone, not just skipped: the same ask shown open again is answered normally, no "unconfirmed".
+    ask.value = openAsk().value
+    const again = await post(base, turnsPath(a.bindingId), { prompt: ANSWER, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-te-0025', turnEndAskId: ID })
+    expect(again.body.reason ?? again.body.outcome).not.toBe('turn_end_ask_moved')
+    expect(live).toBe(2)
   })
 
   it('a Codex turn naming an ask reads exactly as before: the head check, and the tracker is never asked (Q1)', async () => {

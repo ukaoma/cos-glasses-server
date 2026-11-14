@@ -37,6 +37,9 @@ const mutations = [
   ["first-answer-surface-lost", "server/routes/agent-session-bindings.ts", "answeredBy: answeredAsks.get(askKey)?.by ?? 'cos', askNow: null", "answeredBy: 'cos', askNow: null", "first answer counts", ["server/routes/agent-session-bindings.test.ts"]],
   ["unknown-delivery-unmarks", "server/routes/agent-session-bindings.ts", "if (answeredAskKey !== null && (extra.deliveryState ?? 'not_delivered') === 'not_delivered') {", "if (answeredAskKey !== null) {", "delivery is UNKNOWN keeps its mark", ["server/routes/agent-session-bindings.test.ts"]],
   ["any-provider-names-ask", "server/routes/agent-session-bindings.ts", "if (typeof namedAsk === 'string' && binding.provider === 'claude' && isTurnEndAnswerPrompt(prompt)", "if (typeof namedAsk === 'string' && isTurnEndAnswerPrompt(prompt)", "a Codex turn naming an ask", ["server/routes/agent-session-bindings.test.ts"]],
+  ["unconfirmed-said-answered", "server/routes/agent-session-bindings.ts", "answered: mark.state === 'delivered' ? true : 'unconfirmed'", "answered: true", "delivery is UNKNOWN keeps its mark", ["server/routes/agent-session-bindings.test.ts"]],
+  ["delivered-said-unconfirmed", "server/routes/agent-session-bindings.ts", "        if (mark) mark.state = 'delivered'\n", "", "first answer counts", ["server/routes/agent-session-bindings.test.ts"]],
+  ["mark-outlives-ask", "server/routes/agent-session-bindings.ts", "        if (mark && !(open && turnEndAskId(open.stoppedAt) === namedAsk)) answeredAsks.delete(askKey)", "        void mark", "the unconfirmed mark never outlives its ask", ["server/routes/agent-session-bindings.test.ts"]],
 ]
 const args = process.argv.slice(2)
 if (args.includes('--list')) { for (const [name] of mutations) console.log(name); process.exit(0) }
