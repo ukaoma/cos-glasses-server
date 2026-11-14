@@ -18,9 +18,17 @@
 - **Not on a real phone:** the card fix, the ruler and Refresh were measured with Control Web tests and WebKit on fake routes.
 - **Two quick taps on Settings Refresh:** the second answer lands as a plain load (no kept sections, no typed-text restore, no failed line). Rare; not fixed here.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent ff57406b, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 17,111 passed, 6 skipped (17,117) in 943 files (941 passed, 2 skipped); type check clean. In the same lease, first: the web set 1,820 passed, and the 11 server tests that read web-control source, the key-lane census, hazard invariants and every route suite 3,061 passed.
+- **The layout sweep in a test browser (WebKit), quick set, on ff57406b (F1):** exit 0; 0 defect keys over 640 states in 1123 s (14 known keys, not failing, as F1 classes them) (F1_evidence/sweep_gate_ff57406b.log).
+- **Not on a real phone** (see above).
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **The question card in the reader (F1, claude/server-reader-qfoot 235f23ce):** reader-qfoot-web.test.ts 7 of 7 (1 fails on 7.0.42), 7 of 7 mutants; WebKit on the real reader, Today page and sheet, 38 of 38 (24 of 38 before), at 382 x 557, 449 x 798 and 1119 x 787. W1 reviewed the hunk. Q1 PASS, final 17:05.
+- **The plan ruler (U1, claude/server-plan-ruler 710332a2):** U1's counted run on 710332a2: 17,086 passed, 0 failed, tsc 0, gate exit 0 (16:50). Q1 PASS on the same change at 0fb12a5f, confirmed byte-identical outside CHANGELOG 16:57.
+- **Refresh keeps the page (F1, claude/server-refresh-keep af5b903a):** refresh-keep-web.test.ts with Q1's four owed tests; 281 green on 12 files, 16 of 16 mutants. W1 reviewed the settings.js hunk. Q1 PASS 17:06.
+- **The push flag (X1, claude/server-web-push-health-flag 06c3de7a):** X1's counted run: tsc 0, web-push gate 51 of 51 (17:07). Q1 PASS, final 17:22.
+- **The cut:** 12 picks on 6a2b47f9, every replayed commit's added and removed lines equal its source; every file outside CHANGELOG byte-identical to the passed heads (server/index.ts carries both 7.0.42's and the push flag's lines).
 
 ## 7.0.42 - Notes in the COS thread, COS's look-back by day, and https on the ts.net name that holds across a restart
 
