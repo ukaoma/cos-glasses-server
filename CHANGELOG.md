@@ -21,9 +21,15 @@
 - **Only Settings is framed.** The same stranded view can still leave the rail part way down on other pages that scroll the whole page. A test browser found seven when the question card makes them long: Today, the Messages list, the COS chat, Meetings, Memories, Work and a Work card's page. Framing those is scoped, not built, until his phone shows Settings holds.
 - **The Mac app** is not changed (its picked day is on the 0.5.394 list).
 
-**Tested on this build:** <filled at the cut>
+**Tested on this build** (the full suite on its parent ad55b311, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 16,806 passed, 6 skipped (16,812) in 919 files (917 passed, 2 skipped); type check clean.
+- **The layout sweep in a test browser (WebKit), quick set, on ad55b311 (F1):** exit 0; 0 defect keys over 625 states in 1111 s (14 known keys, not failing: the rail in the pan state at 787 x 1022, one key per pane, as F1 classes it) (F1_evidence/sweep_gate_ad55b311.log).
+- **Not on a real phone.**
 
-**Tests:** <filled at the cut>
+**Tests:**
+- **Settings frame (F1, claude/server-settings-frame to 7e1a5d0e):** settings-frame-web.test.ts; WebKit: framed at 1119 x 787 and 787 x 1022 on touch (one screen, rail static), not under 600 px or with a mouse; the keyboard hook only where the frame applies. Q1 PASS (all five of its undo attempts on the keyboard check caught).
+- **Picked day (F1, claude/server-mt-selected to 896c8a8a):** mt-selected-web.test.ts, contrast measured in both themes, a picked disabled day keeps its light number by specificity. Q1 PASS.
+- **The package:** the four old gate scripts are named as intended removals in the release tool, so any other removal fails.
 
 ## 7.0.38 - Answers that land now or say why, a session link that recovers, and bigger tap areas
 
