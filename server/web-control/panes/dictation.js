@@ -11,7 +11,7 @@
   var $ = W.$, esc = W.esc, api = W.api;
   var pane = $('pane-dictation');
 
-  var S = { glossary: null, recent: null, recentError: '', state: 'idle', error: '', q: '', busy: false };
+  var S = { glossary: null, recent: null, recentError: '', state: 'idle', error: '', q: '', busy: false, refreshing: false, loadedAt: 0, failedAt: 0 };
 
   function toDate(v) { var d = v ? new Date(v) : null; return d && !isNaN(d.getTime()) ? d : null; }
   // Control's "when": "now" under a minute, "h:mm a" today, otherwise "MMM d".
@@ -38,12 +38,13 @@
       S.glossary = res[0] || { vocabulary: [], corrections: {} };
       S.recent = res[1] && res[1].entries ? res[1].entries : null;
       S.recentError = res[1] && res[1].error ? (res[1].error.status === 404 ? 'Update the COS server to see recent corrections here.' : (res[1].error.message || 'Recent corrections could not be read.')) : '';
-      S.state = 'ready';
-      render();
+      S.state = 'ready'; S.loadedAt = Date.now(); S.failedAt = 0;
+      render(); S.refreshing = false;
     }, function (err) {
-      S.state = 'error';
-      S.error = err.message || 'The dictionary could not be read.';
-      render();
+      // F1 (A4): a refresh that fails keeps the dictionary on screen and says so in one line.
+      if (S.glossary) { S.state = 'ready'; S.failedAt = Date.now(); }
+      else { S.state = 'error'; S.error = err.message || 'The dictionary could not be read.'; }
+      render(); S.refreshing = false;
     });
   }
 
@@ -65,10 +66,16 @@
     }).join('') + '</div>';
   }
 
+  // F1 (A4): one line when a refresh failed and the old dictionary is still shown. Try again is the same refresh.
+  function failLine() {
+    if (!S.failedAt || !S.glossary) return '';
+    return '<p class="cx-note refresh-fail" role="status">Could not refresh. Showing what was there at ' + esc(W.clock(new Date(S.loadedAt))) +
+      '. <button type="button" class="link-btn" data-dict="refresh">Try again</button></p>';
+  }
   function renderMain() {
     var body;
     if (S.state === 'error') body = '<div class="cx-notice warn">' + esc(S.error) + '</div>';
-    else body =
+    else body = failLine() +
       '<p class="cx-strip-label" style="margin-top:16px">RECENT CORRECTIONS</p>' + recentRows(S.recent, 10) +
       '<div class="cx-notice" style="margin-top:16px"><svg class="icon" aria-hidden="true"><use href="#i-dictation"/></svg><span>Your dictations and the fixes Learn from my edits suggests are kept on your Mac, so they show in COS Control there. The dictionary is shared, so a word you add here applies to G2 meetings, Mac recordings and dictation from the next sentence.</span></div>';
     pane.innerHTML = '<div class="cx" data-tint="dictation">' +
@@ -92,7 +99,8 @@
         '<button type="button" class="cx-btn quiet" data-dict="refresh"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button>') +
       '<div class="cx-controls"><div class="cx-search" style="max-width:420px"><input class="field" type="search" id="dict-q" placeholder="Search words and corrections" value="' + esc(S.q) + '" autocomplete="off" aria-label="Search words and corrections">' +
         (S.q ? '<button type="button" class="cx-clear" data-dict="clear">Clear</button>' : '') + '</div></div>' +
-      (S.state !== 'ready' ? (S.state === 'error' ? '<div class="cx-notice warn">' + esc(S.error) + '</div>' : '<div class="cx-list">' + W.skeletonRows(4) + '</div>') :
+      failLine() +
+      (!S.glossary ? (S.state === 'error' ? '<div class="cx-notice warn">' + esc(S.error) + '</div>' : '<div class="cx-list">' + W.skeletonRows(4) + '</div>') :
       '<div class="cx-dict-cols"><section><h2 class="cx-col-title">Recent corrections</h2>' + (S.recent && !recent.length && q ? '<div class="cx-list"><p class="cx-empty">No recent correction matches.</p></div>' : recentRows(S.recent ? recent : null, 0)) + '</section>' +
       '<section><h2 class="cx-col-title">Vocabulary · ' + (g.vocabulary || []).length + '</h2>' +
         '<form class="cx-inline-form" data-dict-form="vocab"><input class="field" id="dict-term" type="text" placeholder="Add a word or name" maxlength="100" autocomplete="off" aria-label="Add a word or name"><button type="submit" class="cx-btn">Add</button></form>' +
@@ -115,8 +123,28 @@
     if (r.pane !== 'dictation') return;
     var focus = document.activeElement && document.activeElement.id === 'dict-q';
     var caret = focus ? document.activeElement.selectionStart : null;
+    var keep = S.refreshing ? keepTyped() : null;
     if (r.args[0] === 'dictionary') renderDictionary(); else renderMain();
-    if (focus) { var input = $('dict-q'); if (input) { input.focus(); try { input.setSelectionRange(caret, caret); } catch (_e) {} } }
+    if (keep) keep();
+    else if (focus) { var input = $('dict-q'); if (input) { input.focus(); try { input.setSelectionRange(caret, caret); } catch (_e) {} } }
+  }
+
+  // F1 (A4): what is being typed survives a refresh. A field with an id that has focus, or a value other than the one it
+  // was drawn with, is put back with its caret after the re-render. Only for a refresh: after an add, the box clears.
+  function keepTyped() {
+    var a = document.activeElement, kept = [];
+    Array.prototype.forEach.call(pane.querySelectorAll('input, textarea'), function (el) {
+      if (!el.id || el.type === 'checkbox' || el.type === 'radio') return;
+      var focused = el === a;
+      if (focused || el.value !== el.defaultValue) kept.push({ id: el.id, value: el.value, focused: focused, s: el.selectionStart, e: el.selectionEnd });
+    });
+    return function () {
+      kept.forEach(function (k) {
+        var el = pane.querySelector('#' + k.id); if (!el) return;
+        el.value = k.value;
+        if (k.focused) { el.focus({ preventScroll: true }); try { el.setSelectionRange(k.s, k.e); } catch (_e) {} }
+      });
+    };
   }
 
   function write(path, body, done) {
@@ -125,7 +153,7 @@
     api(path, { method: 'POST', body: body }).then(function () {
       S.busy = false;
       if (done) W.toast(done);
-      S.glossary = null; S.state = 'idle'; load(true);
+      S.state = 'idle'; load(true);
     }, function (err) {
       S.busy = false;
       var msg = err && err.message ? err.message : 'That change was not saved.';
@@ -139,7 +167,8 @@
     if (!t) return;
     var act = t.getAttribute('data-dict');
     if (act === 'dictionary') return W.go('dictation', ['dictionary']);
-    if (act === 'refresh') { S.glossary = null; S.state = 'idle'; return load(true); }
+    // F1 (A4): Refresh keeps what is on screen; the new dictionary swaps in when it arrives.
+    if (act === 'refresh') { S.state = 'idle'; S.refreshing = true; return load(true); }
     if (act === 'clear') { S.q = ''; return render(); }
     if (act === 'undo') return write('/api/transcription-glossary/correction/undo', { id: t.getAttribute('data-id') }, 'Undone');
     if (act === 'vocab-remove') return write('/api/transcription-glossary/vocabulary/remove', { term: t.getAttribute('data-term') }, 'Removed');

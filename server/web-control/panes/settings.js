@@ -11,7 +11,7 @@
   var W = window.COSWeb;
   var $ = W.$, esc = W.esc, api = W.api;
   var pane = $('pane-settings');
-  var S = { data: null, state: 'idle' };
+  var S = { data: null, state: 'idle', refreshing: false, loadedAt: 0, failedAt: 0 };
 
   var CATEGORIES = [
     { id: 'general', title: 'General', summary: 'How COS Control opens, its shortcut, Today and the setup guide.', mac: ['App', 'Activity home', 'Setup guide'] },
@@ -103,9 +103,15 @@
       soft(api('/api/health')), soft(api('/api/drops/settings/p2')), soft(api('/api/today/brief/settings')),
       soft(api('/api/session-files/settings')), soft(api('/api/preview-folders/settings'))
     ]).then(function (r) {
-      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8], sf: r[9], pf: r[10] };
-      S.state = 'ready';
-      render();
+      var next = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8], sf: r[9], pf: r[10] };
+      // F1 (A4): on a refresh, a section whose read failed keeps what it showed; if every read failed, the page stays
+      // as it was and one line says so.
+      var old = S.refreshing ? S.data : null;
+      if (old) Object.keys(next).forEach(function (k) { if (next[k] == null && old[k] != null) next[k] = old[k]; });
+      var allFailed = !!old && r.every(function (x) { return x == null; });
+      S.data = next; S.state = 'ready';
+      if (allFailed) S.failedAt = Date.now(); else { S.loadedAt = Date.now(); S.failedAt = 0; }
+      render(); S.refreshing = false;
     });
   }
 
@@ -356,20 +362,47 @@
     return out + (cat.mac.length ? onMac(cat.mac) : '');
   }
 
+  // F1 (A4): one line when a refresh failed and the old settings are still shown. Try again is the same refresh.
+  function failLine() {
+    if (!S.failedAt || !S.data) return '';
+    return '<p class="cx-note refresh-fail" role="status">Could not refresh. Showing what was there at ' + esc(W.clock(new Date(S.loadedAt))) +
+      '. <button type="button" class="link-btn" data-set="refresh">Try again</button></p>';
+  }
+  // F1 (A4): what is being typed survives a refresh. A field (by id, data-p2 or data-set) that has focus, or a value
+  // other than the one it was drawn with, is put back with its caret after the re-render. Only during a refresh.
+  function keepTyped() {
+    var a = document.activeElement, kept = [];
+    Array.prototype.forEach.call(pane.querySelectorAll('input, textarea'), function (el) {
+      if (el.type === 'checkbox' || el.type === 'radio') return;
+      var key = el.id ? '#' + el.id : el.getAttribute('data-p2') ? '[data-p2="' + el.getAttribute('data-p2') + '"]' : el.getAttribute('data-set') ? '[data-set="' + el.getAttribute('data-set') + '"]' : '';
+      var focused = el === a;
+      if (key && (focused || el.value !== el.defaultValue)) kept.push({ key: key, value: el.value, focused: focused, s: el.selectionStart, e: el.selectionEnd });
+    });
+    return function () {
+      kept.forEach(function (k) {
+        var el = pane.querySelector(k.key); if (!el) return;
+        el.value = k.value;
+        if (k.focused) { el.focus({ preventScroll: true }); try { el.setSelectionRange(k.s, k.e); } catch (_e) {} }
+      });
+    };
+  }
+
   function render() {
     if (W.parseRoute().pane !== 'settings') return;
+    var keep = S.refreshing ? keepTyped() : null;
     var host = String(W.state.serverName || 'your Mac').replace(/-/g, ' ');
     pane.innerHTML = '<div class="cx">' +
       '<header class="cx-hero"><span class="cx-glyph"><svg class="icon"><use href="#i-settings"/></svg></span>' +
       '<div class="cx-hero-text"><h1 class="cx-title">Settings</h1><p class="cx-detail-line">COS on ' + esc(host) + '. Keys, permissions and glasses pairing change only on the Mac.</p></div>' +
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-set="refresh"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div></header>' +
-      browserGroup() +
-      (S.state !== 'ready' ? '<div class="cx-list" style="margin-top:18px">' + W.skeletonRows(4) + '</div>' :
+      browserGroup() + failLine() +
+      (!S.data ? '<div class="cx-list" style="margin-top:18px">' + W.skeletonRows(4) + '</div>' :
         CATEGORIES.filter(function (cat) { return !cat.p2 || p2On(); }).map(function (cat) {
           return '<section class="cx-set-cat" id="set-cat-' + cat.id + '"><h2 class="cx-col-title">' + esc(cat.title) + '</h2><p class="cx-set-blurb">' + esc(cat.summary) + '</p>' + categoryBody(cat) + '</section>';
         }).join('')) +
       '<p class="status-line" id="settings-status"></p></div>';
     if (PET.q) filterPets();
+    if (keep) keep();
   }
 
   function say(text, isError) { var el = $('settings-status'); if (el) { el.textContent = text; el.classList.toggle('error', !!isError); } }
@@ -397,7 +430,8 @@
     }
     if (t.getAttribute('data-set') === 'pet-retry') { PET.state = 'idle'; return render(); }
     var act = t.getAttribute('data-set');
-    if (act === 'refresh') { S.data = null; S.state = 'idle'; load(true); return render(); }
+    // F1 (A4): Refresh keeps the settings on screen; the new values swap in when they arrive.
+    if (act === 'refresh') { S.state = 'idle'; S.refreshing = true; load(true); return render(); }
     if (act === 'provider') {
       api('/api/decision-provider', { method: 'PATCH', body: { provider: t.getAttribute('data-provider') } })
         .then(function () { W.toast('Saved'); S.data = null; S.state = 'idle'; load(true); }, function (err) { say(err.message, true); });

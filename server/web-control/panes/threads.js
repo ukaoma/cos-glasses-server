@@ -9,7 +9,7 @@
   var $ = W.$, esc = W.esc, api = W.api;
   var pane = $('pane-threads');
 
-  var S = { rows: null, state: 'idle', error: '', status: null, q: '', hits: null, searching: false, ranFor: '', semantic: null, details: {} };
+  var S = { rows: null, state: 'idle', error: '', status: null, q: '', hits: null, searching: false, ranFor: '', semantic: null, details: {}, loadedAt: 0, failedAt: 0 };
 
   function trimmed(v) { var s = typeof v === 'string' ? v.trim() : ''; return s || null; }
   function subtitle(t) {
@@ -64,11 +64,12 @@
     ]).then(function (res) {
       S.rows = (res[0] && res[0].threads) || [];
       S.status = res[1] && res[1].threads ? res[1].threads : null;
-      S.state = 'ready';
+      S.state = 'ready'; S.loadedAt = Date.now(); S.failedAt = 0;
       render();
     }, function (err) {
-      S.state = 'error';
-      S.error = err && err.status === 404 ? 'Update the server to search threads from this panel.' : (err.message || 'Threads could not be loaded.');
+      // F1 (A4): a refresh that fails keeps the list on screen and says so in one line; only a first load shows the error.
+      if (S.rows) { S.state = 'ready'; S.failedAt = Date.now(); }
+      else { S.state = 'error'; S.error = err && err.status === 404 ? 'Update the server to search threads from this panel.' : (err.message || 'Threads could not be loaded.'); }
       render();
     });
   }
@@ -137,8 +138,10 @@
     }
     if (S.state === 'error') return '<div class="cx-notice warn">' + esc(S.error) + '</div>';
     if (!S.rows) return '<p class="cx-note">Loading threads…</p>';
-    if (!S.rows.length) return '<div class="cx-list"><p class="cx-empty">No threads yet. Threads are markdown files in threads/, or tracked automatically with a bridge.</p></div>';
-    return '<div class="cx-list">' + S.rows.map(row).join('') + '</div>';
+    var fail = S.failedAt ? '<p class="cx-note refresh-fail" role="status">Could not refresh. Showing what was there at ' + esc(W.clock(new Date(S.loadedAt))) +
+      '. <button type="button" class="link-btn" data-th="refresh">Try again</button></p>' : '';
+    if (!S.rows.length) return fail + '<div class="cx-list"><p class="cx-empty">No threads yet. Threads are markdown files in threads/, or tracked automatically with a bridge.</p></div>';
+    return fail + '<div class="cx-list">' + S.rows.map(row).join('') + '</div>';
   }
   function renderList() {
     var focus = document.activeElement && document.activeElement.id === 'th-q';
@@ -174,7 +177,8 @@
     var t = e.target.closest('[data-th]');
     if (!t) return;
     var act = t.getAttribute('data-th');
-    if (act === 'refresh') { S.rows = null; S.state = 'idle'; load(true); if (S.q.trim().length >= 2) search(); return; }
+    // F1 (A4): Refresh keeps the list on screen; the new rows swap in when they arrive.
+    if (act === 'refresh') { S.state = 'idle'; load(true); if (S.q.trim().length >= 2) search(); return; }
     if (act === 'clear') { S.q = ''; S.hits = null; S.ranFor = ''; return renderList(); }
     if (act === 'open') return W.go('threads', [t.getAttribute('data-id')]);
     if (act === 'retry') { var cur = W.parseRoute().args[0]; if (cur) renderDetail(cur); return; }
