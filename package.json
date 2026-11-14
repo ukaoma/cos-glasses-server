@@ -159,6 +159,10 @@
     "!server/scripts/turn-end-answer-mutation-gate.mjs",
     "!server/scripts/answer-never-queued-mutation-gate.mjs",
     "!server/scripts/question-hold-default-mutation-gate.mjs",
+    "!server/scripts/live-cues-v3-mutation-gate.mjs",
+    "!server/scripts/mac-voice-assignment-6930-mutation-gate.mjs",
+    "!server/scripts/dictation-parity-6920-mutation-gate.mjs",
+    "!server/scripts/mac-window-voices-6930-mutation-gate.mjs",
     "docs/web-key-verifier-contract.md"
   ],
   "author": "COS Contributors",
