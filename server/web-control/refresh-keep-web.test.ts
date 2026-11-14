@@ -77,7 +77,7 @@ function harness(file: string, paneId: string, route: { pane: string; args: stri
     $: (id: string) => id === paneId ? pane : pane.querySelector('#' + id), esc: (s: unknown) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
     md: (s: unknown) => String(s), state: { serverName: 'Test-Mac' }, skeletonRows: () => SKEL, toast: () => {}, copyText: () => Promise.resolve(),
     parseRoute: () => route, go: () => {}, setCrumb: () => {}, armTap: () => true, petPrefs: () => ({}), setPetPrefs: () => {}, resetTodayBrief: () => {},
-    clock: (d: Date) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+    clock: (d: Date) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' }),
     registerPane: (_n: string, def: { load: (args?: string[]) => void }) => { loadFn = def.load },
     api: (path: string) => {
       const key = path.split('?')[0]
@@ -87,14 +87,18 @@ function harness(file: string, paneId: string, route: { pane: string; args: stri
       try { return Promise.resolve(typeof a === 'function' ? (a as () => unknown)() : a) } catch (e) { return Promise.reject(e) }
     },
   }
-  const ctx = vm.createContext({ window: { COSWeb: W }, document: doc, console, Promise, Number, String, isFinite, Date, Array, Object, JSON, Math, setTimeout, clearTimeout })
+  const clock = { now: Date.UTC(2026, 10, 14, 16, 0, 0) }
+  class FakeDate extends Date { constructor(...a: unknown[]) { super(...((a.length ? a : [clock.now]) as [number])) } static now() { return clock.now } }
+  const ctx = vm.createContext({ window: { COSWeb: W }, document: doc, console, Promise, Number, String, isFinite, Date: FakeDate, Array, Object, JSON, Math, setTimeout, clearTimeout })
   vm.runInContext(src(file), ctx)
   const flush = async () => { for (let i = 0; i < 6; i++) await new Promise(r => setTimeout(r, 0)) }
   const click = (attr: string, act: string) => pane.listeners.click({
     target: { closest: (sel: string) => sel === `[${attr}]` ? { getAttribute: (k: string) => k === attr ? act : null } : null },
   })
   return {
-    pane, doc, flush, click,
+    pane, doc, flush, click, clock,
+    /** Leave a field: it keeps the typed value but no longer has focus. */
+    blur: () => { doc.activeElement = null },
     open: async () => { loadFn!(route.args); await flush() },
     hold: () => { holding = true },
     release: async (ok: boolean) => {
@@ -231,5 +235,41 @@ describe('Settings: Refresh keeps the settings and what is being typed', () => {
     expect(h.pane.innerHTML).toContain('id="today-brief-cap"')
     expect(h.pane.innerHTML).toMatch(FAIL)
     expect(h.pane.innerHTML).toMatch(/data-set="refresh"[^>]*>Try again</)
+  })
+})
+
+describe('Q1 owed tests (17:00): F5, F13, F15, F16', () => {
+  it('F5 Settings: a value typed and then left (no focus) keeps its text through a refresh', async () => {
+    const h = harness('settings.js', 'pane-settings', { pane: 'settings', args: [] }, { '/api/today/brief/settings': { enabled: true, dailyCap: 20, min: 1, max: 100 }, '/api/health': { status: 'ok' } })
+    await h.open()
+    h.type('#today-brief-cap', '35'); h.blur()
+    h.click('data-set', 'refresh'); await h.flush()
+    expect((h.pane.querySelector('#today-brief-cap') as El).value).toBe('35')
+    expect(h.doc.activeElement).toBe(null)
+  })
+  it('F13 Threads: the fail line names when the list on screen was read, not when the refresh failed', async () => {
+    const h = harness('threads.js', 'pane-threads', { pane: 'threads', args: [] }, { '/api/threads': { threads: [{ id: 't1', name: 'Pricing page rebuild' }] }, '/api/context/status': { threads: { active: 1 } } })
+    await h.open()                                   // read at 16:00 UTC
+    h.clock.now += 7 * 60e3                          // the refresh fails at 16:07
+    h.hold(); h.click('data-th', 'refresh'); await h.flush(); await h.release(false)
+    expect(h.pane.innerHTML).toContain('Showing what was there at 4:00 PM.')
+    expect(h.pane.innerHTML).not.toContain('4:07 PM')
+  })
+  it('F15 Dictation: a good refresh after a failed one clears the fail line', async () => {
+    const h = harness('dictation.js', 'pane-dictation', { pane: 'dictation', args: ['dictionary'] }, { '/api/transcription-glossary': { vocabulary: ['Quilt'], corrections: {} }, '/api/transcription-glossary/recent': { entries: [] } })
+    await h.open()
+    h.hold(); h.click('data-dict', 'refresh'); await h.flush(); await h.release(false)
+    expect(h.pane.innerHTML).toMatch(FAIL)
+    h.click('data-dict', 'refresh'); await h.flush()
+    expect(h.pane.innerHTML).not.toMatch(FAIL)
+    expect(h.pane.innerHTML).toContain('Quilt')
+  })
+  it('F16 Settings: once a refresh has finished, a later render is not a refresh (it draws the saved value)', async () => {
+    const h = harness('settings.js', 'pane-settings', { pane: 'settings', args: [] }, { '/api/today/brief/settings': { enabled: true, dailyCap: 20, min: 1, max: 100 }, '/api/health': { status: 'ok' } })
+    await h.open()
+    h.click('data-set', 'refresh'); await h.flush()  // the refresh completes
+    h.type('#today-brief-cap', '35'); h.blur()
+    await h.open()                                   // opening Settings again renders it fresh
+    expect((h.pane.querySelector('#today-brief-cap') as El).value).toBe('20')
   })
 })
