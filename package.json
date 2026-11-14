@@ -158,6 +158,7 @@
     "!server/scripts/question-8h-mutation-gate.mjs",
     "!server/scripts/turn-end-answer-mutation-gate.mjs",
     "!server/scripts/control-tsnet-https-mutation-gate.mjs",
+    "!server/scripts/web-push-mutation-gate.mjs",
     "!server/scripts/answer-never-queued-mutation-gate.mjs",
     "!server/scripts/question-hold-default-mutation-gate.mjs",
     "!server/scripts/live-cues-v3-mutation-gate.mjs",

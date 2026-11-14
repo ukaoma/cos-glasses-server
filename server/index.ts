@@ -13,6 +13,8 @@ import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
+import { createWebPushRouter, webPushEnabled } from './routes/web-push.js'
+import { WebPushStore } from './lib/web-push-store.js'
 import { diagRouter } from './routes/diag.js'
 import { createClientInstanceRouter, isMeetingChunkPost, pairedInstanceFrom } from './routes/client-instance.js'
 import type { ClientInstanceOwner } from './lib/client-instance-claim.js'
@@ -1000,6 +1002,15 @@ function forkDepsClearingIdleHalt(provider: 'claude' | 'codex' | 'cursor', threa
 
 // API routes
 app.use('/api', healthRouter)
+// X1 (iPhone pings, one-ping proof): subscribe, list, remove, and one explicit test ping. ONLY with COS_WEB_PUSH on at
+// boot (default off): off, none of these paths exists, no key is made and nothing goes to Apple's push service.
+if (webPushEnabled()) {
+  app.use('/api', createWebPushRouter({
+    store: new WebPushStore(dataPath('push')),
+    // A phone subscribes from Control Web over https on 3143 (this Mac's ts.net name, or its IP).
+    originAllowed: origin => isAllowedNetworkOrigin(origin, { selfDnsName: webKeySelfDnsName(), allowedPorts: [HTTPS_PORT] }),
+  }))
+}
 app.use('/api', diagRouter)
 // 6.50.3: the referee between copies of the COS Glasses app (routes/client-instance.ts).
 // Mounted BEFORE transcribeStreamRouter: it notes each meeting chunk on its way past.
