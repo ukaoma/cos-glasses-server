@@ -44,7 +44,7 @@ function frame(hidden = false, bad = false) {
     src + '\nreturn { pgFrameSync: pgFrameSync, pgFrameOn: pgFrameOn };')
   const api = make(doc, win, win.getComputedStyle, (id: string) => (id === 'app-shell' ? shell : id === 'workspace' ? ws : null), () => ({ pane: 'today', args: [] }),
     () => ({ bad, top: 0, height: 787 }), (what: string, data: any) => { rows.push({ what, data }); return true }, (fn: () => void) => fn())
-  return { cls, rows, hooks, doc, field, outside, scrolled, ...api }
+  return { cls, rows, hooks, doc, field, outside, scrolled, shellNoClass: () => { delete (shell as any).classList }, ...api }
 }
 
 describe('Settings frame: the rail stays a column of the visible box', () => {
@@ -55,6 +55,9 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
     for (const pane of ['today', 'messages', 'sessions', 'work', 'meetings', 'memories', 'toString', 'constructor']) {
       expect(f.pgFrameSync({ pane, args: [] }), pane).toBe(false); expect(f.cls.has('pg-frame')).toBe(false)
     }
+    // a shell with no classList (route harnesses, W1 08:04): no throw, Settings still framed
+    const h = frame(); (h as any).shellNoClass()
+    expect(() => h.pgFrameSync({ pane: 'settings', args: [] })).not.toThrow(); expect(h.cls.has('pg-frame')).toBe(true)
     const g = frame(true)
     expect(g.pgFrameSync({ pane: 'settings', args: [] })).toBe(false); expect(g.cls.has('pg-frame')).toBe(false)
   })
@@ -90,7 +93,7 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
     expect(gate).toContain("document.documentElement.classList.remove('pg-frame');")
   })
   it('a new pane starts at the workspace top when framed (the page itself cannot scroll then)', () => {
-    expect(APP).toMatch(/if \(changedPane\) \{ window\.scrollTo\(0, 0\); var wsTop = \$\('workspace'\); if \(wsTop && document\.documentElement\.classList\.contains\('pg-frame'\)\) wsTop\.scrollTop = 0; \}/)
+    expect(APP).toMatch(/if \(changedPane\) \{ window\.scrollTo\(0, 0\); var wsTop = \$\('workspace'\), deTop = document\.documentElement; if \(wsTop && deTop && deTop\.classList && deTop\.classList\.contains\('pg-frame'\)\) wsTop\.scrollTop = 0; \}/)
   })
   it('the CSS: from 600 px on touch, one-screen page, the shell is the visible box, a static rail, the workspace scrolls', () => {
     const b = mediaBlock(CSS, '(min-width: 600px) and (pointer: coarse)')

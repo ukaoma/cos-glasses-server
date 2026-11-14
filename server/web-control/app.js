@@ -839,7 +839,7 @@
     if (typeof paintTrail === 'function') paintTrail(r);
     closeMenu();
     // F1: a framed pane scrolls the workspace, not the page, so a new pane starts at the workspace's top too.
-    if (changedPane) { window.scrollTo(0, 0); var wsTop = $('workspace'); if (wsTop && document.documentElement.classList.contains('pg-frame')) wsTop.scrollTop = 0; }
+    if (changedPane) { window.scrollTo(0, 0); var wsTop = $('workspace'), deTop = document.documentElement; if (wsTop && deTop && deTop.classList && deTop.classList.contains('pg-frame')) wsTop.scrollTop = 0; }
     // 7.0.33 A12 (Q1): through barShow, so a bar sliding back after a page change catches its first tap too.
     barShow($('topbar'));
     onScroll();
@@ -3188,7 +3188,7 @@
   var PG_FRAME_PANES = { settings: 1 };
   function pgFrameOn(r) {
     var shell = $('app-shell');
-    return !!(r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && !(shell && shell.classList.contains('hidden')));
+    return !!(r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && !(shell && shell.classList && shell.classList.contains('hidden')));
   }
   function pgFrameSync(r) {
     var de = document.documentElement, on = pgFrameOn(r || parseRoute()), was = !!(de && de.classList && de.classList.contains('pg-frame'));
