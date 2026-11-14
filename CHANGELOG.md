@@ -42,9 +42,15 @@
 - **"Answered. The session carries on."** shows only when this panel's answer is confirmed delivered (the turn came back completed, or the watch later reports it completed); queued or unknown shows "This question is no longer open." with the Sent line kept.
 - **Not on a real phone** (above). Measured with route tests, Control Web tests on the real send path against fake routes, and the layout sweep in a test browser.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent 1737c815, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end, 09:02):** 16,790 passed, 6 skipped, 0 failed (917 files); type check clean.
+- **The layout sweep in a test browser (WebKit), quick set, on 1737c815 (F1):** RESULT 0 defect keys (14 known, not failing) over 625 states in 1109 s (F1_evidence/sweep_gate_1737c815.log). Layout only, not the answer behaviour, which the tests below cover.
+- **Not on a real phone.**
 
-**Tests:** <filled at the cut: web 1,671+ and gates 48/48, 2/2, 5/5, 14/14 (W1); server gates 30, 26, 60 and route tests (X1); Set D sweep (F1)>
+**Tests:**
+- **Control Web (W1, claude/server-today-closed to 5584a82d):** 1,678 web tests on the branch; mutation gates each on a green baseline: 48 of 48 (Today panel, reconnect, no-queue rule, the server deciding), 14 of 14 (held answers, Answered only on delivery), 16 of 16 (the 08:0x rulings and the caps fields), plus the targeted mutants on the last fixes (2, 5, 3 and 1, each killed). Q1 PASS 08:31.
+- **Server (X1, claude/server-answer-never-queued to 599fab55):** gates on a green baseline, answer-never-queued 37 of 37, turn-end-answer 26 of 26, turn-end-ask 60 of 60; route tests for the queue doors, Send anyway, the early ask check, and a peer message. Q1 code PASS.
+- **Set D (F1, claude/server-setd to d163a695):** tap areas measured in WebKit by hit-testing from each control's centre; final sweep 0 failing keys over 625 states, Speakers' tabs 46 px at 382 x 557. Q1 PASS.
 
 ## 7.0.37 - An answer tapped on a question is not lost when the session has moved on
 
