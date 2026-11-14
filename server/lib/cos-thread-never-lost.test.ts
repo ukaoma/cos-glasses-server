@@ -50,7 +50,8 @@ afterEach(async () => {
   delete process.env.COS_QUERY_JOB_DIR
   delete process.env.COS_DROP_IT
   delete process.env.COS_DATA_DIR
-  await rm(root, { recursive: true, force: true })
+  // retries: an abandoned runtime (a simulated crash) may still be writing into it
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   vi.resetModules()
 })
 

@@ -33,6 +33,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { localDay } from './local-day.js'
+import { TimelineStore, type CrumbEntry, type CrumbKind } from './cos-thread-timeline.js'
 import { securePrivateDirectory } from './secure-user-config.js'
 
 export const COS_THREAD_PROTOCOL = 1
@@ -152,6 +153,26 @@ export interface CosThreadHistoryPage {
 }
 /** `maxBytes` exists for tests only (the route never sends it): one entry is at most about 120 KB, under the cap. */
 export interface CosThreadHistoryQuery { before?: number; after?: number; afterAnswers?: number; limit: number; maxBytes?: number }
+/** 7.0.39 candidate 3: the history with the timeline's breadcrumbs, ordered by time (GET /cos-thread/history?timeline=1). */
+export type HistoryKind = 'chat' | CrumbKind
+export interface CosThreadTimelineQuery {
+  limit: number
+  maxBytes?: number
+  kinds?: readonly HistoryKind[]
+  /** An older page: everything strictly before this place in time order. */
+  before?: { atMs: number; tie: string }
+  /** What was added or changed since these counts (the `newest` cursor). */
+  after?: { chats: number; ends: number; crumbs: number; outcomes: number }
+}
+export type TimelineEntry = CosThreadChatEntry | CrumbEntry
+export interface CosThreadTimelinePage {
+  protocol: 1
+  entries: TimelineEntry[]
+  older: string | null
+  newest: string
+  more: boolean
+  updated: TimelineEntry[]
+}
 /** What a full-answer read needs to look the answer up elsewhere. */
 export interface CosThreadEntryLookup { sessionId: string; clientId: string; messageNo: number | null; at: string; query: string }
 /** A drop as the digest carries it: its words and where it was filed. */
@@ -196,7 +217,7 @@ interface CurrentThread {
 }
 interface StateFile { schema: 1; ledgerRows: number; current: CurrentThread }
 /** A turn row's place in the ledger (7.0.39). */
-interface HistoryRef { clientId: string; offset: number; length: number }
+interface HistoryRef { clientId: string; offset: number; length: number; atMs: number }
 interface RowPlace { offset: number; length: number }
 interface MemoryTurn { threadId: string; sessionId: string; clientId: string; at: string; query: string; answerHead: string; messageNo: number | null }
 
@@ -411,6 +432,7 @@ export class CosThread {
   /** 7.0.39 candidate 2: the latest job end per chat, and how many ends were recorded (the `after` cursor's second part). */
   private readonly answers = new Map<string, AnswerState>()
   private answerSeq = 0
+  private timelineStore: TimelineStore | null = null
 
   constructor(private readonly deps: CosThreadDeps) {
     this.now = deps.now ?? Date.now
@@ -423,6 +445,8 @@ export class CosThread {
   private iso(): string { return new Date(this.now()).toISOString() }
   private newId(): string { return this.deps.newId?.() ?? `th_${randomBytes(8).toString('hex')}` }
   cap(): number { return this.deps.capTokens?.() ?? cosThreadCapTokens() }
+  /** The store's folder (the timeline sweeper keeps its state beside the ledger). */
+  dir(): string { return this.deps.dir }
 
   // ── loading ─────────────────────────────────────────
   private load(): void {
@@ -488,7 +512,7 @@ export class CosThread {
       this.clientIds.add(row.clientId)
       if (place && !this.historyByClient.has(row.clientId)) {
         this.historyByClient.set(row.clientId, this.history.length)
-        this.history.push({ clientId: row.clientId, offset: place.offset, length: place.length })
+        this.history.push({ clientId: row.clientId, offset: place.offset, length: place.length, atMs: Date.parse(row.at) })
       }
       this.turns.push({ threadId: row.threadId, sessionId: row.sessionId, clientId: row.clientId, at: row.at, query: row.query.slice(0, MEMORY_QUERY_CHARS), answerHead: row.answerHead, messageNo: row.messageNo })
       if (this.turns.length > SEARCH_MEMORY_TURNS) this.turns.splice(0, this.turns.length - SEARCH_MEMORY_TURNS)
@@ -713,6 +737,107 @@ export class CosThread {
     } catch { return undefined } finally { closeSync(fd) }
   }
 
+  // ── timeline (7.0.39 candidate 3) ───────────────────
+  /** The breadcrumb store beside the ledger (cos-thread-timeline.ts), opened on first use. */
+  timeline(): TimelineStore {
+    this.timelineStore ??= new TimelineStore(this.deps.dir, this.now)
+    return this.timelineStore
+  }
+
+  /**
+   * The history with breadcrumbs, ordered by time (a backfilled breadcrumb sits at its own time, not where it was
+   * appended). `before` pages back in that order; `after` returns what was ADDED since (new chats and crumbs, in append
+   * order, cut by the limit and the byte cap as a prefix) and, in `updated`, entries already sent whose end or outcome
+   * changed. The returned `newest` counts exactly what this page carried, so a cut page loses nothing.
+   */
+  timelinePage(query: CosThreadTimelineQuery): CosThreadTimelinePage {
+    const tl = this.timeline()
+    const kinds = new Set<HistoryKind>(query.kinds ?? ['chat', 'notification', 'session_question', 'meeting', 'message'])
+    const limit = Math.max(1, Math.min(HISTORY_MAX_LIMIT, Math.floor(query.limit)))
+    const cap = query.maxBytes ?? HISTORY_MAX_BYTES
+    const size = (e: TimelineEntry) => Buffer.byteLength(JSON.stringify(e))
+    const chatAt = (i: number) => this.history[i]!.atMs
+    const counts = { chats: this.history.length, ends: this.answerSeq, crumbs: tl.crumbs.length, outcomes: tl.outcomeSeq }
+    const chatEntries = (indexes: number[]) => { const rows = this.readTurns(indexes); return indexes.map((_, k) => this.chatEntry(rows[k]!)) }
+
+    if (query.after) {
+      const a = query.after
+      const through = { ...a }
+      const entries: TimelineEntry[] = []
+      const updated: TimelineEntry[] = []
+      let bytes = 0, cut = false
+      const take = (e: TimelineEntry, into: TimelineEntry[]) => {
+        const b = size(e)
+        if (entries.length + updated.length && (bytes + b > cap || (into === entries && entries.length >= limit))) { cut = true; return false }
+        into.push(e); bytes += b; return true
+      }
+      // 1. new chats, 2. new crumbs, in append order; 3. chats whose end changed; 4. crumbs whose outcome changed.
+      const newChats = range(Math.min(a.chats, counts.chats), counts.chats)
+      const newChatEntries = newChats.length ? chatEntries(newChats) : []
+      for (let k = 0; k < newChats.length && !cut; k++) {
+        if (!kinds.has('chat')) { through.chats = newChats[k]! + 1; continue }
+        if (take(newChatEntries[k]!, entries)) through.chats = newChats[k]! + 1
+      }
+      for (let j = Math.min(a.crumbs, counts.crumbs); j < counts.crumbs && !cut; j++) {
+        const c = tl.crumbs[j]!
+        if (!kinds.has(c.kind)) { through.crumbs = j + 1; continue }
+        if (take(tl.entry(c), entries)) through.crumbs = j + 1
+      }
+      if (!cut) {
+        const changed = [...this.answers.entries()]
+          .filter(([clientId, s]) => s.seq > a.ends && (this.historyByClient.get(clientId) ?? Infinity) < a.chats)
+          .sort((x, y) => x[1].seq - y[1].seq)
+        const rows = kinds.has('chat') ? chatEntries(changed.map(([clientId]) => this.historyByClient.get(clientId)!)) : []
+        for (let k = 0; k < changed.length && !cut; k++) {
+          if (!kinds.has('chat') || take(rows[k]!, updated)) through.ends = changed[k]![1].seq
+        }
+        if (!cut) through.ends = Math.max(through.ends, counts.ends)
+      }
+      if (!cut) {
+        const changed = tl.crumbs.slice(0, Math.min(a.crumbs, counts.crumbs)).filter(c => c.outcomeSeq > a.outcomes).sort((x, y) => x.outcomeSeq - y.outcomeSeq)
+        for (const c of changed) {
+          if (cut) break
+          if (!kinds.has(c.kind) || take(tl.entry(c), updated)) through.outcomes = c.outcomeSeq
+        }
+        if (!cut) through.outcomes = Math.max(through.outcomes, counts.outcomes)
+      }
+      if (!cut) { through.chats = counts.chats; through.crumbs = counts.crumbs }
+      entries.sort((x, y) => Date.parse(x.at) - Date.parse(y.at))
+      return { protocol: 1, entries, older: null, newest: timelineCursor(through), more: cut, updated }
+    }
+
+    // A page in time order: every item, sorted by (time, tie), then the `limit` just before `before`.
+    type Item = { atMs: number; tie: string; chat?: number; crumb?: number }
+    const items: Item[] = []
+    if (kinds.has('chat')) for (let i = 0; i < counts.chats; i++) items.push({ atMs: chatAt(i), tie: chatTie(i), chat: i })
+    tl.crumbs.forEach((c, j) => { if (kinds.has(c.kind)) items.push({ atMs: c.atMs, tie: `b${c.id}`, crumb: j }) })
+    items.sort(compareItems)
+    let end = items.length
+    if (query.before) end = items.findIndex(it => compareItems(it, query.before!) >= 0)
+    if (end < 0) end = items.length
+    const window = items.slice(Math.max(0, end - limit), end)
+    const chatIdx = window.filter(it => it.chat !== undefined).map(it => it.chat!)
+    const chatMap = new Map<number, CosThreadChatEntry>()
+    if (chatIdx.length) chatEntries(chatIdx).forEach((e, k) => chatMap.set(chatIdx[k]!, e))
+    const kept: TimelineEntry[] = []
+    let bytes = 0, first = end
+    for (let k = window.length - 1; k >= 0; k--) {
+      const it = window[k]!
+      const e = it.chat !== undefined ? chatMap.get(it.chat)! : tl.entry(tl.crumbs[it.crumb!]!)
+      const b = size(e)
+      if (kept.length && bytes + b > cap) break
+      kept.push(e); bytes += b; first = end - window.length + k
+    }
+    kept.reverse()
+    const firstItem = items[first]
+    return { protocol: 1, entries: kept, older: first > 0 && firstItem ? `c2.${firstItem.atMs}.${firstItem.tie}` : null, newest: timelineCursor(counts), more: false, updated: [] }
+  }
+
+  /** A candidate-1 `before` cursor (the n-th chat) as a place in time order. */
+  timePlaceOfChat(n: number): { atMs: number; tie: string } | undefined {
+    return n < this.history.length ? { atMs: this.history[n]!.atMs, tie: chatTie(n) } : undefined
+  }
+
   // ── history (7.0.39) ─────────────────────────────────
   /** Turn rows at these indexes, read from the ledger by place. A row that is not the turn the index says it is (the file
    * changed under us) is a 503, never a wrong entry. */
@@ -886,6 +1011,26 @@ export class CosThread {
 function supersededBy(prior: { generation: number; status: CosThreadChatStatus; answerChars: number }, next: { generation: number; status: CosThreadChatStatus; answerChars: number }): boolean {
   if (next.generation !== prior.generation) return next.generation > prior.generation
   return next.status !== prior.status || next.answerChars !== prior.answerChars
+}
+
+const chatTie = (i: number) => `t${String(i).padStart(9, '0')}`
+function compareItems(a: { atMs: number; tie: string }, b: { atMs: number; tie: string }): number {
+  return a.atMs !== b.atMs ? a.atMs - b.atMs : a.tie < b.tie ? -1 : a.tie > b.tie ? 1 : 0
+}
+/** The timeline `newest` cursor: chats, chat ends, crumbs and crumb outcomes seen so far. Opaque to clients. */
+export function timelineCursor(c: { chats: number; ends: number; crumbs: number; outcomes: number }): string {
+  return `c3.${c.chats}.${c.ends}.${c.crumbs}.${c.outcomes}`
+}
+const C2_RE = /^c2\.(\d{1,15})\.([tb][0-9a-f]{9,20})$/
+const C3_RE = /^c3\.(\d{1,9})\.(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/
+/** A timeline cursor: `c2` a place in time (before), `c3` the counts (after). Null when it is not one of these. */
+export function parseTimelineCursor(raw: unknown): { before: { atMs: number; tie: string } } | { after: { chats: number; ends: number; crumbs: number; outcomes: number } } | null {
+  if (typeof raw !== 'string') return null
+  const two = C2_RE.exec(raw)
+  if (two) return { before: { atMs: Number(two[1]), tie: two[2]! } }
+  const three = C3_RE.exec(raw)
+  if (three) return { after: { chats: Number(three[1]), ends: Number(three[2]), crumbs: Number(three[3]), outcomes: Number(three[4]) } }
+  return null
 }
 
 function range(from: number, to: number): number[] {

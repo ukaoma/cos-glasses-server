@@ -59,7 +59,8 @@ afterEach(async () => {
   delete process.env.COS_QUERY_JOB_DIR
   delete process.env.COS_DROP_IT
   delete process.env.COS_DATA_DIR
-  await rm(root, { recursive: true, force: true })
+  // retries: an abandoned runtime (a simulated crash) may still be writing into it
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   vi.resetModules()
 })
 
@@ -117,6 +118,10 @@ describe('a chat sent with cosThread stays in the thread', () => {
     expect(plain.status).toBe(202)
     await h.waitEnd(plain.body.job.jobId)
     expect(h.busFor(plainId)).toEqual(['start', 'done'])
+    // The conversation the server made for a plain web Ask says so (the timeline's surface); nothing else is stamped.
+    expect(h.conversation.getSessionRaw(plain.body.job.sessionId)?.surface).toBe('web')
+    const { serverTimelineSources } = await import('./cos-thread-timeline-sources.js')
+    expect(serverTimelineSources().liveMessages!().map(m => [m.query, m.surface])).toEqual([['ok plain', 'web']])
     const before = await h.lists()
     expect(before.rows).toHaveLength(1)
 
@@ -127,6 +132,7 @@ describe('a chat sent with cosThread stays in the thread', () => {
     const done = await h.waitEnd(admitted.body.job.jobId)
     expect(done.status).toBe('completed')
     expect(h.conversation.isCosThreadSession(done.sessionId)).toBe(true)
+    expect(h.conversation.getSessionRaw(done.sessionId)?.surface).toBeUndefined()
     expect(await h.lists()).toEqual(before)
     expect(h.busFor(ask.clientJobId)).toEqual([])
 

@@ -28,7 +28,7 @@ export interface WebAskAdmissionDeps {
   currentMax: () => number
   activeEra: () => string
   sessionExists: (sessionId: string) => boolean
-  createSession: (options?: { cosThread?: boolean }) => string
+  createSession: (options?: { cosThread?: boolean; surface?: 'web' }) => string
   /** 7.0.39: the conversation carries the pinned COS thread. Absent: none does. */
   isThreadSession?: (sessionId: string) => boolean
   /** The admitted job for this client identity, if any (lost-202 replay). */
@@ -87,7 +87,8 @@ export async function prepareWebAsk(input: Record<string, unknown>, deps: WebAsk
   if (asked && isThread(asked)) {
     throw new WebAskAdmissionError(409, 'thread_session_web_only', 'That conversation is the pinned COS thread. Ask from the thread.')
   }
-  const sessionId = asked && deps.sessionExists(asked) ? asked : deps.createSession()
+  // 7.0.39 candidate 3: a conversation the server makes for a plain web Ask is stamped `web` (the timeline's surface).
+  const sessionId = asked && deps.sessionExists(asked) ? asked : deps.createSession({ surface: 'web' })
   const globalMsgNum = Math.max(deps.currentMax(), lastMinted) + 1
   lastMinted = globalMsgNum
   return { ...rest, sessionId, globalMsgNum, messageEra: deps.activeEra() }

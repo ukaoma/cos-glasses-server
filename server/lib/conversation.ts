@@ -119,6 +119,12 @@ interface Session {
    * exchanges still build the prompt history like any session's. Set only by createSession({ cosThread: true }).
    */
   cosThread?: true
+  /**
+   * 7.0.39 candidate 3 (lead 11:5x): where this conversation's chats were asked, only when the server knows. Today that is
+   * `web`, for the conversation the server makes for a plain Control Web Ask (source 'web'). Absent when unknown: the
+   * glasses and the Mac app send nothing that says which they are, so the server never guesses.
+   */
+  surface?: 'web'
 }
 
 const MAX_EXCHANGES = 100             // 50 Q&A pairs — deep history for browsing
@@ -384,12 +390,13 @@ scheduleArchiveMirrorAtNextLocalDay()
 // Track whether session is brand new (for first-query notification)
 const newSessions = new Set<string>()
 
-export function createSession(options: { cosThread?: boolean } = {}): string {
+export function createSession(options: { cosThread?: boolean; surface?: 'web' } = {}): string {
   const now = Date.now()
   const id = randomUUID().slice(0, 8)
   sessions.set(id, {
     id, exchanges: [], lastActivity: now, createdAt: now, modelPreference: null, contextBreaks: [],
     ...(options.cosThread === true ? { cosThread: true as const } : {}),
+    ...(options.surface === 'web' ? { surface: 'web' as const } : {}),
   })
   newSessions.add(id)
   scheduleSave()

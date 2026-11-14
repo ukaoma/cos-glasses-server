@@ -23,10 +23,12 @@
 import { Router, type Response } from 'express'
 import {
   archivedAnswer, CosThread, CosThreadError, ENTRY_MAX_ANSWER_CHARS, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, parseCursorParts,
-  parseTurnInput, type CosThreadEntryLookup,
+  parseTimelineCursor, parseTurnInput, type CosThreadEntryLookup, type HistoryKind,
 } from '../lib/cos-thread.js'
 import { dataPath } from '../lib/data-dir.js'
 import { isCosThreadSession } from '../lib/conversation.js'
+import { startTimeline } from '../lib/cos-thread-timeline-sources.js'
+import { CRUMB_KINDS } from '../lib/cos-thread-timeline.js'
 
 export interface CosThreadRouterDependencies {
   enabled: () => boolean
@@ -34,7 +36,10 @@ export interface CosThreadRouterDependencies {
   thread: () => CosThread | null
   /** 7.0.39: a chat's whole answer from the day archive. Default: the data dir's archive, read only and size-capped. */
   archiveAnswer?: (lookup: CosThreadEntryLookup) => string | undefined
+  /** 7.0.39 candidate 3: start the timeline sweeper when the store first opens. Default: the server's sources. */
+  startTimeline?: (thread: CosThread) => void
 }
+const HISTORY_KINDS: readonly HistoryKind[] = ['chat', ...CRUMB_KINDS]
 const ENTRY_ID_RE = /^t:([A-Za-z0-9:_-]{8,80})$/
 
 const fail = (res: Response, error: unknown) => {
@@ -60,6 +65,8 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
   const withThread = (res: Response, fn: (t: CosThread) => unknown) => {
     const thread = deps.thread()
     if (!thread) return res.status(503).json({ error: { code: 'cos_thread_unavailable' } })
+    // 7.0.39 candidate 3: the timeline sweeper starts with the first request that opens the store (Drop it on).
+    try { (deps.startTimeline ?? startTimeline)(thread) } catch { /* the thread works without its breadcrumbs */ }
     try { return fn(thread) } catch (e) { return fail(res, e) }
   }
 
@@ -93,6 +100,22 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
     if (limit === null) return res.status(400).json({ error: { code: 'invalid_limit' } })
     const { before, after } = req.query
     if (before !== undefined && after !== undefined) return res.status(400).json({ error: { code: 'invalid_cursor', message: 'Send before or after, not both.' } })
+    // 7.0.39 candidate 3: ?timeline=1 adds the breadcrumbs, in time order, with c2 (before) and c3 (after) cursors.
+    // Without it the answer is exactly candidate 1's: chats only, c1 cursors (a page that does not ask never sees a crumb).
+    if (req.query.timeline === '1') {
+      let kinds: HistoryKind[] | undefined
+      if (req.query.kinds !== undefined) {
+        const list = typeof req.query.kinds === 'string' ? req.query.kinds.split(',') : null
+        if (!list || !list.length || list.some(k => !(HISTORY_KINDS as readonly string[]).includes(k))) return res.status(400).json({ error: { code: 'invalid_kinds' } })
+        kinds = [...new Set(list)] as HistoryKind[]
+      }
+      const raw = before ?? after
+      const cursor = raw === undefined ? undefined : parseTimelineCursor(raw)
+      if (cursor === null || (before !== undefined && cursor && !('before' in cursor)) || (after !== undefined && cursor && !('after' in cursor))) {
+        return res.status(400).json({ error: { code: 'invalid_cursor' } })
+      }
+      return withThread(res, t => res.json(t.timelinePage({ limit, ...(kinds ? { kinds } : {}), ...(cursor ?? {}) })))
+    }
     const raw = before ?? after
     const parts = raw === undefined ? undefined : parseCursorParts(raw)
     if (parts === null) return res.status(400).json({ error: { code: 'invalid_cursor' } })
