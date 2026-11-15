@@ -158,14 +158,16 @@ describe('Control Web Memories: opening and reading never writes', () => {
     await h.open()
     const ops = h.calls.map(c => c.op === 'workspace.request' ? 'ws:' + c.args.action : c.op)
     for (const op of ['status', 'ws:learning_page', 'ws:review_page', 'graph.status']) expect(ops).toContain(op)
-    expect(h.cueCalls).toEqual([{ method: 'GET', path: '/api/live-cues/history?days=7&unrated=1&limit=200', body: undefined }])
+    // Memories C: the week's unrated cues (every one, up to the route's 1,000) and 30 days of rated cues for the index.
+    expect(h.cueCalls).toEqual([{ method: 'GET', path: '/api/live-cues/history?days=7&unrated=1&limit=1000', body: undefined },
+      { method: 'GET', path: '/api/live-cues/history?days=30&limit=1000', body: undefined }])
     expect(h.writes()).toEqual([])
   })
 
   it('every view, the reader, Knowledge, setup, Memory settings and the activity log stay read-only', async () => {
     const h = load()
     await h.open()
-    for (const v of ['recent', 'applied', 'memories', 'review', 'knowledge']) { h.tap('view', { 'data-arg': v }); await flush() }
+    for (const j of ['meetings', 'who', 'quarantine', 'suggestions', 'corrections', 'decisions', 'rules', 'summaries', 'used', 'rated', 'graph', 'sources']) { h.tap('job', { 'data-arg': j }); await flush() }
     await h.open(['e', 'evt_pattern'])
     await h.open(['e', 'evt_need_mem'])
     await h.open(['m', 'mem_a'])
@@ -195,10 +197,11 @@ describe('Control Web Memories: a tab opened before the update (7.0.4 QA)', () =
     expect(h.scripts.map(sc => sc.src)).toEqual(['/control/memory-review.js'])
     await h.open()
     expect(h.els.get('pane-memories')!.innerHTML.length).toBeGreaterThan(0)
-    // Until the predicate arrives the count is the server's own, never a throw.
-    expect(h.t.needsCount()).toBe(2)
+    // Until the predicate arrives Needs you has no number (never a guess), and nothing throws; then the shared predicate
+    // decides what is listed.
+    expect(h.t.needsParts().total).toBeNull()
     h.loadReview(); await flush()
-    expect(h.t.needsCount()).toBe(1)
+    expect(h.t.needsRows().length).toBe(1)
   })
   it('a current tab (memory-review.js already loaded by index.html) adds no script', () => {
     expect(load().scripts).toEqual([])
@@ -213,23 +216,21 @@ describe('Control Web Memories: To review', () => {
     const review = base()['ws:review_page'] as any
     const h = load({ answers: { 'ws:review_page': { ...review, items: [...review.items, { ...review.items[0], event_id: 'evt_pattern_proposed', event_type: 'proposed' }] } } })
     await h.open()
-    expect(h.t.needsCount()).toBe(1)
-    expect(h.t.viewsHtml()).toContain('To review (1)')
-    expect(h.t.viewsHtml()).not.toContain('76')
-    h.tap('view', { 'data-arg': 'review' }); await flush()
-    const html: string = h.t.listHtml()
-    const needsAt = html.indexOf('Needs you now'), learningAt = html.indexOf('>Learning<')
-    expect(needsAt).toBeGreaterThanOrEqual(0)
-    expect(needsAt).toBeLessThan(html.indexOf('Proposed changes'))
-    expect(learningAt).toBeGreaterThan(needsAt)
-    // The pattern is in both lists; it shows once, under Learning, with its confidence and no warning tone.
+    // Memories C: To review is three jobs. Who said it is unclear lists what needs review (one item), never the page's 76.
+    const who: string = h.t.jobHtml('who'), html: string = h.t.jobHtml('suggestions')
+    expect(h.t.needsRows().length).toBe(1)
+    expect(who).toContain('data-id="evt_need_mem"')
+    expect(who).not.toContain('data-id="evt_pattern"')
+    expect(who).not.toContain('76')
+    expect(who).toContain('Mentions Bradley near &quot;wants&quot; without saying who said it')
+    // The pattern is in both lists; it shows once, under Suggestions after the proposed change, with its confidence and
+    // no warning tone.
     expect(html.split('data-id="evt_pattern"').length - 1).toBe(1)
     expect(html).not.toContain('data-id="evt_pattern_proposed"')
-    expect(html.indexOf('data-id="evt_pattern"')).toBeGreaterThan(learningAt)
+    expect(html.indexOf('data-id="evt_pattern"')).toBeGreaterThan(html.indexOf('data-id="evt_prop"'))
     expect(html).toContain('Learning. Confidence 0.52, under the 0.8 bar for a rule')
     expect(html).not.toMatch(/mm-status warn">[^<]*0\.8 bar/)
-    expect(html).toContain('Mentions Bradley near &quot;wants&quot; without saying who said it')
-    expect(html).toContain('Ready to quarantine')
+    expect(h.t.jobHtml('quarantine')).toContain('Ready to quarantine')
     // A proposal with no decision waiting is listed calmly, never as Needs your review.
     expect(html).toContain('Suggested by a scheduled task')
     expect(html).not.toContain('Needs your review')
@@ -240,27 +241,28 @@ describe('Control Web Memories: To review', () => {
     let block: any = { count: 1, limit: 7, items: [], learning: [{ ...rule(0.55), gate: 'rule_ready', state: 'learning', reason: 'promotable at confidence 0.55 (< 0.8)' }], learning_count: 1 }
     const h = load({ answers: { status: () => ({ ...base().status as object, learningToReview: 0, needs_you: block }) } })
     await h.open()
-    expect(h.t.needsCount()).toBe(0)
-    h.tap('view', { 'data-arg': 'review' }); await flush()
-    expect(h.t.listHtml()).toContain('Learning. Confidence 0.55, under the 0.8 bar for a rule')
+    expect(h.t.needsRows().length).toBe(0)
+    expect(h.t.jobHtml('suggestions')).toContain('Learning. Confidence 0.55, under the 0.8 bar for a rule')
     block = { count: 1, limit: 7, items: [rule(0.8)], learning: [], learning_count: 0 }
     h.tap('refresh'); await flush()
-    expect(h.t.needsCount()).toBe(1)
-    const html: string = h.t.listHtml()
-    expect(html.indexOf('data-id="evt_pattern"')).toBeGreaterThan(html.indexOf('Needs you now'))
+    expect(h.t.needsRows().length).toBe(1)
+    const html: string = h.t.jobHtml('who')
+    expect(html).toContain('data-id="evt_pattern"')
     expect(html).toContain('Confidence 0.8, at or over the 0.8 bar for a rule')
-    expect(html).not.toContain('>Learning<')
+    expect(html).not.toContain('Learning.')
+    // A rule waiting is not a who-said-it question: the row says what it is.
+    expect(h.t.indexHtml()).toContain('Waiting for your decision')
+    expect(h.t.jobHtml('suggestions')).not.toContain('data-id="evt_pattern"')
   })
 
   it('a dismissed suggestion leaves To review for history; its open reader keeps Restore suggestion', async () => {
     const h = load({ answers: { 'learning.decide': {} } })
     await h.open()
-    h.tap('view', { 'data-arg': 'review' }); await flush()
+    h.tap('job', { 'data-arg': 'suggestions' }); await flush()
     await h.open(['e', 'evt_pattern'])
     h.tap('decide', { 'data-id': 'evt_pattern', 'data-arg': 'dismissed' }); await flush()
     expect(h.writes()).toEqual([{ op: 'learning.decide', args: { id: 'ptn_1', decision: 'dismissed' } }])
-    h.setRoute([]); h.tap('view', { 'data-arg': 'review' }); await flush()
-    expect(h.t.listHtml()).not.toContain('data-id="evt_pattern"')
+    expect(h.t.jobHtml('suggestions')).not.toContain('data-id="evt_pattern"')
     const reader: string = h.t.readerHtml({ pane: 'memories', args: ['e', 'evt_pattern'] })
     expect(reader).toContain('Change dismissed')
     expect(reader).toContain('Restore suggestion')
@@ -293,9 +295,8 @@ describe('Control Web Memories: To review', () => {
     // The decided item leaves the needs-you count and the list, even after the status read that follows the write
     // still lists it; its reader stays open on it and offers Restore.
     expect(h.calls.filter(c => c.op === 'status').length).toBeGreaterThanOrEqual(2)
-    expect(h.t.needsCount()).toBe(0)
-    h.tap('view', { 'data-arg': 'review' }); await flush()
-    expect(h.t.listHtml()).not.toContain('data-id="evt_need_mem"')
+    expect(h.t.needsRows().length).toBe(0)
+    expect(h.t.jobHtml('who')).not.toContain('data-id="evt_need_mem"')
     expect(h.t.readerHtml({ pane: 'memories', args: ['e', 'evt_need_mem'] })).toContain('Restore to recall')
   })
 
@@ -303,10 +304,10 @@ describe('Control Web Memories: To review', () => {
     let n = 0
     const h = load({ answers: { 'memory.review': () => (++n === 2 ? new Error('Server is updating.') : { decision: { decision: 'pruned' } }) } })
     await h.open()
-    h.tap('view', { 'data-arg': 'review' }); await flush()
+    h.tap('job', { 'data-arg': 'quarantine' }); await flush()
     h.tap('prune-all'); await flush()
     expect(h.writes()).toEqual([])
-    expect(h.t.listHtml()).toContain('Tap again to quarantine 2')
+    expect(h.t.jobHtml('quarantine')).toContain('Tap again to quarantine 2')
     h.tap('prune-all'); await flush()
     expect(h.writes().map(c => c.args)).toEqual([{ id: 'mem_old1', decision: 'prune', note: 'prune ready' }, { id: 'mem_old2', decision: 'prune', note: 'prune ready' }])
     expect(h.toasts.some(t => /^Stopped after 1 of 2: Server is updating\./.test(t))).toBe(true)
@@ -346,37 +347,39 @@ describe('Control Web Memories: views', () => {
   it('Applied fails closed: a server that ignored kind=used leaves it empty with the reason', async () => {
     const h = load({ answers: { 'learning.list': { events: [{ event_id: 'e1', event_type: 'retrieved', title: 'x' }], total: 1 } } })
     await h.open()
-    h.tap('view', { 'data-arg': 'applied' }); await flush()
+    h.tap('job', { 'data-arg': 'used' }); await flush()
     expect(h.S.applied.rows).toEqual([])
-    expect(h.t.listHtml()).toContain('Applied stays empty rather than mislabel them')
+    expect(h.t.jobHtml('used')).toContain('Applied stays empty rather than mislabel them')
     expect(h.calls.find(c => c.op === 'learning.list')!.args).toMatchObject({ kind: 'used', days: 7 })
   })
 
   it('Applied names each lesson from its memory and keeps the count from the title', async () => {
     const h = load()
     await h.open()
-    h.tap('view', { 'data-arg': 'applied' }); await flush()
-    expect(h.t.listHtml()).toContain('Summary of mem_u')
-    h.S.view = 'applied'
+    h.tap('job', { 'data-arg': 'used' }); await flush()
+    expect(h.t.jobHtml('used')).toContain('Summary of mem_u')
     const r: string = h.t.readerHtml({ pane: 'memories', args: ['e', 'evt_u1'] })
     expect(r).toContain('Recorded 3 times since first use')
     expect(r).toContain('ranks ahead of unused memories')
   })
 
+  // Memories C: Recent learning is no longer a list (recalls are counted on the health line); a recall's reader keeps it.
   it('a recall row is titled by its memory, with the trace word dropped from what happened', async () => {
     const h = load()
     await h.open()
-    const html: string = h.t.listHtml()
+    const html: string = h.t.readerHtml({ pane: 'memories', args: ['e', 'evt_r1'] })
     expect(html).toContain('Summary of mem_9')
     expect(html).toContain('Included in context 39 times')
     expect(html).not.toContain('context_emitted')
     expect(h.t.cleanTitle('Retrieved 414 times by the startup hook · retrieval_log')).toBe('Retrieved 414 times by the startup hook')
   })
 
-  it('on a wide screen the reader shows the first row with no route; narrow, the reader stays empty', async () => {
-    const wide = load({ wide: true })
+  // Memories C: wide, the last job opened shows beside the index (no reader opens on its own); narrow, the index is the page.
+  it('on a wide screen the last job shows beside the index with no route; narrow, the job column stays empty', async () => {
+    const wide = load({ wide: true, stored: { job: 'used' } })
     await wide.open()
-    expect(wide.t.readerHtml({ pane: 'memories', args: [] })).toContain('mm-timeline')
+    expect(wide.t.readerHtml({ pane: 'memories', args: [] })).toContain('Used this week')
+    expect(wide.t.readerHtml({ pane: 'memories', args: [] })).not.toContain('mm-timeline')
     const narrow = load({ wide: false })
     await narrow.open()
     expect(narrow.t.readerHtml({ pane: 'memories', args: [] })).toBe('')
@@ -562,91 +565,102 @@ function cueServer(opts: { rows?: any[]; counts?: any; feedback?: (body: any) =>
   const counts = opts.counts ?? { total: 4, rated: 1, unrated: 3, byVerdict: { useful: 1, late: 0, repeat: 0, wrong: 0, obvious: 0 } }
   return (path: string, body?: any) => {
     if (path.startsWith('/api/live-cues/feedback')) return opts.feedback ? opts.feedback(body) : { ok: true, cueId: body.cueId, verdict: body.verdict === 'clear' ? null : body.verdict, vote: null }
+    if (path.startsWith('/api/live-cues/skip')) return { ok: true, sessionId: body.sessionId, skippedAt: /clear$/.test(path) ? null : now }
     if (opts.history) return opts.history(path)
     const unrated = /unrated=1/.test(path)
-    return { v: 1, cues: rows.filter(r => !unrated || !r.rating?.verdict), counts, truncated: false, skipped: 0, maxCuesPerMeeting: 30 }
+    return { v: 1, cues: rows.filter(r => !unrated || !r.rating?.verdict), counts, truncated: false, skipped: 0, maxCuesPerMeeting: 30, skips: {} }
   }
 }
 const httpError = (status: number, code?: string) => Object.assign(new Error('HTTP ' + status), { status, code })
-const key = (k: string, extra: Record<string, unknown> = {}) => ({ key: k, target: { id: 'mm-cue-card', getAttribute: (a: string) => (a === 'data-cue' ? (extra.cue as string) ?? 'c-old' : null) }, ...extra })
+// Memories C: each cue in a meeting card is its own focus target (id mm-cue-<cueId>, data-cue-card).
+const key = (k: string, extra: Record<string, unknown> = {}) => { const id = (extra.cue as string) ?? 'c-old'; return { key: k, target: { id: 'mm-cue-' + id, getAttribute: (a: string) => (a === 'data-cue-card' ? id : null) }, ...extra } }
 
 describe('Control Web Memories: Cues to rate and Rated cues', () => {
   it('a server without the cue history (404) keeps both cue views hidden; one with it shows them with the unrated count', async () => {
     const off = load()
     await off.open()
     expect(off.S.cue.available).toBe(false)
-    expect(off.t.viewsHtml()).not.toContain('Cues to rate')
+    expect(off.t.indexHtml()).not.toContain('Meetings to rate')
+    expect(off.t.indexHtml()).not.toContain('data-arg="rated"')
     const on = load({ cues: cueServer({ counts: { total: 457, rated: 10, unrated: 447, byVerdict: {} } }) })
     await on.open()
     expect(on.S.cue.available).toBe(true)
-    expect(on.t.viewsHtml()).toContain('Cues to rate (447)')
-    expect(on.t.viewsHtml()).toContain('data-arg="rated"')
+    // Memories C: meetings to rate, not cues (all three unrated cues are from one meeting).
+    expect(on.t.indexHtml()).toMatch(/data-arg="meetings"[^>]*data-counted="1"/)
+    expect(on.t.indexHtml()).toContain('data-arg="rated"')
     expect(on.cueCalls.filter(c => c.method === 'POST')).toEqual([])
   })
 
-  it('the queue is oldest first, one card at a time, with Control\'s card: title, when, kind, score, left, sources, what was said, five verdicts', async () => {
+  // Memories C (plan section 5): one card per meeting, its unrated cues in the order they fired, five verdicts each, none
+  // chosen; sources that open are listed; a note opens on request.
+  it('a meeting card lists its unrated cues oldest first, each with sources that open and five verdicts, none chosen', async () => {
     const h = load({ cues: cueServer() })
-    await h.open(['view', 'cues'])
-    await h.open()
+    await h.open(['i', 'meetings'])
     expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-old', 'c-mid', 'c-new'])
-    const html: string = h.t.listHtml()
+    const html: string = h.t.jobHtml('meetings')
     expect(html).toContain('Payroll roadmap review')
-    expect(html).toMatch(/, 7 min in</)
-    expect(html).toContain('Challenge')
-    expect(html).toContain('score 0.95')
-    expect(html).toContain('3 left')
-    expect(html).toContain('Oldest unrated cue')
-    expect(html).not.toContain('Newest unrated cue')
-    expect(html).toContain('<a href="https://www.reuters.com/a" target="_blank" rel="noopener noreferrer">Reuters (reuters.com)</a>')
-    expect(html).toContain('data-mm="cue-memory" data-id="mem_src"')
-    expect(html).toContain('<li class="mm-muted">Board deck</li>')
-    expect(html).toContain('What was said just before')
-    expect(html.match(/data-mm="cue-rate"/g)).toHaveLength(5)
-    expect(html).toContain('What would have made it useful?')
-    expect(html).toContain('Next up: ')
-    expect(html).toContain('Middle unrated cue')
-    expect(html).toContain('Ratings in the last 7 days: 1 of 4.')
+    expect(html).toContain('3 cues fired')
+    expect(html.indexOf('Oldest unrated cue')).toBeLessThan(html.indexOf('Middle unrated cue'))
+    expect(html.indexOf('Middle unrated cue')).toBeLessThan(html.indexOf('Newest unrated cue'))
+    expect(html).not.toContain('A rated cue')
+    // The face: the line said just before, the verdicts and one disclosure; sources, kind and score sit behind it.
+    expect(html).toContain('Just before: what was said')
+    expect(html).not.toContain('reuters.com')
+    expect(html).not.toContain('Challenge')
+    expect(html.match(/data-mm="cue-rate"/g)).toHaveLength(15)
+    expect(html).not.toContain('aria-pressed="true"')
+    expect(html).toMatch(/data-mm="cue-note-open" data-id="c-old" aria-expanded="false"[^>]*>Note and details</)
+    h.tap('cue-note-open', { 'data-id': 'c-old' })
+    const open: string = h.t.jobHtml('meetings')
+    expect(open).toContain('What would have made it useful?')
+    expect(open).toContain('<a href="https://www.reuters.com/a" target="_blank" rel="noopener noreferrer">Reuters (reuters.com)</a>')
+    expect(open).toContain('data-mm="cue-memory" data-id="mem_src"')
+    expect(open).toContain('<li class="mm-muted">Board deck</li>')
+    expect(open).toContain('What was said just before')
+    expect(open).toContain('<dt>Kind</dt><dd>Challenge</dd>')
+    expect(open).toContain('0.95')
   })
 
   it('a verdict posts the cue with its normalized note, then the next cue shows and the counts move', async () => {
     const h = load({ cues: cueServer() })
-    await h.open(['view', 'cues'])
-    await h.open()
+    await h.open(['i', 'meetings'])
     h.S.cue.notes['c-old'] = '  after   the\npoint  '
     h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'late' }); await flush()
     const posts = h.cueCalls.filter(c => c.method === 'POST')
     expect(posts).toEqual([{ method: 'POST', path: '/api/live-cues/feedback', body: { sessionId: 'meeting_1793728868236_emvdsb', cueId: 'c-old', verdict: 'late', note: 'after the point' } }])
     expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-mid', 'c-new'])
     expect(h.S.cue.counts).toMatchObject({ rated: 2, unrated: 2, byVerdict: { late: 1 } })
-    expect(h.t.viewsHtml()).toContain('Cues to rate (2)')
-    expect(h.t.listHtml()).toContain('Middle unrated cue')
+    // The rated cue keeps its place with its verdict; the meeting still has cues to rate.
+    expect(h.t.jobHtml('meetings')).toMatch(/data-id="c-old" data-arg="late" aria-pressed="true"/)
+    expect(h.t.jobHtml('meetings')).toContain('Middle unrated cue')
+    expect(h.t.indexHtml()).toMatch(/data-arg="meetings"[^>]*data-counted="1"/)
     expect(h.writes()).toEqual([])
   })
 
-  it('keys 1 to 5 rate, N goes to the note and S skips, only on the focused card and never with a modifier', async () => {
+  // Memories C (lead, F1 review): S skips the rest of the meeting on the card, through the same route as its button.
+  it('keys 1 to 5 rate, N goes to the note and S skips the rest of the meeting, only on the focused cue and never with a modifier', async () => {
     const h = load({ cues: cueServer() })
-    await h.open(['view', 'cues'])
-    await h.open()
+    await h.open(['i', 'meetings'])
     expect(h.t.cueKey(key('2', { metaKey: true }))).toBe(false)
-    expect(h.t.cueKey({ key: '2', target: { id: 'mm-cue-note', getAttribute: () => 'c-old' } })).toBe(false)
+    expect(h.t.cueKey({ key: '2', target: { id: 'mm-cue-note-c-old', getAttribute: () => 'c-old' } })).toBe(false)
     expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
-    expect(h.t.cueKey(key('s'))).toBe(true)
-    expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-mid', 'c-new', 'c-old'])
+    expect(h.t.cueKey(key('s', { altKey: true }))).toBe(false)
     expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
     expect(h.t.cueKey(key('5', { cue: 'c-mid' }))).toBe(true); await flush()
     expect(h.cueCalls.filter(c => c.method === 'POST').map(c => c.body)).toEqual([{ sessionId: 'meeting_1793728868236_emvdsb', cueId: 'c-mid', verdict: 'obvious' }])
     expect(h.t.cueKey(key('n', { cue: 'c-new' }))).toBe(true)
+    expect(h.t.cueKey(key('s', { cue: 'c-new' }))).toBe(true); await flush()
+    expect(h.cueCalls.filter(c => c.path === '/api/live-cues/skip').map(c => c.body)).toEqual([{ sessionId: 'meeting_1793728868236_emvdsb' }])
   })
 
   it('one rating per cue at a time: a second tap while the first saves sends nothing', async () => {
     let release: (v: unknown) => void = () => {}
     const h = load({ cues: cueServer({ feedback: () => new Promise(r => { release = r }) }) })
-    await h.open(['view', 'cues'])
-    await h.open()
+    await h.open(['i', 'meetings'])
     h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'useful' })
     h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'wrong' }); await flush()
     expect(h.cueCalls.filter(c => c.method === 'POST')).toHaveLength(1)
-    expect(h.t.listHtml()).toContain('Saving…')
+    expect(h.t.jobHtml('meetings')).toContain('Saving…')
     release({ ok: true, cueId: 'c-old', verdict: 'useful', vote: null }); await flush()
     expect(h.S.cue.queue[0].cueId).toBe('c-mid')
   })
@@ -662,20 +676,18 @@ describe('Control Web Memories: Cues to rate and Rated cues', () => {
     ]
     for (const [err, line] of cases) {
       const h = load({ cues: cueServer({ feedback: () => { throw err } }) })
-      await h.open(['view', 'cues'])
-      await h.open()
+      await h.open(['i', 'meetings'])
       h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'useful' }); await flush()
       expect(h.S.cue.queue[0].cueId).toBe('c-old')
-      expect(h.t.listHtml()).toContain(line.replace(/'/g, '&#39;'))
+      expect(h.t.jobHtml('meetings')).toContain(line.replace(/'/g, '&#39;'))
     }
   })
 
-  it('Rated cues reads the whole week newest first; a new verdict keeps the note, the same verdict sends nothing, Clear sends it back to the queue', async () => {
+  it('Rated cues reads 30 days newest first; a new verdict keeps the note, the same verdict sends nothing, Clear sends it back to the queue', async () => {
     const h = load({ cues: cueServer() })
-    await h.open(['view', 'rated'])
-    await h.open()
-    expect(h.cueCalls.some(c => c.path === '/api/live-cues/history?days=7&limit=1000')).toBe(true)
-    const html: string = h.t.listHtml()
+    await h.open(['i', 'rated'])
+    expect(h.cueCalls.some(c => c.path === '/api/live-cues/history?days=30&limit=1000')).toBe(true)
+    const html: string = h.t.jobHtml('rated')
     expect(html).toContain('Rated Useful · “spot on”')
     expect(html).toMatch(/data-arg="useful" aria-pressed="true"/)
     h.tap('cue-rate', { 'data-id': 'c-rated', 'data-arg': 'useful' }); await flush()
@@ -690,24 +702,22 @@ describe('Control Web Memories: Cues to rate and Rated cues', () => {
 
   it('a history read that fails says why, with Check again except while loading or on an older server', async () => {
     const storage = load({ cues: () => { throw httpError(503, 'verdicts_unreadable') } })
-    storage.S.view = 'cues'
-    await storage.open()
-    expect(storage.t.listHtml()).toContain('ratings file cannot be read, so cues cannot be listed')
-    expect(storage.t.listHtml()).toContain('data-mm="cue-check"')
+    await storage.open(['i', 'meetings'])
+    expect(storage.t.jobHtml('meetings')).toContain('ratings file cannot be read, so cues cannot be listed')
+    expect(storage.t.jobHtml('meetings')).toContain('data-mm="cue-check"')
     const odd = load({ cues: () => ({ cues: [] }) })
-    odd.S.view = 'cues'
-    await odd.open()
-    expect(odd.t.listHtml()).toContain('was not readable')
+    await odd.open(['i', 'meetings'])
+    expect(odd.t.jobHtml('meetings')).toContain('was not readable')
+    // A server without the cue history: Meetings to rate falls back to Corrections.
     const older = load()
-    older.S.view = 'cues'
+    older.S.job = 'meetings'
     await older.open()
-    expect(older.S.view).toBe('recent')
+    expect(older.S.job).toBe('corrections')
   })
 
   it('a memory source opens in All memories; notes are cut to 200 UTF-16 units on a character; only public https pages open', async () => {
     const h = load({ cues: cueServer() })
-    await h.open(['view', 'cues'])
-    await h.open()
+    await h.open(['i', 'meetings'])
     h.tap('cue-memory', { 'data-id': 'mem_src' }); await flush()
     expect(h.S.view).toBe('memories')
     expect(h.t.cueNote('a  b\n c')).toBe('a b c')
@@ -728,7 +738,8 @@ describe('Control Web Memories: QA fixes (6.99.26)', () => {
     const gone = () => Object.assign(new Error(UNREACHABLE), { code: 'unreachable', cause: new TypeError('Failed to fetch') })
     const h = load({ answers: { 'ws:learning_page': gone(), 'learning.list': gone() } })
     await h.open()
-    const html: string = h.t.listHtml()
+    // Memories C: the health line says it (Recent learning is no longer a list).
+    const html: string = h.t.healthReasons().join('\n')
     expect(html).toContain(UNREACHABLE)
     expect(html).not.toContain('Failed to fetch')
     expect(readFileSync(join(HERE, 'panes', 'memories.js'), 'utf8'), 'no second copy of the sentence in the pane').not.toContain('Could not reach')
@@ -737,16 +748,17 @@ describe('Control Web Memories: QA fixes (6.99.26)', () => {
   it('a first read that fails is said once, by the list (7.0.33 A8), and the count keeps its last value when a refresh fails', async () => {
     const failing = load({ answers: { 'ws:learning_page': new TypeError('Failed to fetch'), 'learning.list': new TypeError('Failed to fetch') } })
     await failing.open()
-    // 7.0.33 A8: said once. The Recent learning list says it did not load; the count line does not say it again.
-    expect(failing.t.countsHtml()).not.toContain('could not be counted')
+    // 7.0.33 A8: said once. Memories C: the counts line is gone; the health line names the failed read once.
+    expect(failing.t.healthReasons().filter((r: string) => r.includes('Could not read what COS learned')).length).toBe(1)
     let fail = false
     const page = base()['ws:learning_page']
     const h = load({ answers: { 'ws:learning_page': () => (fail ? new TypeError('Failed to fetch') : page), 'learning.list': () => (fail ? new TypeError('Failed to fetch') : { events: [] }) } })
     await h.open()
-    expect(h.t.countsHtml()).toContain('<b>34,195</b> events in 90 days')
+    expect(h.t.healthHtml()).toContain('recalled 3 times in 90 days')
     fail = true
     h.tap('refresh'); await flush()
-    expect(h.t.countsHtml()).toContain('<b>34,195</b> events in 90 days')
+    expect(h.t.healthHtml()).toContain('recalled 3 times in 90 days')
+    expect(h.t.healthState()).toBe('ok')
   })
 
   it('Recent learning keeps one order across reads: newest first, ties by event id', async () => {
@@ -770,46 +782,54 @@ describe('Control Web Memories: QA fixes (6.99.26)', () => {
   })
 })
 
-describe('Control Web Memories: the tab is in the address (QA N9)', () => {
-  const TABS = ['recent', 'applied', 'memories', 'review', 'knowledge', 'cues', 'rated']
-  it('each tab writes #/memories/t/<tab>, and a fresh browser opened there (no stored view) lands on the same tab', async () => {
-    for (const tab of TABS) {
+// Memories C (the build after 7.0.42): the tabs became the index's jobs. A job is in the address (#/memories/i/<job>);
+// the old tab addresses land on their job (memories-c-web.test.ts covers each one).
+describe('Control Web Memories: the job is in the address (QA N9, Memories C)', () => {
+  const JOBS: Array<[string, string[]]> = [['meetings', ['i', 'meetings']], ['who', ['i', 'who']], ['used', ['i', 'used']], ['corrections', ['i', 'corrections']], ['rated', ['i', 'rated']], ['graph', ['k', 'graph']], ['sources', ['k', 'sources']]]
+  it('each job writes its address, and a fresh browser opened there (no stored job) lands on the same job', async () => {
+    for (const [job, args] of JOBS) {
       const h = load({ cues: cueServer() })
       await h.open()
-      h.tap('view', { 'data-arg': tab }); await flush()
-      expect(h.route(), tab).toEqual({ pane: 'memories', args: ['t', tab] })
+      h.tap('job', { 'data-arg': job }); await flush()
+      expect(h.route(), job).toEqual({ pane: 'memories', args })
       const fresh = load({ cues: cueServer() })
-      await fresh.open(['t', tab])
-      expect(fresh.S.view, tab).toBe(tab)
-      expect(fresh.t.viewsHtml(), tab).toContain(`data-arg="${tab}" aria-pressed="true"`)
-      expect(fresh.route(), tab).toEqual({ pane: 'memories', args: ['t', tab] })
+      await fresh.open(args)
+      expect(fresh.S.job, job).toBe(job)
+      expect(fresh.t.indexHtml(), job).toMatch(new RegExp(`data-arg="${job}" aria-selected="true"`))
+      expect(fresh.route(), job).toEqual({ pane: 'memories', args })
     }
   })
 
-  it('a bare #/memories and the older #/memories/view/<tab> link become the tab\'s address; an unknown tab falls back to the stored one', async () => {
+  it('a bare #/memories stays the index; the older #/memories/view/<tab> link lands on its job; an unknown tab is the index', async () => {
     const bare = load({ stored: { view: 'applied' } })
     await bare.open([])
-    expect(bare.route().args).toEqual(['t', 'applied'])
+    expect(bare.route().args).toEqual([])
+    expect(bare.S.job).toBe('used')
     const old = load()
     await old.open(['view', 'review'])
-    expect(old.route().args).toEqual(['t', 'review'])
+    expect(old.route().args).toEqual(['i', 'who'])
     const bogus = load({ stored: { view: 'knowledge' } })
     await bogus.open(['t', 'nonsense'])
-    expect(bogus.route().args).toEqual(['t', 'knowledge'])
+    expect(bogus.route().args).toEqual([])
   })
 
-  it('a tab route is the list, not a reader, and Back from a reader lands on its tab', async () => {
+  it('on a phone a job is its own page; Back from a reader lands on its job, and from a job on the index', async () => {
     const h = load({ wide: false })
-    await h.open(['t', 'applied'])
-    expect(h.t.readerHtml({ pane: 'memories', args: ['t', 'applied'] })).toBe('')
+    await h.open(['i', 'used'])
+    expect(h.t.readerHtml({ pane: 'memories', args: ['i', 'used'] })).toContain('Used this week')
+    expect(h.els.get('pane-memories')!.classList.contains('reading')).toBe(true)
+    expect(h.els.get('mm-split')!.classList.contains('reading')).toBe(true)
+    await h.open([])
     expect(h.els.get('pane-memories')!.classList.contains('reading')).toBe(false)
-    expect(h.els.get('mm-split')!.classList.contains('reading')).toBe(false)
-    // Wide, the reader shows the tab's first row, and that row is the selected one in the list.
+    expect(h.t.readerHtml({ pane: 'memories', args: [] })).toBe('')
+    // Wide, the index marks the job a reader was opened from.
     const wide = load({ wide: true })
-    await wide.open(['t', 'recent'])
-    expect(wide.t.listHtml()).toMatch(/data-id="evt_r1" aria-selected="true"/)
-    expect(h.def.up(['e', 'evt_x'])).toEqual(['t', 'applied'])
-    expect(h.def.up(['t', 'applied'])).toBeNull()
+    await wide.open(['i', 'used'])
+    await wide.open(['e', 'evt_u1'])
+    expect(wide.t.indexHtml()).toMatch(/data-arg="used" aria-selected="true"/)
+    expect(h.def.up(['e', 'evt_x'])).toEqual(['i', 'used'])
+    expect(h.def.up(['i', 'used'])).toEqual([])
+    expect(h.def.up([])).toBeNull()
   })
 })
 

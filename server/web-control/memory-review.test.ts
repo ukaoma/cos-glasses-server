@@ -176,8 +176,8 @@ function pane(details: Record<string, any>) {
   }
   const W = {
     $: (id: string) => els.get(id) ?? null, esc: (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!),
-    toast() {}, readStore: () => ({}), writeStore() {}, skeletonRows: () => '', copyText: () => Promise.resolve(), parseRoute: () => ({ pane: 'memories', args: ['t', 'review'] }),
-    go() {}, goBack() {}, setCrumb() {}, crumb: () => '', registerPane: (name: string, d: unknown) => { if (name === 'memories') def = d },
+    toast() {}, readStore: () => ({}), writeStore() {}, skeletonRows: () => '', copyText: () => Promise.resolve(), parseRoute: () => ({ pane: 'memories', args: ['i', 'who'] }),
+    go() {}, goBack() {}, replace() {}, setCrumb() {}, crumb: () => '', registerPane: (name: string, d: unknown) => { if (name === 'memories') def = d },
     api: (path: string, o: any) => {
       if (path.startsWith('/api/live-cues/')) return Promise.reject(Object.assign(new Error('Not found'), { status: 404 }))
       const { op, args } = o.body
@@ -189,7 +189,7 @@ function pane(details: Record<string, any>) {
   const window = { COSWeb: W, matchMedia: () => media, crypto: globalThis.crypto, localStorage: { getItem: () => null, setItem() {} } }
   const document = { getElementById: (id: string) => els.get(id) ?? null, querySelector: () => null, querySelectorAll: () => [], addEventListener() {},
     createElement: () => ({ setAttribute() {}, remove() {} }), head: { appendChild() {} }, body: { classList: { toggle() {}, add() {}, remove() {} }, appendChild() {} }, activeElement: null }
-  const location = { hash: '#/memories/t/review', replace() {} }
+  const location = { hash: '#/memories/i/who', replace() {} }
   const ctx = vm.createContext({ window, document, location, crypto: globalThis.crypto, console, Date, JSON, Math, Promise, Object, Array, String, Number, RegExp, Error, Uint8Array, URL,
     setTimeout: (fn: () => void, ms?: number) => ((ms ?? 0) >= 6000 ? 0 : setTimeout(fn, 0)), clearTimeout() {}, setInterval: () => 0, clearInterval() {} })
   vm.runInContext(read('memory-review.js'), ctx)
@@ -209,14 +209,16 @@ describe('parity: Today, the rail story and the Memories pane count the same ite
       expect(details.learningToReview).toBe(n)
       expect(details.learningToReviewTotal).toBe(total)
       expect(needsYouCount(details.needs_you)).toBe(n)
-      const rail = railStory(details)
+      // This row pins the older-field rail line (a server without needsYou). With S1's server (c911a589) the status also
+      // carries needsYou and the rail reads that instead; W1's memories-c-reads-web.test.ts pins that line (W1, 17:29).
+      const rail = railStory({ ...details, needsYou: undefined })
       expect(rail.text).toBe(total > n ? `Next ${n} of ${total}` : `${n} to review`)
       expect(rail.hot).toBe(n > 0)
       const p = pane(details)
-      p.def.load(['t', 'review']); await flush()
-      expect(p.t.needsCount()).toBe(n)
+      // Memories C (the build after 7.0.42): the pane lists the same open items under Needs you; its old "To review (n)"
+      // tab label is gone, and its Needs you number is the server's needsYou sum (memories-c-web.test.ts).
+      p.def.load(['i', 'who']); await flush()
       expect(p.t.needsRows().length).toBe(listed)
-      expect(p.t.viewsHtml()).toContain(`To review (${n})`)
       // Nothing under the bar is ever in the Needs you now rows.
       for (const row of p.t.needsRows()) expect(memoryReview.reviewState(row.needs.gate, (details.needs_you.items.find((i: any) => i.event_id === row.event_id) || {}).confidence)).toBe('needs_review')
     })
@@ -230,7 +232,7 @@ describe('parity: Today, the rail story and the Memories pane count the same ite
     expect(SHELL).not.toContain('/api/context/learning/review')
     // The pane's count and list come from the shared predicate only.
     const MEM = read('panes/memories.js')
-    expect(MEM).toContain('R.count(')
+    expect(MEM).toContain('R.total(')
     expect(MEM).toContain('R.openItems(')
     expect(MEM).not.toMatch(/ny\.items\.filter|ny\.count != null/)
   })

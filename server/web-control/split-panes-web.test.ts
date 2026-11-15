@@ -371,10 +371,11 @@ describe('the stylesheet', () => {
     expect(h).toMatch(/touch-action:\s*none/)
     expect(h, 'display comes only from a pane’s breakpoint').not.toMatch(/display:/)
   })
-  it('Memories from 760 px: the default columns unchanged, the clamp matches memories.js SPLIT, solo views hide it', () => {
+  // Memories C (the build after 7.0.42): the left column is the index, 240 px by default, and the solo cue views are gone.
+  it('Memories from 760 px: the index column by default, the clamp matches memories.js SPLIT', () => {
     const wide = mediaWith(MEMCSS, 760, '.split.mm-split > .split-handle')
     expect(wide).toMatch(/\.split\.mm-split > \.split-handle \{ display: flex; \}/)
-    expect(wide).toMatch(/\.split\.mm-split \{ grid-template-columns: minmax\(260px, 340px\) 18px minmax\(0, 1fr\); column-gap: 0; \}/)
+    expect(wide).toMatch(/\.split\.mm-split \{ grid-template-columns: 240px 18px minmax\(0, 1fr\); column-gap: 0; \}/)
     const lim = /\.split\.mm-split\.split-sized \{ grid-template-columns: clamp\((\d+)px, var\(--split-list-share, 30%\), calc\(100% - (\d+)px\)\) (\d+)px/.exec(wide)
     expect(lim).not.toBeNull()
     expect(Number(lim![1])).toBe(MEM_OPTS.listMin)
@@ -383,7 +384,6 @@ describe('the stylesheet', () => {
     expect(wide).toMatch(/\.split\.mm-split\.split-full\.mm-fullable:not\(\.solo\) \{ grid-template-columns: minmax\(0, 1fr\); \}/)
     expect(wide).toMatch(/\.split\.mm-split\.split-full\.mm-fullable:not\(\.solo\) > \.split-list, \.split\.mm-split\.split-full\.mm-fullable:not\(\.solo\) > \.split-handle \{ display: none; \}/)
     expect(wide).toMatch(/\.mm-reader \.split-full-btn \{ display: inline-flex; \}/)
-    expect(MEMCSS).toMatch(/\.split\.mm-split\.solo > \.split-handle \{ display: none; \}/)
   })
   it('Messages from 860 px: the 24 px gap is the divider’s column, the clamp matches messages.js SPLIT', () => {
     const wide = mediaWith(CHAT, 860, '.msg-split > .split-handle')

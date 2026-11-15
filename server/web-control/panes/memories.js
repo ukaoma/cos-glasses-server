@@ -1,21 +1,23 @@
-/* COS Control Web: Memories, built to Control's Memories page (the bundle ActivityWindow.swift MemoriesWebView hosts,
-   server/web-control/memories/memories-app.js 0.5.191 to 0.5.362): Recent learning, Applied this week, All memories,
-   To review and Knowledge, the lesson reader with Open sources, Explore in graph and Copy context, the counts line,
-   the activity log and Memory settings. Native here, so it fills the phone and follows the app's theme; the old
-   hosted page (memories/memories.html) is no longer on this path.
+/* COS Control Web: Memories, direction C (the index; the build after 7.0.42, F1 plan
+   wk46_2026/production_hardening/lanes/F1_memories_C_build_plan.md). One health line for the memory engine, then an index of
+   jobs grouped as Needs you, Learned, Knowledge and Is it working. A job opens its list beside the index from 760 px, or as
+   its own page on a phone ("Memories / <job>"); a reader opens in the job column. Every reader, sheet and action Control's
+   Memories page had stays (the event, memory and knowledge readers, the graph, cue rating, the activity log, Memory
+   settings, stewardship and Ask the graph); what changed is the chrome and the navigation.
    Data: POST /api/web-bridge/memories {id, op, args} answers {ok, message, details} (lib/web-memories-bridge.ts).
-   Reads: status, workspace.request (learning_page, review_page, memory_page, get_memory, policy_get, rule_page,
-   source_status, trace_summary, identity_status, status, graph_overview, graph_expand), learning.list, learning.review,
-   learning.event, memories.list, memories.search, memory.detail, cues.summary, graph.status, graph.search,
+   Reads: status (needsYou, the one Needs you number), workspace.request (learning_page, review_page, memory_page, get_memory,
+   policy_get, rule_page, source_status, trace_summary, identity_status, status, graph_overview, graph_expand), learning.list,
+   learning.review, learning.event, memories.list, memories.search, memory.detail, cues.summary, graph.status, graph.search,
    graph.entity, graph.passages, graph.setup, graph.progress, graph.ask, graph.duplicates, graph.merge.preview,
-   graph.merge.status, profile.owner, memory.guardrails.
-   Writes (each only from a tap, never on load): memory.review, learning.decide, workspace.request (review_memory,
-   policy_set, propose_rule, review_rule, activate_rule, rollback_rule, refresh_source, identity_keep_apart and the
-   graph workspace's own saves), profile.owner.set, memory.guardrails.set, memory.guardrails.run, graph.ingest,
-   graph.build, graph.merge, graph.setup.sources, graph.setup.owner, graph.setup.extraction, graph.setup.embedding,
-   graph.sample, graph.schedule.
-   Routes: #/memories, #/memories/e/<eventId>, #/memories/m/<memoryId>, #/memories/k/<graph|sources|setup>,
-   #/memories/view/<recent|applied|memories|review|knowledge>. */
+   graph.merge.status, profile.owner, memory.guardrails. Cues: GET /api/live-cues/history (skips).
+   Writes (each only from a tap, never on load): memory.review (Wrong is prune with note wrong_in_use; its Undo is accept),
+   learning.decide, workspace.request (review_memory, policy_set, propose_rule, review_rule, activate_rule, rollback_rule,
+   refresh_source, identity_keep_apart and the graph workspace's own saves), profile.owner.set, memory.guardrails.set,
+   memory.guardrails.run, graph.ingest, graph.build, graph.merge, graph.setup.sources, graph.setup.owner,
+   graph.setup.extraction, graph.setup.embedding, graph.sample, graph.schedule; POST /api/live-cues/feedback,
+   /api/live-cues/skip and /api/live-cues/skip/clear.
+   Routes: #/memories (the index), #/memories/i/<job>, #/memories/e/<eventId>, #/memories/m/<memoryId>,
+   #/memories/k/<graph|sources|setup>. The older #/memories/t/<view> and #/memories/view/<view> land on the matching job. */
 (function () {
   'use strict';
   var W = window.COSWeb;
@@ -43,10 +45,21 @@
     memory: 'Saved memory', occurrence: 'When it happened', assistant_turn: 'An answer' };
   var GATE = { attribution: 'Who said it is unclear', rule_ready: 'Ready to become a rule', low_confidence: 'Ready to become a rule', prune_ready: 'Ready to quarantine',
     contradiction: 'Contradicts another memory', scope: 'No area set', candidate: 'Waiting for your acceptance' };
-  var VIEWS = [['recent', 'Recent learning'], ['applied', 'Applied this week'], ['memories', 'All memories'], ['review', 'To review'], ['knowledge', 'Knowledge']];
-  // Control's cue review (MeetingAsk.swift CueReviewPane): shown beside the views once the server's cue history answers.
-  var CUE_VIEWS = [['cues', 'Cues to rate'], ['rated', 'Rated cues']];
-  function knownView(v) { return VIEWS.concat(CUE_VIEWS).some(function (x) { return x[0] === v; }); }
+  // The index's jobs (direction C). `view` is the list the job draws with the readers' own rules (S.view below); `type` is
+  // a bot-memory type the memory list filters on in the pane until memory_page takes one (plan section 1).
+  var JOBS = {
+    meetings: { label: 'Meetings to rate', view: 'cues' }, who: { label: 'Who said it is unclear', view: 'review' },
+    quarantine: { label: 'Ready to quarantine', view: 'review' }, suggestions: { label: 'Suggestions', view: 'review' },
+    corrections: { label: 'Corrections', view: 'memories', type: 'correction' }, decisions: { label: 'Decisions', view: 'memories', type: 'decision' },
+    rules: { label: 'Rules', view: 'rules' }, summaries: { label: 'Session summaries', view: 'memories', type: 'session_summary' },
+    graph: { label: 'Graph', view: 'knowledge' }, sources: { label: 'Sources', view: 'knowledge' },
+    used: { label: 'Used in answers', view: 'applied' }, rated: { label: 'Rated cues', view: 'rated' }
+  };
+  // The seven tabs before C, and where each now lands (plan section 7).
+  var OLD_VIEW = { recent: 'corrections', applied: 'used', memories: 'corrections', review: 'who', knowledge: 'graph', cues: 'meetings', rated: 'rated' };
+  function knownJob(j) { return typeof j === 'string' && Object.prototype.hasOwnProperty.call(JOBS, j); }
+  function jobOf(v) { return knownJob(v) ? v : OLD_VIEW[v] || ''; }
+  function viewOf(j) { return knownJob(j) ? JOBS[j].view : 'cues'; }
   var KTABS = ['graph', 'sources', 'setup'];
   var PRUNE_READY = 'Prune ready';
   // The bridge's read-only ops (READ_ONLY_MEMORY_WEB_OPS and WORKSPACE_READ_ACTIONS in lib/web-memories-bridge.ts).
@@ -99,14 +112,14 @@
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
   function icon(name) { return '<svg class="icon"><use href="#i-' + name + '"/></svg>'; }
-  // The tab is in the address: #/memories/t/<view> (app.js isTabRoute), so a reload, a new browser or Safari clearing its
-  // storage all land on the same tab; the stored view is only the fallback for a bare #/memories.
+  // The tabs before C kept their place as #/memories/t/<view> (app.js isTabRoute); those links now land on the job.
   function tabRoute(args) { return args.length === 2 && args[0] === 't'; }
   function readerArgs(r) { return r.pane === 'memories' && !tabRoute(r.args) ? r.args : []; }
-  function showTab(v) {
-    var h = '#/memories/t/' + encodeURIComponent(v);
-    if (location.hash === h) paint(); else W.replace(h);
-  }
+  // A job is in the address (#/memories/i/<job>), so a reload or a new browser lands on it. Graph and Sources are the
+  // knowledge reader's own routes.
+  function jobHash(j) { return j === 'graph' || j === 'sources' ? '#/memories/k/' + j : '#/memories/i/' + encodeURIComponent(j); }
+  function jobArgs(j) { return j === 'graph' || j === 'sources' ? ['k', j] : ['i', j]; }
+  function showJob(j) { var h = jobHash(j); if (location.hash === h) paint(); else W.replace(h); }
   function isWide() { return !!(window.matchMedia && window.matchMedia('(min-width: 760px)').matches); }
   function el(id) { return document.getElementById(id); }
   function btn(act, label, extra) { return '<button type="button" class="cx-btn' + (extra && extra.cls ? ' ' + extra.cls : ' quiet') + '" data-mm="' + act + '"' + (extra && extra.id != null ? ' data-id="' + esc(extra.id) + '"' : '') + (extra && extra.arg != null ? ' data-arg="' + esc(extra.arg) + '"' : '') + (extra && extra.disabled ? ' disabled' : '') + '>' + label + '</button>'; }
@@ -134,13 +147,14 @@
   // ── state ────────────────────────────────────────────────
   var STORE_KEY = 'cos.web.memories';
   var saved = W.readStore(STORE_KEY);
+  var savedJob = jobOf(saved.job) || jobOf(saved.view) || 'meetings';
   function list() { return { rows: [], total: null, cursor: null, loaded: false, loading: false, error: '', paged: undefined, coverage: {}, info: null }; }
   var S = {
-    view: knownView(saved.view) ? saved.view : 'recent',
+    job: savedJob, view: viewOf(savedJob), healthOpen: false, memCounts: null, wrong: {},
     ktab: KTABS.indexOf(saved.ktab) >= 0 ? saved.ktab : 'graph', ktabChosen: false,
     started: false, loadedAt: 0,
     status: null, statusError: '', statusLoading: false,
-    recent: list(), review: list(), applied: Object.assign(list(), { days: 7 }), mem: Object.assign(list(), { q: '', hits: null, hitCursor: null }),
+    recent: list(), review: list(), applied: Object.assign(list(), { days: 7 }), mem: Object.assign(list(), { q: '', draft: '', hits: null, hitCursor: null }),
     graph: null, graphError: '', setup: null, setupError: '', setupLoading: false, setupBusy: '', progress: null,
     ingest: null, ingestLimit: 10, building: '', folderDraft: '',
     detail: {}, memDetail: {}, passages: {}, loading: {},
@@ -156,17 +170,27 @@
     guard: null, guardError: '', guardBusy: '', guardRun: null, guardLines: 0, guardLoading: false,
     steward: { tab: 'rules', rows: [], cursor: null, busy: false, error: '', intent: null, outcomes: null, serial: 0, loaded: false }
   };
-  function persist() { W.writeStore(STORE_KEY, { view: S.view, ktab: S.ktab }); }
+  function persist() { W.writeStore(STORE_KEY, { job: S.job, ktab: S.ktab }); }
+  function setJob(j) { if (!knownJob(j)) return; S.job = j; S.view = viewOf(j); persist(); }
   var serials = {};
   function nextSerial(k) { serials[k] = (serials[k] || 0) + 1; return serials[k]; }
 
   // ── loading ──────────────────────────────────────────────
+  // Opening reads what the health line and the index count, and nothing searches: lists browse (memory_page with no
+  // query is a plain scroll that records no recall, plan section 6), and a search runs only when it is submitted.
   function loadAll() {
     S.started = true; S.loadedAt = Date.now();
-    loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph();
+    loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph(); loadApplied(false); loadMemCounts();
     if (S.view === 'memories') loadMem(false);
-    if (S.view === 'applied') loadApplied(false);
     paint();
+  }
+  // Learned's counts: the memory overview's by_type (memories.list, one row asked for; the counts are the point).
+  function loadMemCounts() {
+    var serial = nextSerial('memCounts');
+    call('memories.list', { limit: 1 }).then(function (d) {
+      if (serial !== serials.memCounts) return;
+      S.memCounts = d && d.byType && typeof d.byType === 'object' ? d.byType : {};
+    }, function () { if (serial === serials.memCounts) S.memCounts = null; }).then(paint);
   }
   function loadStatus() {
     if (S.statusLoading) return;
@@ -179,7 +203,7 @@
   }
   // Cues to rate and Rated cues read the server's cue history themselves, as Control's store does: the read is the
   // capability check (a 404 is a server from before the routes, and both entries hide).
-  function loadCues() { loadCueWeek(); }
+  function loadCues() { loadCueWeek(); loadCueRated(); }
   // Newest first, then by event id: many recall rows share one timestamp, and the server's order among them can differ from
   // one read to the next, which reshuffled Recent learning on every visit.
   function stableOrder(rows) {
@@ -243,7 +267,6 @@
       if (more) W.toast(e.message + ' Refresh To review to start again.'); else { L.error = e.message; L.errorCode = e.code || ''; L.loaded = true; }
     }).then(function () { if (serial === serials.review) L.loading = false; paint(); });
   }
-  var memTimer = null;
   function loadMem(more) {
     var L = S.mem, q = L.q.trim();
     var cursor = more ? (q ? L.hitCursor : L.cursor) : null;
@@ -251,7 +274,7 @@
     var serial = nextSerial('mem'); L.loading = true; if (!more) L.error = '';
     paint();
     var paged = L.paged === false ? Promise.reject(new Error('older server')) :
-      call('workspace.request', { action: 'memory_page', q: q, limit: 25, cursor: cursor }).then(function (d) {
+      call('workspace.request', { action: 'memory_page', q: q, limit: q ? 25 : 50, cursor: cursor }).then(function (d) {
         if (d.protocol !== 1 || !Array.isArray(d.items)) throw new Error('older server');
         L.paged = true; return { rows: d.items, total: d.matched_total, cursor: d.next_cursor || null };
       });
@@ -271,10 +294,12 @@
       if (more) W.toast(e.message); else { L.error = e.message; L.errorCode = e.code || ''; L.loaded = true; }
     }).then(function () { if (serial === serials.mem) L.loading = false; paint(); });
   }
-  function memQuery(q) {
-    S.mem.q = q; clearTimeout(memTimer);
-    if (q.trim().length === 1) return;
-    memTimer = setTimeout(function () { loadMem(false); }, q ? 350 : 0);
+  // Search runs on submit only (Enter), never as you type: each search is one read, and until M1 lands each one also
+  // counts as a recall of what it finds (plan section 6). Typing only keeps the draft.
+  function memSubmit(q) {
+    S.mem.q = String(q || ''); S.mem.hits = null; S.mem.hitCursor = null;
+    if (S.mem.q.trim().length === 1) { paint(); return; }
+    loadMem(false);
   }
   // Applied: the helper's `--kind used` window, never Recent filtered here. Fails closed: a server that ignored
   // `kind` returns the whole window, and Applied stays empty rather than call those rows uses.
@@ -467,20 +492,8 @@
       return itemRow(it, { needs: { gate: it.gate, reason: plainReason(it.reason) } });
     });
   }
-  // The same count the server hands Today and the rail (memory-review.js count), less what was decided on this page.
-  function needsCount() {
-    var s = S.status || {}, ny = (S.recent.info && S.recent.info.needs_you) || s.needs_you;
-    var n = ny && R ? R.count(R.normalizeBlock(ny), S.decisions) : null;
-    if (n != null) return n;
-    if (typeof s.learningToReview === 'number') return s.learningToReview;
-    return null;
-  }
-  // To review's other rows: proposed changes still open, and suggested rules only once the predicate counts them.
-  function reviewRestRows(seen) {
-    var learn = {};
-    learningRows().forEach(function (r) { learn[r.lesson_id] = 1; });
-    return S.review.rows.filter(function (e) { return !seen[e.event_id] && !closedHere(e) && !(isPattern(e) && learn[e.lesson_id]); });
-  }
+
+
   function findRow(id) {
     var all = needsRows().concat(learningRows(), S.review.rows, S.recent.rows, S.applied.rows);
     for (var i = 0; i < all.length; i++) if (all[i].event_id === id) return all[i];
@@ -514,7 +527,12 @@
     unreadable: 'The server\'s answer about cues was not readable. Update the server in Settings.',
     storageUnreadable: 'The server\'s ratings file cannot be read, so cues cannot be listed. Check again after the server restarts.' };
   S.cue = { available: null, weekState: 'checking', queue: [], counts: null, ratedState: 'checking', rated: [], ratedLoaded: false,
-    saving: {}, errors: {}, skipped: [], notes: {}, weekBusy: false, ratedBusy: false, failedStatus: 0, ratedStatus: 0 };
+    saving: {}, errors: {}, skipped: [], notes: {}, weekBusy: false, ratedBusy: false, failedStatus: 0, ratedStatus: 0,
+    // Memories C, rating a meeting at a time: the server's skips (sessionId to when), whether this server has them, the
+    // meetings folded here (newest first) for their Undo, the cues rated here (they stay drawn with their verdict, so
+    // nothing moves under the reader), the meeting open, and a note field opened on request.
+    skips: {}, skipsOn: null, truncated: false, folded: [], meetBusy: {}, meetErrors: {}, here: {}, meet: '', noteOpen: {} };
+  var RATED_DAYS = 30;
   function verdictLabel(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : ''; }
   function cueNum(v) { var n = Number(v); return isFinite(n) ? n : 0; }
   // CueVerdicts.read: the answer to a state, and from a 200 in the contract's shape, the cues and counts.
@@ -523,7 +541,10 @@
     if (!d || d.v !== 1 || !Array.isArray(d.cues) || !c || typeof c.total !== 'number' || typeof c.rated !== 'number' || typeof c.unrated !== 'number') return { state: 'unreadable' };
     var by = {}; VERDICTS.forEach(function (v) { by[v] = c.byVerdict && typeof c.byVerdict[v] === 'number' ? c.byVerdict[v] : 0; });
     var cues = d.cues.filter(function (r) { return r && typeof r.cueId === 'string' && r.cueId && typeof r.sessionId === 'string' && r.sessionId && cueNum(r.createdAt) > 0 && typeof r.detail === 'string' && r.detail; });
-    return { state: 'loaded', cues: cues, counts: { total: c.total, rated: c.rated, unrated: c.unrated, byVerdict: by } };
+    // Memories C: the server's live meeting skips. Absent is a server from before them (no Skip this meeting); null is a
+    // skips file it could not read (no skips shown rather than wrong ones).
+    var skips = !('skips' in d) ? undefined : d.skips && typeof d.skips === 'object' && !Array.isArray(d.skips) ? d.skips : null;
+    return { state: 'loaded', cues: cues, counts: { total: c.total, rated: c.rated, unrated: c.unrated, byVerdict: by }, skips: skips, truncated: d.truncated === true };
   }
   function cueReadError(err) {
     var st = err && err.status;
@@ -536,7 +557,7 @@
   function cueLearn(state) {
     var next = state === 'loaded' ? true : state === 'olderServer' ? false : S.cue.available;
     S.cue.available = next;
-    if (next === false && (S.view === 'cues' || S.view === 'rated')) { S.view = 'recent'; persist(); if (tabRoute(W.parseRoute().args)) showTab('recent'); }
+    if (next === false && (S.job === 'meetings' || S.job === 'rated')) { setJob('corrections'); ensureJob('corrections'); var ra = W.parseRoute().args; if (ra[0] === 'i' && (ra[1] === 'meetings' || ra[1] === 'rated')) showJob('corrections'); }
   }
   function cueVerdict(c) { return c && c.rating && c.rating.verdict ? c.rating.verdict : null; }
   // CueVerdicts.queueOrder: oldest first, then the skipped cues in the order they were skipped.
@@ -548,19 +569,23 @@
   function loadCueWeek() {
     var C = S.cue; if (C.weekBusy) return;
     C.weekBusy = true; if (C.weekState !== 'loaded') C.weekState = 'checking'; paint();
-    W.api('/api/live-cues/history?days=' + CUE_DAYS + '&unrated=1&limit=200').then(cueRead, cueReadError).then(function (r) {
+    // Every unrated cue of the week, up to the route's 1,000 (200 undercounted meetings past 200 cues).
+    W.api('/api/live-cues/history?days=' + CUE_DAYS + '&unrated=1&limit=1000').then(cueRead, cueReadError).then(function (r) {
       C.weekBusy = false; cueLearn(r.state); C.weekState = r.state; C.failedStatus = r.status || 0;
-      if (r.state === 'loaded') { C.queue = queueOrder(r.cues.filter(function (c) { return !cueVerdict(c); })); C.counts = r.counts; }
+      if (r.state === 'loaded') {
+        C.queue = queueOrder(r.cues.filter(function (c) { return !cueVerdict(c); })); C.counts = r.counts; C.truncated = r.truncated;
+        C.skipsOn = r.skips !== undefined; C.skips = r.skips || {};
+      }
       paint();
     });
   }
-  // The rated list reads the whole week (up to the server's 1,000 rows), so every rated cue shows, not only the newest 200's.
+  // Rated cues reads 30 days (up to the server's 1,000 rows), the window Is it working counts (plan section 1).
   function loadCueRated() {
     var C = S.cue; if (C.ratedBusy) return;
     C.ratedBusy = true; if (C.ratedState !== 'loaded') C.ratedState = 'checking'; paint();
-    W.api('/api/live-cues/history?days=' + CUE_DAYS + '&limit=1000').then(cueRead, cueReadError).then(function (r) {
+    W.api('/api/live-cues/history?days=' + RATED_DAYS + '&limit=1000').then(cueRead, cueReadError).then(function (r) {
       C.ratedBusy = false; cueLearn(r.state); C.ratedState = r.state; C.ratedStatus = r.status || 0;
-      if (r.state === 'loaded') { C.rated = r.cues.filter(cueVerdict).sort(function (a, b) { return cueNum(b.createdAt) - cueNum(a.createdAt); }); C.counts = r.counts; C.ratedLoaded = true; }
+      if (r.state === 'loaded') { C.rated = r.cues.filter(cueVerdict).sort(function (a, b) { return cueNum(b.createdAt) - cueNum(a.createdAt); }); C.ratedLoaded = true; }
       paint();
     });
   }
@@ -584,7 +609,8 @@
     return 'The rating was not saved (HTTP ' + st + '). Try again.';
   }
   function findCue(id) {
-    var C = S.cue; return C.queue.filter(function (c) { return c.cueId === id; })[0] || C.rated.filter(function (c) { return c.cueId === id; })[0] || null;
+    var C = S.cue; return C.queue.filter(function (c) { return c.cueId === id; })[0] || (Object.prototype.hasOwnProperty.call(C.here, id) ? C.here[id] : null) ||
+      C.rated.filter(function (c) { return c.cueId === id; })[0] || null;
   }
   // CueVerdictsStore.rate: one call per cue at a time; on success every list that holds the cue shows the new verdict.
   function rateCue(id, verdict, note) {
@@ -600,6 +626,7 @@
       var old = cueVerdict(cue), updated = Object.assign({}, cue, { rating: stored || vote ? { verdict: stored, note: stored ? text || null : null, vote: vote, at: Date.now() } : null });
       applyCue(updated, old);
       delete C.notes[id];
+      loadStatus();
     }, function (err) {
       if (err && err.status === 404 && err.code !== 'unknown_cue') C.available = false;
       C.errors[id] = cueRateLine(err);
@@ -618,6 +645,8 @@
     var C = S.cue, now = cueVerdict(cue);
     moveCounts(old, now);
     C.skipped = C.skipped.filter(function (x) { return x !== cue.cueId; });
+    // A cue rated in a meeting card stays drawn there with its verdict; cleared, it is simply unrated again.
+    if (now && (!old || Object.prototype.hasOwnProperty.call(C.here, cue.cueId))) C.here[cue.cueId] = cue; else if (!now) delete C.here[cue.cueId];
     var waiting = C.queue.filter(function (c) { return c.cueId !== cue.cueId; });
     if (!now && C.weekState === 'loaded' && cueNum(cue.createdAt) > Date.now() - CUE_DAYS * 86400000) waiting.push(cue);
     C.queue = queueOrder(waiting);
@@ -625,21 +654,20 @@
     if (now && C.ratedState === 'loaded') done.push(cue);
     C.rated = done.sort(function (a, b) { return cueNum(b.createdAt) - cueNum(a.createdAt); });
   }
-  function skipCue(id) {
-    var C = S.cue; C.skipped = C.skipped.filter(function (x) { return x !== id; }); C.skipped.push(id);
-    C.queue = queueOrder(C.queue); paint(); focusCueCard();
-  }
   // The card takes focus after a rating or a skip only when the person was already working from the keyboard there.
   var cueKeyboard = false;
-  function focusCueCard() { if (!cueKeyboard) return; var card = el('mm-cue-card'); if (card && card.focus) card.focus({ preventScroll: true }); }
-  // CueVerdicts.key: 1 to 5 rate, N goes to the note, S skips; only while the card itself has focus, without modifiers.
+  var cueFocusId = '';
+  function focusCueCard() { if (!cueKeyboard || !cueFocusId) return; var card = el('mm-cue-' + cueFocusId); if (card && card.focus) card.focus({ preventScroll: true }); }
+  // CueVerdicts.key, per cue in a meeting card: 1 to 5 rate, N opens the note and details and goes to the note, S skips the
+  // rest of the meeting on the card (the same route as its button); only while that cue has focus, without modifiers.
   function cueKey(e) {
-    var card = e.target;
-    if (!card || card.id !== 'mm-cue-card' || e.metaKey || e.ctrlKey || e.altKey) return false;
-    var id = card.getAttribute('data-cue'), k = String(e.key || '');
-    if (/^[1-5]$/.test(k)) { cueKeyboard = true; rateCue(id, VERDICTS[Number(k) - 1], S.cue.notes[id]); return true; }
-    if (k === 'n' || k === 'N') { cueKeyboard = true; var n = el('mm-cue-note'); if (n && n.focus) n.focus(); return true; }
-    if (k === 's' || k === 'S') { cueKeyboard = true; skipCue(id); return true; }
+    var card = e.target, cls = card && card.getAttribute ? card.getAttribute('data-cue-card') : null;
+    if (!card || !cls || e.metaKey || e.ctrlKey || e.altKey) return false;
+    if (card.id !== 'mm-cue-' + cls) return false;
+    var id = cls, k = String(e.key || '');
+    if (/^[1-5]$/.test(k)) { cueKeyboard = true; cueFocusId = id; rateCue(id, VERDICTS[Number(k) - 1], S.cue.notes[id]); return true; }
+    if (k === 'n' || k === 'N') { cueKeyboard = true; cueFocusId = id; S.cue.noteOpen[id] = true; paint(); var n = el('mm-cue-note-' + id); if (n && n.focus) n.focus(); return true; }
+    if (k === 's' || k === 'S') { var sc = findCue(id); if (!sc || S.cue.skipsOn !== true) return false; cueKeyboard = true; skipMeeting(sc.sessionId, false); return true; }
     return false;
   }
   function cueClock(ms) { return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
@@ -703,92 +731,345 @@
     return '<div class="cx-list"><div class="mm-state"><strong' + (state === 'checking' ? '' : ' class="mm-warn"') + '>' + esc(line) + '</strong>' +
       (state !== 'checking' && state !== 'olderServer' ? '<span class="mm-state-act">' + btn('cue-check', 'Check again') + '</span>' : '') + '</div></div>';
   }
-  function cueHeading(title, detail) {
-    var c = S.cue.counts;
-    return '<div class="mm-cue-head"><div><h2 class="mm-cue-title">' + esc(title) + '</h2><p class="mm-muted">' + detail + '</p>' +
-      (c ? '<p class="mm-muted">Ratings in the last 7 days: ' + fmt(c.rated) + ' of ' + fmt(c.total) + '.</p>' : '') + '</div>' +
-      '<button type="button" class="cx-btn quiet mm-icon-btn" data-mm="cue-check" aria-label="Check again" title="Check again">' + icon('refresh') + '</button></div>';
+
+  // ── Meetings to rate (Memories C, plan section 5): the week's unrated cues grouped by meeting, newest meeting first.
+  //    One card per meeting with each cue and the five verdicts, none chosen; each tap rates one cue through rateCue. ──
+  function meetingTitle(g) { return g.title || 'Meeting, ' + meetingWhen(g.start); }
+  function meetingWhen(ms) { return ms && isFinite(ms) ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''; }
+  function meetingPlace(sid) { return /^mac_/.test(String(sid || '')) ? 'On this Mac' : 'On the glasses'; }
+  // A skip covers the cues already shown when it was made: a cue logged after it brings the meeting back (the server's
+  // LiveCueVerdicts.unratedSessionCount, the same rule).
+  function isSkipped(g) {
+    var at = S.cue.skips[g.sid];
+    if (typeof at !== 'number') return false;
+    var cues = g.unrated.length ? g.unrated : g.cues;
+    return cues.every(function (c) { return cueNum(c.createdAt) <= at; });
   }
-  function cueQueueHtml() {
-    var C = S.cue, head = cueHeading('Cues to rate', 'Oldest first.<span class="mm-keys-hint"> Keys 1 to 5 rate, N adds a note, S skips.</span>');
-    if (C.weekState !== 'loaded') return head + cueStateHtml(C.weekState, C.failedStatus);
-    var cue = C.queue[0];
-    if (!cue) return head + '<div class="cx-list"><div class="mm-state"><strong>' + esc(C.counts && C.counts.total ? 'Every cue from the last 7 days is rated.' : 'No cues in the last 7 days.') + '</strong></div></div>';
-    var id = cue.cueId, saving = !!C.saving[id], left = Math.max(C.queue.length, C.counts ? C.counts.unrated : 0), next = C.queue[1];
-    var vote = cue.rating && cue.rating.vote === 'up' ? 'Voted up on the glasses' : cue.rating && cue.rating.vote === 'down' ? 'Voted down on the glasses' : '';
-    return head + '<section class="cx-card mm-cue" id="mm-cue-card" tabindex="0" data-cue="' + esc(id) + '" aria-label="Cue to rate. Keys 1 to 5 rate, N adds a note, S skips.">' +
-      cueMetaHtml(cue, '<span class="mm-cue-left">' + (left === 1 ? '1 left' : fmt(left) + ' left') + '</span>') +
-      '<p class="mm-cue-text">' + esc(cue.detail) + '</p>' + cueSourcesHtml(cue) +
-      (cue.general && cue.general.query ? '<p class="mm-muted">Searched the web for: ' + esc(cue.general.query) + '</p>' : '') +
-      (cue.before ? '<div class="mm-cue-before"><span class="mm-muted">What was said just before</span><p>' + esc(cue.before) + '</p></div>' : '') +
-      (vote ? '<p class="mm-muted">' + vote + '</p>' : '') + verdictButtons(id, null, true, saving) +
-      '<label class="mm-pick mm-block"><span>Note (optional)</span><input class="field" id="mm-cue-note" data-cue="' + esc(id) + '" maxlength="' + CUE_NOTE_MAX + '" autocomplete="off" placeholder="What would have made it useful?" value="' + esc(C.notes[id] || '') + '"></label>' +
-      '<div class="mm-actions">' + btn('cue-skip', 'Skip', { id: id, disabled: saving }) + (saving ? '<span class="mm-muted">Saving…</span>' : '') +
-      (C.errors[id] ? '<span class="mm-warn">' + esc(C.errors[id]) + '</span>' : '') + '</div></section>' +
-      (next ? '<p class="mm-muted mm-cue-next">Next up: ' + esc(cueClock(cueNum(next.createdAt))) + ' · ' + esc(clip(next.headline || next.detail, 80)) + '</p>' : '');
+  function meetingGroups() {
+    var C = S.cue, by = {}, list = [];
+    function add(c, rated) {
+      var g = by[c.sessionId];
+      if (!g) { g = by[c.sessionId] = { sid: c.sessionId, cues: [], unrated: [], start: Infinity, newest: 0, title: '' }; list.push(g); }
+      g.cues.push(c); if (!rated) g.unrated.push(c);
+      g.start = Math.min(g.start, cueNum(c.armedAt) > 0 ? cueNum(c.armedAt) : cueNum(c.createdAt));
+      g.newest = Math.max(g.newest, cueNum(c.createdAt));
+      if (!g.title) g.title = str(c.title).trim() || str(c.meetingTitle).trim();
+    }
+    C.queue.forEach(function (c) { add(c, false); });
+    Object.keys(C.here).forEach(function (id) { var c = C.here[id]; if (c && cueVerdict(c) && !C.queue.some(function (q) { return q.cueId === id; })) add(c, true); });
+    list.forEach(function (g) { g.cues.sort(function (a, b) { return cueNum(a.createdAt) - cueNum(b.createdAt); }); });
+    return list.filter(function (g) { return !isSkipped(g); }).sort(function (a, b) { return b.start - a.start || (a.sid < b.sid ? -1 : 1); });
+  }
+  // Meetings with a cue still to rate: the pane's own count while its read is whole, else null (the server's stands).
+  function meetingsToRate() {
+    var C = S.cue;
+    if (C.available === false) return 0;
+    if (C.weekState !== 'loaded' || C.truncated) return null;
+    return meetingGroups().filter(function (g) { return g.unrated.length > 0; }).length;
+  }
+  // The meeting the card shows stays put once drawn, so rating its last cue never swaps the card under the reader.
+  function shownMeeting(groups) {
+    var C = S.cue, g = C.meet ? groups.filter(function (x) { return x.sid === C.meet; })[0] : null;
+    if (!g) { g = groups.filter(function (x) { return x.unrated.length > 0; })[0] || null; C.meet = g ? g.sid : ''; }
+    return g;
+  }
+  function minutesLine(n) { var m = Math.max(1, Math.round(n * 10 / 60)); return m === 1 ? 'about a minute' : 'about ' + m + ' minutes'; }
+  // One cue in a meeting card (lead, F1 review: nothing the rating flow could do may disappear). The face: the cue, the
+  // line said just before it (one quiet line), the glasses vote, the five verdicts (none chosen) and one disclosure. Behind
+  // the disclosure: the note, the full line said before, the kind, the score and the sources.
+  function cueDetailsHtml(c) {
+    var C = S.cue, id = c.cueId, v = cueVerdict(c), facts = [];
+    if (CUE_KIND[c.kind] || c.kind) facts.push('<dt>Kind</dt><dd>' + esc(CUE_KIND[c.kind] || c.kind) + '</dd>');
+    if (cueScore(c.gate)) facts.push('<dt>Score</dt><dd class="mm-mono">' + esc(cueScore(c.gate)) + '</dd>');
+    return '<div class="mm-meet-details" id="mm-cue-details-' + esc(id) + '">' +
+      (!v ? '<label class="mm-pick mm-block"><span>Note (optional)</span><input class="field" id="mm-cue-note-' + esc(id) + '" data-cue="' + esc(id) + '" maxlength="' + CUE_NOTE_MAX + '" autocomplete="off" placeholder="What would have made it useful?" value="' + esc(C.notes[id] || '') + '"></label>' :
+        c.rating && c.rating.note ? '<p class="mm-muted">Note: “' + esc(c.rating.note) + '”</p>' : '') +
+      (c.before ? '<div class="mm-cue-before"><span class="mm-muted">What was said just before</span><p>' + esc(c.before) + '</p></div>' : '') +
+      (facts.length ? '<dl class="mm-grid">' + facts.join('') + '</dl>' : '') +
+      cueSourcesHtml(c) + '</div>';
+  }
+  function meetingCueHtml(c) {
+    var C = S.cue, id = c.cueId, saving = !!C.saving[id], v = cueVerdict(c), open = !!C.noteOpen[id];
+    var vote = c.rating && c.rating.vote === 'up' ? 'Voted up on the glasses' : c.rating && c.rating.vote === 'down' ? 'Voted down on the glasses' : '';
+    var toggle = '<p class="mm-meet-note"><button type="button" class="mm-link" data-mm="cue-note-open" data-id="' + esc(id) + '" aria-expanded="' + open + '" aria-controls="mm-cue-details-' + esc(id) + '">' +
+      (open ? 'Hide note and details' : 'Note and details') + '</button></p>';
+    return '<div class="mm-meet-cue" id="mm-cue-' + esc(id) + '" data-cue-card="' + esc(id) + '" tabindex="0" aria-label="Cue. Keys 1 to 5 rate it, N opens its note and details, S skips the rest of this meeting.">' +
+      '<p class="mm-meet-text">' + esc(c.detail) + '</p>' +
+      (c.before ? '<p class="mm-meet-before" title="' + esc(c.before) + '">Just before: ' + esc(c.before) + '</p>' : '') +
+      (vote ? '<p class="mm-muted">' + vote + '</p>' : '') +
+      verdictButtons(id, v, false, saving) + toggle + (open ? cueDetailsHtml(c) : '') +
+      (saving ? '<p class="mm-muted">Saving…</p>' : '') + (C.errors[id] ? '<p class="mm-warn">' + esc(C.errors[id]) + '</p>' : '') + '</div>';
+  }
+  function meetingCardHtml(g) {
+    var C = S.cue, busy = !!C.meetBusy[g.sid], n = g.cues.length;
+    // One skip route either way: it covers the cues shown now. Once a cue here is rated, what it skips is the rest.
+    var some = g.cues.some(function (c) { return !!cueVerdict(c); });
+    var skip = C.skipsOn === true ? btn('cue-meet-skip', busy ? 'Skipping…' : some ? 'Skip the rest' : 'Skip this meeting', { id: g.sid, disabled: busy }) : '';
+    return '<section class="cx-card mm-meet" aria-label="' + esc(meetingTitle(g)) + '"><div class="mm-meet-head"><div><h3>' + esc(meetingTitle(g)) + '</h3>' +
+      '<p>' + esc([meetingPlace(g.sid), g.title ? meetingWhen(g.start) : '', n + ' ' + plural(n, 'cue', 'cues') + ' fired', g.unrated.length ? minutesLine(g.unrated.length) : 'all rated'].filter(Boolean).join(' · ')) + '</p></div>' + skip + '</div>' +
+      '<p class="mm-muted mm-keys-hint">Keys 1 to 5 rate the cue in focus, N opens its note and details, S skips the rest of the meeting.</p>' +
+      (C.meetErrors[g.sid] ? '<p class="mm-warn">' + esc(C.meetErrors[g.sid]) + '</p>' : '') +
+      g.cues.map(meetingCueHtml).join('') + '</section>';
+  }
+  function foldedHtml() {
+    var C = S.cue, rows = C.folded.filter(function (f) { return typeof C.skips[f.sid] === 'number'; });
+    if (!rows.length) return '';
+    return '<div class="cx-list mm-folded">' + rows.map(function (f) {
+      var busy = !!C.meetBusy[f.sid];
+      return '<div class="mm-removed" role="status"><span>Skipped the ' + esc(meetingWhen(f.start) || 'earlier') + ' meeting. It no longer counts in Needs you.' +
+        (C.meetErrors[f.sid] ? ' <span class="mm-warn">' + esc(C.meetErrors[f.sid]) + '</span>' : '') + '</span>' +
+        textBtn('cue-meet-unskip', busy ? 'Undoing…' : 'Undo', { id: f.sid, disabled: busy }) + '</div>';
+    }).join('') + '</div>';
+  }
+  function meetingRowHtml(g, selected) {
+    var n = g.unrated.length || g.cues.length;
+    var facts = [meetingPlace(g.sid), g.title ? meetingWhen(g.start) : '', g.unrated.length ? 'unrated' : 'rated'].filter(Boolean).join(' · ');
+    return '<button type="button" class="mm-row" data-mm="cue-meet" data-id="' + esc(g.sid) + '" aria-selected="' + (selected ? 'true' : 'false') + '">' +
+      '<span class="mm-row-body"><span class="mm-row-title">' + esc(meetingTitle(g)) + '</span><span class="mm-facts"><span class="mm-kind">' + n + ' ' + plural(n, 'cue', 'cues') + '</span> · ' + esc(facts) + '</span></span><span class="chev"></span></button>';
+  }
+  function meetingsJobHtml() {
+    var C = S.cue;
+    if (C.weekState !== 'loaded') return groupHead('Meetings to rate') + cueStateHtml(C.weekState, C.failedStatus);
+    var groups = meetingGroups(), open = groups.filter(function (g) { return g.unrated.length > 0; }), g = shownMeeting(groups), n = meetingsToRate();
+    if (!groups.length) return foldedHtml() + groupHead('Meetings to rate', '0') +
+      stateBox(C.counts && C.counts.total ? 'Every cue from the last 7 days is rated.' : 'No cues in the last 7 days.', C.counts && C.counts.total ? 'Skipped meetings stay out of this list.' : '');
+    var mac = open.filter(function (x) { return /^mac_/.test(x.sid); }), g2 = open.filter(function (x) { return !/^mac_/.test(x.sid); });
+    function cues(list) { return list.reduce(function (a, x) { return a + x.unrated.length; }, 0); }
+    var split = (mac.length ? fmt(cues(mac)) + ' ' + plural(cues(mac), 'cue', 'cues') + ' from ' + fmt(mac.length) + ' Mac ' + plural(mac.length, 'meeting', 'meetings') : '') +
+      (mac.length && g2.length ? ', ' : '') + (g2.length ? fmt(cues(g2)) + ' from ' + fmt(g2.length) + ' on the glasses' : '');
+    return foldedHtml() + (g ? meetingCardHtml(g) : '') +
+      groupHead('Meetings to rate', n != null ? fmt(n) : '') + '<div class="cx-list">' + groups.map(function (x) { return meetingRowHtml(x, g && x.sid === g.sid); }).join('') + '</div>' +
+      (split ? '<p class="mm-group-note mm-after">' + esc(split) + '.</p>' : '') +
+      (C.truncated ? '<p class="cx-note">Showing the newest 1,000 cues to rate.</p>' : '');
+  }
+  // "Skip this meeting" (lead 16:00): stored on the server, so the page, the rail and Today keep one number. It never writes
+  // a cue verdict: the meeting's cues stay unrated in the verdicts store. Undo clears the skip.
+  function skipLine(err, undo) {
+    var st = err && err.status, code = err && err.code;
+    if (code === 'unknown_meeting') return 'This meeting has no cue from the last 7 days any more.';
+    if (code === 'skips_full' || st === 409) return 'Too many meetings are skipped. Undo some first.';
+    if (code === 'skips_unreadable' || st === 503) return 'The server\'s skips file cannot be read. Nothing was changed.';
+    if (!st) return 'Your Mac did not answer. Nothing was changed; try again.';
+    if (st === 401 || st === 403) return 'Sign this browser in again to ' + (undo ? 'undo this.' : 'skip a meeting.');
+    return 'Nothing was changed (HTTP ' + st + '). Try again.';
+  }
+  function skipMeeting(sid, undo) {
+    var C = S.cue;
+    if (!sid || C.meetBusy[sid]) return;
+    var g = meetingGroups().filter(function (x) { return x.sid === sid; })[0];
+    if (!undo && !g) return;
+    if (undo && typeof C.skips[sid] !== 'number') return;
+    C.meetBusy[sid] = true; delete C.meetErrors[sid]; paint();
+    W.api(undo ? '/api/live-cues/skip/clear' : '/api/live-cues/skip', { method: 'POST', body: { sessionId: sid } }).then(function (d) {
+      if (!d || d.ok !== true) throw Object.assign(new Error('not saved'), { status: 200 });
+      loadStatus();
+      if (undo) { delete C.skips[sid]; C.folded = C.folded.filter(function (f) { return f.sid !== sid; }); return; }
+      C.skips[sid] = typeof d.skippedAt === 'number' && isFinite(d.skippedAt) ? d.skippedAt : Math.max(Date.now(), g.newest);
+      C.folded = [{ sid: sid, start: g.start }].concat(C.folded.filter(function (f) { return f.sid !== sid; }));
+      if (C.meet === sid) C.meet = '';
+    }, function (err) {
+      // A 404 that is not the route's own "unknown meeting" is a server from before skips: the button goes away.
+      if (err && err.status === 404 && err.code !== 'unknown_meeting') { C.skipsOn = false; if (!undo) return; }
+      C.meetErrors[sid] = skipLine(err, undo);
+    }).then(function () { delete C.meetBusy[sid]; paint(); });
   }
   function cueRatedHtml() {
-    var C = S.cue, head = cueHeading('Rated cues', 'Newest first. Pick another verdict to change one.');
+    var C = S.cue, head = groupHead('Rated cues', C.ratedState === 'loaded' ? fmt(C.rated.length) + ' in ' + RATED_DAYS + ' days' : '') +
+      '<p class="mm-group-note">Newest first. Pick another verdict to change one.</p>';
     if (C.ratedState !== 'loaded') return head + cueStateHtml(C.ratedState, C.ratedStatus);
-    if (!C.rated.length) return head + '<div class="cx-list"><div class="mm-state"><strong>No rated cues in the last 7 days.</strong></div></div>';
+    if (!C.rated.length) return head + stateBox('No rated cues in the last ' + RATED_DAYS + ' days.', '');
     return head + C.rated.map(function (c) {
       var id = c.cueId, saving = !!C.saving[id], r = c.rating || {};
       return '<article class="cx-card mm-cue-row">' + cueMetaHtml(c) + '<p class="mm-cue-text small">' + esc(c.detail) + '</p>' +
         (r.verdict ? '<p class="mm-cue-rated">Rated ' + esc(verdictLabel(r.verdict)) + (r.note ? ' · “' + esc(r.note) + '”' : '') + '</p>' : '') +
         '<div class="mm-actions">' + verdictButtons(id, r.verdict, false, saving) +
-        '<button type="button" class="mm-link" data-mm="cue-clear" data-id="' + esc(id) + '" title="Back to Cues to rate"' + (saving ? ' disabled' : '') + '>Clear</button></div>' +
+        '<button type="button" class="mm-link" data-mm="cue-clear" data-id="' + esc(id) + '" title="Back to Meetings to rate"' + (saving ? ' disabled' : '') + '>Clear</button></div>' +
         (C.errors[id] ? '<p class="mm-warn">' + esc(C.errors[id]) + '</p>' : '') + '</article>';
     }).join('');
   }
   function cueAct(name, id, arg) {
     var C = S.cue, cue = findCue(id);
-    if (name === 'cue-check') return S.view === 'rated' ? loadCueRated() : loadCueWeek();
-    if (name === 'cue-skip') return skipCue(id);
+    if (name === 'cue-check') { loadCueWeek(); return loadCueRated(); }
     if (name === 'cue-clear') return rateCue(id, null);
-    if (name === 'cue-memory') { S.view = 'memories'; persist(); if (!S.mem.loaded && !S.mem.loading) loadMem(false); return W.go('memories', ['m', id]); }
+    if (name === 'cue-meet') { C.meet = id || ''; return paint(); }
+    if (name === 'cue-meet-skip') return skipMeeting(id, false);
+    if (name === 'cue-meet-unskip') return skipMeeting(id, true);
+    if (name === 'cue-note-open') { if (C.noteOpen[id]) { delete C.noteOpen[id]; return paint(); } C.noteOpen[id] = true; paint(); var n = el('mm-cue-note-' + id); if (n && n.focus) n.focus(); return; }
+    if (name === 'cue-memory') { setJob('corrections'); return W.go('memories', ['m', id]); }
     if (name === 'cue-rate') {
       if (!cue) return;
-      // A rated row keeps its note when its verdict changes; picking the verdict it already has changes nothing.
+      // A rated cue keeps its note when its verdict changes; picking the verdict it already has changes nothing.
       if (cueVerdict(cue)) { if (arg === cueVerdict(cue)) return; return rateCue(id, arg, cue.rating && cue.rating.note); }
       return rateCue(id, arg, C.notes[id]);
     }
   }
 
-  // ── chrome: hero, views, counts, footer ──────────────────
+  // ── chrome: hero and the health line ────────────────────
   function heroHtml() {
     return '<header class="cx-hero mm-hero" data-tint="memories"><span class="cx-glyph">' + icon('memories') + '</span>' +
-      '<div class="cx-hero-text"><h1 class="cx-title">Memories</h1><p class="cx-detail-line">Follow what COS learns, how skills change, and whether it helps.</p></div>' +
+      '<div class="cx-hero-text"><h1 class="cx-title">Memories</h1><p class="cx-detail-line">One memory for the glasses, Mac meetings, sessions and the COS thread.</p></div>' +
       '<div class="cx-actions">' + btn('settings', 'Memory settings') +
       '<button type="button" class="cx-btn quiet mm-icon-btn" data-mm="refresh" aria-label="Refresh memories" title="Refresh memories">' + icon('refresh') + '</button></div></header>';
   }
-  function viewsHtml() {
-    var n = needsCount();
-    // The two cue views show once the server's cue history has answered (a 404, a server without it, hides them).
-    var cueOn = S.cue.available === true || (S.cue.available === null && (S.view === 'cues' || S.view === 'rated'));
-    var unrated = S.cue.counts ? S.cue.counts.unrated : null;
-    return '<div class="cx-switch mm-tabs" role="group" aria-label="Memories view">' + VIEWS.concat(cueOn ? CUE_VIEWS : []).map(function (v) {
-      var label = v[0] === 'review' && n ? 'To review (' + fmt(n) + ')' : v[0] === 'cues' && unrated ? 'Cues to rate (' + fmt(unrated) + ')' : v[1];
-      return '<button type="button" data-mm="view" data-arg="' + v[0] + '" aria-pressed="' + (S.view === v[0]) + '">' + esc(label) + '</button>';
-    }).join('') + '</div>';
+  // The memory engine's health line, in dictation's Settings pattern (a mark, the engine's name, its state; plan section 1).
+  // Every signal is read when the pane opens or on Refresh; nothing here runs a job. The thresholds are named here.
+  var KNOWLEDGE_BEHIND_S = 7 * 86400, CUES_STALLED_MIN = 10, CAPTURE_STALE_MS = 3 * 86400000;
+  function recalledCount() { var c = S.recent.info && S.recent.info.counts_by_type; return c && typeof c.retrieved === 'number' && isFinite(c.retrieved) ? c.retrieved : null; }
+  function storeConfigured() { var s = S.status; return !!(s && (s.contextScriptsDirectory || s.contextFilesDirectory)); }
+  function healthReasons() {
+    var out = [], g = S.graph || {}, q = g.queue || {}, proc = g.processor || {}, c = S.cue.counts;
+    if (S.statusError && !S.status) out.push('<b>Could not read this Mac\'s status.</b> ' + esc(S.statusError) + ' ' + textBtn('refresh', 'Try again'));
+    // What COS learned could not be read at all (a later failed refresh keeps the last numbers and says nothing new).
+    if (S.recent.error && !S.recent.info) out.push('<b>Could not read what COS learned.</b> ' + esc(S.recent.error) + ' ' + textBtn('refresh', 'Try again'));
+    var pending = Number(q.pending), age = Number(q.oldest_pending_age_s);
+    if (isFinite(pending) && pending > 0 && isFinite(age) && age > KNOWLEDGE_BEHIND_S) {
+      out.push('<b>Knowledge is behind.</b> ' + fmt(pending) + ' ' + plural(pending, 'document is', 'documents are') + ' waiting to be added, the oldest for ' +
+        (Math.round(age / 8640) / 10) + ' days.' + (proc.plist === true ? '' : ' Adding them is not scheduled on this Mac.') + ' ' + textBtn('health-queue', 'See what is waiting'));
+    }
+    if (c && c.rated === 0 && c.total >= CUES_STALLED_MIN) {
+      out.push('<b>Cue ratings have stopped.</b> None of the ' + fmt(c.total) + ' cues from the last 7 days is rated, so cues are not getting better. ' + textBtn('job', 'Rate the last meeting', { arg: 'meetings' }));
+    }
+    var cap = S.recent.info && S.recent.info.stores && S.recent.info.stores.capture_ledger, last = cap && toDate(cap.last_ts);
+    if (last && Date.now() - last.getTime() > CAPTURE_STALE_MS) {
+      out.push('<b>Nothing captured lately.</b> The last capture was ' + esc(when(cap.last_ts)) + ', more than 3 days ago. ' + textBtn('settings', 'Memory settings'));
+    }
+    return out;
   }
-  function countsHtml() {
-    var n = needsCount(), parts = [];
-    var checked = S.recent.rows.filter(function (e) { return outcomeText(e); }).length;
-    if (S.statusError && !S.status) parts.push('<span class="mm-bad">' + esc('Could not read this Mac\'s status. ' + S.statusError) + '</span>');
-    if (n) parts.push('<span><b>' + fmt(n) + '</b> ' + plural(n, 'change', 'changes') + ' to review</span>');
-    if (S.recent.total != null) parts.push('<span><b>' + fmt(S.recent.total) + '</b> ' + plural(S.recent.total, 'event', 'events') + ' in 90 days</span>');
-    else if (S.recent.loading) parts.push('<span>Counting events…</span>');
-    // 7.0.33 A8: said once. When the Recent learning list below already says it failed, this line does not say it again.
-    else if (S.recent.error && S.recent.rows.length) parts.push('<span class="mm-warn">Events in 90 days could not be counted</span>');
-    if (S.recent.loaded) parts.push('<span><b>' + fmt(checked) + '</b> ' + plural(checked, 'result', 'results') + ' checked on this page</span>');
-    parts.push('<span>Capture status in ' + textBtn('settings', 'Memory settings') + '</span>');
-    parts.push('<span>' + textBtn('log', 'View activity log') + '<span class="mm-phone-only"><span class="mm-dot" aria-hidden="true"> · </span>' + textBtn('refresh', 'Refresh') + '</span></span>');
-    return parts.join('<span class="mm-dot" aria-hidden="true">·</span>');
+  function healthState() {
+    if (!S.status && !S.statusError) return 'checking';
+    if (S.status && !storeConfigured()) return 'off';
+    return healthReasons().length ? 'warn' : 'ok';
   }
-  function footHtml() {
-    var s = S.status;
-    if (!s) return 'Stored on this Mac';
-    return 'Stored on this Mac · ' + (bridgeOn() ? 'Advanced search connected' : 'Plain files') + (s.installedVersion ? ' · Server ' + esc(s.installedVersion) : '');
+  function workingLine() {
+    if (!S.status) return '';
+    var parts = [], n = recalledCount(), A = S.applied;
+    if (n != null) parts.push('recalled ' + fmt(n) + ' times in 90 days');
+    if (A.loaded && A.days === 7 && typeof A.total === 'number') parts.push('used in ' + fmt(A.total) + ' ' + plural(A.total, 'answer', 'answers') + ' this week');
+    parts.push(bridgeOn() ? 'advanced search on' : 'plain files');
+    if (S.status.installedVersion) parts.push('server ' + S.status.installedVersion);
+    return 'Working: ' + esc(parts.join(', ')) + '. ';
+  }
+  function healthHtml() {
+    var st = healthState(), open = S.healthOpen;
+    if (st === 'checking') return '<div class="mm-hl"><p><span class="mm-hl-mark" aria-hidden="true"></span><b>Memory</b><span>Checking…</span></p></div>';
+    if (st === 'off') return '<div class="mm-hl"><p><span class="mm-hl-mark off" aria-hidden="true"></span><b>Memory</b><span>Not set up. COS answers without what you taught it.</span>' +
+      textBtn('settings', 'Set up memory') + '</p></div>';
+    var reasons = st === 'warn' ? healthReasons() : [], n = recalledCount();
+    var line = st === 'ok' ? 'Working' + (n != null ? ' · recalled ' + fmt(n) + ' times in 90 days' : '') : 'Needs attention · ' + reasons.length + ' ' + plural(reasons.length, 'thing', 'things');
+    var toggle = '<button type="button" class="mm-link" data-mm="health" aria-expanded="' + !!open + '" aria-controls="mm-hl-items">' + (open ? 'Hide' : 'Details') + '</button>';
+    var working = workingLine();
+    return '<div class="mm-hl' + (open ? ' open' : '') + '"><p><span class="mm-hl-mark ' + st + '" aria-hidden="true"></span><b>Memory</b><span>' + esc(line) + '</span>' + toggle + '</p>' +
+      (open ? '<ul class="mm-hl-items" id="mm-hl-items">' + reasons.map(function (r) { return '<li>' + r + '</li>'; }).join('') +
+        '<li class="mm-hl-ok">' + working + textBtn('log', 'Activity log') + '</li></ul>' : '') + '</div>';
+  }
+
+  // ── the index (direction C): Needs you, Learned, Knowledge, Is it working ──
+  function numOrNull(v) { return typeof v === 'number' && isFinite(v) && v >= 0 ? v : null; }
+  function blockGates() { var b = needsBlock(); return b && b.gates && typeof b.gates === 'object' && !Array.isArray(b.gates) ? b.gates : null; }
+  function pruneWaiting() { var g = blockGates(); if (!g) return null; return typeof g.prune_ready === 'number' && g.prune_ready > 0 ? g.prune_ready : 0; }
+  function isPruneItem(it) { return !!it && it.gate === 'prune_ready'; }
+  function quarantineRows() {
+    var seen = {}, out = [];
+    needsRows().filter(function (e) { return e.needs && e.needs.gate === 'prune_ready'; }).concat(S.review.rows.filter(isPruneReady)).forEach(function (e) {
+      if (!e || seen[e.event_id]) return; seen[e.event_id] = 1; out.push(e);
+    });
+    return out;
+  }
+  function prunedHere() {
+    var ids = {};
+    quarantineRows().forEach(function (e) { if (e.lesson_id && S.decided[e.lesson_id] && S.decisions[e.lesson_id] === 'pruned') ids[e.lesson_id] = 1; });
+    return Object.keys(ids).length;
+  }
+  // The one Needs you number (lead 15:49, option (a)): meetings to rate + decisions + one quarantine batch. From the server's
+  // status.needsYou when it sends one, else the same sum from the needs-you block; less what was decided on this page since
+  // (the server's next read catches up). A part that cannot be read is null, and so is the total: never a guessed number.
+  function needsParts() {
+    var s = S.status, ny = s && s.needsYou && typeof s.needsYou === 'object' ? s.needsYou : null, block = needsBlock(), prune = pruneWaiting();
+    var decisions = null, batch = null, meetings = null;
+    if (ny) { decisions = numOrNull(ny.decisions); batch = numOrNull(ny.quarantineBatch); meetings = numOrNull(ny.meetings); }
+    else if (block && R) { var all = R.total(block); if (typeof all === 'number' && prune !== null) { decisions = Math.max(0, all - prune); batch = prune > 0 ? 1 : 0; } }
+    if (decisions !== null && block && R) {
+      var before = R.openItems(block, {}).filter(function (it) { return !isPruneItem(it); }).length;
+      var after = R.openItems(block, S.decisions).filter(function (it) { return !isPruneItem(it); }).length;
+      decisions = Math.max(0, decisions - (before - after));
+    }
+    if (batch === 1 && prune !== null && prune > 0 && prunedHere() >= prune) batch = 0;
+    // F1 review: the page, the rail and Today show one number, so the server's count wins whenever it sends one; the
+    // pane's own grouping stands in only on a server without needsYou. Skips, undos and ratings re-read the status.
+    var mine = meetingsToRate();
+    if (mine !== null && !ny) meetings = mine;
+    var total = meetings !== null && decisions !== null && batch !== null ? meetings + decisions + batch : null;
+    return { meetings: meetings, decisions: decisions, quarantineBatch: batch, total: total };
+  }
+  // What the decisions row is called: "Who said it is unclear" while that is the only kind waiting (the producer's gates).
+  function decisionsLabel() {
+    var g = blockGates(), kinds = g ? Object.keys(g).filter(function (k) { return typeof g[k] === 'number' && g[k] > 0; }) : needsItems().map(function (it) { return it.gate; });
+    var other = kinds.some(function (k) { return k !== 'prune_ready' && k !== 'attribution'; });
+    return other ? 'Waiting for your decision' : 'Who said it is unclear';
+  }
+  // Suggestions are listed, never counted: what the review page holds that is not a decision waiting or a memory ready to
+  // quarantine (proposed changes, rules not yet at the bar), then the below-bar rules with their confidence. A lesson
+  // listed under its learning row is not listed again under another event id. A number only once the list is whole.
+  function suggestionRows() {
+    var learn = learningRows(), seen = {}, lessons = {};
+    needsRows().forEach(function (e) { seen[e.event_id] = 1; });
+    learn.forEach(function (e) { seen[e.event_id] = 1; lessons[e.lesson_id] = 1; });
+    var rest = S.review.rows.filter(function (e) { return !seen[e.event_id] && !isPruneReady(e) && !closedHere(e) && !(isPattern(e) && lessons[e.lesson_id]); });
+    return rest.concat(learn);
+  }
+  function suggestionsCount() { return S.review.loaded && !S.review.cursor && !S.review.error ? suggestionRows().length : null; }
+  function memCount(type) { var c = S.memCounts; return c && typeof c[type] === 'number' && isFinite(c[type]) ? c[type] : null; }
+  var CHEV = '<span class="chev" aria-hidden="true"></span>';
+  // One index row. Counted rows carry data-counted (the test sums them against the header) and their number in the accent;
+  // the rest are plain. `sub` is the phone's second line; `keep` keeps it on the wide index too.
+  function idxRow(job, label, n, o) {
+    o = o || {};
+    var sel = selectedJob() === job, num = n == null ? '' : fmt(n);
+    var name = label + (num ? ', ' + num : '') + (o.uncounted ? ', not counted' : '');
+    return '<button type="button" class="mm-idx" data-mm="' + (o.act || 'job') + '" data-arg="' + esc(job) + '" aria-selected="' + (sel ? 'true' : 'false') + '"' +
+      (o.counted ? ' data-counted="' + (n == null ? '' : n) + '"' : '') + ' aria-label="' + esc(name) + '">' +
+      '<span class="mm-idx-text">' + esc(label) + (o.sub ? '<small class="mm-idx-sub' + (o.keep ? '' : ' opt') + '">' + esc(o.sub) + '</small>' : '') + '</span>' +
+      '<span class="mm-idx-n' + (o.counted && n ? ' hot' : '') + '">' + num + '</span>' + CHEV + '</button>';
+  }
+  function indexHtml() {
+    var p = needsParts(), C = S.cue, groups = C.weekState === 'loaded' ? meetingGroups() : [], first = groups.filter(function (g) { return g.unrated.length; })[0];
+    var prune = pruneWaiting(), sugg = suggestionsCount(), g = S.graph || {}, A = S.applied, all = S.recent.info && S.recent.info.counts_by_type;
+    var usedAll = all && typeof all.used === 'number' ? all.used : null, docs = g.build && typeof g.build.doc_count === 'number' ? g.build.doc_count : null;
+    var needs = [];
+    if (C.available !== false) needs.push(idxRow('meetings', 'Meetings to rate', p.meetings, { counted: true, sub: first ? first.unrated.length + ' ' + plural(first.unrated.length, 'cue', 'cues') + ' in the last one' : '' }));
+    needs.push(idxRow('who', decisionsLabel(), p.decisions, { counted: true, sub: decisionsLabel() === 'Who said it is unclear' ? 'A decision that quotes someone' : 'Each waits for a yes or no' }));
+    needs.push(idxRow('quarantine', 'Ready to quarantine', p.quarantineBatch, { counted: true, sub: prune ? fmt(prune) + ' old, unused ' + plural(prune, 'memory', 'memories') + ', one batch' : prune === 0 ? 'Nothing waiting' : '' }));
+    needs.push(idxRow('suggestions', 'Suggestions', sugg, { uncounted: true, sub: 'Not counted', keep: true }));
+    var learned = [
+      idxRow('corrections', 'Corrections', memCount('correction'), { sub: 'What you fixed' }),
+      idxRow('decisions', 'Decisions', memCount('decision')),
+      // Rules has no number until the correction journal reports what it promoted (M1 lane, plan section 9a item 4).
+      idxRow('rules', 'Rules', null, { sub: 'Made from your /learn corrections' }),
+      idxRow('summaries', 'Session summaries', memCount('session_summary'), { sub: 'One per session' })
+    ];
+    var know = [
+      idxRow('graph', 'Graph', typeof g.entities === 'number' ? g.entities : null, { sub: typeof g.relationships === 'number' ? fmt(g.relationships) + ' links' : '' }),
+      idxRow('sources', 'Sources', docs)
+    ];
+    var working = [
+      idxRow('used', 'Used in answers', A.loaded && A.days === 7 && typeof A.total === 'number' ? A.total : null, { sub: 'This week' + (usedAll != null ? ', ' + fmt(usedAll) + ' in 90 days' : '') }),
+      idxRow('rated', 'Rated cues', C.ratedState === 'loaded' ? C.rated.length : null, { sub: RATED_DAYS + ' days' }),
+      idxRow('log', 'Activity log', null, { act: 'log' })
+    ];
+    if (C.available === false) working.splice(1, 1);
+    return '<div class="mm-index">' + groupHead('Needs you', p.total != null ? fmt(p.total) : '') + '<div class="cx-list">' + needs.join('') + '</div>' +
+      groupHead('Learned') + '<div class="cx-list">' + learned.join('') + '</div>' +
+      groupHead('Knowledge') + '<div class="cx-list">' + know.join('') + '</div>' +
+      groupHead('Is it working') + '<div class="cx-list">' + working.join('') + '</div>' +
+      '<p class="mm-index-foot mm-phone-only">' + textBtn('settings', 'Memory settings') + '<span class="mm-dot" aria-hidden="true"> · </span>' + textBtn('refresh', 'Refresh') + '</p></div>';
+  }
+  // The job the index marks: the route's, else (wide, a reader or the bare index) the last one opened.
+  function selectedJob() {
+    var a = readerArgs(W.parseRoute());
+    if (a[0] === 'i' && knownJob(a[1])) return a[1];
+    if (a[0] === 'k') return a[1] === 'sources' ? 'sources' : 'graph';
+    if (a.length || isWide()) return S.job;
+    return '';
   }
 
   // ── lists ────────────────────────────────────────────────
@@ -835,73 +1116,110 @@
     if (!gaps.length) return '';
     return '<p class="cx-note">Not recorded on this Mac yet: ' + esc(gaps.map(function (k) { return storeName(k); }).join(', ')) + '.</p>';
   }
-  function selectedId() { var a = readerArgs(W.parseRoute()); return a.length === 2 ? a[1] : (autoPick() || ''); }
+  function selectedId() { var a = readerArgs(W.parseRoute()); return (a[0] === 'e' || a[0] === 'm') && a.length === 2 ? a[1] : ''; }
+  // "Wrong" on a memory shown as used or learned (plan section 2): out of recall at once (prune, nothing deleted), with an
+  // Undo that puts it back (accept). A quiet word at the row's end, named apart from a cue's Wrong verdict.
+  function canWrong(id) { return /^mem_/.test(str(id)); }
+  function removedHtml(id) {
+    var undoing = S.wrong[id] === 'undoing';
+    return '<div class="mm-removed" role="status"><span>Removed from recall. COS will not use it again.</span>' +
+      textBtn('mem-wrong-undo', undoing ? 'Undoing…' : 'Undo', { id: id, disabled: undoing }) + '</div>';
+  }
+  function withWrong(id, rowHtmlText) {
+    if (!canWrong(id)) return rowHtmlText;
+    if (S.wrong[id] === 'removed' || S.wrong[id] === 'undoing') return removedHtml(id);
+    var busy = S.wrong[id] === 'busy';
+    return '<div class="mm-wrow">' + rowHtmlText + '<button type="button" class="mm-link mm-wrong" data-mm="mem-wrong" data-id="' + esc(id) + '" aria-label="Take this memory out of recall"' + (busy ? ' disabled aria-busy="true"' : '') + '>Wrong</button></div>';
+  }
+  function wrongMemory(id, undo) {
+    if (!canWrong(id)) return;
+    if (undo ? S.wrong[id] !== 'removed' : !!S.wrong[id]) return;
+    S.wrong[id] = undo ? 'undoing' : 'busy'; paint();
+    call('memory.review', undo ? { id: id, decision: 'accept' } : { id: id, decision: 'prune', note: 'wrong_in_use' }).then(function (d) {
+      var row = (d && d.decision) || {};
+      S.decisions[id] = row.decision || (undo ? 'accepted' : 'pruned'); S.decisionTs[id] = new Date().toISOString(); S.decided[id] = 1;
+      if (undo) delete S.wrong[id]; else S.wrong[id] = 'removed';
+    }, function (e) { if (undo) S.wrong[id] = 'removed'; else delete S.wrong[id]; W.toast(e.message); }).then(paint);
+  }
 
-  function listHtml() {
-    if (S.view === 'cues') return cueQueueHtml();
-    if (S.view === 'rated') return cueRatedHtml();
-    if (S.view === 'knowledge') return knowledgeListHtml();
-    if (S.view === 'memories') return memListHtml();
-    if (S.view === 'applied') return appliedListHtml();
-    if (S.view === 'review') return reviewListHtml();
-    return recentListHtml();
+  // A job's page: in the column beside the index from 760 px, or its own page on a phone.
+  function jobHtml(job) {
+    if (job === 'meetings') return meetingsJobHtml();
+    if (job === 'rated') return cueRatedHtml();
+    if (job === 'who') return whoJobHtml();
+    if (job === 'quarantine') return quarantineJobHtml();
+    if (job === 'suggestions') return suggestionsJobHtml();
+    if (job === 'used') return appliedListHtml();
+    if (job === 'rules') return rulesJobHtml();
+    if (job === 'graph' || job === 'sources') return knowledgeReader(job);
+    if (JOBS[job] && JOBS[job].type) return memJobHtml(job);
+    return '';
   }
-  function recentListHtml() {
-    var L = S.recent, sel = selectedId();
-    if (!L.loaded && L.loading) return groupHead('Recent learning', '90 days') + loadingBox('Reading what COS learned in the last 90 days');
-    if (L.error && !L.rows.length) return groupHead('Recent learning', '90 days') + failBox(L, 'Recent learning did not load.', 'refresh');
-    if (!L.rows.length) return groupHead('Recent learning', '90 days') + stateBox('Nothing learned in the last 90 days.', 'Lessons, corrections and recalls show here as COS records them.');
-    return groupHead('Recent learning', L.total != null ? fmt(L.total) + ' in 90 days' : '90 days') +
-      '<div class="cx-list">' + L.rows.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' +
-      (L.cursor ? moreBtn('more-recent', 'Load more', L.loading) : '') + coverageNote(L.coverage);
+  function reviewWaitHtml(title) {
+    var L = S.review;
+    if (!L.loaded && L.loading) return loadingBox('Reading what is waiting for you');
+    if (L.error && !L.rows.length) return failBox(L, title, 'refresh');
+    return '';
   }
-  function reviewListHtml() {
-    var L = S.review, sel = selectedId(), needs = needsRows(), learning = learningRows(), seen = {};
-    needs.forEach(function (e) { seen[e.event_id] = 1; });
-    learning.forEach(function (e) { seen[e.event_id] = 1; });
-    var rest = reviewRestRows(seen);
-    var other = rest.filter(function (e) { return !isPruneReady(e); }), ready = rest.filter(isPruneReady);
-    var out = '';
-    if (needs.length) out += groupHead('Needs you now', fmt(needsCount() || needs.length) + ' open') + '<div class="cx-list">' + needs.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
-    var learnHtml = learning.length ? groupHead('Learning', fmt(learning.length) + ' ' + plural(learning.length, 'suggestion', 'suggestions')) +
-      '<p class="mm-group-note">Suggested rules still gathering evidence. They cannot become a rule until their confidence reaches the bar, and move to Needs you now on their own when it does.</p>' +
-      '<div class="cx-list">' + learning.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' : '';
-    if (!L.loaded && L.loading) return out + groupHead('Proposed changes') + loadingBox('Reading the changes waiting for you') + learnHtml;
-    if (L.error && !L.rows.length) return out + groupHead('Proposed changes') + failBox(L, 'The review list did not load.', 'refresh') + learnHtml;
-    if (!needs.length && !rest.length) return groupHead('To review') + stateBox('You are up to date.', 'Nothing is waiting for your decision.') + learnHtml;
-    if (other.length) out += groupHead('Proposed changes', fmt(other.length) + ' open') + '<div class="cx-list">' + other.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
-    if (ready.length) {
-      var open = ready.filter(function (e) { return !decisionFor(e); }).length, b = S.bulk;
-      out += groupHead('Ready to quarantine', open ? fmt(open) + ' open' : 'All decided') +
-        '<p class="mm-group-note">Saved memories that are old, unused and rarely recalled. Quarantine takes them out of recall and keeps them; Restore brings one back.</p>' +
-        (b ? '<p class="mm-group-note" aria-live="polite">Quarantining ' + fmt(b.done) + ' of ' + fmt(b.total) + '…</p>' :
-          open ? '<div class="mm-more mm-more-top">' + btn('prune-all', S.armed === 'prune-all' ? 'Tap again to quarantine ' + fmt(open) : 'Quarantine all ' + fmt(open)) + '</div>' : '') +
-        '<div class="cx-list">' + ready.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
+  function whoJobHtml() {
+    var sel = selectedId(), rows = needsRows().filter(function (e) { return !(e.needs && e.needs.gate === 'prune_ready'); }), n = needsParts().decisions;
+    var head = groupHead(decisionsLabel(), n != null ? fmt(n) : '');
+    if (!rows.length) {
+      if (!S.status && !S.statusError) return head + loadingBox('Reading what needs you');
+      return head + stateBox('You are up to date.', 'Nothing is waiting for your decision.');
     }
-    if (L.cursor) out += moreBtn('more-review', 'Load more to review', L.loading);
-    return out + learnHtml;
+    return head + '<p class="mm-group-note">Open one to say who said it, keep it, or quarantine it.</p>' +
+      '<div class="cx-list">' + rows.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
+  }
+  function quarantineJobHtml() {
+    var sel = selectedId(), ready = quarantineRows(), open = ready.filter(function (e) { return !decisionFor(e); }).length, b = S.bulk, waiting = pruneWaiting();
+    var head = groupHead('Ready to quarantine', waiting != null ? fmt(waiting) + ' ' + plural(waiting, 'memory', 'memories') : '') +
+      '<p class="mm-group-note">Saved memories that are old, unused and rarely recalled, decided together. Quarantine takes them out of recall and keeps them; Restore brings one back.</p>';
+    if (!ready.length) return head + (reviewWaitHtml('The review list did not load.') || stateBox('Nothing to quarantine.', 'Old, unused memories show here when the retention pass finds them.'));
+    return head + (b ? '<p class="mm-group-note" aria-live="polite">Quarantining ' + fmt(b.done) + ' of ' + fmt(b.total) + '…</p>' :
+      open ? '<div class="mm-more mm-more-top">' + btn('prune-all', S.armed === 'prune-all' ? 'Tap again to quarantine ' + fmt(open) : 'Quarantine all ' + fmt(open)) + '</div>' : '') +
+      '<div class="cx-list">' + ready.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' +
+      (S.review.cursor ? moreBtn('more-review', 'Load more', S.review.loading) : '');
+  }
+  function suggestionsJobHtml() {
+    var sel = selectedId(), rows = suggestionRows(), n = suggestionsCount();
+    var head = groupHead('Suggestions', n != null ? fmt(n) : '') + '<p class="mm-group-note">Not counted: rules gather evidence first, and changes wait for your yes or no when you have time.</p>';
+    var wait = reviewWaitHtml('The suggestions did not load.');
+    if (!rows.length) return head + (wait || stateBox('No suggestions right now.', 'Proposed changes and rules still gathering evidence show here.'));
+    return head + '<div class="cx-list">' + rows.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' +
+      (S.review.cursor ? moreBtn('more-review', 'Load more', S.review.loading) : '');
+  }
+  function rulesJobHtml() {
+    return groupHead('Rules') + '<p class="mm-group-note">Made from your /learn corrections. Each rule keeps its versions, its sources and the evidence for whether it helped.</p>' +
+      '<div class="cx-list"><div class="mm-state"><strong>Rules open in their own sheet.</strong><span>Review a rule, its versions and its outcome evidence there.</span><span class="mm-state-act">' + btn('steward', 'Open the rules') + '</span></div></div>';
   }
   function memSearchHtml() {
-    return '<form class="cx-search mm-search" data-mm-form="mem-search" role="search"><input class="field" type="search" id="mm-mem-q" placeholder="Search topics, ideas…" value="' + esc(S.mem.q) + '" autocomplete="off" enterkeyhint="search" aria-label="Search memories">' +
-      (S.mem.q ? '<button type="button" class="cx-clear" data-mm="mem-clear">Clear</button>' : '') + '</form>';
+    return '<form class="cx-search mm-search" data-mm-form="mem-search" role="search"><input class="field" type="search" id="mm-mem-q" placeholder="Search everything COS remembers" value="' + esc(S.mem.draft) + '" autocomplete="off" enterkeyhint="search" aria-label="Search memories">' +
+      (S.mem.draft || S.mem.q ? '<button type="button" class="cx-clear" data-mm="mem-clear">Clear</button>' : '') + '</form>' +
+      '<p class="mm-group-note mm-search-hint">Press Enter to search. For now, a search also counts as a recall of what it finds.</p>';
   }
-  function memListHtml() {
-    var L = S.mem, q = L.q.trim(), rows = L.hits != null ? L.hits : L.rows, sel = selectedId();
-    var head = groupHead(q ? 'Memories matching “' + esc(q) + '”' : 'Saved memories', !q && L.total != null ? fmt(L.total) + ' stored' : '');
+  // Corrections, Decisions and Session summaries: the newest memories, filtered here by kind until memory_page takes a
+  // type (plan section 1); a search covers every kind.
+  function memJobHtml(job) {
+    var L = S.mem, q = L.q.trim(), type = JOBS[job].type, label = JOBS[job].label, sel = selectedId();
+    var rows = q ? (L.hits || []) : L.rows.filter(function (m) { return m && m.type === type; }), cursor = q ? L.hitCursor : L.cursor, n = memCount(type);
+    var head = q ? groupHead('Memories matching “' + esc(q) + '”') : groupHead(label, n != null ? fmt(n) : '') +
+      '<p class="mm-group-note">Your newest memories, filtered here to ' + esc(label.toLowerCase()) + '. Load more reaches older ones.</p>';
     if (!L.loaded && L.loading) return head + loadingBox(q ? 'Searching your memories' : 'Reading your saved memories');
     if (L.error && !rows.length) return head + failBox(L, q ? 'That search did not finish.' : 'Your memories did not load.', 'mem-retry');
-    if (!rows.length) return head + stateBox(q ? 'No memories match that search.' : 'No memories yet.', q ? 'Try fewer or different words.' : 'COS saves memories as you work. Plain notes in the memory folder show here too.');
-    var cursor = q ? L.hitCursor : L.cursor;
-    return head + '<div class="cx-list">' + rows.map(function (m) { return memRowHtml(m, m.id === sel); }).join('') + '</div>' +
-      (cursor ? moreBtn('more-mem', 'Load more memories', L.loading) : '') + (L.paged === false ? '<p class="cx-note">This server shows the newest memories only.</p>' : '');
+    if (!rows.length) return head + stateBox(q ? 'No memories match that search.' : 'None among the newest ' + fmt(L.rows.length) + ' memories.', q ? 'Try fewer or different words.' : cursor ? 'Load more to look further back.' : '') +
+      (cursor ? moreBtn('more-mem', 'Load more', L.loading) : '');
+    return head + '<div class="cx-list">' + rows.map(function (m) { return withWrong(m.id, memRowHtml(m, m.id === sel)); }).join('') + '</div>' +
+      (cursor ? moreBtn('more-mem', 'Load more', L.loading) : '') + (L.paged === false ? '<p class="cx-note">This server shows the newest memories only.</p>' : '');
   }
   function appliedListHtml() {
     var L = S.applied, sel = selectedId();
     var toggle = textBtn('applied-days', L.days === 90 ? 'Show this week' : 'Show 90 days', { arg: L.days === 90 ? 7 : 90 });
-    var head = groupHead((L.days === 90 ? 'Applied in 90 days' : 'Applied this week') + (L.total != null ? ' · ' + fmt(L.total) : ''), toggle);
+    var head = groupHead((L.days === 90 ? 'Used in 90 days' : 'Used this week') + (L.total != null ? ' · ' + fmt(L.total) : ''), toggle) +
+      '<p class="mm-group-note">Memories later answers used. If one is wrong, take it out of recall.</p>';
     if (!L.loaded) return head + loadingBox('Reading which lessons later answers used');
     if (!L.rows.length) { var c = appliedEmpty(); return head + stateBox(c.h, c.p, L.error ? 'applied-retry' : ''); }
-    return head + '<div class="cx-list">' + L.rows.map(function (e) { return appliedRowHtml(e, e.event_id === sel); }).join('') + '</div>' +
+    return head + '<div class="cx-list">' + L.rows.map(function (e) { return withWrong(e.lesson_id, appliedRowHtml(e, e.event_id === sel)); }).join('') + '</div>' +
       (L.cursor ? moreBtn('more-applied', 'Load more', L.loading) : '') + coverageNote(L.coverage);
   }
   // Empty copy by memory path: the bridge can detect use and saw none; the other paths cannot detect it at all.
@@ -917,15 +1235,6 @@
     if (cov.state && cov.state !== 'ok' && cov.state !== 'legacy') return { h: 'Use has not been recorded on this Mac yet.', p: 'Nothing here is a measured zero.' };
     return { h: 'No later answer has used a lesson ' + (L.days === 90 ? 'in 90 days.' : 'this week.'), p: 'Being recalled is not the same as being used. A lesson shows here when a later answer visibly applied it.' };
   }
-  // On a wide screen with nothing chosen, the reader shows the first row (Control's page does the same).
-  function autoPick() {
-    if (!isWide() || S.view === 'cues' || S.view === 'rated') return '';
-    if (S.view === 'knowledge') return S.ktab;
-    if (S.view === 'memories') { var m = S.mem.hits != null ? S.mem.hits : S.mem.rows; return m[0] ? m[0].id : ''; }
-    var rows = S.view === 'applied' ? S.applied.rows : S.view === 'review' ? needsRows().concat(reviewRestRows({}), learningRows()) : S.recent.rows;
-    return rows[0] ? rows[0].event_id : '';
-  }
-
   // ── the reader: a lesson's timeline ──────────────────────
   function step(title, meta, body, last) {
     return '<section class="mm-step' + (last ? ' last' : '') + '"><div class="mm-step-head"><h3>' + title + '</h3>' + (meta ? '<span class="mm-step-meta">' + meta + '</span>' : '') + '</div><div class="mm-step-body">' + body + '</div></section>';
@@ -944,7 +1253,7 @@
       if (!S.detail[id]) { S.detail[id] = null; ensureDetail({ event_id: id }); return readerState('Opening this item…', 'Your Mac is reading it.'); }
       return readerState('This item is not in the list any more.', 'It may have been reviewed already.', true);
     }
-    if (S.view === 'applied' && base.event_type === 'used' && S.applied.rows.indexOf(base) >= 0) return appliedReader(base);
+    if (S.job === 'used' && base.event_type === 'used' && S.applied.rows.indexOf(base) >= 0) return appliedReader(base);
     ensureDetail(base);
     if (isMemoryLesson(base)) ensureMem(base.lesson_id);
     var full = S.detail[base.event_id], e = fullRow(base);
@@ -1083,24 +1392,12 @@
     var sample = (s.sample || {}).indexed >= 1 || (graphN != null && graphN > 0);
     return [ok, on, (s.owner || {}).is_owner === true, ok && budgetOk, sample, !!S.ask.answer, (s.schedule || {}).installed === true].filter(Boolean).length;
   }
-  function knowledgeListHtml() {
-    var sel = selectedId(), focus = S.knowledgeFocus && findRow(S.knowledgeFocus), done = setupDone();
-    function route(tab, title, sub) {
-      return '<button type="button" class="mm-row" data-mm="ktab" data-arg="' + tab + '" aria-selected="' + (sel === tab) + '"><span class="mm-row-body"><span class="mm-row-title">' + esc(title) + '</span><span class="mm-status">' + esc(sub) + '</span></span><span class="chev"></span></button>';
-    }
-    return groupHead('Explore knowledge') + '<div class="cx-list">' +
-      route('graph', 'Ask the graph', 'Explore connections · ' + (fileGraph() ? 'your document links' : 'your knowledge graph')) +
-      route('sources', 'Source records', 'What was actually said') +
-      route('setup', 'Set up Knowledge', done != null ? done + ' of 7 steps done' : 'Sources, owner, first index') + '</div>' +
-      '<div class="mm-aside-note"><h3>' + (focus ? 'Related to: ' + esc(clip(rowTitle(focus), 80)) : 'Better context. Traceable learning.') + '</h3><p>Sources explain a memory. Relationships add context. Run evidence shows whether a change helped.</p>' +
-      textBtn('back-learning', 'Back to recent learning') + '</div>';
-  }
   function knowledgeReader(tab) {
     crumb(tab === 'graph' ? 'Ask the graph' : tab === 'sources' ? 'Source records' : 'Set up Knowledge');
     if (tab === 'sources') return syncCard() + sourcesHtml();
     if (tab === 'setup') { if (!S.setup && !S.setupLoading && !S.setupError) loadSetup(); return syncCard() + setupHtml(); }
     return '<div id="mm-ask">' + askHtml() + '</div>' + graphSectionHtml() +
-      '<details class="mm-health"><summary>Knowledge status and maintenance</summary>' + syncCard() + dupsHtml() + '</details>';
+      '<details class="mm-health"><summary>Knowledge status and maintenance</summary>' + syncCard() + '<p class="mm-muted">' + textBtn('ktab', 'Set up Knowledge', { arg: 'setup' }) + '</p>' + dupsHtml() + '</details>';
   }
   // Ask the graph in plain words; the hybrid query the setup step uses. About a minute, two model calls under today's budget.
   function askHtml() {
@@ -1766,7 +2063,7 @@
   }
   function explore(eventId) {
     var e = findRow(eventId); if (!e) return;
-    S.knowledgeFocus = eventId; S.view = 'knowledge'; S.ktab = 'graph'; S.ktabChosen = true; persist();
+    S.knowledgeFocus = eventId; setJob('graph'); S.ktab = 'graph'; S.ktabChosen = true; persist();
     W.go('memories', ['k', 'graph']);
     var term = exploreTerm(e);
     call('graph.search', { q: term, limit: 3 }).then(function (d) {
@@ -1919,7 +2216,7 @@
   }
   function pruneAll() {
     if (S.bulk) return;
-    var ids = S.review.rows.filter(function (e) { return isPruneReady(e) && !decisionFor(e); }).map(function (e) { return e.lesson_id; });
+    var ids = quarantineRows().filter(function (e) { return !decisionFor(e) && e.lesson_id; }).map(function (e) { return e.lesson_id; });
     if (!ids.length) return;
     if (S.armed !== 'prune-all') return arm('prune-all');
     S.armed = ''; S.bulk = { done: 0, total: ids.length }; paint();
@@ -2055,16 +2352,15 @@
   }
 
   // ── painting ─────────────────────────────────────────────
-  // Duo tables: the divider between the list and the reader from 760 px (app.js splitKit; the same limits as Sessions),
-  // with its own remembered width, and Full width in a reader's header.
+  // From 760 px the index is the narrow column (240 px, the divider's floor) beside the job, with the divider between them (app.js
+  // splitKit, its own remembered width) and Full width in a reader's header. A reader opens in the job column.
   var SPLIT = { key: 'cos_web_memories_split', label: 'Memories list', controls: 'mm-list-col', media: '(min-width: 760px)', listMin: 240, readerMin: 380, handleW: 18 };
   // A page without the kit (a test's stand-in W) draws no divider and keeps working.
   var SPLIT_KIT = W.splitKit || { handle: function () { return ''; }, mount: function () { return null; }, fullButton: function () { return ''; } };
   var SPLIT_HANDLE = SPLIT_KIT.handle({ id: 'mm-handle', controls: SPLIT.controls, label: SPLIT.label });
-  var SKELETON = '<div class="cx mm" data-tint="memories" id="mm-root"><div id="mm-hero"></div><div class="mm-controls" id="mm-views"></div><p class="mm-counts" id="mm-counts"></p>' +
-    '<div class="split mm-split" id="mm-split"><div class="split-list mm-list" id="mm-list-col"><div id="mm-tools"></div><div id="mm-list"></div></div>' +
-    SPLIT_HANDLE + '<div class="reader mm-reader" id="mm-reader"></div></div>' +
-    '<p class="mm-foot" id="mm-foot"></p></div><div id="mm-modal-host"></div>';
+  var SKELETON = '<div class="cx mm" data-tint="memories" id="mm-root"><div id="mm-hero"></div><div id="mm-health"></div>' +
+    '<div class="split mm-split" id="mm-split"><div class="split-list mm-list" id="mm-list-col"><div id="mm-list"></div></div>' +
+    SPLIT_HANDLE + '<div class="reader mm-reader" id="mm-job-col"><div id="mm-tools"></div><div id="mm-reader"></div></div></div></div><div id="mm-modal-host"></div>';
   function write(node, html) { if (!node || node.__mm === html) return false; node.innerHTML = html; node.__mm = html; return true; }
   var paintTimer = null;
   function paintSoon() { if (paintTimer) return; paintTimer = setTimeout(function () { paintTimer = null; paint(); }, 60); }
@@ -2074,32 +2370,40 @@
     var reading = readerArgs(r).length > 0, split = el('mm-split');
     SPLIT_KIT.mount(split, el('mm-handle'), SPLIT);
     pane.classList.toggle('reading', reading); if (split) split.classList.toggle('reading', reading);
-    // The cue views are one column at every width, like Control's cue review (a card, not a list beside a reader).
-    if (split) split.classList.toggle('solo', !reading && (S.view === 'cues' || S.view === 'rated'));
-    write(el('mm-hero'), heroHtml()); write(el('mm-views'), viewsHtml()); write(el('mm-counts'), countsHtml()); write(el('mm-foot'), footHtml());
-    var tools = el('mm-tools');
-    if (tools && tools.__view !== S.view) { tools.innerHTML = S.view === 'memories' ? memSearchHtml() : ''; tools.__view = S.view; }
-    write(el('mm-list'), listHtml());
+    write(el('mm-hero'), heroHtml()); write(el('mm-health'), healthHtml()); write(el('mm-list'), indexHtml());
+    paintTools(r);
     paintReader(r);
     paintModal();
   }
+  // Above a job's list: the trail on a phone ("Memories / <job>", when the app's own trail row has no path to show) and,
+  // for the memory lists, the search field. Written only when the job changes, so typing in it is never redrawn.
+  function paintTools(r) {
+    var tools = el('mm-tools'); if (!tools) return;
+    var a = readerArgs(r), job = a[0] === 'i' && knownJob(a[1]) ? a[1] : !a.length && isWide() ? S.job : '';
+    var appTrail = !!(W.trailNow && (function () { try { return (W.trailNow(r).steps || []).length > 0; } catch (_e) { return false; } })());
+    var key = job + '|' + (appTrail ? 1 : 0) + '|' + (a[0] === 'i' ? 1 : 0);
+    if (tools.__key === key) return;
+    tools.__key = key;
+    var trail = a[0] === 'i' && job && !appTrail ? '<p class="mm-trail">' + textBtn('index', 'Memories') + '<span aria-hidden="true">/</span><span>' + esc(JOBS[job].label) + '</span></p>' : '';
+    tools.innerHTML = trail + (job && JOBS[job].type ? memSearchHtml() : '');
+  }
   function readerHtml(r) {
-    var a = r.args;  // a tab route (t/<view>) opens no reader: the auto-pick below decides, as on a bare list
+    var a = r.args;
     S.crumbText = '';
     if (a[0] === 'e' && a[1]) return eventReader(a[1]);
     if (a[0] === 'm' && a[1]) return memoryReader(a[1]);
     if (a[0] === 'k') return knowledgeReader(KTABS.indexOf(a[1]) >= 0 ? a[1] : 'graph');
-    var pick = autoPick();
-    if (pick) return S.view === 'knowledge' ? knowledgeReader(pick) : S.view === 'memories' ? memoryReader(pick) : eventReader(pick);
-    return isWide() ? '<p class="reader-placeholder">Pick an item to read it.</p>' : '';
+    if (a[0] === 'i' && knownJob(a[1])) { crumb(JOBS[a[1]].label); return jobHtml(a[1]); }
+    // The bare index: on a phone the index is the page; from 760 px the last job opened shows beside it.
+    return isWide() ? jobHtml(S.job) : '';
   }
   function paintReader(r) {
     var node = el('mm-reader'); if (!node) return;
     var html = readerHtml(r);
     if (readerArgs(r).length && W.crumb && W.crumb() !== S.crumbText) W.setCrumb(S.crumbText);
     if (write(node, html) && el('mm-graph-host')) mountGraph();
-    // Full width hides the list only while a reader with the button is open, so the list is never hidden behind a
-    // placeholder with no way back.
+    // Full width hides the index only while a reader with the button is open, so the index is never hidden behind a
+    // page with no way back.
     var split = el('mm-split'); if (split) split.classList.toggle('mm-fullable', !!(node.querySelector && node.querySelector('[data-split-full]')));
     document.body.classList.toggle('mm-graph-open', S.graphFull && !!el('mm-graph-host'));
   }
@@ -2121,25 +2425,31 @@
   }
 
   // ── taps, typing, keys ───────────────────────────────────
-  function setView(v) {
-    if (!knownView(v)) return;
-    S.view = v; persist();
-    if (v === 'memories' && !S.mem.loaded && !S.mem.loading) loadMem(false);
-    if (v === 'applied' && !S.applied.loaded && !S.applied.loading) loadApplied(false);
-    if (v === 'cues' && S.cue.weekState !== 'loaded') loadCueWeek();
-    if (v === 'rated' && !S.cue.ratedLoaded) loadCueRated();
-    showTab(v);
+  // A job's data, read when it first opens (the index's counts are read on open; lists only when shown).
+  function ensureJob(j) {
+    if (JOBS[j] && JOBS[j].type && !S.mem.loaded && !S.mem.loading) loadMem(false);
+    if (j === 'used' && !S.applied.loaded && !S.applied.loading) loadApplied(false);
+    if (j === 'rated' && !S.cue.ratedLoaded && !S.cue.ratedBusy) loadCueRated();
+    if (j === 'meetings' && S.cue.weekState !== 'loaded' && !S.cue.weekBusy) loadCueWeek();
+  }
+  // A tap on an index row. Graph opens Set up Knowledge while there is no graph yet.
+  function openJob(j) {
+    if (!knownJob(j)) return;
+    setJob(j); ensureJob(j);
+    if (j === 'graph' && S.graph && S.graph.entities == null && !fileGraph()) return openKnowledge('setup');
+    if (j === 'graph' || j === 'sources') return openKnowledge(j);
+    W.go('memories', jobArgs(j));
   }
   function refresh() {
-    S.loadedAt = Date.now(); S.detail = {}; S.passages = {}; S.decided = {};
-    loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph();
-    if (S.cue.ratedLoaded || S.view === 'rated') loadCueRated();
+    S.loadedAt = Date.now(); S.detail = {}; S.passages = {}; S.decided = {}; S.wrong = {};
+    S.cue.folded = []; S.cue.here = {}; S.cue.meet = '';
+    loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph(); loadApplied(false); loadMemCounts();
     if (S.mem.loaded || S.view === 'memories') loadMem(false);
-    if (S.applied.loaded || S.view === 'applied') loadApplied(false);
     if (S.setup) loadSetup();
   }
   function openKnowledge(tab, focusId) {
     if (focusId) S.knowledgeFocus = focusId;
+    if (tab !== 'setup') setJob(tab === 'sources' ? 'sources' : 'graph');
     S.view = 'knowledge'; S.ktab = tab; S.ktabChosen = true; persist();
     W.go('memories', ['k', tab]);
   }
@@ -2148,7 +2458,13 @@
     if (name.indexOf('steward-') === 0) return stewardAct(name, id || arg);
     if (name.indexOf('cue-') === 0) return cueAct(name, id, arg);
     switch (name) {
-      case 'view': return setView(arg);
+      case 'job': return openJob(arg);
+      case 'index': return W.go('memories', []);
+      case 'health': S.healthOpen = !S.healthOpen; return paint();
+      // "See what is waiting" only shows the knowledge queue; it never starts processing.
+      case 'health-queue': return openKnowledge('sources');
+      case 'mem-wrong': return wrongMemory(id, false);
+      case 'mem-wrong-undo': return wrongMemory(id, true);
       case 'refresh': return refresh();
       case 'settings': openModal('settings', { opener: t }); return loadSettings();
       case 'log': return openModal('log', { opener: t });
@@ -2156,13 +2472,12 @@
       case 'open-m': return W.go('memories', ['m', id]);
       case 'ktab': return openKnowledge(KTABS.indexOf(arg) >= 0 ? arg : 'graph');
       case 'back': return W.goBack();
-      case 'back-learning': S.view = 'recent'; persist(); return S.knowledgeFocus ? W.go('memories', ['e', S.knowledgeFocus]) : showTab('recent');
       case 'more-recent': return loadRecent(true);
       case 'more-review': return loadReview(true);
       case 'more-mem': return loadMem(true);
       case 'more-applied': return loadApplied(true);
       case 'mem-retry': return loadMem(false);
-      case 'mem-clear': { var qi = el('mm-mem-q'); if (qi) qi.value = ''; S.mem.hits = null; S.mem.hitCursor = null; var tl = el('mm-tools'); if (tl) tl.__view = ''; memQuery(''); return paint(); }
+      case 'mem-clear': { var qi = el('mm-mem-q'); if (qi) qi.value = ''; S.mem.draft = ''; var tl = el('mm-tools'); if (tl) tl.__key = ''; return memSubmit(''); }
       case 'applied-days': return setAppliedDays(Number(arg));
       case 'applied-retry': S.applied.error = ''; S.applied.loaded = false; return loadApplied(false);
       case 'open-sources': return openKnowledge('sources', id);
@@ -2229,16 +2544,17 @@
   });
   pane.addEventListener('input', function (e) {
     var t = e.target; if (!t || !t.getAttribute) return;
-    if (t.id === 'mm-mem-q') { memQuery(t.value); var clr = pane.querySelector('[data-mm="mem-clear"]'); if (!t.value && clr) { var tl = el('mm-tools'); if (tl) tl.__view = ''; } return; }
+    // Typing in the search keeps the draft only: the search runs on Enter (memSubmit).
+    if (t.id === 'mm-mem-q') { S.mem.draft = t.value; return; }
     if (t.id === 'mm-ask-q') { S.ask.q = t.value; return; }
-    if (t.id === 'mm-cue-note') { S.cue.notes[t.getAttribute('data-cue')] = t.value; return; }
+    if (/^mm-cue-note-/.test(String(t.id || '')) && t.getAttribute('data-cue')) { S.cue.notes[t.getAttribute('data-cue')] = t.value; return; }
     if (t.id === 'mm-folder') { S.folderDraft = t.value; return; }
     var dk = t.getAttribute('data-draft'); if (dk) S.drafts[dk] = t.type === 'checkbox' ? !!t.checked : t.value;
   });
   pane.addEventListener('submit', function (e) {
     var f = e.target, k = f && f.getAttribute && f.getAttribute('data-mm-form'); if (!k) return;
     e.preventDefault();
-    if (k === 'mem-search') { clearTimeout(memTimer); var qi = el('mm-mem-q'); if (qi) { S.mem.q = qi.value; if (qi.blur) qi.blur(); } var tl = el('mm-tools'); if (tl) tl.__view = ''; loadMem(false); }
+    if (k === 'mem-search') { var qi = el('mm-mem-q'); if (qi) { S.mem.draft = qi.value; if (qi.blur) qi.blur(); } var tl = el('mm-tools'); if (tl) tl.__key = ''; memSubmit(S.mem.draft); }
     else if (k === 'ask') ask();
     else if (k === 'folder') addFolder();
     else if (k === 'owner') saveOwner();
@@ -2247,7 +2563,8 @@
   // for chat boxes, and these lists are one pattern or one exclusion per line.
   pane.addEventListener('keydown', function (e) {
     if (cueKey(e)) { e.preventDefault(); return; }
-    if (e.target && e.target.id === 'mm-cue-note' && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); e.stopPropagation(); cueKeyboard = true; var cc = el('mm-cue-card'); if (cc) cc.focus({ preventScroll: true }); return; }
+    var nt = e.target, nid = nt && /^mm-cue-note-/.test(String(nt.id || '')) && nt.getAttribute ? nt.getAttribute('data-cue') : '';
+    if (nid && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); e.stopPropagation(); cueKeyboard = true; var cc = el('mm-cue-' + nid); if (cc) cc.focus({ preventScroll: true }); return; }
     if (e.key === 'Enter' && e.target && e.target.tagName === 'TEXTAREA') e.stopPropagation();
     if (e.key === 'Enter' && e.target && e.target.id === 'graphQuery') { e.preventDefault(); graphSearch(); }
   });
@@ -2261,25 +2578,27 @@
   function onWide() {
     if (W.parseRoute().pane !== 'memories' || !el('mm-root')) return;
     paint();
-    var sel = pane.querySelector && pane.querySelector('.mm-row[aria-selected="true"]');
+    var sel = pane.querySelector && pane.querySelector('.mm-idx[aria-selected="true"]');
     if (sel && sel.scrollIntoView && isWide()) sel.scrollIntoView({ block: 'nearest' });
   }
   if (wideMq) { if (wideMq.addEventListener) wideMq.addEventListener('change', onWide); else if (wideMq.addListener) wideMq.addListener(onWide); }
 
   W.registerPane('memories', {
     load: function (args) {
-      // #/memories/view/<view> (older links) and a bare #/memories become the tab's own address; an unknown tab, the stored one.
-      if (args[0] === 'view' || !args.length || (args[0] === 't' && !knownView(args[1]))) {
-        if (args[0] === 'view' && knownView(args[1])) { S.view = args[1]; persist(); }
-        W.replace('#/memories/t/' + encodeURIComponent(S.view)); return;
+      // The tabs before C (#/memories/t/<view>, and the older #/memories/view/<view>) land on the matching job; Today's
+      // Review button and old links keep working. An unknown job is the index.
+      if ((args[0] === 'view' || args[0] === 't') && args.length >= 2) {
+        var j = jobOf(args[1]);
+        if (j) { setJob(j); W.replace(jobHash(j)); return; }
+        W.replace('#/memories'); return;
       }
-      if (tabRoute(args) && S.view !== args[1]) { S.view = args[1]; persist(); }
-      if (args[0] === 'k') { S.view = 'knowledge'; if (KTABS.indexOf(args[1]) >= 0) { S.ktab = args[1]; S.ktabChosen = true; } persist(); }
+      if (args[0] === 'i' && !knownJob(args[1])) { W.replace('#/memories'); return; }
+      if (args[0] === 'i' && (args[1] === 'graph' || args[1] === 'sources')) { W.replace(jobHash(args[1])); return; }
+      if (args[0] === 'i') { setJob(args[1]); ensureJob(args[1]); }
+      if (args[0] === 'k') { S.view = 'knowledge'; if (KTABS.indexOf(args[1]) >= 0) { S.ktab = args[1]; S.ktabChosen = true; } if (args[1] !== 'setup') setJob(args[1] === 'sources' ? 'sources' : 'graph'); persist(); }
       if (!S.started) loadAll();
       else if (S.graph && lockHeld(S.graph.lock)) watchIngest();
-      if (S.view === 'memories' && !S.mem.loaded && !S.mem.loading) loadMem(false);
-      if (S.view === 'applied' && !S.applied.loaded && !S.applied.loading) loadApplied(false);
-      if (S.view === 'rated' && !S.cue.ratedLoaded && !S.cue.ratedBusy) loadCueRated();
+      if (!args.length && isWide()) ensureJob(S.job);
       paint();
     },
     leave: function () {
@@ -2287,11 +2606,16 @@
       if (S.modal && S.modal.kind !== 'merge') closeModal();
       document.body.classList.remove('mm-modal-open'); document.body.classList.remove('mm-graph-open');
     },
-    // Back from a reader lands on the tab it was opened from.
-    up: function (args) { return tabRoute(args) ? null : ['t', S.view]; },
-    // For the vm tests (web-control/memories-web.test.ts): the same functions taps and loads run.
-    _t: { S: S, act: act, paint: paint, listHtml: listHtml, readerHtml: readerHtml, countsHtml: countsHtml, viewsHtml: viewsHtml, modalHtml: modalHtml,
-      needsCount: needsCount, needsRows: needsRows, contextText: contextText, findRow: findRow, isRead: isRead, cleanTitle: cleanTitle, mergeFlow: mergeFlow,
+    // Back: from a job to the index; from a reader to the job it was opened from; from the index, out of the pane.
+    up: function (args) {
+      if (!args.length || tabRoute(args)) return null;
+      if (args[0] === 'i' || args[0] === 'k') return [];
+      return jobArgs(S.job);
+    },
+    // For the vm tests (memories-web.test.ts, memories-c-web.test.ts): the same functions taps and loads run.
+    _t: { S: S, act: act, paint: paint, indexHtml: indexHtml, healthHtml: healthHtml, healthState: healthState, healthReasons: healthReasons, needsParts: needsParts,
+      jobHtml: jobHtml, meetingGroups: meetingGroups, readerHtml: readerHtml, modalHtml: modalHtml,
+      needsRows: needsRows, contextText: contextText, findRow: findRow, isRead: isRead, cleanTitle: cleanTitle, mergeFlow: mergeFlow,
       loadApplied: loadApplied, ask: ask, renderMarkdown: renderMarkdown, cueKey: cueKey, cueNote: cueNote, cueHttps: cueHttps }
   });
 })();
