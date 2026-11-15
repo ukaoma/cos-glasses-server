@@ -1,6 +1,7 @@
-## Unreleased (draft, U1): Cursor's plan usage on the Usage view, read like Claude's (off unless switched on)
+## 7.0.46 - Cursor's plan usage on the Usage view, read like Claude's, off unless switched on
 
-Draft for 7.0.46. Miles, 2026-11-14: the plan relayed from his glasses at 8:23 PM ("Yes, that was me", 20:46), and at 21:06 "No, I wnat you to actually install it and turn it on as well". Not a release entry until it is cut.
+2026-11-14. 7.0.45 plus the change below; everything in 7.0.45 and 7.0.44 is in this update too (see their entries).
+Miles, 2026-11-14 21:06: "No, I wnat you to actually install it and turn it on as well". The switch is set on his Mac only, at install.
 
 **Off for everyone unless switched on:**
 - server: **Cursor's plan usage is read only when the server's environment says `COS_CURSOR_PLAN_USAGE=1`** (exactly "1"). Off, nothing below runs: no Keychain read, no network call, and Cursor reads "No plan reading" as before. The lead sets it on Miles's Mac only, at install.
@@ -15,6 +16,12 @@ Draft for 7.0.46. Miles, 2026-11-14: the plan relayed from his glasses at 8:23 P
 
 **Not covered, said plainly:**
 - No Cursor reply has been recorded yet: the parser follows the shape Miles saw on 2026-11-14 as relayed. The lead's first live read, with Miles at the Mac, is the first real sample, and the parser may need a fix from it.
+
+**The lead's install condition, settled in code:** Cursor is read in exactly two ways, opening Usage and Refresh. The background poll (COS_WORK_USAGE_POLL=1, off by default) never reads Cursor.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
 
 ## 7.0.45 - A response's images open as one set you can swipe through, and the review switch leaves Memory settings
 
