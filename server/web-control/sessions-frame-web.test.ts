@@ -170,9 +170,11 @@ describe('the reader opens at the newest turn and stays there until the person s
     expect(h.scrolls).toHaveLength(1)
   })
   it('opening, a sent turn and a redraw while pinned all use it', () => {
-    expect(APP).toContain("if (turns.length) requestAnimationFrame(function () { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); });")
+    // The build after 7.0.43: the open's first frame goes to the newest line unless a question card is drawn
+    // (reader-open-question-web.test.ts).
+    expect(APP).toContain("if (turns.length) { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); }")
     expect(slice(APP, '  function showPendingTurn(text, note, heldKey) {', '\n  }\n')).toContain("if (typeof sxToNewest === 'function') sxToNewest();")
-    expect(APP).toContain("if (body && typeof SX_PIN === 'object' && SX_PIN.body === body) { body.scrollTop = body.scrollHeight; SX_PIN.put = body.scrollTop; return; }")
+    expect(APP).toContain("if (body && typeof SX_PIN === 'object' && SX_PIN.body === body) { sxPinApply(body); return; }")
   })
 })
 
@@ -381,6 +383,7 @@ describe('Go to the question (Q1 23:40): the dock says a question waits when its
     expect(APP).toContain("body.addEventListener('scroll', sxGoQuestionPaint, { passive: true });")
     expect(APP).toContain("if (SX_PIN.body === body && body.isConnected) bottom(); sxGoQuestionPaint(); });")
     expect(APP).toContain("if (typeof sxGoQuestionPaint === 'function') sxGoQuestionPaint(); });")
-    expect(APP).toContain("if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint();")
+    // The build after 7.0.43: its button goes to the card's top (reader-open-question-web.test.ts).
+    expect(APP).toContain("if (act === 'goto-question') { sxToQuestion(); sxGoQuestionPaint();")
   })
 })

@@ -3422,14 +3422,42 @@
   // SX_PIN_USER_MS, then a scroll that leaves the end by more than 4 px. A scroll the browser makes on its own (scroll
   // anchoring while turns and previews land) never counts. Two more passes (250 and 900 ms) cover a browser without
   // ResizeObserver.
-  var SX_NEWEST_AGAIN_MS = [250, 900], SX_PIN_USER_MS = 1000;
-  var SX_PIN = { body: null, ro: null, put: -1, userAt: 0 };
-  function sxUnpin() { if (SX_PIN.ro) { try { SX_PIN.ro.disconnect(); } catch (_e) {} } SX_PIN.ro = null; SX_PIN.body = null; }
-  function sxToNewest() {
+  //
+  // The build after 7.0.43 (folded reader item 4, lead 17:35, F1's scope): the pin has a second mode. 'question' holds
+  // the top of this session's question card (#session-questions) at the top of the body, so he reads the question and its
+  // first options instead of the card's end (the card is taller than the body at every size: 110 px folded, 265 to 270
+  // px wider, against about 356 px). It is set only when the reader opens on a waiting question (openSession) or by Go to
+  // the question; it holds through what mounts above the card until his own scroll, like 'newest'. A card that is gone
+  // (answered) falls back to the newest line.
+  var SX_NEWEST_AGAIN_MS = [250, 900], SX_PIN_USER_MS = 1000, SX_Q_GAP = 8, SX_OPEN_Q_MS = 4000;
+  var SX_PIN = { body: null, ro: null, put: -1, userAt: 0, mode: 'newest' };
+  function sxUnpin() { if (SX_PIN.ro) { try { SX_PIN.ro.disconnect(); } catch (_e) {} } SX_PIN.ro = null; SX_PIN.body = null; SX_PIN.mode = 'newest'; }
+  // Where the question card's top sits in the body's scroll, or null when there is no card to show.
+  function sxQuestionTop(body) {
+    var q = $('session-questions');
+    if (!q || !q.children || !q.children.length || !String(q.textContent || '').trim() || !q.getBoundingClientRect || !body.getBoundingClientRect) return null;
+    return Math.max(0, Math.round(body.scrollTop + q.getBoundingClientRect().top - body.getBoundingClientRect().top - SX_Q_GAP));
+  }
+  // Put the body where the pin's mode says (the browser clamps to the end when the card fits).
+  function sxPinApply(body) {
+    var t = SX_PIN.mode === 'question' ? sxQuestionTop(body) : null;
+    if (t === null) { SX_PIN.mode = 'newest'; t = body.scrollHeight; }
+    body.scrollTop = t; SX_PIN.put = body.scrollTop;
+  }
+  // At open only (openSession): the card's first draw with a question in it, within SX_OPEN_Q_MS of opening and before
+  // any touch of his on the body, lands on the card's top. Anything later says 'done' and moves nothing. true: it moved.
+  function sxOpenOnQuestion(r, n) {
+    if (!r || state.reading !== r || r.openQ !== 'pending') return false;
+    if (Date.now() - r.openAt > SX_OPEN_Q_MS || SX_PIN.userAt >= r.openAt) { r.openQ = 'done'; return false; }
+    if (n > 0) { r.openQ = 'done'; sxToQuestion(); return true; }
+    return false;
+  }
+  function sxToNewest() { sxPinTo('newest'); }
+  function sxToQuestion() { sxPinTo('question'); }
+  function sxPinTo(mode) {
     var body = $('session-body');
     if (!(body && document.documentElement.classList.contains('sx-frame'))) { window.scrollTo(0, document.documentElement.scrollHeight); return; }
-    var bottom = function () { body.scrollTop = body.scrollHeight; SX_PIN.put = body.scrollTop; };
-    bottom();
+    var bottom = function () { sxPinApply(body); };
     if (SX_PIN.body !== body) {
       sxUnpin();
       SX_PIN.body = body;
@@ -3440,7 +3468,9 @@
       body.addEventListener('scroll', function () { if (typeof sxMarkShown === 'function' && state.reading) sxMarkShown(state.reading); }, { passive: true });
       body.addEventListener('scroll', function () {
         if (SX_PIN.body !== body || Date.now() - SX_PIN.userAt > SX_PIN_USER_MS) return;
-        if (Math.abs(body.scrollTop - SX_PIN.put) > 4 && body.scrollTop < body.scrollHeight - body.clientHeight - 4) sxUnpin();
+        // Held on the card: any scroll of his own of more than 4 px lets go, the end included. Held on the newest line:
+        // a scroll of his own that leaves the end.
+        if (Math.abs(body.scrollTop - SX_PIN.put) > 4 && (SX_PIN.mode === 'question' || body.scrollTop < body.scrollHeight - body.clientHeight - 4)) sxUnpin();
       }, { passive: true });
       if (typeof ResizeObserver === 'function') {
         // The body and everything in it (the note, the turns, Copy session, its note): any of them can grow.
@@ -3451,6 +3481,9 @@
         if ($('session-dock')) SX_PIN.ro.observe($('session-dock'));
       }
     }
+    // The mode is set after a first pin's sxUnpin (which resets it), then applied at once.
+    SX_PIN.mode = mode === 'question' ? 'question' : 'newest';
+    bottom();
     SX_NEWEST_AGAIN_MS.forEach(function (ms) {
       setTimeout(function () { if (body.isConnected && SX_PIN.body === body) bottom(); }, ms);
     });
@@ -4215,7 +4248,8 @@
       var act = t.getAttribute('data-sx'), rd = state.reading;
       if (act === 'view') { sxViewMenu(false); return setSessionsView(t.getAttribute('data-view')); }
       if (act === 'view-menu') return sxViewMenu();
-      if (act === 'goto-question') { sxToNewest(); sxGoQuestionPaint(); var gq = $('session-questions'), first = gq && gq.querySelector('button, input, [tabindex]'); if (first && first.focus) first.focus({ preventScroll: true }); return; }
+      // The build after 7.0.43: Go to the question lands on the card's top (its question first), not the card's end.
+      if (act === 'goto-question') { sxToQuestion(); sxGoQuestionPaint(); var gq = $('session-questions'), first = gq && gq.querySelector('button, input, [tabindex]'); if (first && first.focus) first.focus({ preventScroll: true }); return; }
       if (act === 'fold' && t.getAttribute('data-g') === 'pinned') { sxPinnedSet(!sxPinnedOpen()); return renderSessionGroups(); }
       if (act === 'fold') { var g = t.getAttribute('data-g'), isF = g.indexOf('f:') === 0; SXL.open[g] = isF ? SXL.open[g] === false : !SXL.open[g]; return renderSessionGroups(); }
       if (/^(row-menu|org-|folder-|new-folder|rename-clear|inline-cancel)/.test(act)) { e.stopPropagation(); return sxOrgClick(act, t); }
@@ -4658,7 +4692,12 @@
       setLive({});
       if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
       var qk = window.COSWeb.sessionQuestions, qhost = $('session-questions');
-      if (qk && qk.mount && qhost) r.qMount = qk.mount(qhost, id, function () { if (state.reading === r && typeof readerMacPaint === 'function') readerMacPaint(r, r.waitingNow); if (typeof sxGoQuestionPaint === 'function') sxGoQuestionPaint(); });
+      // The build after 7.0.43 (folded reader item 4): a reader that opens on a waiting question lands on the card's top.
+      // Only at open: the card's first draw within SX_OPEN_Q_MS of opening, before any touch of his. A question that
+      // arrives later, a live line, a refresh or the question changing never moves him.
+      r.openAt = Date.now(); r.openQ = 'pending';
+      var openOnQuestion = function (n) { return sxOpenOnQuestion(r, n); };
+      if (qk && qk.mount && qhost) r.qMount = qk.mount(qhost, id, function (n) { if (state.reading === r && typeof readerMacPaint === 'function') readerMacPaint(r, r.waitingNow); openOnQuestion(Number(n) || 0); if (typeof sxGoQuestionPaint === 'function') sxGoQuestionPaint(); });
       paintReaderFiles();
       paintWebKeyOffer(r);
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
@@ -4673,7 +4712,13 @@
         sessionStatus('Waiting for the current reply. ' + (state.reading.held.length > 1 ? state.reading.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don’t send</button>');
         startHeldTimer(state.reading);
       }
-      if (turns.length) requestAnimationFrame(function () { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); });
+      requestAnimationFrame(function () {
+        if (state.reading !== r) return;
+        if (r.openQ === 'done' && SX_PIN.mode === 'question') return sxToQuestion();
+        var n = r.qMount && r.qMount.count ? r.qMount.count() : 0;
+        if (n > 0 && openOnQuestion(n)) return;
+        if (turns.length) { if (typeof sxToNewest === 'function') sxToNewest(); else window.scrollTo(0, document.documentElement.scrollHeight); }
+      });
       // 7.0.29 ADD 3: the newest turns he was just taken to count as shown (this frame runs after the one above).
       if (turns.length) requestAnimationFrame(function () { if (typeof sxMarkShown === 'function') sxMarkShown(r); });
       requestAnimationFrame(function () { if (typeof sxFrameCrumb === 'function') sxFrameCrumb('open'); });
@@ -4973,7 +5018,8 @@
   function sxAtEnd() {
     try {
       var body = $('session-body');
-      if (body && document.documentElement.classList.contains('sx-frame')) return SX_PIN.body === body || body.scrollTop >= body.scrollHeight - body.clientHeight - 4;
+      // Held on the question card is not the end: the turns above it are not in view.
+      if (body && document.documentElement.classList.contains('sx-frame')) return (SX_PIN.body === body && SX_PIN.mode !== 'question') || body.scrollTop >= body.scrollHeight - body.clientHeight - 4;
       var de = document.documentElement;
       return (window.scrollY || 0) + window.innerHeight >= de.scrollHeight - 4;
     } catch (_e) { return false; }   // a page without these (a test harness): nothing counts as shown, so nothing resends
@@ -6161,8 +6207,9 @@
       if (rect.bottom > edge) { anchor = cards[i].getAttribute('data-sig'); top = rect.top; break; }
     }
     box.innerHTML = renderTurns(next, d);
-    // Still at the newest turn since it opened (sxToNewest's pin): stay there, rather than keep a card in place.
-    if (body && typeof SX_PIN === 'object' && SX_PIN.body === body) { body.scrollTop = body.scrollHeight; SX_PIN.put = body.scrollTop; return; }
+    // Still held since it opened (the reader's pin): stay where the pin holds (the newest turn, or the question card's
+    // top), rather than keep a card in place.
+    if (body && typeof SX_PIN === 'object' && SX_PIN.body === body) { sxPinApply(body); return; }
     if (!anchor) return;
     var same = [].filter.call(box.querySelectorAll('.turn[data-sig]'), function (el) { return el.getAttribute('data-sig') === anchor; })[0];
     if (!same) return;
