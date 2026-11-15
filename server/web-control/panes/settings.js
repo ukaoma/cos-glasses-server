@@ -161,7 +161,7 @@
 
   // ── COS reaching out (6.99.11) ──────────────────────────
   // A subscription belongs to this origin. No worker or permission prompt runs on load.
-  var PUSH = { loaded: false, generation: 0, busy: false, key: null, productionAllowed: false, subscription: null, current: null, devices: [], error: '' };
+  var PUSH = { loaded: false, known: false, reading: false, generation: 0, busy: false, key: null, productionAllowed: false, subscription: null, current: null, devices: [], error: '' };
   function pushOn() { return !!(S.data && S.data.health && S.data.health.features && S.data.health.features.webPush === true); }
   function pushManager() { return window.isSecureContext && window.pushManager ? window.pushManager : null; }
   function pushHome() { return !!(window.navigator && window.navigator.standalone) || !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); }
@@ -174,17 +174,18 @@
   }
   function pushLoad() {
     if (!pushOn() || PUSH.loaded) return;
-    PUSH.loaded = true;
+    PUSH.loaded = true; PUSH.reading = true;
     var generation = ++PUSH.generation, manager = pushManager();
     function current() { return generation === PUSH.generation && !PUSH.busy; }
     function apply(r, device, sub) {
       if (!current()) return;
       PUSH.devices = r[0].devices || []; PUSH.subscription = sub; PUSH.current = device;
-      PUSH.productionAllowed = r[2].productionEnabled === true;
+      PUSH.productionAllowed = r[2].productionEnabled; PUSH.known = true; PUSH.reading = false;
       render();
     }
     Promise.all([api('/api/web-push/devices'), manager ? manager.getSubscription() : Promise.resolve(null), api('/api/web-push/status')]).then(function (r) {
       if (!current()) return;
+      if (!r[2] || r[2].enabled !== true || typeof r[2].productionEnabled !== 'boolean') throw new Error('status');
       if (!r[1]) return apply(r, null, null);
       return api('/api/web-push/subscription/status', { method: 'POST', body: { endpoint: r[1].endpoint } }).then(function (answer) {
         if (!current()) return;
@@ -197,12 +198,14 @@
       });
     }).catch(function () {
       if (!current()) return;
-      PUSH.error = 'Phone pings could not be checked. Refresh to try again.'; render();
+      PUSH.reading = false; PUSH.error = 'Phone pings could not be checked. Refresh to try again.'; render();
     });
   }
   function pushBody() {
     if (!pushOn()) return '';
     pushLoad();
+    // Until the first complete reconciliation, neither the boot gate nor this phone's subscription is known.
+    if (!PUSH.known) return group('Phone pings', '', row('This phone', PUSH.reading ? 'Checking phone pings…' : 'Phone pings could not be checked. Refresh to try again.', value(PUSH.reading ? 'Checking' : 'Unavailable')));
     var current = PUSH.current, on = current && current.production, problem = pushProblem();
     var control = on ? '<button type="button" class="btn cx-push-action" data-set="push-off"' + (PUSH.busy ? ' disabled' : '') + '>Stop pings to this phone</button>' :
       '<button type="button" class="btn cx-push-action" data-set="push-on"' + (PUSH.busy || problem ? ' disabled' : '') + '>' + (PUSH.key ? 'Allow pings on this phone' : 'Send pings to this phone') + '</button>';
@@ -220,7 +223,7 @@
     if (PUSH.error) rows += '<p role="status" class="cx-set-blurb">' + esc(PUSH.error) + '</p>';
     return group('Phone pings', 'The Mac sends encrypted notifications through Apple. Apple sees delivery timing, not the words. The Mac must be awake and online.', rows);
   }
-  function pushFinish() { ++PUSH.generation; PUSH.busy = false; render(); }
+  function pushFinish() { ++PUSH.generation; PUSH.busy = false; PUSH.reading = false; render(); }
   function pushError() { PUSH.error = 'Phone pings could not be saved. Try again.'; pushFinish(); }
   function pushRemove(id) {
     ++PUSH.generation; PUSH.busy = true; PUSH.error = ''; render();
@@ -236,7 +239,7 @@
     }).then(function () { PUSH.error = 'Device removed. COS will send no more pings to it.'; pushFinish(); }, function () { PUSH.error = 'Delivery has stopped if the device was removed. Refresh to check and finish turning off this phone.'; pushFinish(); });
   }
   function pushClick(act, button) {
-    if (!pushOn() || PUSH.busy) return;
+    if (!pushOn() || PUSH.busy || !PUSH.known) return;
     if (act === 'push-remove') return pushRemove(button.getAttribute('data-device'));
     if (act === 'push-off' && PUSH.current) return pushRemove(PUSH.current.id);
     if (act === 'push-words' && PUSH.current) {

@@ -6,13 +6,16 @@ import { P2_DEFAULTS } from '../lib/drop-p2-settings.js'
 
 const source = readFileSync(new URL('./panes/settings.js', import.meta.url), 'utf8')
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)) }
-async function rig(opts: { enabled?: boolean; production?: boolean; secure?: boolean; home?: boolean; blocked?: boolean; existing?: boolean; removed?: boolean; failSave?: boolean; failStatus?: boolean; failTest?: boolean; deferInitialDevices?: boolean; dropOff?: boolean } = {}) {
+async function rig(opts: { enabled?: boolean; production?: boolean; secure?: boolean; home?: boolean; blocked?: boolean; existing?: boolean; removed?: boolean; failSave?: boolean; failStatus?: boolean; failTest?: boolean; deferInitialDevices?: boolean; deferInitialStatus?: boolean; deferSubscriptionStatus?: boolean; failInitialStatus?: boolean; dropOff?: boolean } = {}) {
   const calls: Array<{ path: string; method?: string; body?: any }> = [], listeners: Record<string, Function> = {}
   const pane = { innerHTML: '', querySelectorAll: () => [], querySelector: () => null, addEventListener: (name: string, f: Function) => { listeners[name] = f } }
   let load: Function = () => {}, subscribeCalls = 0, unsubscribes = 0
   let pendingDevices: Promise<any> | null = null, resolveDevices: ((value: any) => void) | null = null
   const deferDevices = () => { pendingDevices = new Promise(resolve => { resolveDevices = resolve }); return (devices: any[]) => resolveDevices!({ devices }) }
   const resolveInitial = opts.deferInitialDevices ? deferDevices() : null
+  let resolveStatus: ((value: unknown) => void) | null = null, resolveSubscriptionStatus: ((value: unknown) => void) | null = null
+  const pendingStatus = opts.deferInitialStatus ? new Promise(resolve => { resolveStatus = resolve }) : null
+  const pendingSubscriptionStatus = opts.deferSubscriptionStatus ? new Promise(resolve => { resolveSubscriptionStatus = resolve }) : null
   const device = { id: '0123456789abcdef', label: 'Phone', production: opts.production === true, showWords: false, addedAt: '2026-11-15T00:00:00Z' }
   const subscription = { endpoint: 'https://web.push.apple.com/secret', toJSON: () => ({ endpoint: 'https://web.push.apple.com/secret', keys: { auth: 'private', p256dh: 'private' } }), unsubscribe: async () => { unsubscribes++; return true } }
   const W = {
@@ -22,7 +25,10 @@ async function rig(opts: { enabled?: boolean; production?: boolean; secure?: boo
       calls.push({ path, ...o })
       if (path === '/api/health') return { capabilities: { dropIt: { protocol: 1, enabled: !opts.dropOff, p2Settings: 1 } }, features: { webPush: opts.enabled !== false } }
       if (path === '/api/drops/settings/p2') return { protocol: 1, settings: P2_DEFAULTS }
-      if (path === '/api/web-push/status') return { enabled: true, productionEnabled: opts.production === true }
+      if (path === '/api/web-push/status') {
+        if (opts.failInitialStatus) throw new Error('status unavailable')
+        return pendingStatus || { enabled: true, productionEnabled: opts.production === true }
+      }
       if (path === '/api/web-push/key') return { publicKey: 'BA' }
       if (path === '/api/web-push/devices' && o?.method === 'POST') {
         if (opts.failSave) throw new Error('refused')
@@ -34,7 +40,7 @@ async function rig(opts: { enabled?: boolean; production?: boolean; secure?: boo
       }
       if (path === '/api/web-push/subscription/status') {
         if (opts.failStatus) throw new Error('unavailable')
-        return { device: opts.removed ? null : structuredClone(device) }
+        return pendingSubscriptionStatus || { device: opts.removed ? null : structuredClone(device) }
       }
       if (path.startsWith('/api/web-push/devices/')) return { ok: true, removed: true }
       if (path === '/api/web-push/test') { if (opts.failTest) throw new Error('cap'); return { scheduled: true, delaySeconds: 15 } }
@@ -51,7 +57,7 @@ async function rig(opts: { enabled?: boolean; production?: boolean; secure?: boo
     const t = { disabled: false, getAttribute: (name: string) => name === 'data-set' ? act : name === 'data-device' ? device.id : null, closest: (sel: string) => sel === '[data-set]' ? t : null }
     listeners.click({ target: t })
   }
-  return { pane, calls, click, deferDevices, resolveInitial, subscribeCalls: () => subscribeCalls, unsubscribes: () => unsubscribes }
+  return { pane, calls, click, deferDevices, resolveInitial, resolveStatus: (value: unknown) => resolveStatus!(value), resolveSubscriptionStatus: (value: unknown) => resolveSubscriptionStatus!(value), device, subscribeCalls: () => subscribeCalls, unsubscribes: () => unsubscribes }
 }
 
 describe('Settings phone pings', () => {
@@ -125,13 +131,43 @@ describe('Settings phone pings', () => {
     expect(r.pane.innerHTML).toContain('could not be scheduled')
     expect(r.pane.innerHTML).not.toContain('Test scheduled')
   })
-  it('an old initial snapshot cannot replace a newly subscribed phone', async () => {
-    const r = await rig({ deferInitialDevices: true })
-    r.click('push-test-on'); await flush(); r.click('push-test-on'); await flush()
-    expect(r.pane.innerHTML).toContain('Send test ping')
-    r.resolveInitial!([]); await flush()
-    expect(r.pane.innerHTML).toContain('data-set="push-test"')
+  it('first-load setup waits for the actual boot gate and cannot strand production as off', async () => {
+    const r = await rig({ production: true, deferInitialStatus: true })
+    expect(r.pane.innerHTML).toContain('Checking phone pings')
+    expect(r.pane.innerHTML).not.toContain('data-set="push-on"')
     expect(r.pane.innerHTML).not.toContain('data-set="push-test-on"')
+    expect(r.pane.innerHTML).not.toContain('Production pings')
+    r.click('push-test-on'); r.click('push-on'); await flush()
+    expect(r.calls.some(c => c.path === '/api/web-push/key')).toBe(false)
+    expect(r.subscribeCalls()).toBe(0)
+    r.resolveStatus({ enabled: true, productionEnabled: true }); await flush()
+    expect(r.pane.innerHTML).toContain('data-set="push-on"')
+    expect(r.pane.innerHTML).not.toContain('Production pings')
+    r.click('push-on'); await flush(); r.click('push-on'); await flush()
+    expect(r.calls.find(c => c.path === '/api/web-push/devices' && c.method === 'POST')?.body.production).toBe(true)
+  })
+  it('initial devices and subscription reconciliation must complete before setup becomes available', async () => {
+    const devices = await rig({ deferInitialDevices: true })
+    expect(devices.pane.innerHTML).toContain('Checking phone pings')
+    devices.click('push-test-on'); await flush()
+    expect(devices.calls.some(c => c.path === '/api/web-push/key')).toBe(false)
+    devices.resolveInitial!([]); await flush()
+    expect(devices.pane.innerHTML).toContain('data-set="push-test-on"')
+    const sub = await rig({ existing: true, production: true, deferSubscriptionStatus: true })
+    expect(sub.pane.innerHTML).toContain('Checking phone pings')
+    sub.click('push-on'); sub.click('push-remove'); await flush()
+    expect(sub.calls.some(c => c.path === '/api/web-push/key' || c.method === 'DELETE')).toBe(false)
+    sub.resolveSubscriptionStatus({ device: sub.device }); await flush()
+    expect(sub.pane.innerHTML).toContain('data-set="push-off"')
+  })
+  it('an unknown initial gate is unavailable on error and never claims that production is off', async () => {
+    const r = await rig({ production: true, failInitialStatus: true })
+    expect(r.pane.innerHTML).toContain('Unavailable')
+    expect(r.pane.innerHTML).not.toContain('Checking phone pings')
+    expect(r.pane.innerHTML).not.toContain('Production pings')
+    expect(r.pane.innerHTML).not.toContain('data-set="push-test-on"')
+    r.click('push-on'); r.click('push-test-on'); await flush()
+    expect(r.calls.some(c => c.path === '/api/web-push/key')).toBe(false)
   })
   it('a slow refresh cannot resurrect a removed device or roll back a words change', async () => {
     const removed = await rig({ existing: true, production: true })

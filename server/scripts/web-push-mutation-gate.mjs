@@ -69,7 +69,9 @@ const mutations = [
   ["status-origin-unguarded", "server/routes/web-push.ts", "    if (!trustedOrigin) return res.status(400).json({ error: 'bad_origin' })\n", "", "production subscribe, privacy changes", ["server/routes/web-push.test.ts"]],
   ["proof-schedule-skipped", "server/routes/web-push.ts", "    if (req.body?.delaySeconds === 15) {\n", "    if (false) {\n", "a delayed test claims its cap exactly once", ["server/routes/web-push.test.ts"]],
   ["proof-subscribes-production", "server/web-control/panes/settings.js", "var production = act === 'push-on';", "var production = true;", "proof uses two taps", ["server/web-control/settings-push.test.ts"]],
-  ["push-stale-snapshot-applied", "server/web-control/panes/settings.js", "generation === PUSH.generation && !PUSH.busy", "!PUSH.busy", "an old initial snapshot cannot replace", ["server/web-control/settings-push.test.ts"]],
+  ["push-stale-snapshot-applied", "server/web-control/panes/settings.js", "generation === PUSH.generation && !PUSH.busy", "!PUSH.busy", "a slow refresh cannot resurrect", ["server/web-control/settings-push.test.ts"]],
+  ["push-initial-known-too-soon", "server/web-control/panes/settings.js", "known: false, reading: false", "known: true, reading: false", "first-load setup waits for the actual boot gate", ["server/web-control/settings-push.test.ts"]],
+  ["push-initial-action-guard-lost", "server/web-control/panes/settings.js", "PUSH.busy || !PUSH.known", "PUSH.busy", "first-load setup waits for the actual boot gate", ["server/web-control/settings-push.test.ts"]],
   // Lead 15:18: health's features.webPush says whether the routes exist.
   ["health-flag-always-true", "server/routes/health.ts", "webPush: webPushRoutesMounted(),", "webPush: true,", "is false while the push routes are not mounted", ["server/routes/health.test.ts"]],
   ["mark-is-noop", "server/lib/web-push-mounted.ts", "  mounted = true\n", "", "is false while the push routes are not mounted", ["server/routes/health.test.ts"]],
