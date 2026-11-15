@@ -9,7 +9,8 @@ const status = (patch: Partial<SignerTlsStatus> = {}): SignerTlsStatus => ({
   trusted: true, host: NAME, reason: 'ok', notAfter: new Date(NOW + 60_000).toISOString(),
   lastError: null, checkedAt: null, nextCheckAt: null, storedRefused: null, ...patch,
 })
-const tls = (patch: Partial<SignerTlsStatus> = {}) => ({ active: () => ({ status: () => status(patch) }) })
+type TlsFixture = { active: () => { status: () => SignerTlsStatus } | null }
+const tls = (patch: Partial<SignerTlsStatus> = {}): TlsFixture => ({ active: () => ({ status: () => status(patch) }) })
 const listener = (patch: { listening?: boolean; port?: number; actualPort?: number; host?: string; label?: string; address?: null | string } = {}): RequiredListener => ({
   label: patch.label ?? 'HTTPS', host: '0.0.0.0', port: patch.port ?? 3143,
   server: {
@@ -26,7 +27,7 @@ describe('trusted Control phone URL', () => {
 
   it.each([
     ['disabled TLS', null, [listener()]],
-    ['missing active certificate', { active: () => null }, [listener()]],
+    ['missing active certificate', { active: (): null => null }, [listener()]],
     ['mkcert/untrusted certificate', tls({ trusted: false }), [listener()]],
     ['certificate for another name', tls({ host: 'old.example-tail.ts.net' }), [listener()]],
     ['expired certificate', tls({ notAfter: new Date(NOW).toISOString() }), [listener()]],
