@@ -693,6 +693,37 @@ describe('Memories C: Needs you after quarantining on the page (Q1 P3, P4)', () 
   })
 })
 
+describe('Memories C: optional learning setup and cached counts', () => {
+  it('counts meetings alone and hides unavailable learning decisions when learning is not set up', async () => {
+    const h = load({ answers: { status: status({ needsYou: { meetings: 2, decisions: null, quarantineBatch: null, total: 2, learning: 'not_set_up' } }) } })
+    await h.open()
+    expect(h.t.needsParts().total).toBe(2)
+    const html = h.html('mm-list')
+    expect(needsHeader(html)).toBe(2)
+    expect(html).not.toContain('data-arg="who"')
+    expect(html).not.toContain('data-arg="quarantine"')
+    expectHeaderIsSum(html)
+  })
+
+  it('keeps unknown learning different from absent setup; an unknown part never becomes zero', async () => {
+    const h = load({ answers: { status: status({ needsYou: { meetings: 2, decisions: null, quarantineBatch: null, total: null, learning: 'unknown' } }) } })
+    await h.open()
+    expect(h.t.needsParts().total).toBeNull()
+    expect(h.html('mm-list')).toContain('data-arg="who"')
+  })
+
+  it('labels an older count without hiding it, and removes the label once fresh', async () => {
+    const ny = { meetings: 2, decisions: 1, quarantineBatch: 1, total: 4, learning: 'read', ageSeconds: 181, fresh: false }
+    const h = load({ answers: { status: status({ needsYou: ny }) } })
+    await h.open()
+    expect(needsHeader(h.html('mm-list'))).toBe(4)
+    expect(h.html('mm-list')).toContain('Memory count last read 3 minutes ago.')
+    h.S.status.needsYou.fresh = true
+    h.t.paint()
+    expect(h.html('mm-list')).not.toContain('Memory count last read')
+  })
+})
+
 describe('Memories C: small edges (Q1)', () => {
   it('a cue logged at the skip\'s own time stays skipped; one a millisecond later brings the meeting back (the server\'s <=)', async () => {
     const at = NOW - 100 * MIN

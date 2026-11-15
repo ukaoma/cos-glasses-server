@@ -1014,8 +1014,15 @@
     // pane's own grouping stands in only on a server without needsYou. Skips, undos and ratings re-read the status.
     var mine = meetingsToRate();
     if (mine !== null && !ny) meetings = mine;
-    var total = meetings !== null && decisions !== null && batch !== null ? meetings + decisions + batch : null;
+    var total = ny && ny.learning === 'not_set_up' ? meetings : meetings !== null && decisions !== null && batch !== null ? meetings + decisions + batch : null;
     return { meetings: meetings, decisions: decisions, quarantineBatch: batch, total: total };
+  }
+  function learningNotSetUp() { return !!(S.status && S.status.needsYou && S.status.needsYou.learning === 'not_set_up'); }
+  function needsAgeLine() {
+    var ny = S.status && S.status.needsYou;
+    if (!ny || ny.fresh !== false || ny.learning !== 'read' || typeof ny.ageSeconds !== 'number' || !isFinite(ny.ageSeconds) || ny.ageSeconds < 0) return '';
+    var minutes = Math.max(1, Math.floor(ny.ageSeconds / 60));
+    return '<p class="mm-muted" role="status">Memory count last read ' + minutes + ' ' + plural(minutes, 'minute', 'minutes') + ' ago. Refresh to check again.</p>';
   }
   // What the decisions row is called: "Who said it is unclear" while that is the only kind waiting (the producer's gates).
   function decisionsLabel() {
@@ -1053,8 +1060,10 @@
     var usedAll = all && typeof all.used === 'number' ? all.used : null, docs = g.build && typeof g.build.doc_count === 'number' ? g.build.doc_count : null;
     var needs = [];
     if (C.available !== false) needs.push(idxRow('meetings', 'Meetings to rate', p.meetings, { counted: true, sub: first ? first.unrated.length + ' ' + plural(first.unrated.length, 'cue', 'cues') + ' in the last one' : '' }));
-    needs.push(idxRow('who', decisionsLabel(), p.decisions, { counted: true, sub: decisionsLabel() === 'Who said it is unclear' ? 'A decision that quotes someone' : 'Each waits for a yes or no' }));
-    needs.push(idxRow('quarantine', 'Ready to quarantine', p.quarantineBatch, { counted: true, sub: prune ? fmt(prune) + ' old, unused ' + plural(prune, 'memory', 'memories') + ', one batch' : prune === 0 ? 'Nothing waiting' : '' }));
+    if (!learningNotSetUp()) {
+      needs.push(idxRow('who', decisionsLabel(), p.decisions, { counted: true, sub: decisionsLabel() === 'Who said it is unclear' ? 'A decision that quotes someone' : 'Each waits for a yes or no' }));
+      needs.push(idxRow('quarantine', 'Ready to quarantine', p.quarantineBatch, { counted: true, sub: prune ? fmt(prune) + ' old, unused ' + plural(prune, 'memory', 'memories') + ', one batch' : prune === 0 ? 'Nothing waiting' : '' }));
+    }
     needs.push(idxRow('suggestions', 'Suggestions', sugg, { uncounted: true, sub: 'Not counted', keep: true }));
     var learned = [
       idxRow('corrections', 'Corrections', memCount('correction'), { sub: 'What you fixed' }),
@@ -1073,7 +1082,7 @@
       idxRow('log', 'Activity log', null, { act: 'log' })
     ];
     if (C.available === false) working.splice(1, 1);
-    return '<div class="mm-index">' + groupHead('Needs you', p.total != null ? fmt(p.total) : '') + '<div class="cx-list">' + needs.join('') + '</div>' +
+    return '<div class="mm-index">' + groupHead('Needs you', p.total != null ? fmt(p.total) : '') + needsAgeLine() + '<div class="cx-list">' + needs.join('') + '</div>' +
       groupHead('Learned') + '<div class="cx-list">' + learned.join('') + '</div>' +
       groupHead('Knowledge') + '<div class="cx-list">' + know.join('') + '</div>' +
       groupHead('Is it working') + '<div class="cx-list">' + working.join('') + '</div>' +
