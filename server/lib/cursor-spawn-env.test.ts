@@ -172,6 +172,9 @@ const EXPECTED = [
   'server/lib/lens-gist.ts',
   'server/lib/live-cues-cursor.ts',
   'server/lib/provider-proof.ts',
+  // 7.0.46 (U1): resolves the Cursor binary only to read its install folder name (the client-version header) and never
+  // starts it. Listed here, not exempt, so every spawn call in it stays checked: its one call is reviewed below.
+  'server/lib/work-orchestrator/cursor-plan.ts',
 ]
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -199,6 +202,7 @@ const NOT_THE_CURSOR_CLI: Array<[file: string, head: string, why: string]> = [
   ['server/lib/health-static-probes.ts', 'execute(PYTHON_BIN', 'python --version'],
   ['server/lib/health-static-probes.ts', 'execute(resolved.path', 'codex --version'],
   ['server/lib/provider-proof.ts', 'spawn(command', 'spawnPiped body: env is its parameter, isolated at the cursor caller (asserted below)'],
+  ['server/lib/work-orchestrator/cursor-plan.ts', 'execFile(file', 'realExec body: its one caller passes CURSOR_KEYCHAIN_TOOL, /usr/bin/security, never the Cursor CLI (asserted below)'],
 ]
 
 /** Every call of a spawn-family function, with its balanced argument text. Definitions skipped. */
@@ -255,6 +259,11 @@ describe('the Cursor spawn census', () => {
     const proof = spawnCalls(readFileSync(join(REPO, 'server/lib/provider-proof.ts'), 'utf8')).filter(call => call.startsWith('spawnPiped('))
     expect(proof).toHaveLength(1)
     expect(proof[0]).toContain('isolation ? isolation.env : env')
+    // 7.0.46: cursor-plan.ts's execFile runs only the Keychain tool. One exec( call, and its binary is the fixed tool.
+    const plan = readFileSync(join(REPO, 'server/lib/work-orchestrator/cursor-plan.ts'), 'utf8')
+    expect(plan).toContain("export const CURSOR_KEYCHAIN_TOOL = '/usr/bin/security'")
+    expect(plan.match(/\bexec\(/g)).toEqual(['exec('])
+    expect(plan).toContain('await exec(CURSOR_KEYCHAIN_TOOL, CURSOR_KEYCHAIN_ARGS,')
     // Each of the ten sites contributed at least one checked call.
     expect(new Set(calls.map(line => line.split(':')[0])).size).toBeGreaterThanOrEqual(8)
   })
