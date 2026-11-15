@@ -1,8 +1,10 @@
-// SR-15 (review finding 9): the 3144 signer binds only this Mac's tailnet addresses, refuses any
-// connection on another local address, and status reports the certificate-disclosure facts.
-// The interface fixture has the real macOS shape (os.networkInterfaces on a Mac with Tailscale, read
-// 2026-11-15): loopback, Wi-Fi with a 192.168 address and a global IPv6, Tailscale's utun with a link-local,
-// a 100.64/10 IPv4 and an fd7a:115c:a1e0::/48 IPv6, plus a CGNAT hotspot interface with a 100.x address.
+// SR-15 (review finding 9) and fix round 1 (review PA-R S1, S2, S4): the 3144 signer binds only this Mac's
+// tailnet addresses on Tailscale's OWN interface, refuses any connection that is not tailnet to tailnet,
+// follows address changes, and status reports the certificate-disclosure facts.
+// Fixtures have the real macOS shape (os.networkInterfaces with `cidr`, read on a Mac with Tailscale
+// 2026-11-15): loopback; Wi-Fi with a 192.168 address and a global IPv6; Tailscale's utun with a link-local,
+// a 100.64/10 IPv4 /32 and an fd7a:115c:a1e0::/48 IPv6. Hostile shapes: hotel Wi-Fi whose en0 also carries
+// an RA-announced fd7a /64 and a rogue-DHCP 100.x /16; a CGNAT hotspot; a utun with only one family.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -13,8 +15,10 @@ import type { AddressInfo } from 'node:net'
 import {
   guardSignerConnections,
   isTailnetAddress,
+  isTailscaleInterface,
+  keepSignerBind,
+  nonTailscaleSubnets,
   normalizeBindAddress,
-  openSignerWhenTailnetAppears,
   planSignerBind,
   readCertDisclosure,
   SIGNER_BIND_FIX_VERSION,
@@ -30,48 +34,67 @@ const TS4 = '100.101.102.103'
 const TS6 = 'fd7a:115c:a1e0::1234:5678'
 const LAN = '192.168.1.23'
 const CGNAT = '100.72.3.4'
+const PHONE4 = '100.90.1.2'
+const PHONE6 = 'fd7a:115c:a1e0::aaaa:1'
+/** What a hostile LAN can put on en0: a rogue-DHCP 100.x in a /16 and an RA-announced fd7a /64. */
+const EVIL4 = '100.90.7.7'
+const EVIL6 = 'fd7a:115c:a1e0:5555::77'
 
-const iface = (address: string, family: 'IPv4' | 'IPv6' | 4 | 6, internal = false) => ({ address, family, internal })
+const iface = (address: string, family: 'IPv4' | 'IPv6' | 4 | 6, prefix: number | null = null, internal = false) =>
+  ({ address, family, internal, cidr: prefix === null ? null : `${address}/${prefix}` })
 
+const LO = [iface('127.0.0.1', 'IPv4', 8, true), iface('::1', 'IPv6', 128, true), iface('fe80::1', 'IPv6', 64, true)]
+const UTUN = [iface('fe80::826d:97ff:fe64:1111', 'IPv6', 64), iface(TS4, 'IPv4', 32), iface(TS6, 'IPv6', 48)]
 /** A Mac on home Wi-Fi with Tailscale up. */
 const MAC: InterfaceTable = {
-  lo0: [iface('127.0.0.1', 'IPv4', true), iface('::1', 'IPv6', true), iface('fe80::1', 'IPv6', true)],
-  en0: [iface('fe80::1c2b:3d4e:5f60:7182', 'IPv6'), iface(LAN, 'IPv4'), iface('2600:1700:abcd:1230::17', 'IPv6')],
-  utun4: [iface('fe80::826d:97ff:fe64:1111', 'IPv6'), iface(TS4, 'IPv4'), iface(TS6, 'IPv6')],
+  lo0: LO,
+  en0: [iface('fe80::1c2b:3d4e:5f60:7182', 'IPv6', 64), iface(LAN, 'IPv4', 24), iface('2600:1700:abcd:1230::17', 'IPv6', 64)],
+  utun4: UTUN,
 }
-/** The same Mac with Tailscale off, tethered to a carrier-grade-NAT hotspot that hands out 100.64/10. */
-const HOTSPOT_ONLY: InterfaceTable = {
-  lo0: MAC.lo0,
-  en0: [iface(LAN, 'IPv4')],
-  en5: [iface(CGNAT, 'IPv4'), iface('fe80::aaaa:bbbb:cccc:dddd', 'IPv6')],
-  utun0: [iface('fe80::2222:3333:4444:5555', 'IPv6')],
-}
+/** Hotel Wi-Fi run by an attacker: en0 carries BOTH tailnet ranges. Tailscale up or not. */
+const HOTEL_EN0 = [iface('fe80::1c2b:3d4e:5f60:7182', 'IPv6', 64), iface(EVIL4, 'IPv4', 16), iface(EVIL6, 'IPv6', 64)]
+const HOTEL_TS_DOWN: InterfaceTable = { lo0: LO, en0: HOTEL_EN0, utun0: [iface('fe80::2222:3333:4444:5555', 'IPv6', 64)] }
+const HOTEL_TS_UP: InterfaceTable = { lo0: LO, en0: HOTEL_EN0, utun4: UTUN }
+/** Tailscale off, tethered to a carrier-grade-NAT hotspot. */
+const HOTSPOT_ONLY: InterfaceTable = { lo0: LO, en0: [iface(LAN, 'IPv4', 24)], en5: [iface(CGNAT, 'IPv4', 24), iface('fe80::aaaa:bbbb:cccc:dddd', 'IPv6', 64)] }
 
-describe('which addresses are this Mac\'s tailnet addresses', () => {
-  it('finds the utun IPv4 and IPv6 only, IPv4 first: never loopback, LAN, global IPv6 or link-local', () => {
+describe('which interface is Tailscale\'s (review S1)', () => {
+  it('home Wi-Fi: only the utun IPv4 and IPv6, IPv4 first; never loopback, LAN, global IPv6 or link-local', () => {
     expect(tailnetInterfaceAddresses(MAC)).toEqual([TS4, TS6])
   })
 
-  it('refuses a 100.64/10 address on an interface with no Tailscale IPv6 (CGNAT hotspot)', () => {
-    expect(isTailnetAddress(CGNAT)).toBe(true) // in range...
-    expect(tailnetInterfaceAddresses(HOTSPOT_ONLY)).toEqual([]) // ...but not Tailscale's interface
-    expect(tailnetInterfaceAddresses({ ...MAC, en5: [iface(CGNAT, 'IPv4')] })).toEqual([TS4, TS6])
+  it('hostile hotel en0 with an RA fd7a /64 and a rogue-DHCP 100.x: refused, Tailscale down or up', () => {
+    expect(isTailnetAddress(EVIL4) && isTailnetAddress(EVIL6)).toBe(true) // both in range...
+    expect(isTailscaleInterface('en0', HOTEL_EN0)).toBe(false) // ...but en0 is never Tailscale's
+    expect(tailnetInterfaceAddresses(HOTEL_TS_DOWN)).toEqual([])
+    expect(tailnetInterfaceAddresses(HOTEL_TS_UP)).toEqual([TS4, TS6])
   })
 
-  it('on Tailscale\'s own interface, takes only the tailnet-range addresses (never a LAN or other IPv4 or IPv6 it also carries)', () => {
-    // Found by the mutation gate (iface-v4-range survived): no fixture had a non-tailnet IPv4 on the tailnet interface.
-    expect(tailnetInterfaceAddresses({ utun4: [iface(LAN, 'IPv4'), iface('10.0.0.5', 'IPv4'), iface(TS4, 'IPv4'), iface(TS6, 'IPv6'), iface('2600:1700:abcd:1230::17', 'IPv6')] })).toEqual([TS4, TS6])
-    expect(tailnetInterfaceAddresses({ tailscale0: [iface('10.0.0.5', 'IPv4'), iface(TS4, 'IPv4')] })).toEqual([TS4])
+  it('a utun with only one family is not Tailscale\'s (both a 100.64/10 IPv4 and an fd7a IPv6 are required)', () => {
+    expect(tailnetInterfaceAddresses({ utun4: [iface(TS4, 'IPv4', 32)] })).toEqual([])
+    expect(tailnetInterfaceAddresses({ utun4: [iface(TS6, 'IPv6', 48)] })).toEqual([])
+    expect(tailnetInterfaceAddresses({ utun4: [iface(TS4, 'IPv4', 32), iface('fd00:1::5', 'IPv6', 64)] })).toEqual([])
+    expect(tailnetInterfaceAddresses({ utun4: [iface('10.8.0.2', 'IPv4', 24), iface(TS6, 'IPv6', 48)] })).toEqual([])
   })
 
-  it('accepts numeric families (older Node) and a Linux tailscale0 interface without IPv6', () => {
-    expect(tailnetInterfaceAddresses({ utun3: [iface(TS4, 4), iface(TS6, 6)] })).toEqual([TS4, TS6])
-    expect(tailnetInterfaceAddresses({ tailscale0: [iface(TS4, 'IPv4')], eth0: [iface('10.0.0.5', 'IPv4')] })).toEqual([TS4])
+  it('names: utun<N> only on macOS (not utun-ish names), tailscale<N> on Linux', () => {
+    expect(isTailscaleInterface('utun7', UTUN)).toBe(true)
+    expect(isTailscaleInterface('xutun4', UTUN)).toBe(false)
+    expect(isTailscaleInterface('utun', UTUN)).toBe(false)
+    expect(isTailscaleInterface('en0', UTUN)).toBe(false)
+    expect(isTailscaleInterface('bridge100', UTUN)).toBe(false)
+    expect(tailnetInterfaceAddresses({ tailscale0: [iface(TS4, 'IPv4', 32)], eth0: [iface('10.0.0.5', 'IPv4', 24)] })).toEqual([TS4])
   })
 
-  it('never takes an internal address even in the tailnet ranges, and drops duplicates', () => {
-    expect(tailnetInterfaceAddresses({ utun9: [iface(TS4, 'IPv4', true), iface(TS6, 'IPv6', true)] })).toEqual([])
-    expect(tailnetInterfaceAddresses({ utun4: [iface(TS4, 'IPv4'), iface(TS6, 'IPv6')], utun5: [iface(TS6, 'IPv6'), iface(TS4, 'IPv4')] })).toEqual([TS4, TS6])
+  it('on Tailscale\'s own interface, takes only the tailnet-range addresses', () => {
+    expect(tailnetInterfaceAddresses({ utun4: [iface(LAN, 'IPv4', 24), iface('10.0.0.5', 'IPv4', 8), iface(TS4, 'IPv4', 32), iface(TS6, 'IPv6', 48), iface('2600:1700:abcd:1230::17', 'IPv6', 64)] })).toEqual([TS4, TS6])
+    expect(tailnetInterfaceAddresses({ tailscale0: [iface('10.0.0.5', 'IPv4', 8), iface(TS4, 'IPv4', 32)] })).toEqual([TS4])
+  })
+
+  it('numeric families (older Node), internal rows never count, duplicates dropped', () => {
+    expect(tailnetInterfaceAddresses({ utun3: [iface(TS4, 4, 32), iface(TS6, 6, 48)] })).toEqual([TS4, TS6])
+    expect(tailnetInterfaceAddresses({ utun9: [iface(TS4, 'IPv4', 32, true), iface(TS6, 'IPv6', 48, true)] })).toEqual([])
+    expect(tailnetInterfaceAddresses({ utun4: [iface(TS4, 'IPv4', 32), iface(TS6, 'IPv6', 48)], utun5: [iface(TS6, 'IPv6', 48), iface(TS4, 'IPv4', 32)] })).toEqual([TS4, TS6])
   })
 
   it('normalizes IPv4-mapped, zone ids and case', () => {
@@ -90,9 +113,13 @@ describe('the bind plan', () => {
     }
   })
 
-  it('no tailnet address (Tailscale off, CGNAT hotspot only): does not open, says why', () => {
-    expect(plan(HOTSPOT_ONLY)).toEqual({ scope: 'none', addresses: [], reason: 'no_tailnet_address' })
-    expect(plan({})).toEqual({ scope: 'none', addresses: [], reason: 'no_tailnet_address' })
+  it('no tailnet interface (Tailscale off; hostile hotel; CGNAT hotspot): does not open, says why', () => {
+    for (const nets of [HOTEL_TS_DOWN, HOTSPOT_ONLY, {}]) expect(plan(nets)).toEqual({ scope: 'none', addresses: [], reason: 'no_tailnet_address' })
+  })
+
+  it('hostile hotel with Tailscale up: binds only the utun pair, never en0\'s look-alikes', () => {
+    expect(plan(HOTEL_TS_UP)).toEqual({ scope: 'tailnet', addresses: [TS4, TS6], reason: null })
+    expect(plan(HOTEL_TS_UP, EVIL4)).toEqual({ scope: 'none', addresses: [], reason: 'no_tailnet_address' })
   })
 
   it('BIND_HOST naming loopback or a LAN address: the signer does not open (less exposure asked for)', () => {
@@ -104,32 +131,77 @@ describe('the bind plan', () => {
     expect(plan(MAC, TS6)).toEqual({ scope: 'tailnet', addresses: [TS6], reason: null })
   })
 
-  it('BIND_HOST in the tailnet range but not on Tailscale\'s interface (CGNAT): no_tailnet_address', () => {
-    expect(plan({ ...MAC, en5: [iface(CGNAT, 'IPv4')] }, CGNAT)).toEqual({ scope: 'none', addresses: [], reason: 'no_tailnet_address' })
-  })
-
   it('no https pair: https_unavailable before anything else', () => {
     expect(plan(MAC, undefined, false)).toEqual({ scope: 'none', addresses: [], reason: 'https_unavailable' })
   })
 })
 
-describe('per-connection refusal (defense in depth)', () => {
+describe('per-connection refusal (defense in depth, review S2)', () => {
   const bound = [TS4, TS6]
+  const ok = (local: unknown, remote: unknown, nets: InterfaceTable = MAC, b: readonly string[] = bound) => signerConnectionAllowed(local, remote, b, nets)
 
-  it('serves only a local address that is in the tailnet range AND one of the bound addresses', () => {
-    expect(signerConnectionAllowed(TS4, bound)).toBe(true)
-    expect(signerConnectionAllowed(TS6, bound)).toBe(true)
-    expect(signerConnectionAllowed(`::ffff:${TS4}`, bound)).toBe(true)
-    expect(signerConnectionAllowed(LAN, bound)).toBe(false)
-    expect(signerConnectionAllowed('127.0.0.1', bound)).toBe(false)
-    expect(signerConnectionAllowed('::1', bound)).toBe(false)
-    expect(signerConnectionAllowed(CGNAT, bound)).toBe(false) // in range, never bound
-    expect(signerConnectionAllowed(undefined, bound)).toBe(false)
+  it('tailnet to tailnet: a phone on its tailnet IPv4 or IPv6, to a bound address, is served', () => {
+    expect(ok(TS4, PHONE4)).toBe(true)
+    expect(ok(TS6, PHONE6)).toBe(true)
+    expect(ok(`::ffff:${TS4}`, `::ffff:${PHONE4}`)).toBe(true)
+    expect(ok(TS4, TS4)).toBe(true) // this Mac fetching its own signer over its tailnet name
   })
 
-  it('a bound list carrying a non-tailnet address still refuses it (the range check is not the list\'s job)', () => {
-    expect(signerConnectionAllowed(LAN, [LAN])).toBe(false)
-    expect(signerConnectionAllowed('127.0.0.1', ['127.0.0.1'])).toBe(false)
+  it('local address: must be tailnet-range AND one of the bound addresses', () => {
+    expect(ok(LAN, PHONE4)).toBe(false)
+    expect(ok('127.0.0.1', PHONE4)).toBe(false)
+    expect(ok(CGNAT, PHONE4)).toBe(false) // in range, never bound
+    expect(ok(undefined, PHONE4)).toBe(false)
+    expect(ok(LAN, PHONE4, MAC, [LAN])).toBe(false) // the range check is not the list's job
+  })
+
+  it('remote address: a LAN, loopback or global caller is refused even on a bound address', () => {
+    expect(ok(TS4, '192.168.1.50')).toBe(false)
+    expect(ok(TS4, '127.0.0.1')).toBe(false)
+    expect(ok(TS6, '2600:1700:abcd:1230::99')).toBe(false)
+    expect(ok(TS4, undefined)).toBe(false)
+  })
+
+  it('weak host: a "tailnet" remote inside a non-Tailscale interface\'s subnet is refused (hotel /16 and RA /64)', () => {
+    // The hostile LAN's DHCP /16 contains the phone's tailnet IP, and its RA /64 an fd7a address.
+    expect(ok(TS4, PHONE4, HOTEL_TS_UP)).toBe(false)
+    expect(ok(TS6, 'fd7a:115c:a1e0:5555::1', HOTEL_TS_UP)).toBe(false)
+    // Outside those subnets the real tailnet still works on the same network.
+    expect(ok(TS4, '100.101.9.9', HOTEL_TS_UP)).toBe(true)
+    expect(ok(TS6, PHONE6, HOTEL_TS_UP)).toBe(true)
+  })
+
+  it('Tailscale\'s own subnets never refuse (the utun fd7a /48 covers every tailnet IPv6)', () => {
+    expect(nonTailscaleSubnets({ utun4: UTUN })).toBeNull()
+    expect(ok(TS6, PHONE6, { utun4: UTUN })).toBe(true)
+  })
+
+  it('a CGNAT hotspot whose subnet covers the phone: refused (fails closed on that network)', () => {
+    const nets = { ...MAC, en5: [iface('100.90.0.1', 'IPv4', 16)] }
+    expect(ok(TS4, PHONE4, nets)).toBe(false)
+  })
+
+  it('rows without a cidr, or malformed, are skipped (no throw)', () => {
+    expect(nonTailscaleSubnets({ en0: [iface(LAN, 'IPv4', null)], en1: [{ address: LAN, family: 'IPv4', internal: false, cidr: 'junk/xx' }] })).toBeNull()
+  })
+
+  it('the default guard reads the socket\'s remote address and the live table: a LAN remote on a bound address is destroyed', () => {
+    const sockets: Array<{ localAddress: string; remoteAddress: string; destroyed: number }> = []
+    let handler: (socket: unknown) => void = () => {}
+    const fake = { on: (_event: string, fn: (socket: unknown) => void) => { handler = fn } } as unknown as Server
+    let table: InterfaceTable = MAC
+    const refused = guardSignerConnections(fake, [TS4], { nets: () => table })
+    const connect = (localAddress: string, remoteAddress: string) => {
+      const s = { localAddress, remoteAddress, destroyed: 0, destroy() { this.destroyed++ } }
+      sockets.push(s)
+      handler(s)
+      return s.destroyed
+    }
+    expect(connect(TS4, '192.168.1.50')).toBe(1)
+    expect(connect(TS4, PHONE4)).toBe(0)
+    table = HOTEL_TS_UP // joined the hostile hotel: the same phone address is now on-link through en0
+    expect(connect(TS4, PHONE4)).toBe(1)
+    expect(refused()).toBe(2)
   })
 
   describe('on a real server', () => {
@@ -154,27 +226,27 @@ describe('per-connection refusal (defense in depth)', () => {
       req.end()
     })
 
-    it('a connection on loopback (not a tailnet address) is destroyed before the handler runs', async () => {
+    it('a loopback connection (not tailnet to tailnet) is destroyed before the handler runs', async () => {
       const lines: string[] = []
-      const s = await serve(server => guardSignerConnections(server, ['127.0.0.1'], { log: l => lines.push(l) }))
+      const s = await serve(server => guardSignerConnections(server, ['127.0.0.1'], { nets: () => MAC, log: l => lines.push(l) }))
       const r = await get(s.port)
       expect(r.ok).toBe(false)
       expect(s.handled()).toBe(0)
       expect(s.refused()).toBe(1)
-      expect(lines).toEqual(['[web-key-signer] refused a 3144 connection on a non-tailnet address (1 so far)'])
+      expect(lines).toEqual(['[web-key-signer] refused a 3144 connection that is not tailnet to tailnet (1 so far)'])
     })
 
-    it('a connection the predicate allows is served normally', async () => {
+    it('the guard hands the predicate the real local AND remote address; allowed is served', async () => {
       const seen: unknown[] = []
-      const s = await serve(server => guardSignerConnections(server, [], { allowed: addr => { seen.push(addr); return true } }))
+      const s = await serve(server => guardSignerConnections(server, [], { nets: () => MAC, allowed: (local, remote) => { seen.push([local, remote]); return true } }))
       expect(await get(s.port)).toEqual({ ok: true, body: 'signed' })
       expect(s.handled()).toBe(1)
       expect(s.refused()).toBe(0)
-      expect(seen).toEqual(['127.0.0.1'])
+      expect(seen).toEqual([['127.0.0.1', '127.0.0.1']])
     })
 
     it('a predicate that throws refuses', async () => {
-      const s = await serve(server => guardSignerConnections(server, [], { allowed: () => { throw new Error('boom') } }))
+      const s = await serve(server => guardSignerConnections(server, [], { nets: () => MAC, allowed: () => { throw new Error('boom') } }))
       expect((await get(s.port)).ok).toBe(false)
       expect(s.handled()).toBe(0)
     })
@@ -198,54 +270,90 @@ describe('status shape', () => {
   })
 })
 
-describe('late open (Tailscale comes up after the server)', () => {
-  function rig(plans: Array<SignerBindPlan | Error>, opens: boolean[] = []) {
+describe('the keeper (late open, lost or changed addresses; review S4)', () => {
+  const none: SignerBindPlan = { scope: 'none', addresses: [], reason: 'no_tailnet_address' }
+  const tail: SignerBindPlan = { scope: 'tailnet', addresses: [TS4, TS6], reason: null }
+  const tail4: SignerBindPlan = { scope: 'tailnet', addresses: [TS4], reason: null }
+
+  function rig(initial: SignerBindPlan, plans: Array<SignerBindPlan | Error>, opens: boolean[] = []) {
     const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = []
-    const opened: SignerBindPlan[] = []
+    const events: string[] = []
+    let live = initial.scope === 'tailnet'
     let i = 0
-    const ctl = openSignerWhenTailnetAppears({
+    const keeper = keepSignerBind({
+      initial,
       plan: () => { const p = plans[Math.min(i++, plans.length - 1)]; if (p instanceof Error) throw p; return p },
-      open: async p => { opened.push(p); return opens.length ? opens.shift()! : true },
+      open: async p => { events.push(`open ${p.addresses.join(',')}`); const r = opens.length ? opens.shift()! : true; if (r) live = true; return r },
+      close: async () => { events.push('close'); live = false },
+      listening: () => live,
       schedule: (fn, ms) => { const t = { fn, ms, cancelled: false }; timers.push(t); return { cancel: () => { t.cancelled = true } } },
     })
     const fire = async () => { const t = timers.filter(x => !x.cancelled).at(-1)!; t.cancelled = true; t.fn(); await new Promise(r => setImmediate(r)) }
-    return { ctl, timers, opened, fire, live: () => timers.filter(x => !x.cancelled).length }
+    return { keeper, timers, events, fire, kill: () => { live = false }, pending: () => timers.filter(x => !x.cancelled).length }
   }
-  const none: SignerBindPlan = { scope: 'none', addresses: [], reason: 'no_tailnet_address' }
-  const tail: SignerBindPlan = { scope: 'tailnet', addresses: [TS4, TS6], reason: null }
 
-  it('waits while there is no address, opens exactly the tailnet plan once one appears, then stops looking', async () => {
-    const r = rig([none, none, tail])
+  it('login race: waits while there is no address, then opens exactly the tailnet plan', async () => {
+    const r = rig(none, [none, tail])
     expect(r.timers[0].ms).toBe(SIGNER_BIND_RESCAN_MS)
-    await r.fire(); await r.fire()
-    expect(r.opened).toEqual([])
+    expect(r.keeper.status()).toEqual(none)
     await r.fire()
-    expect(r.opened).toEqual([tail])
-    expect(r.ctl.opened()).toBe(true)
-    expect(r.live()).toBe(0)
+    expect(r.events).toEqual([])
+    await r.fire()
+    expect(r.events).toEqual([`open ${TS4},${TS6}`])
+    expect(r.keeper.status()).toEqual(tail)
+    expect(r.pending()).toBe(1) // keeps watching after opening
   })
 
-  it('a failed open (port taken) tries again on the next scan', async () => {
-    const r = rig([tail], [false, true])
-    await r.fire()
-    expect(r.ctl.opened()).toBe(false)
-    expect(r.live()).toBe(1)
-    await r.fire()
-    expect(r.opened).toEqual([tail, tail])
-    expect(r.ctl.opened()).toBe(true)
+  it('bound at boot and nothing changes: no close, no open, status stays the plan', async () => {
+    const r = rig(tail, [tail, { ...tail, addresses: [TS6, TS4] }])
+    await r.fire(); await r.fire()
+    expect(r.events).toEqual([])
+    expect(r.keeper.status()).toEqual(tail)
   })
 
-  it('never opens a plan that is not tailnet, even one carrying addresses', async () => {
-    const r = rig([{ scope: 'none', addresses: [LAN], reason: 'bind_host_not_tailnet' }, new Error('ifaces')])
+  it('Tailscale goes down while bound: closes, and reports address_lost instead of a dead listener', async () => {
+    const r = rig(tail, [none, none])
+    await r.fire()
+    expect(r.events).toEqual(['close'])
+    expect(r.keeper.status()).toEqual({ scope: 'none', addresses: [], reason: 'address_lost' })
+    await r.fire()
+    expect(r.keeper.status().reason).toBe('address_lost') // until a later open succeeds
+  })
+
+  it('the address set changes: closes the stale listeners first, then opens the new set in the same scan', async () => {
+    const r = rig(tail, [tail4])
+    await r.fire()
+    expect(r.events).toEqual(['close', `open ${TS4}`])
+    expect(r.keeper.status()).toEqual(tail4)
+  })
+
+  it('a dead listener with an unchanged plan is reopened', async () => {
+    const r = rig(tail, [tail])
+    r.kill()
+    await r.fire()
+    expect(r.events).toEqual(['close', `open ${TS4},${TS6}`])
+  })
+
+  it('a failed open (port taken) says listen_failed and tries again on the next scan', async () => {
+    const r = rig(none, [tail], [false, true])
+    await r.fire()
+    expect(r.keeper.status()).toEqual({ scope: 'none', addresses: [], reason: 'listen_failed' })
+    await r.fire()
+    expect(r.events).toEqual([`open ${TS4},${TS6}`, `open ${TS4},${TS6}`])
+    expect(r.keeper.status()).toEqual(tail)
+  })
+
+  it('never opens a plan that is not tailnet, even one carrying addresses; a throwing plan opens nothing', async () => {
+    const r = rig(none, [{ scope: 'none', addresses: [LAN], reason: 'bind_host_not_tailnet' }, new Error('ifaces')])
     await r.fire(); await r.fire()
-    expect(r.opened).toEqual([])
-    expect(r.live()).toBe(1)
+    expect(r.events).toEqual([])
+    expect(r.pending()).toBe(1)
   })
 
   it('stop cancels the pending scan', () => {
-    const r = rig([none])
-    r.ctl.stop()
-    expect(r.live()).toBe(0)
+    const r = rig(none, [none])
+    r.keeper.stop()
+    expect(r.pending()).toBe(0)
   })
 })
 
@@ -305,21 +413,33 @@ describe('index.ts wiring (source)', () => {
     expect(count("const BIND_HOST = process.env.BIND_HOST ?? '0.0.0.0'")).toBe(1)
   })
 
-  it('the signer binds each planned tailnet address, guarded, and never BIND_HOST', () => {
+  it('the signer binds each planned tailnet address, guarded with the live interface table, and never BIND_HOST', () => {
     const signerPart = loop.slice(loop.indexOf('    continue\n  }\n'))
     expect(signerPart).not.toContain('host: BIND_HOST')
     expect(signerPart).toContain('const signerListeners = (plan: SignerBindPlan): RequiredListener[] => plan.addresses.map(address => {')
-    expect(signerPart).toContain('    guardSignerConnections(server, plan.addresses, { log: line => console.warn(line) })\n')
+    expect(signerPart).toContain('    guardSignerConnections(server, plan.addresses, { nets: signerNets, log: line => console.warn(line) })\n')
+    expect(signerPart).toContain('  const signerNets = () => networkInterfaces()\n')
     expect(signerPart).toContain('    return { server, port: entry.port, host: address, label: entry.label }\n')
-    expect(signerPart).toContain("  if (webKeySignerBindPlan.scope === 'tailnet') {\n    listeners.push(...signerListeners(webKeySignerBindPlan))\n")
-    expect(count('planSignerBind({ nets: networkInterfaces(), bindHost: process.env.BIND_HOST, httpsAvailable })')).toBe(2)
+    expect(signerPart).toContain("  if (signerBootPlan.scope === 'tailnet') {\n    listeners.push(...signerListeners(signerBootPlan))\n")
+    expect(count('planSignerBind({ nets: signerNets(), bindHost: process.env.BIND_HOST, httpsAvailable })')).toBe(2)
   })
 
-  it('status reports the facts; the late opener stops at shutdown', () => {
+  it('the keeper owns the signer: built once with the boot plan, its close empties the servers, status reads it', () => {
+    expect(count('webKeySignerKeeper = keepSignerBind({')).toBe(1)
+    expect(index).toContain('    initial: signerBootPlan,\n')
+    expect(index).toContain('    close: closeSigner,\n')
+    expect(index).toContain('    const closing = webKeySignerServers.splice(0, webKeySignerServers.length)\n')
+    expect(index).toContain('    listening: () => webKeySignerServers.length > 0 && webKeySignerServers.every(server => server.listening),\n')
+    expect(count('webKeySignerKeeper?.status() ?? planSignerBind(')).toBe(1)
+  })
+
+  it('status reports the facts; the keeper stops at shutdown; no claim that a wildcard squatter fails the boot', () => {
     expect(count('  signerFacts: webKeySignerFacts,\n')).toBe(1)
     expect(count('  signerBindFixVersion: SIGNER_BIND_FIX_VERSION,\n')).toBe(1)
     expect(count('certDisclosure: readCertDisclosure({ dir: dataPath(SIGNER_TLS_DIR), certFile: SIGNER_TLS_CERT_FILE, selfDnsName: webKeySelfDnsName() }),')).toBe(1)
-    expect(count('  webKeySignerLateOpen?.stop()\n')).toBe(1)
-    expect(index.indexOf('  webKeySignerLateOpen?.stop()\n')).toBeGreaterThan(index.indexOf('async function gracefulShutdown(): Promise<void> {'))
+    expect(count('  webKeySignerKeeper?.stop()\n')).toBe(1)
+    expect(index.indexOf('  webKeySignerKeeper?.stop()\n')).toBeGreaterThan(index.indexOf('async function gracefulShutdown(): Promise<void> {'))
+    expect(index).not.toContain('(a squatter fails the boot closed)')
+    expect(index).toContain('A process holding the wildcard 0.0.0.0:3144 probably does not')
   })
 })
