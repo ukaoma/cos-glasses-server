@@ -214,6 +214,7 @@ import { createDropP2Boot } from './lib/drop-p2-boot.js'
 import { createP2SettingsReader } from './lib/drop-p2-settings.js'
 import { createDropP2Runtime, journalReceiptsLite } from './lib/drop-p2-runtime.js'
 import { sessionTurnOutcome } from './lib/drop-resolution.js'
+import { createSessionReplyPings } from './lib/session-reply-pings.js'
 import { DropHistorySearcher } from './lib/drop-history-search.js'
 import { emitDisplay } from './lib/display-bus.js'
 import { COS_SCRIPTS_DIR } from './lib/python-bridge.js'
@@ -1130,6 +1131,14 @@ const dropP2 = createDropP2Boot({
     settings: () => dropP2Settings.read(),
   }),
 })
+const sessionReplyPings = createSessionReplyPings({
+  initial: sessionSignalStore.snapshot(),
+  waiting: id => !!peekTurnEndAsk(id),
+  signal: id => sessionSignalStore.get(id),
+  deliver: reply => { if (!gracefulShutdownStarted && maintenanceAdmissionsOpen()) dropP2.runtime()?.pushAgent(reply) },
+})
+sessionSignalStore.subscribe((signal, env, child) => sessionReplyPings.observe(signal, env, child))
+sessionSignalStore.subscribeObservations((signal, env, child) => sessionReplyPings.observe(signal, env, child))
 // The turn after Send to session ended: its held drop gets one follow-up (replied, or stopped). Never throws.
 sessionSignalStore.subscribe((signal, env, child) => {
   try {
@@ -1662,6 +1671,7 @@ async function gracefulShutdown(): Promise<void> {
   stopMeetingImportScheduler()
   stopMeetingMergeScheduler()
   sessionHooksRuntime.stop()
+  sessionReplyPings.stop()
   // Every held hook gets `{}` (the native dialog) before the process goes.
   permissionBroker.stop()
   try {

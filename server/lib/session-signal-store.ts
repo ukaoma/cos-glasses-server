@@ -362,6 +362,8 @@ export class SessionSignalStore {
   private readonly signals = new Map<string, SessionSignal>()
   private readonly listeners = new Set<SignalListener>()
   private readonly thoughtListeners = new Set<ThoughtListener>()
+  /** Notification-only observations never enter the lifecycle/authority subscriber channel. */
+  private readonly observationListeners = new Set<SignalListener>()
   private readonly ctx: ReducerContext
 
   constructor(ctx: ReducerContext) {
@@ -373,6 +375,9 @@ export class SessionSignalStore {
     const next = applyHookEvent(prev, env, this.ctx, child)
     this.signals.set(env.sessionId, next)
     if (isDisplayOnly(env)) {
+      for (const listener of this.observationListeners) {
+        try { listener(next, env, child ?? this.ctx.isCosSpawnedPid(env.ppid)) } catch { /* observational only */ }
+      }
       // No drain, permission or halt listeners. A NEW thought reaches the live feed only.
       const thought = next.lastThought
       if (env.event === 'AgentThought' && thought && thought !== prev?.lastThought) {
@@ -460,6 +465,11 @@ export class SessionSignalStore {
     return () => { this.thoughtListeners.delete(listener) }
   }
 
+  subscribeObservations(listener: SignalListener): () => void {
+    this.observationListeners.add(listener)
+    return () => { this.observationListeners.delete(listener) }
+  }
+
   /** Drop records that ended long ago, and records silent for a day (a tab that died with no SessionEnd). */
   prune(nowMs = Date.now()): number {
     let dropped = 0
@@ -495,5 +505,6 @@ export class SessionSignalStore {
     this.signals.clear()
     this.listeners.clear()
     this.thoughtListeners.clear()
+    this.observationListeners.clear()
   }
 }

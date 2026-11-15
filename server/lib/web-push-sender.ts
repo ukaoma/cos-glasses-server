@@ -102,7 +102,7 @@ async function sendPayload(store: WebPushStore, id: string, payload: Buffer, top
 
 
 const SOURCE_LABEL: Record<PingBanner['sources'][number], string> = {
-  reminder: 'Reminder', resolution: 'Follow-up', prep: 'Meeting prep', agent: 'Agent finished',
+  reminder: 'Reminder', resolution: 'Follow-up', prep: 'Meeting prep', agent: 'Session update',
   followups: 'Follow-ups ready', stale: 'Update', checkin: 'Weekly check-in',
 }
 /** Only the kind leaves the Mac by default. Never copy the Mac banner title: it can contain private words. */

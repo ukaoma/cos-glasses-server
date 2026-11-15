@@ -173,13 +173,13 @@ export function checkinCandidates(nowMs: number, timezone: string, when: { weekd
 
 const PROVIDER_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor', grok: 'Grok' }
 /** Agent finished: a session linked to a drop or a Work handoff ended its turn. Pushed by the caller, never polled. */
-export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; turnEndedAt?: unknown; label?: unknown; failed?: unknown }): PingCandidate | null {
+export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; turnEndedAt?: unknown; label?: unknown; failed?: unknown; turnId?: string; replyReady?: boolean }): PingCandidate | null {
   if (typeof ev.sessionId !== 'string' || !ID_SAFE.test(ev.sessionId) || typeof ev.turnEndedAt !== 'number' || !Number.isFinite(ev.turnEndedAt)) return null
   const who = PROVIDER_NAME[typeof ev.provider === 'string' ? ev.provider : ''] ?? 'Your agent'
-  const label = clip(ev.label, PING_TEXT.title) || 'its task'
+  const label = clip(ev.label, PING_TEXT.title) || (ev.replyReady ? 'Session' : 'its task')
   return {
-    source: 'agent', key: `agent:${ev.sessionId}:${Math.floor(ev.turnEndedAt)}`, title: label,
-    line: ev.failed === true ? `${who} stopped on ${label}. It needs a look.` : `${who} finished ${label}.`,
+    source: 'agent', key: ev.turnId && /^[a-f0-9]{64}$/.test(ev.turnId) ? `agent:${ev.sessionId}:turn:${ev.turnId}` : `agent:${ev.sessionId}:${Math.floor(ev.turnEndedAt)}`, title: ev.replyReady ? 'Reply ready' : label,
+    line: ev.replyReady ? `${who} has a reply ready.` : ev.failed === true ? `${who} stopped on ${label}. It needs a look.` : `${who} finished ${label}.`,
     links: [{ kind: 'session', id: ev.sessionId, label }], actions: [{ id: 'open_result', label: 'Open result' }],
     createdAt: ev.turnEndedAt, needsReply: ev.failed === true,
   }

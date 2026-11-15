@@ -1,3 +1,9 @@
+## 7.0.49 - Session replies ready on your phone
+
+- Connect finished Claude and Codex reply turns, and Cursor's explicit completed-turn hook, to the existing session ping category and Sessions destination.
+- Keep duplicate turns, startup replay, child agents, known waiting input and reported failures out of reply notifications. Cursor observer evidence remains display only and requires the updated installed hook.
+- Preserve notification privacy choices, quiet hours, category switches and banner budgets. Phone push and phone authority remain off by default.
+
 ## 7.0.48 - Secure phone links and notification destinations
 
 2026-11-15.

@@ -22,6 +22,11 @@ process.stdin.on('end',()=>{
      const ts=Date.now(),payload={session_id:id.toLowerCase(),display_only:true};
      const agent=p.subagent_id||p.agent_id;
      if(typeof agent==='string'&&/^[a-zA-Z0-9_-]{1,160}$/.test(agent))payload.agent_id=agent;
+     // Notification-only success provenance. Retain no prompt, transcript or answer.
+     // This remains PostCompact/display_only: it cannot free a queue or grant authority.
+     if(event==='stop'&&['completed','error','aborted'].includes(p.status)&&!agent&&!p.parent_conversation_id&&p.is_background_agent!==true&&
+        typeof p.generation_id==='string'&&/^[A-Za-z0-9_.:-]{1,160}$/.test(p.generation_id))
+      payload.notification_completion={status:p.is_error===true||p.error?'error':p.status,generationId:p.generation_id};
      // 6.62.0: the thought itself, at most 280 characters. The server keeps it in memory only.
      if(names[event]==='AgentThought'){if(typeof p.text!=='string'||!p.text.trim())throw 0;payload.text=p.text.slice(0,280)}
      const name=ts+'-'+process.pid+'-'+crypto.randomBytes(6).toString('hex')+'-'+names[event]+'.json';

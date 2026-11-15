@@ -174,7 +174,7 @@ describe('X1 web push: one ping', () => {
     r.store.add({ ...r.p.subscription, origin: ORIGIN, production: true })
     await sendBannerPush(r.store, b, { post: r.post })
     expect(r.sent).toHaveLength(1)
-    expect(JSON.parse(decrypt(r.sent[0].body, r.p))).toEqual({ web_push: 8030, notification: { title: 'COS', body: 'Agent finished', navigate: `${ORIGIN}/control#/sessions/t/sessions`, silent: false } })
+    expect(JSON.parse(decrypt(r.sent[0].body, r.p))).toEqual({ web_push: 8030, notification: { title: 'COS', body: 'Session update', navigate: `${ORIGIN}/control#/sessions/t/sessions`, silent: false } })
     expect(r.store.preferences(r.id, true)).toBe(true)
     // Reopening the proof page cannot change the explicit production/privacy settings.
     r.store.add({ ...r.p.subscription, origin: ORIGIN })
