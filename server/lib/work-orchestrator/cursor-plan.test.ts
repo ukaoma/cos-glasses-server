@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import {
   CURSOR_HOST, CURSOR_KEYCHAIN_ARGS, CURSOR_KEYCHAIN_TOOL, CURSOR_READS, cursorBucketFor, cursorCliVersion, cursorPlanUsageOn,
   cursorReadUrl, jwtExpired, keychainEnv, parseCursorUsage, probeCursorUsage, readCursorToken,
-  type ExecFn, type FetchFn, type FetchInit,
+  MAX_REPLY_BYTES, type ExecFn, type FetchFn, type FetchInit,
 } from './cursor-plan.js'
 import { UsageMonitor, UsageProbeError, USAGE_BREAKER_MS, USAGE_FAILURE_HOLD_MS, headroomOf, safeFailureText, viewOf, type UsageEntry } from './usage.js'
 import { planLine, planPane } from './plan-pane.js'
@@ -38,7 +38,8 @@ const fakeFetch = (replies: Partial<Record<string, { status: number; body?: unkn
     calls.push({ url, init })
     const method = url.split('/').pop()!
     const r = replies[method] ?? { status: 404 }
-    return { status: r.status, type: r.type, text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {})) }
+    const text = typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {})
+    return { status: r.status, type: r.type, headers: { get: () => null }, body: new Blob([text]).stream(), text: async () => { throw new Error('the capped reader must read the stream') } }
   })
 const goodReplies = { GetCurrentPeriodUsage: { status: 200, body: usageReply() }, GetPlanInfo: { status: 200, body: planReply }, GetHardLimit: { status: 200, body: hardReply } }
 const deps = (over: Partial<Parameters<typeof probeCursorUsage>[0]> = {}) => ({ env: ON, now: () => NOW, version: () => '2026.11.13-eacade1', exec: okExec(), fetch: fakeFetch(goodReplies), ...over })
@@ -66,7 +67,8 @@ describe('the switch (COS_CURSOR_PLAN_USAGE)', () => {
   })
   it('off, even with a reading an earlier on-period left in the cache, Cursor still reads "No plan reading"', () => {
     const e = entry(parseCursorUsage(usageReply()))
-    expect(viewOf(e, NOW, false)).toMatchObject({ state: 'unknown', headroomPct: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' })
+    expect(viewOf({ ...e, reading: parseCursorUsage(usageReply(), planReply), lastFailure: 'keychain_refused' }, NOW, false)).toMatchObject({ state: 'unknown', headroomPct: null, plan: null, reason: null, lastGoodAt: null, ageSec: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' })
+    expect(planLine({ ...e, lastFailure: 'keychain_refused' }, NOW, TZ, false)).toMatchObject({ reason: null, readAt: null, lastGoodAt: null })
     expect(planLine(e, NOW, TZ, false).state).toBe('no_plan')
   })
   it('off: the probe itself refuses before the Keychain or the network', async () => {
@@ -153,6 +155,45 @@ describe('the reads: one host, three methods, no redirects', () => {
   it('a network error\'s own text is never kept', async () => {
     const boom: FetchFn = async () => { throw new Error(`connect ECONNREFUSED with ${TOKEN}`) }
     await expect(probeCursorUsage(deps({ fetch: boom }))).rejects.toMatchObject({ code: 'error', message: 'unexpected error' })
+  })
+})
+
+describe('Q1 21:13: bounds, a broken token, a huge reply, and TLS checks off', () => {
+  it('displayMessage is kept to 200 characters, autoBucketModels to 50 ids of at most 100, the plan name to 60', () => {
+    const r = parseCursorUsage(usageReply({ displayMessage: 'x'.repeat(500), autoBucketModels: [...Array.from({ length: 60 }, (_, i) => `grok-${i}`), 'y'.repeat(101)] }), { planInfo: { planName: 'P'.repeat(70) } })!
+    expect(r.cursor.displayMessage).toHaveLength(200)
+    expect(r.cursor.autoBucketModels).toHaveLength(50)
+    expect(r.cursor.autoBucketModels.every(m => m.length <= 100)).toBe(true)
+    expect(parseCursorUsage(usageReply({ autoBucketModels: ['y'.repeat(101), 'grok-a'] }))!.cursor.autoBucketModels).toEqual(['grok-a'])
+    expect(r.plan).toHaveLength(60)
+  })
+  it('a token with a CR, LF or any space inside never reaches fetch', async () => {
+    for (const bad of ['abc\r\ndef', 'abc\rdef', 'abc\ndef', 'abc def', 'abc\tdef']) {
+      const fetchFn = fakeFetch(goodReplies)
+      await expect(probeCursorUsage(deps({ exec: vi.fn(async () => ({ code: 0, stdout: `${bad}\n`, timedOut: false })), fetch: fetchFn }))).rejects.toMatchObject({ code: 'sign_in_missing' })
+      expect(fetchFn).not.toHaveBeenCalled()
+    }
+  })
+  it('a reply is capped while it streams: an endless body is cancelled just past the cap, a stated huge length is never read', async () => {
+    let pulled = 0, cancelled = false
+    const endless: FetchFn = async () => ({ status: 200, headers: { get: () => null }, text: async () => { throw new Error('not buffered') },
+      body: new ReadableStream<Uint8Array>({ pull(c) { pulled += 64 * 1024; c.enqueue(new Uint8Array(64 * 1024)) }, cancel() { cancelled = true } }, { highWaterMark: 0 }) })
+    await expect(probeCursorUsage(deps({ fetch: endless }))).rejects.toMatchObject({ code: 'unknown_shape' })
+    expect(cancelled).toBe(true)
+    expect(pulled).toBeLessThanOrEqual(MAX_REPLY_BYTES + 3 * 64 * 1024)
+    let read = false
+    const stated: FetchFn = async () => ({ status: 200, headers: { get: (n: string) => (n === 'content-length' ? String(10 * 1024 * 1024) : null) }, text: async () => '{}',
+      // highWaterMark 0: the stream pulls only when someone reads, so `read` stays false unless the reader runs.
+      body: new ReadableStream<Uint8Array>({ pull(c) { read = true; c.enqueue(new Uint8Array(10)) } }, { highWaterMark: 0 }) })
+    await expect(probeCursorUsage(deps({ fetch: stated }))).rejects.toMatchObject({ code: 'unknown_shape' })
+    expect(read).toBe(false)
+  })
+  it('with NODE_TLS_REJECT_UNAUTHORIZED=0 the read is refused before the Keychain is touched', async () => {
+    const exec = okExec(), fetchFn = fakeFetch(goodReplies)
+    await expect(probeCursorUsage(deps({ env: { ...ON, NODE_TLS_REJECT_UNAUTHORIZED: '0' }, exec, fetch: fetchFn }))).rejects.toMatchObject({ code: 'tls_off', message: 'TLS certificate checks are off; Cursor not read' })
+    expect(exec).not.toHaveBeenCalled(); expect(fetchFn).not.toHaveBeenCalled()
+    await expect(probeCursorUsage(deps({ env: { ...ON, NODE_TLS_REJECT_UNAUTHORIZED: '1' } }))).resolves.toMatchObject({ available: true })
+    expect(safeFailureText('TLS certificate checks are off; Cursor not read')).toBe('TLS certificate checks are off; Cursor not read')
   })
 })
 
@@ -272,13 +313,16 @@ describe('the monitor, switched on: the same holds as Claude', () => {
     await t.refresh('cursor'); await t.refresh('cursor')
     expect(timeouts).toHaveBeenCalledTimes(1); expect(t.entry('cursor').holdUntil).toBe(NOW + USAGE_FAILURE_HOLD_MS)
   })
-  it('re-reads Cursor only past 10 minutes on the usage route and 2 before a plan, like the others', async () => {
+  it('re-reads Cursor only past 10 minutes on the usage route (2 on Refresh), and never for a Work plan', async () => {
     let now = NOW
     const cursor = vi.fn(async () => parseCursorUsage(usageReply())!)
     const m = new UsageMonitor({ probes: { claude: async () => parseCursorUsage(usageReply())!, codex: async () => parseCursorUsage(usageReply())!, cursor }, now: () => now, cursorPlan: true })
     await m.onDemand(false); now += 5 * 60_000; await m.onDemand(false)
     expect(cursor).toHaveBeenCalledTimes(1)
-    await m.forPlan()
+    // Q1 21:13: a Work plan never reads Cursor (no Keychain prompt while he is away); it sees the cached reading.
+    now += 5 * 60_000; await m.forPlan(); await m.forPlan()
+    expect(cursor).toHaveBeenCalledTimes(1)
+    now += 6 * 60_000; await m.onDemand(false)
     expect(cursor).toHaveBeenCalledTimes(2)
   })
 })
@@ -306,8 +350,9 @@ describe('the token never leaves the probe', () => {
         seen.push(JSON.stringify(m.views()), JSON.stringify(planPane([m.entry('claude'), m.entry('codex'), m.entry('cursor')], NOW, TZ, true)), readFileSync(path, 'utf8'))
       }
       const all = [...seen, ...out.lines].join('\n')
-      expect(all).not.toContain('SENTINELsignatureQ9xZ')
-      expect(all).not.toContain(TOKEN.split('.')[1]!)
+      // Q1 21:13 (C1b): not even a piece. Every 8-character window of the signature and of the payload is absent.
+      const [, payload, signature] = TOKEN.split('.') as [string, string, string]
+      for (const part of [signature, payload]) for (let i = 0; i + 8 <= part.length; i++) expect(all, `token piece ${part.slice(i, i + 8)}`).not.toContain(part.slice(i, i + 8))
       expect(out.lines.length).toBeGreaterThan(0) // the failure log lines ran, and carry no token
     } finally { out.restore(); rmSync(dir, { recursive: true, force: true }) }
   })

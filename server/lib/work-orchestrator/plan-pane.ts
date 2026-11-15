@@ -105,6 +105,7 @@ export function failureWords(provider: UsageProvider, code: UsageFailureCode | n
     case 'sign_in_expired': return `the ${NAME[provider]} sign-in has expired; opening ${NAME[provider]} renews it`
     case 'redirected': return `${NAME[provider]} answered with a redirect, which COS does not follow`
     case 'http_error': return `${NAME[provider]} answered with an error`
+    case 'tls_off': return 'this server has TLS certificate checks turned off, so COS did not send the sign-in'
     default: return 'unexpected error'
   }
 }
@@ -138,7 +139,7 @@ export function planLine(e: UsageEntry, now: number, tz?: string, cursorOn = fal
   const none = { usedPct: null, gonePct: null, windowStart: null, resetsAt: null }
   if (e.provider === 'cursor' && !cursorOn) {
     return { ...base, ...none, state: 'no_plan', windowWords: '', short: 'No plan reading', shortLong: 'No plan reading',
-      long: 'No plan reading. Cursor does not report its plan to COS.', quiet: 'Cursor no plan reading', readAt: null, lastGoodAt: null }
+      long: 'No plan reading. Cursor does not report its plan to COS.', quiet: 'Cursor no plan reading', readAt: null, lastGoodAt: null, reason: null }
   }
   const period = e.provider === 'cursor' ? 'Billing period' : 'Week'
   const found = e.reading?.available ? rulerWindow(e.provider, e.reading.windows) : null

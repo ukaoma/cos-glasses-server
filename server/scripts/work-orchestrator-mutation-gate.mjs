@@ -108,7 +108,8 @@ const mutations = [
   ['usage-on-demand-reads', US, 'async onDemand(refresh = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS); return this.views() }', 'async onDemand(refresh = false): Promise<UsageView[]> { return this.views() }'],
   ['usage-on-demand-cache', US, '(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS)', '(USAGE_FRESH_MS)'],
   ['usage-on-demand-refresh', US, ' ? USAGE_FRESH_MS : USAGE_CACHE_MS)', ' ? USAGE_CACHE_MS : USAGE_CACHE_MS)'],
-  ['usage-plan-fresh', US, 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS);', 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_CACHE_MS);'],
+  // 7.0.45: forPlan now also says "not Cursor" (Q1 21:13); the 2-minute age it guards is unchanged.
+  ['usage-plan-fresh', US, 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS, undefined, false);', 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_CACHE_MS, undefined, false);'],
   ['usage-cache-window', US, 'export const USAGE_CACHE_MS = 10 * 60_000\n', 'export const USAGE_CACHE_MS = 60 * 60_000\n'],
   // Target moved by eebd1737 (2026-11-05, Ask's proposals read cached usage): the plan path is now the ternary's live arm.
   ['runtime-input-reads-for-plan', RT, "? monitor.views() : await monitor.forPlan()\n", "? monitor.views() : monitor.views()\n"],
@@ -222,6 +223,17 @@ const mutations = [
   ["cur-refused-message-generic", CP, "throw new UsageProbeError('keychain_refused', \"Cursor's sign-in was not shared with COS\")", "throw new UsageProbeError('keychain_refused', 'Keychain read refused')"],
   ["cur-first-read-says-nothing", PP, "        : e.provider === 'cursor' ? CURSOR_FIRST_READ_WORDS : 'Not read yet. Refresh to read it.',", "        : 'Not read yet. Refresh to read it.',"],
   ["cur-copy-suggests-always", PP, "a \"security wants to use \u2026 cursor-access-token\" prompt and your login password. Refresh to read it.'", "a \"security wants to use \u2026 cursor-access-token\" prompt and your login password; choose Always Allow. Refresh to read it.'"],
+  // Q1 21:13 (C1b, C17, C18, C21-C23, TLS, plan path, off state).
+  ["cur-log-token-tail", CP, "  const token = await readCursorToken(deps.exec ?? realExec, env)\n", "  const token = await readCursorToken(deps.exec ?? realExec, env)\n  console.warn(`[cursor] ${token.slice(-8)} ${token.length}`)\n"],
+  ["cur-cap-not-while-streaming", CP, "      if (total > MAX_REPLY_BYTES) { try { await reader.cancel() } catch { /* gone */ } throw tooBig() }\n", ""],
+  ["cur-content-length-ignored", CP, "  if (Number.isFinite(stated) && stated > MAX_REPLY_BYTES) { try { await reply.body?.cancel() } catch { /* gone */ } throw tooBig() }\n", ""],
+  ["cur-token-whitespace-ok", CP, "  if (!token || /\\s/.test(token)) throw", "  if (!token) throw"],
+  ["cur-display-unbounded", CP, "short(u.displayMessage, 200)", "short(u.displayMessage, 100000)"],
+  ["cur-models-unbounded", CP, ".filter((m: unknown): m is string => typeof m === 'string' && m.length <= 100).slice(0, 50)", ".filter((m: unknown): m is string => typeof m === 'string')"],
+  ["cur-planname-unbounded", CP, "short(p?.planName, 60) ?? short(obj(p?.planInfo)?.planName, 60)", "short(p?.planName, 1000) ?? short(obj(p?.planInfo)?.planName, 1000)"],
+  ["cur-tls-off-ignored", CP, "  if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new UsageProbeError('tls_off', 'TLS certificate checks are off; Cursor not read')\n", ""],
+  ["cur-plan-reads-cursor", US, "await this.ensureFresh(USAGE_FRESH_MS, undefined, false)", "await this.ensureFresh(USAGE_FRESH_MS)"],
+  ["cur-off-serves-plan-name", US, "{ ...base, plan: null, reason: null, lastGoodAt: null, ageSec: null, state: 'unknown',", "{ ...base, state: 'unknown',"],
   ['q1-escape-long', PR, "' + esc(l.long) + '</div></div>'", "' + l.long + '</div></div>'"],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],

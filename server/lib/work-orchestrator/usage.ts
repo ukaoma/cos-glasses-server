@@ -58,7 +58,7 @@ export const USAGE_FAILURE_HOLD_MS = USAGE_NO_LIMITS_HOLD_MS
 /** Why a probe failed, as a code: logged on every failure and served on the usage route (never an account detail). */
 export type UsageFailureCode = 'no_limits' | 'unknown_shape' | 'refused' | 'timed_out' | 'exited' | 'not_found' | 'error'
   // 7.0.45, Cursor's read: the Keychain item missing, refused or locked; its sign-in expired (or a 401/403); a redirect; another HTTP status.
-  | 'sign_in_missing' | 'keychain_refused' | 'keychain_locked' | 'sign_in_expired' | 'redirected' | 'http_error'
+  | 'sign_in_missing' | 'keychain_refused' | 'keychain_locked' | 'sign_in_expired' | 'redirected' | 'http_error' | 'tls_off'
 export class UsageProbeError extends Error {
   constructor(readonly code: UsageFailureCode, message: string) { super(message) }
 }
@@ -72,7 +72,7 @@ const SAFE_FAILURE_TEXT = new Set(['Claude gave no plan limits (its usage servic
   'not probed inside a test', // runtime.ts's test-only stand-in probe
   // 7.0.45, Cursor (cursor-plan.ts): fixed words only, never the token or a reply.
   'Cursor CLI not found', 'Keychain read timed out', 'Cursor sign-in not found in the Keychain',
-  'Keychain locked', 'Keychain read failed', "Cursor's sign-in was not shared with COS", 'Cursor sign-in expired', 'Cursor answered with a redirect', 'unknown Cursor usage shape'])
+  'Keychain locked', 'Keychain read failed', "Cursor's sign-in was not shared with COS", 'TLS certificate checks are off; Cursor not read', 'Cursor sign-in expired', 'Cursor answered with a redirect', 'unknown Cursor usage shape'])
 export function safeFailureText(text: string | null | undefined): string {
   if (!text) return 'unexpected error'
   return SAFE_FAILURE_TEXT.has(text) || /^exited (?:-?\d+|on error) before answering$/.test(text) || /^Cursor answered HTTP \d{1,3}$/.test(text) ? text : 'unexpected error'
@@ -219,7 +219,7 @@ export function viewOf(e: UsageEntry, now: number, cursorOn = false): UsageView 
   }
   if (e.reading?.allowed === false) return { ...base, state: 'exhausted', headroomPct: 0, resetsAt: tightest?.resetsAt ?? null, note: 'the provider says ordinary usage is not allowed now' }
   // Off (the default): exactly as before 7.0.45, whatever an earlier on-period left in the cache.
-  if (e.provider === 'cursor' && !cursorOn) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' }
+  if (e.provider === 'cursor' && !cursorOn) return { ...base, plan: null, reason: null, lastGoodAt: null, ageSec: null, state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' }
   // Every window this reading had has reset: its numbers describe a window that is over, so they are not shown.
   if (e.reading?.available && allBind.length && !bind.length) {
     return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: `not read since its window ended${e.lastError ? `; last read failed: ${safeFailureText(e.lastError)}` : ''}` }
@@ -346,15 +346,17 @@ export class UsageMonitor {
     return run
   }
   /** Re-read any provider whose reading is older than `maxAgeMs` (default 2 minutes), waiting at most `waitMs`. */
-  async ensureFresh(maxAgeMs = USAGE_FRESH_MS, waitMs = 16_000): Promise<void> {
+  async ensureFresh(maxAgeMs = USAGE_FRESH_MS, waitMs = 16_000, cursor = true): Promise<void> {
     const now = this.now()
-    const readable: Array<'claude' | 'codex' | 'cursor'> = this.cursorPlanOn() ? ['claude', 'codex', 'cursor'] : ['claude', 'codex']
+    const readable: Array<'claude' | 'codex' | 'cursor'> = cursor && this.cursorPlanOn() ? ['claude', 'codex', 'cursor'] : ['claude', 'codex']
     const due = readable.filter(p => !this.entries[p].observedAt || now - this.entries[p].observedAt! > maxAgeMs)
     if (!due.length) return
     await Promise.race([Promise.all(due.map(p => this.refresh(p))), new Promise(r => setTimeout(r, waitMs).unref?.())])
   }
   /** Before a plan (POST /input), which may fork or start a new session: re-read what is older than 2 minutes. */
-  async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS); return this.views() }
+  // 7.0.45 (Q1 21:13, lead's call): never Cursor. Work does not start Cursor sessions, and a plan input while he is away
+  // must not raise the Keychain prompt or wait on it; the plan sees Cursor's cached reading.
+  async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS, undefined, false); return this.views() }
   /** On demand (GET /usage): answer from a reading younger than 10 minutes; `refresh` tightens that to 2. */
   async onDemand(refresh = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS); return this.views() }
   /** A plan-lane COS job on this provider finished with an answer (never a key-lane job). Saved at most once a minute. */

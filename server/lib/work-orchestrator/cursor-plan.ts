@@ -123,10 +123,36 @@ export function cursorHeaders(token: string, version: string): Record<string, st
 }
 
 export interface FetchInit { method: 'POST'; headers: Record<string, string>; body: string; redirect: 'manual'; signal: AbortSignal }
-export interface FetchReply { status: number; type?: string; text(): Promise<string> }
+/** `body` and `headers` are the real fetch's; the read is capped while it streams (Q1 C18). `text` is only for a reply with no
+ *  stream, and is still capped before it is parsed. */
+export interface FetchReply { status: number; type?: string; headers?: { get(name: string): string | null }; body?: ReadableStream<Uint8Array> | null; text(): Promise<string> }
 export type FetchFn = (url: string, init: FetchInit) => Promise<FetchReply>
 
-const MAX_REPLY_CHARS = 256 * 1024
+export const MAX_REPLY_BYTES = 256 * 1024
+
+/** Reads at most MAX_REPLY_BYTES: a stated Content-Length over it is refused before reading, and a stream is cancelled the
+ *  moment it passes it, so a huge or endless reply is never held whole (Q1 21:13, C18). */
+export async function readCapped(reply: FetchReply): Promise<string> {
+  const tooBig = () => new UsageProbeError('unknown_shape', 'unknown Cursor usage shape')
+  const stated = Number(reply.headers?.get('content-length') ?? NaN)
+  if (Number.isFinite(stated) && stated > MAX_REPLY_BYTES) { try { await reply.body?.cancel() } catch { /* gone */ } throw tooBig() }
+  if (reply.body) {
+    const reader = reply.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_REPLY_BYTES) { try { await reader.cancel() } catch { /* gone */ } throw tooBig() }
+      chunks.push(value)
+    }
+    return Buffer.concat(chunks.map(c => Buffer.from(c.buffer, c.byteOffset, c.byteLength))).toString('utf8')
+  }
+  const text = await reply.text()
+  if (Buffer.byteLength(text) > MAX_REPLY_BYTES) throw tooBig()
+  return text
+}
 
 async function cursorRead(fetchFn: FetchFn, method: CursorRead, token: string, version: string, signal: AbortSignal): Promise<unknown> {
   const url = cursorReadUrl(method)
@@ -136,8 +162,7 @@ async function cursorRead(fetchFn: FetchFn, method: CursorRead, token: string, v
   if (reply.type === 'opaqueredirect' || (reply.status >= 300 && reply.status < 400)) throw new UsageProbeError('redirected', 'Cursor answered with a redirect')
   if (reply.status === 401 || reply.status === 403) throw new UsageProbeError('sign_in_expired', 'Cursor sign-in expired')
   if (reply.status !== 200) throw new UsageProbeError('http_error', `Cursor answered HTTP ${Number.isInteger(reply.status) && reply.status >= 100 && reply.status <= 999 ? reply.status : 0}`)
-  const text = await reply.text()
-  if (text.length > MAX_REPLY_CHARS) throw new UsageProbeError('unknown_shape', 'unknown Cursor usage shape')
+  const text = await readCapped(reply)
   try { return JSON.parse(text) } catch { throw new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }
 }
 
@@ -215,6 +240,9 @@ export interface CursorProbeDeps { exec?: ExecFn; fetch?: FetchFn; version?: () 
 export async function probeCursorUsage(deps: CursorProbeDeps = {}): Promise<UsageReading> {
   const env = deps.env ?? process.env
   if (!cursorPlanUsageOn(env)) throw new UsageProbeError('error', 'unexpected error') // never reached: the monitor checks first
+  // Q1 21:13: with certificate checks turned off, the sign-in could go to whoever answers for api2.cursor.sh. Refused before
+  // the Keychain is touched.
+  if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new UsageProbeError('tls_off', 'TLS certificate checks are off; Cursor not read')
   const version = (deps.version ?? (() => cursorCliVersion()))()
   if (!version) throw new UsageProbeError('not_found', 'Cursor CLI not found')
   const token = await readCursorToken(deps.exec ?? realExec, env)
