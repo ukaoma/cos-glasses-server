@@ -77,8 +77,10 @@ export function createSessionReplyPings(deps: Dependencies) {
         if (p.status !== 'completed' || !token(p.generation_id)) return
         turn = p.generation_id
       } else {
-        turn = token(p.turn_id) ? p.turn_id : token(p.prompt_id) ? p.prompt_id
-          : typeof signal.turnStartedAt === 'number' && Number.isFinite(signal.turnStartedAt) && signal.turnStartedAt > 0 && signal.turnStartedAt <= env.ts ? String(signal.turnStartedAt) : null
+        // The reducer's identity survives payloads omitting an optional ID on a duplicate Stop.
+        turn = token(signal.promptId) ? 'prompt:'+signal.promptId
+          : typeof signal.turnStartedAt === 'number' && Number.isFinite(signal.turnStartedAt) && signal.turnStartedAt > 0 && signal.turnStartedAt <= env.ts ? 'start:'+signal.turnStartedAt
+          : token(p.turn_id) ? 'turn:'+p.turn_id : token(p.prompt_id) ? 'prompt:'+p.prompt_id : null
       }
     }
     if (!turn) return

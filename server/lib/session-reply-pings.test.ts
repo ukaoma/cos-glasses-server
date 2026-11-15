@@ -135,3 +135,9 @@ it('category and master/source preferences independently suppress phone output w
 it('automated keep-warm turns stay silent',async()=>{
  const r=rig();r.event('UserPromptSubmit',{prompt:'This is an automated local readiness check for COS'});r.event('Stop');await r.settle();expect(r.phones).toHaveLength(0)
 })
+
+it('duplicate Stop payloads with optional IDs omitted or added retain the known turn identity',async()=>{
+ const r=rig();r.prompt();r.event('Stop',{turn_id:'optional-id'});await r.settle();expect(r.phones).toHaveLength(1)
+ r.event('Stop');await r.settle();expect(r.phones).toHaveLength(1)
+ r.event('Stop',{prompt_id:'another-optional-id'});await r.settle();expect(r.phones).toHaveLength(1)
+})
