@@ -834,7 +834,7 @@
     var m = { el: el, sessionId: String(sessionId || '').toLowerCase(), scope: 'sqm' + (mounts.length + 1), onChange: onChange || null };
     mounts.push(m); listen(el); drawInto(m);
     // Folded reader item 1: a reader's cards now drawn take this session's questions off the page's bar at once.
-    if (host) drawInto({ el: host, sessionId: null, scope: 'sq' });
+    if (host) { drawInto({ el: host, sessionId: null, scope: 'sq' }); fitKeyboard(); }
     if (!Q.stopped) nudge();
     return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
   }

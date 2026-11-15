@@ -103,6 +103,10 @@ describe('the page bar leaves out the session the reader is showing', () => {
     h.go('sessions', ['claude', A.toUpperCase()]); h.Qs.mount(el(), A.toUpperCase(), () => {})
     expect(h.host.hidden).toBe(true)
   })
+  it('the bar redraw in mount() runs fitKeyboard, as render() does (Q1 18:37 note)', () => {
+    const SRC2 = SRC.slice(SRC.indexOf('  function mount(el, sessionId, onChange) {'))
+    expect(SRC2.slice(0, SRC2.indexOf('\n  }\n'))).toContain("if (host) { drawInto({ el: host, sessionId: null, scope: 'sq' }); fitKeyboard(); }")
+  })
   it('the route change listener is there', () => {
     expect(load().winL.hashchange?.length).toBe(1)
   })
