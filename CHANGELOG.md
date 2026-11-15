@@ -1,3 +1,36 @@
+## 7.0.44 - The Memories page as one index with one Needs you number, Skip this meeting, and a reader that opens on its question
+
+2026-11-14. 7.0.43 plus the changes below; everything in 7.0.43 is in this update too (see its entry).
+
+**On for everyone, one line each:**
+- Control Web: Memories is one index instead of seven tabs. One health line on top (Working, with how often recall was used in 90 days; Needs attention, with each reason and what to do; or Not set up), then four lists: Needs you, Learned, Knowledge, and Is it working. Needs you holds Meetings to rate, Who said it is unclear, Ready to quarantine and Suggestions; Learned holds Corrections, Decisions, Rules and Session summaries; Knowledge holds Graph and Sources; Is it working holds Used in answers and Rated cues. Where the seven tabs went: Cues to Meetings to rate, Review to Who said it is unclear, Recent and Memories to Corrections, Applied to Used in answers, Rated to Rated cues, Knowledge to Graph; the counts line and the footer are gone. Old #/memories/t/ and #/memories/view/ links land on the matching list. Search runs when he presses Enter, never on opening the page.
+- Control Web and server: one Needs you number everywhere: the rail ("19 need you"), Today ("19 things in Memories need you", with "17 meetings to rate, 1 memory to decide and a batch ready to quarantine.") and the Memories page all show the server's sum of meetings to rate, decisions and one quarantine batch. When a part cannot be read, no number is shown (never a guess). Today's Review opens the Memories index.
+- Control Web and server: Skip this meeting. Meetings are rated a meeting at a time; Skip this meeting (with Undo) is stored on the server for 7 days (at most 500), covers the cues shown before it, and is never a cue verdict; a cue logged later brings the meeting back. A long meeting shows its first five cues, then "17 more in this meeting" opens the rest in place.
+- Control Web: a session's reader that opens on a waiting question lands with the question card's top in view, not its end; Go to the question does the same. Only at open: a live line, a refresh or the question changing never moves him. A session with no waiting question opens at its newest line, as before.
+- Control Web: the page's "1 question for you" bar leaves out the questions of the session the reader is showing (its card is right there) and counts only the others.
+- Control Web: on a folded phone's session reader, the sign-in line shows only in its last 2 hours (24 hours everywhere else); the Mac-not-answering line always shows.
+- Control Web: a memory shown as used or learned has a quiet Wrong that takes it out of recall, with Undo.
+- Control Web: a second tap on Settings Refresh while one is loading starts nothing.
+- Control Web: every meeting-cue rating button's tap area is at least 44 by 44 px on phones.
+
+**Installed with nothing calling it yet:**
+- server: a read-only catch-up for one session (GET /api/agent-sessions/:provider/:id/catch-up): turns since a cursor, the open question, the queue, whether re-attaching is safe, and whether the server restarted, read at one instant. /api/health says features.sessionCatchUp; nothing in the page calls it yet. It sends, attaches, answers and drains nothing.
+
+**In detail:**
+- **Memories, direction C.** (F1 pane, S1 server, W1 rail and Today.) The Needs you number is the server's `needsYou` on the bridge status: decisions are the 11-08 predicate's count less the memories ready to quarantine, which count as one batch; meetings are those with a cue to rate in 7 days, skipped ones left out. The rail and Today read it; an older server keeps the older lines. Hostile text in a cue, a title or a line said before is drawn as text.
+- **Skip this meeting.** (S1.) POST /api/live-cues/skip and /skip/clear, only for a meeting with a shown cue in the 7-day window; 409 skips_full at 500 with nothing written; history gains `skips` (null when the file is unreadable). Its own file, apart from the verdicts.
+- **The folded reader.** (W1; F1 measured.) The card's top lands 8 px under the reader's top at 382 x 557, 449 x 798 and 1119 x 787, from Today and by address, and a live line or an appended turn does not move it. With the bar and sign-in changes, the folded conversation area is 194 px (128 inside the sign-in window) against 76 on 7.0.43.
+- **Catch-up.** (X1.) Read only by construction; same gate and browser redaction as the session detail; 3 s replay per client, 20 a minute, 256 KB; a cursor that names more than one turn answers gap.
+
+**Not covered, said plainly:**
+- **Not on a real phone:** the Memories page, the reader and the bar were measured with Control Web tests and WebKit on fake routes.
+- **Not in this build:** the reader's one strip (the activity line with Check for new), the pings button, the archive boot fix.
+- **A known older issue:** the live-cues verdicts mutation gate has 3 targets that no longer match (route-max-cues, env-max-per-meeting-read, env-daily-read), in 7.0.43 too; the code it guards is unchanged here.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+
 ## 7.0.43 - The question card in a session's reader no longer hides behind its own Submit, the plan ruler on Usage, and Refresh that keeps the page
 
 2026-11-14. A fix build on 7.0.42; everything in 7.0.42 is in this update too (see its entry).
