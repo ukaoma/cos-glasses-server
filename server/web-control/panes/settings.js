@@ -11,7 +11,11 @@
   var W = window.COSWeb;
   var $ = W.$, esc = W.esc, api = W.api;
   var pane = $('pane-settings');
-  var S = { data: null, state: 'idle', refreshing: false, loadedAt: 0, failedAt: 0 };
+  var S = { data: null, state: 'idle', refreshing: false, refreshAt: 0, loadedAt: 0, failedAt: 0 };
+  // The build after 7.0.43 (lead 19:09; W1's 17:0x note on fc4cb500): a second Refresh while one load runs starts
+  // nothing, so a double tap cannot make the first answer land as a plain load. A refresh older than REFRESH_STUCK_MS no
+  // longer counts as running, so a read that never answers cannot leave Refresh dead.
+  var REFRESH_STUCK_MS = 30000;
 
   var CATEGORIES = [
     { id: 'general', title: 'General', summary: 'How COS Control opens, its shortcut, Today and the setup guide.', mac: ['App', 'Activity home', 'Setup guide'] },
@@ -431,7 +435,10 @@
     if (t.getAttribute('data-set') === 'pet-retry') { PET.state = 'idle'; return render(); }
     var act = t.getAttribute('data-set');
     // F1 (A4): Refresh keeps the settings on screen; the new values swap in when they arrive.
-    if (act === 'refresh') { S.state = 'idle'; S.refreshing = true; load(true); return render(); }
+    if (act === 'refresh') {
+      if (S.refreshing && Date.now() - S.refreshAt < REFRESH_STUCK_MS) return;
+      S.state = 'idle'; S.refreshing = true; S.refreshAt = Date.now(); load(true); return render();
+    }
     if (act === 'provider') {
       api('/api/decision-provider', { method: 'PATCH', body: { provider: t.getAttribute('data-provider') } })
         .then(function () { W.toast('Saved'); S.data = null; S.state = 'idle'; load(true); }, function (err) { say(err.message, true); });
