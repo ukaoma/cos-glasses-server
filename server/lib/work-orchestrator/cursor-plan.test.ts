@@ -178,8 +178,11 @@ describe('Q1 21:13: bounds, a broken token, a huge reply, and TLS checks off', (
     let pulled = 0, cancelled = false
     const endless: FetchFn = async () => ({ status: 200, headers: { get: () => null }, text: async () => { throw new Error('not buffered') },
       body: new ReadableStream<Uint8Array>({ pull(c) { pulled += 64 * 1024; c.enqueue(new Uint8Array(64 * 1024)) }, cancel() { cancelled = true } }, { highWaterMark: 0 }) })
-    await expect(probeCursorUsage(deps({ fetch: endless }))).rejects.toMatchObject({ code: 'unknown_shape' })
+    let signal: AbortSignal | null = null
+    const watched: FetchFn = async (url, init) => { signal = init.signal; return endless(url, init) }
+    await expect(probeCursorUsage(deps({ fetch: watched }))).rejects.toMatchObject({ code: 'unknown_shape' })
     expect(cancelled).toBe(true)
+    expect(signal!.aborted).toBe(true) // the request itself is aborted at the cap (lead 21:19)
     expect(pulled).toBeLessThanOrEqual(MAX_REPLY_BYTES + 3 * 64 * 1024)
     let read = false
     const stated: FetchFn = async () => ({ status: 200, headers: { get: (n: string) => (n === 'content-length' ? String(10 * 1024 * 1024) : null) }, text: async () => '{}',
@@ -190,10 +193,10 @@ describe('Q1 21:13: bounds, a broken token, a huge reply, and TLS checks off', (
   })
   it('with NODE_TLS_REJECT_UNAUTHORIZED=0 the read is refused before the Keychain is touched', async () => {
     const exec = okExec(), fetchFn = fakeFetch(goodReplies)
-    await expect(probeCursorUsage(deps({ env: { ...ON, NODE_TLS_REJECT_UNAUTHORIZED: '0' }, exec, fetch: fetchFn }))).rejects.toMatchObject({ code: 'tls_off', message: 'TLS certificate checks are off; Cursor not read' })
+    await expect(probeCursorUsage(deps({ env: { ...ON, NODE_TLS_REJECT_UNAUTHORIZED: '0' }, exec, fetch: fetchFn }))).rejects.toMatchObject({ code: 'tls_off', message: 'TLS checks are off on this Mac; Cursor was not read' })
     expect(exec).not.toHaveBeenCalled(); expect(fetchFn).not.toHaveBeenCalled()
     await expect(probeCursorUsage(deps({ env: { ...ON, NODE_TLS_REJECT_UNAUTHORIZED: '1' } }))).resolves.toMatchObject({ available: true })
-    expect(safeFailureText('TLS certificate checks are off; Cursor not read')).toBe('TLS certificate checks are off; Cursor not read')
+    expect(safeFailureText('TLS checks are off on this Mac; Cursor was not read')).toBe('TLS checks are off on this Mac; Cursor was not read')
   })
 })
 
@@ -313,6 +316,18 @@ describe('the monitor, switched on: the same holds as Claude', () => {
     await t.refresh('cursor'); await t.refresh('cursor')
     expect(timeouts).toHaveBeenCalledTimes(1); expect(t.entry('cursor').holdUntil).toBe(NOW + USAGE_FAILURE_HOLD_MS)
   })
+  it('lead 21:19: a Work plan input with the switch on spawns no child and opens no socket for Cursor', async () => {
+    const exec = okExec(), fetchFn = fakeFetch(goodReplies)
+    const calls = () => (fetchFn as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+    const m = new UsageMonitor({ probes: { claude: async () => parseCursorUsage(usageReply())!, codex: async () => parseCursorUsage(usageReply())!, cursor: () => probeCursorUsage(deps({ exec, fetch: fetchFn })) }, now: () => NOW, cursorPlan: true })
+    const views = await m.forPlan()
+    expect(exec).not.toHaveBeenCalled(); expect(calls()).toBe(0)
+    expect(views.find(v => v.provider === 'cursor')).toMatchObject({ state: 'unknown', headroomPct: null })
+    await m.onDemand(false)
+    expect(exec).toHaveBeenCalledTimes(1); expect(calls()).toBe(3) // opening Usage does read
+    await m.forPlan()
+    expect(exec).toHaveBeenCalledTimes(1); expect(calls()).toBe(3)
+  })
   it('re-reads Cursor only past 10 minutes on the usage route (2 on Refresh), and never for a Work plan', async () => {
     let now = NOW
     const cursor = vi.fn(async () => parseCursorUsage(usageReply())!)
@@ -350,9 +365,9 @@ describe('the token never leaves the probe', () => {
         seen.push(JSON.stringify(m.views()), JSON.stringify(planPane([m.entry('claude'), m.entry('codex'), m.entry('cursor')], NOW, TZ, true)), readFileSync(path, 'utf8'))
       }
       const all = [...seen, ...out.lines].join('\n')
-      // Q1 21:13 (C1b): not even a piece. Every 8-character window of the signature and of the payload is absent.
-      const [, payload, signature] = TOKEN.split('.') as [string, string, string]
-      for (const part of [signature, payload]) for (let i = 0; i + 8 <= part.length; i++) expect(all, `token piece ${part.slice(i, i + 8)}`).not.toContain(part.slice(i, i + 8))
+      // Q1 21:13 (C1b), lead 21:19: no substring of the token of 8 characters or more, anywhere. Every longer substring
+      // contains an 8-character one, so checking every 8-character window of the whole token covers them all.
+      for (let i = 0; i + 8 <= TOKEN.length; i++) expect(all, `token piece at ${i}`).not.toContain(TOKEN.slice(i, i + 8))
       expect(out.lines.length).toBeGreaterThan(0) // the failure log lines ran, and carry no token
     } finally { out.restore(); rmSync(dir, { recursive: true, force: true }) }
   })

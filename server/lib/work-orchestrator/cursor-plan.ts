@@ -132,8 +132,9 @@ export const MAX_REPLY_BYTES = 256 * 1024
 
 /** Reads at most MAX_REPLY_BYTES: a stated Content-Length over it is refused before reading, and a stream is cancelled the
  *  moment it passes it, so a huge or endless reply is never held whole (Q1 21:13, C18). */
-export async function readCapped(reply: FetchReply): Promise<string> {
-  const tooBig = () => new UsageProbeError('unknown_shape', 'unknown Cursor usage shape')
+export async function readCapped(reply: FetchReply, onCap: () => void = () => {}): Promise<string> {
+  // At the cap the request itself is aborted too (lead 21:19), not only the body stream.
+  const tooBig = () => { onCap(); return new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }
   const stated = Number(reply.headers?.get('content-length') ?? NaN)
   if (Number.isFinite(stated) && stated > MAX_REPLY_BYTES) { try { await reply.body?.cancel() } catch { /* gone */ } throw tooBig() }
   if (reply.body) {
@@ -154,7 +155,7 @@ export async function readCapped(reply: FetchReply): Promise<string> {
   return text
 }
 
-async function cursorRead(fetchFn: FetchFn, method: CursorRead, token: string, version: string, signal: AbortSignal): Promise<unknown> {
+async function cursorRead(fetchFn: FetchFn, method: CursorRead, token: string, version: string, signal: AbortSignal, onCap: () => void = () => {}): Promise<unknown> {
   const url = cursorReadUrl(method)
   const parsed = new URL(url)
   if (parsed.protocol !== 'https:' || parsed.host !== CURSOR_HOST) throw new UsageProbeError('error', 'unexpected error')
@@ -162,7 +163,7 @@ async function cursorRead(fetchFn: FetchFn, method: CursorRead, token: string, v
   if (reply.type === 'opaqueredirect' || (reply.status >= 300 && reply.status < 400)) throw new UsageProbeError('redirected', 'Cursor answered with a redirect')
   if (reply.status === 401 || reply.status === 403) throw new UsageProbeError('sign_in_expired', 'Cursor sign-in expired')
   if (reply.status !== 200) throw new UsageProbeError('http_error', `Cursor answered HTTP ${Number.isInteger(reply.status) && reply.status >= 100 && reply.status <= 999 ? reply.status : 0}`)
-  const text = await readCapped(reply)
+  const text = await readCapped(reply, onCap)
   try { return JSON.parse(text) } catch { throw new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }
 }
 
@@ -242,24 +243,27 @@ export async function probeCursorUsage(deps: CursorProbeDeps = {}): Promise<Usag
   if (!cursorPlanUsageOn(env)) throw new UsageProbeError('error', 'unexpected error') // never reached: the monitor checks first
   // Q1 21:13: with certificate checks turned off, the sign-in could go to whoever answers for api2.cursor.sh. Refused before
   // the Keychain is touched.
-  if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new UsageProbeError('tls_off', 'TLS certificate checks are off; Cursor not read')
+  if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new UsageProbeError('tls_off', 'TLS checks are off on this Mac; Cursor was not read')
   const version = (deps.version ?? (() => cursorCliVersion()))()
   if (!version) throw new UsageProbeError('not_found', 'Cursor CLI not found')
   const token = await readCursorToken(deps.exec ?? realExec, env)
   if (jwtExpired(token, (deps.now ?? Date.now)())) throw new UsageProbeError('sign_in_expired', 'Cursor sign-in expired')
   const fetchFn: FetchFn = deps.fetch ?? ((url, init) => fetch(url, init) as unknown as Promise<FetchReply>)
   const ctl = new AbortController()
+  let capped = false
+  const cap = () => { capped = true; ctl.abort() } // a reply past the cap aborts the request; it is not a timeout
   const timer = setTimeout(() => ctl.abort(), deps.timeoutMs ?? USAGE_PROBE_TIMEOUT_MS)
   timer.unref?.()
   try {
-    const usage = await cursorRead(fetchFn, 'GetCurrentPeriodUsage', token, version, ctl.signal)
+    const usage = await cursorRead(fetchFn, 'GetCurrentPeriodUsage', token, version, ctl.signal, cap)
     // The plan name and the on-demand limit are extras: if either fails, the bar still draws without it.
-    const planInfo = await cursorRead(fetchFn, 'GetPlanInfo', token, version, ctl.signal).catch(() => null)
-    const hardLimit = await cursorRead(fetchFn, 'GetHardLimit', token, version, ctl.signal).catch(() => null)
+    const planInfo = capped ? null : await cursorRead(fetchFn, 'GetPlanInfo', token, version, ctl.signal, cap).catch(() => null)
+    const hardLimit = capped ? null : await cursorRead(fetchFn, 'GetHardLimit', token, version, ctl.signal, cap).catch(() => null)
     const reading = parseCursorUsage(usage, planInfo, hardLimit)
     if (!reading) throw new UsageProbeError('unknown_shape', 'unknown Cursor usage shape')
     return reading
   } catch (error) {
+    if (capped) throw new UsageProbeError('unknown_shape', 'unknown Cursor usage shape')
     if (ctl.signal.aborted) throw new UsageProbeError('timed_out', 'timed out')
     if (error instanceof UsageProbeError) throw error
     throw new UsageProbeError('error', 'unexpected error') // a network error's own text is never kept

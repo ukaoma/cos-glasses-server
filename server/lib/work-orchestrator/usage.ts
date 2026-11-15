@@ -72,7 +72,7 @@ const SAFE_FAILURE_TEXT = new Set(['Claude gave no plan limits (its usage servic
   'not probed inside a test', // runtime.ts's test-only stand-in probe
   // 7.0.45, Cursor (cursor-plan.ts): fixed words only, never the token or a reply.
   'Cursor CLI not found', 'Keychain read timed out', 'Cursor sign-in not found in the Keychain',
-  'Keychain locked', 'Keychain read failed', "Cursor's sign-in was not shared with COS", 'TLS certificate checks are off; Cursor not read', 'Cursor sign-in expired', 'Cursor answered with a redirect', 'unknown Cursor usage shape'])
+  'Keychain locked', 'Keychain read failed', "Cursor's sign-in was not shared with COS", 'TLS checks are off on this Mac; Cursor was not read', 'Cursor sign-in expired', 'Cursor answered with a redirect', 'unknown Cursor usage shape'])
 export function safeFailureText(text: string | null | undefined): string {
   if (!text) return 'unexpected error'
   return SAFE_FAILURE_TEXT.has(text) || /^exited (?:-?\d+|on error) before answering$/.test(text) || /^Cursor answered HTTP \d{1,3}$/.test(text) ? text : 'unexpected error'
