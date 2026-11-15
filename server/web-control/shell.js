@@ -220,6 +220,16 @@
     // more need review than are shown, else "n to review".
     soft(storyApi('/api/web-bridge/memories', { method: 'POST', body: { id: 'rail-status', op: 'status', args: {} } })).then(function (r) {
       var d = r && r.details ? r.details : {};
+      // Memories C (the build after 7.0.43, F1 and S1): a server with needsYou gives the one number the rail, Today and
+      // the Memories page all show (meetings to rate, decisions, the quarantine batch). A null total means a part could
+      // not be read, so the rail shows no number at all, never one guessed from the older fields. A server without
+      // needsYou keeps the older line below.
+      var ny = d.needsYou && typeof d.needsYou === 'object' && !Array.isArray(d.needsYou) ? d.needsYou : null;
+      if (ny) {
+        var t = typeof ny.total === 'number' && ny.total >= 0 && Math.floor(ny.total) === ny.total ? ny.total : null;
+        if (t === null) return setStory('memories', FALLBACK.memories, false);
+        return setStory('memories', t === 0 ? 'Nothing needs you' : t === 1 ? '1 needs you' : t + ' need you', t > 0);
+      }
       var n = d.learningToReview;
       if (typeof n !== 'number') return setStory('memories', FALLBACK.memories, false);
       if (n <= 0) return setStory('memories', 'Nothing to review', false);

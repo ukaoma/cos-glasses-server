@@ -1421,11 +1421,30 @@ describe('Needs you lists every source, and the headline, count and rail agree (
     expect(list).toContain('One sounds like Gina.')
     expect(list).toContain('data-goto="speakers"')
     expect(list).toContain('Review 3 memories')
-    expect(list).toContain('data-goto="memories/view/review"')
+    // Memories C (F1): Review lands on the Memories index, which opens on Needs you.
+    expect(list).toContain('data-goto="memories"')
+    expect(list).not.toContain('memories/view/review')
     expect(n.els['needs-count']!.textContent).toBe('4')
     expect(n.els['today-story']!.textContent).toMatch(/^One session is waiting on you\. No agents are running\.$/)
     expect(n.rail).toEqual([['today', '4 need you', true]])
     expect(n.badges).toContainEqual(['today', true])
+  })
+  it('Memories C: with needsYou the row says the one number and its parts, and Review lands on the Memories index', () => {
+    const his = needsRegion({ at: WED_2PM, memories: { state: 'answered', n: 19, ny: { meetings: 17, decisions: 1, quarantineBatch: 1, total: 19 } } as any })
+    const list = his.els['needs-list']!.innerHTML
+    expect(list).toContain('19 things in Memories need you')
+    expect(list).toContain('17 meetings to rate, 1 memory to decide and a batch ready to quarantine.')
+    expect(list).not.toContain('Review 19 memories')
+    expect(list).toContain('data-goto="memories"')
+    const one = needsRegion({ at: WED_2PM, memories: { state: 'answered', n: 1, ny: { meetings: 1, decisions: 0, quarantineBatch: 0, total: 1 } } as any })
+    expect(one.els['needs-list']!.innerHTML).toContain('One thing in Memories needs you')
+    expect(one.els['needs-list']!.innerHTML).toContain('1 meeting to rate.')
+    const two = needsRegion({ at: WED_2PM, memories: { state: 'answered', n: 4, ny: { meetings: 0, decisions: 3, quarantineBatch: 1, total: 4 } } as any })
+    expect(two.els['needs-list']!.innerHTML).toContain('3 memories to decide and a batch ready to quarantine.')
+    // A partial answer (a part unreadable) shows no row and no number; Today says it could not read Memories.
+    const part = needsRegion({ at: WED_2PM, memories: { state: 'failed', n: 0, partial: true } as any })
+    expect(part.els['needs-list']!.innerHTML).not.toContain('Memories need')
+    expect(part.rail[0]![1]).toBe('Couldn’t read memories')
   })
 
   it('a bare tool name is never the reason line (Control\u2019s tool-name guard)', () => {

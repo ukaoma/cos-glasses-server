@@ -1801,13 +1801,25 @@
     // Voices and memories answer on their own time (the memories status runs a CLI on the Mac): Today paints what it
     // has and says it is still reading, then repaints as each one lands.
     var extras = [];
-    if (force === true || Date.now() - TODAY.extraAt > 60000 || TODAY.voices.state === 'failed' || TODAY.memories.state === 'failed') {
+    // A status that answered without a whole Needs you number (memories.partial) is not re-read at once: it waits the
+    // same minute as an answer, so a part that stays unreadable does not start the Mac's CLI on every paint.
+    if (force === true || Date.now() - TODAY.extraAt > 60000 || TODAY.voices.state === 'failed' || (TODAY.memories.state === 'failed' && !TODAY.memories.partial)) {
       TODAY.extraAt = Date.now();
       TODAY.voices = { state: 'pending', groups: [] }; TODAY.memories = { state: 'pending', n: 0 };
       extras.push(api('/api/voice/held-groups').then(function (d) {
         TODAY.voices = { state: 'answered', groups: (d && Array.isArray(d.groups)) ? d.groups : [] };
       }, function () { TODAY.voices = { state: 'failed', groups: [] }; }).then(function () { paintNeeds(); }));
       extras.push(api('/api/web-bridge/memories', { method: 'POST', body: { id: 'today-status', op: 'status', args: {} } }).then(function (d) {
+        // Memories C (the build after 7.0.43): with needsYou, Today shows its one total and its parts, the number the rail
+        // and the Memories page show. A null total (a part could not be read) shows no number: Today says it could not
+        // read Memories, never a count guessed from the older field. A server without needsYou keeps learningToReview.
+        var dd = d && d.details ? d.details : null;
+        var ny = dd && dd.needsYou && typeof dd.needsYou === 'object' && !Array.isArray(dd.needsYou) ? dd.needsYou : null;
+        if (ny) {
+          var whole = function (x) { return typeof x === 'number' && x >= 0 && Math.floor(x) === x; };
+          TODAY.memories = whole(ny.total) ? { state: 'answered', n: ny.total, ny: ny } : { state: 'failed', n: 0, partial: true };
+          return;
+        }
         var n = d && d.details ? d.details.learningToReview : null;
         TODAY.memories = typeof n === 'number' ? { state: 'answered', n: Math.max(0, n) } : { state: 'failed', n: 0 };
       }, function () { TODAY.memories = { state: 'failed', n: 0 }; }).then(function () { paintNeeds(); }));
@@ -2593,8 +2605,9 @@
         why: named ? 'One sounds like ' + named.suggestion.name + '.' : 'Held from your recordings until they have a name.' });
     }
     if (TODAY.memories.n > 0) {
-      var n = TODAY.memories.n;
-      rows.push({ kind: 'memories', tier: 4, title: n === 1 ? 'Review a memory' : 'Review ' + n + ' memories', why: 'Learned from your meetings and sessions, waiting for a yes or no.' });
+      var n = TODAY.memories.n, ny = TODAY.memories.ny;
+      if (ny) rows.push({ kind: 'memories', tier: 4, title: n === 1 ? 'One thing in Memories needs you' : n + ' things in Memories need you', why: memoriesWhy(ny) });
+      else rows.push({ kind: 'memories', tier: 4, title: n === 1 ? 'Review a memory' : 'Review ' + n + ' memories', why: 'Learned from your meetings and sessions, waiting for a yes or no.' });
     }
     var quiet = quietNowToday(new Date());
     var nowRows = rows.filter(function (r) { return !quiet || r.tier === 1; }), later = rows.filter(function (r) { return quiet && r.tier !== 1; });
@@ -2612,6 +2625,15 @@
     if (PANES.todayActions && PANES.todayActions.needsChanged) PANES.todayActions.needsChanged();
     setBadge('today', m.now.length > 0);
     if (window.COSWeb && window.COSWeb.setStory) window.COSWeb.setStory('today', todayRailLine(m), m.now.length > 0);
+  }
+  // Memories C: the parts of the one Needs you number, in the words the Memories page uses (F1's pane).
+  function memoriesWhy(ny) {
+    var parts = [];
+    if (ny.meetings > 0) parts.push(ny.meetings === 1 ? '1 meeting to rate' : ny.meetings + ' meetings to rate');
+    if (ny.decisions > 0) parts.push(ny.decisions === 1 ? '1 memory to decide' : ny.decisions + ' memories to decide');
+    if (ny.quarantineBatch > 0) parts.push('a batch ready to quarantine');
+    if (!parts.length) return 'Waiting for you in Memories.';
+    return (parts.length < 2 ? parts[0] : parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1]) + '.';
   }
   // The rail's Today line, from the same rows (shell.js keeps its own count off Today).
   function todayRailLine(m) {
@@ -2646,7 +2668,9 @@
         (whereLine ? '<span class="need-foot need-where" data-where="' + esc(r.where) + '">' + esc(whereLine) + '</span>' : '') + '</button>' +
         '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(r.key) + '">Open session</button></div></div>';
     }
-    var go2 = r.kind === 'voices' ? 'speakers' : 'memories/view/review', label = r.kind === 'voices' ? 'Name' : 'Review';
+    // Memories C (F1): Review lands on the Memories index, which opens on Needs you (meetings to rate, decisions and the
+    // quarantine batch). The old memories/view/review address still works and lands on "Who said it is unclear".
+    var go2 = r.kind === 'voices' ? 'speakers' : 'memories', label = r.kind === 'voices' ? 'Name' : 'Review';
     return '<div class="need-row">' +
       '<button type="button" class="need-open" data-goto="' + go2 + '">' + top(r.title) + '<span class="need-foot">' + esc(r.why) + '</span></button>' +
       '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-goto="' + go2 + '">' + label + '</button></div></div>';
