@@ -13,6 +13,9 @@ import vm from 'node:vm'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCE = readFileSync(join(HERE, 'panes', 'memories.js'), 'utf8')
 const REVIEW_SOURCE = readFileSync(join(HERE, 'memory-review.js'), 'utf8')
+const APP_ESC_SRC = /\n  function esc\(s\) \{\n[\s\S]*?\n  \}\n/.exec(readFileSync(join(HERE, 'app.js'), 'utf8'))
+if (!APP_ESC_SRC) throw new Error('app.js esc() not found: the escaping tests need the real one')
+const APP_ESC = new Function(APP_ESC_SRC[0] + '; return esc;')() as (s: unknown) => string
 const flush = async (n = 14) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)) }
 
 type Answer = unknown | ((args: any) => unknown)
@@ -114,7 +117,8 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; cues?: C
   let def: any = null
   const W = {
     $: (id: string) => els.get(id) ?? null,
-    esc: (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!),
+    // The page's own escape, read from app.js (the pane's one escape is W.esc), so an escaping test tests the real thing.
+    esc: APP_ESC,
     toast: (t: string) => { toasts.push(t) }, readStore: () => ({}), writeStore: () => {},
     skeletonRows: () => '<div class="list"><div class="skel-row"></div></div>',
     copyText: () => Promise.resolve(),
@@ -839,5 +843,130 @@ describe('Memories C: the more line counts only unrated cues (lead 18:30)', () =
     expect(job).not.toContain('Cue text cue-long-08')
     expect(job).toMatch(/>16 more in this meeting</)
     expect(job).toMatch(/>Skip the rest \(21\)</)
+  })
+})
+
+// Lead 18:4x on Q1's owed P15 to P17: cue text, the line said just before and the meeting title are untrusted (a title
+// can come from someone else's calendar invite; cue text is transcript). Each is drawn with hostile values and with
+// benign ones of the same shape, through the REAL esc from app.js. The rendered markup must have exactly the same tags
+// and attribute names either way (nothing the values carry becomes markup or a new attribute), and every value must
+// decode back to exactly what was sent, wherever it is drawn: the card, its accessible name and title attribute, the
+// note and details, the list row, the index, the after-skip line, the Rated cues job, and the long-meeting lines.
+describe('Memories C: untrusted values never become markup, anywhere the pane draws them (lead, Q1 P15 to P17)', () => {
+  const HOSTILE = {
+    title: '<script>window.__xss=1</script>Board " onfocus="window.__xss=2" & review &amp; <b>bold</b>',
+    detail: '<img src=x onerror="window.__xss=3"> said \' onmouseover=\'window.__xss=4\' &lt;i&gt;',
+    before: '"><svg onload=window.__xss=5>&quot; it\'s & </p><p>',
+  }
+  const BENIGN = { title: 'Board review', detail: 'Plain cue text', before: 'Plain words before' }
+  type V = typeof HOSTILE
+  const mk = (v: V, id: string, at: number, o: Record<string, unknown> = {}) => cue(id, MAC, at, { title: v.title, meetingTitle: v.title, titleSource: 'saved', detail: v.detail, before: v.before, ...o })
+  const decode = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+  // Tags and attribute NAMES in order. Values are escaped, so a value that broke out would add a tag or an attribute here.
+  const skeleton = (html: string) => [...html.matchAll(/<(\/?[a-zA-Z][a-zA-Z0-9-]*)([^<>]*)>/g)].map(m =>
+    m[1] + '(' + [...m[2]!.matchAll(/\s([^\s="'<>\/]+)(?:="[^"]*")?/g)].map(a => a[1]).join(',') + ')').join(' ')
+  const noMarkup = (html: string) => {
+    // The template's own <b>, icons and buttons are in both renders; skeleton equality is what catches an added tag.
+    expect(html).not.toMatch(/<(script|img|iframe|object)\b/i)
+    expect(skeleton(html)).not.toMatch(/\b(on[a-z]+|data-x)\b/)
+  }
+  const render = async (v: V, step: (h: ReturnType<typeof load>) => Promise<string>) => {
+    const week = [mk(v, 'cue-x-01', NOW - 110 * MIN), mk(v, 'cue-x-02', NOW - 109 * MIN)]
+    const rated = [mk(v, 'cue-r-01', NOW - 2000 * MIN, { rating: { verdict: 'useful', note: null, vote: null, at: 1 } })]
+    const h = load({ wide: true, cues: cueRoutes({ week: () => history({ cues: week }), rated: () => ({ v: 1, cues: rated, counts: { total: 1, rated: 1, unrated: 0, byVerdict: {} }, truncated: false }) }) })
+    return step(h)
+  }
+  const both = async (step: (h: ReturnType<typeof load>) => Promise<string>) => ({ bad: await render(HOSTILE, step), ok: await render(BENIGN, step) })
+
+  it('the meeting card: heading, accessible name, cue text, the "Just before" line and its title attribute', async () => {
+    const { bad, ok } = await both(async h => { await h.open(['i', 'meetings']); return h.html('mm-reader') })
+    expect(skeleton(bad)).toBe(skeleton(ok))
+    noMarkup(bad)
+    const card = bad.slice(bad.indexOf('<section class="cx-card mm-meet"'), bad.indexOf('</section>') + 10)
+    expect(decode(/<section class="cx-card mm-meet" aria-label="([^"]*)"/.exec(card)![1]!)).toBe(HOSTILE.title)
+    expect(decode(/<h3>([^<]*)<\/h3>/.exec(card)![1]!)).toBe(HOSTILE.title)
+    expect(decode(/<p class="mm-meet-text">([^<]*)<\/p>/.exec(card)![1]!)).toBe(HOSTILE.detail)
+    const b = /<p class="mm-meet-before" title="([^"]*)">Just before: ([^<]*)<\/p>/.exec(card)!
+    expect(decode(b[1]!)).toBe(HOSTILE.before)
+    expect(decode(b[2]!)).toBe(HOSTILE.before)
+  })
+
+  it('the note and details, opened: the line said before in full', async () => {
+    const { bad, ok } = await both(async h => { await h.open(['i', 'meetings']); h.tap('cue-note-open', { 'data-id': 'cue-x-01' }); await flush(); return h.html('mm-reader') })
+    expect(bad).toContain('mm-cue-before')
+    expect(skeleton(bad)).toBe(skeleton(ok))
+    noMarkup(bad)
+    expect(decode(/<div class="mm-cue-before"><span class="mm-muted">What was said just before<\/span><p>([^<]*)<\/p>/.exec(bad)![1]!)).toBe(HOSTILE.before)
+  })
+
+  it('the list row under the card and the index', async () => {
+    const { bad, ok } = await both(async h => { await h.open(['i', 'meetings']); return h.html('mm-reader') + '\n' + h.page() })
+    expect(skeleton(bad)).toBe(skeleton(ok))
+    noMarkup(bad)
+    expect(decode(/<span class="mm-row-title">([^<]*)<\/span>/.exec(bad)![1]!)).toBe(HOSTILE.title)
+    const idx = await render(HOSTILE, async h => { await h.open([]); return h.page() })
+    const idxOk = await render(BENIGN, async h => { await h.open([]); return h.page() })
+    expect(skeleton(idx)).toBe(skeleton(idxOk))
+    noMarkup(idx)
+  })
+
+  it('the after-skip line draws only the time, never the title, and stays plain', async () => {
+    const { bad, ok } = await both(async h => { await h.open(['i', 'meetings']); h.tap('cue-meet-skip', { 'data-id': MAC }); await flush(); return h.html('mm-reader') })
+    const line = (x: string) => /<div class="mm-removed" role="status">[\s\S]*?<\/div>/.exec(x)![0]
+    expect(line(bad)).toMatch(/Skipped the .* meeting\. It no longer counts in Needs you\./)
+    expect(skeleton(line(bad))).toBe(skeleton(line(ok)))
+    expect(line(bad)).toBe(line(ok))
+    expect(skeleton(bad)).toBe(skeleton(ok))
+    noMarkup(bad)
+  })
+
+  it('the Rated cues job: the title in the cue line and the cue text', async () => {
+    const { bad, ok } = await both(async h => { await h.open(['i', 'rated']); return h.html('mm-reader') })
+    expect(bad).toContain('mm-cue-row')
+    expect(skeleton(bad)).toBe(skeleton(ok))
+    noMarkup(bad)
+    expect(decode(/<p class="mm-cue-meta"><b>([^<]*)<\/b>/.exec(bad)![1]!)).toBe(HOSTILE.title)
+    expect(decode(/<p class="mm-cue-text small">([^<]*)<\/p>/.exec(bad)![1]!)).toBe(HOSTILE.detail)
+  })
+
+  it('a long hostile meeting: "N more in this meeting" and "Skip the rest (N)" stay plain, and so does every cue shown after More', async () => {
+    const step = (v: V) => async (h: ReturnType<typeof load>) => h.html('mm-reader')
+    const go = async (v: V) => {
+      const long = Array.from({ length: 22 }, (_, i) => mk(v, 'cue-l-' + String(i + 1).padStart(2, '0'), NOW - 110 * MIN + i * MIN))
+      const h = load({ cues: cueRoutes({ week: () => history({ cues: long }) }) })
+      await h.open(['i', 'meetings'])
+      h.tap('cue-rate', { 'data-id': 'cue-l-01', 'data-arg': 'useful' }); await flush()
+      const collapsed = await step(v)(h)
+      h.tap('cue-meet-more', { 'data-id': MAC }); await flush()
+      return { collapsed, expanded: h.html('mm-reader') }
+    }
+    const bad = await go(HOSTILE), ok = await go(BENIGN)
+    expect(bad.collapsed).toMatch(/data-mm="cue-meet-more" data-id="mac_[^"]+">17 more in this meeting<\/button>/)
+    expect(bad.collapsed).toMatch(/data-mm="cue-meet-skip" data-id="mac_[^"]+">Skip the rest \(21\)<\/button>/)
+    expect(skeleton(bad.collapsed)).toBe(skeleton(ok.collapsed))
+    expect(skeleton(bad.expanded)).toBe(skeleton(ok.expanded))
+    noMarkup(bad.collapsed); noMarkup(bad.expanded)
+    expect([...bad.expanded.matchAll(/<p class="mm-meet-text">([^<]*)<\/p>/g)].map(m => decode(m[1]!))).toEqual(Array(22).fill(HOSTILE.detail))
+  })
+
+  it('the escape the pane uses is the page own esc: every special character, nothing more', () => {
+    expect(APP_ESC('<a href="x">\'&amp;\'</a>')).toBe('&lt;a href=&quot;x&quot;&gt;&#39;&amp;amp;&#39;&lt;/a&gt;')
+    expect(APP_ESC(null)).toBe('')
+  })
+})
+
+describe('Memories C: a card first drawn with a cue already rated (Q1 C9, 18:53)', () => {
+  it('picks its five from the cues still to rate, leaving the rated one out', async () => {
+    const g2 = Array.from({ length: 8 }, (_, i) => cue('cue-g-' + (i + 1), G2, NOW - 290 * MIN + i * MIN, { title: 'Pricing review' }))
+    const mac = [cue('cue-mac-0001', MAC, NOW - 110 * MIN), cue('cue-mac-0002', MAC, NOW - 100 * MIN)]
+    const h = load({ cues: cueRoutes({ week: () => history({ cues: [...mac, ...g2] }) }) })
+    await h.open(['i', 'meetings'])
+    expect(h.html('mm-reader')).not.toContain('Cue text cue-g-1')
+    h.tap('cue-rate', { 'data-id': 'cue-g-1', 'data-arg': 'repeat' }); await flush()
+    h.tap('cue-meet', { 'data-id': G2 }); await flush()
+    const job = h.html('mm-reader')
+    expect([...job.matchAll(/data-mm="cue-rate" data-id="([^"]+)" data-arg="useful"/g)].map(m => m[1])).toEqual(['cue-g-2', 'cue-g-3', 'cue-g-4', 'cue-g-5', 'cue-g-6'])
+    expect(job).toMatch(/>2 more in this meeting</)
+    expect(job).toMatch(/>Skip the rest \(7\)</)
   })
 })
