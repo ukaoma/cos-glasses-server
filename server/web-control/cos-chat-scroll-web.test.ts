@@ -136,6 +136,34 @@ describe('COS chat scroll ownership', () => {
       h.chat._paintFeed(false); h.grow(50); h.layout()
       expect(h.scroll.scrollTop).toBe(before)
     })
+    for (const gesture of ['touchstart', 'pointerdown', 'wheel']) {
+      it(`${label}: Jump then ${gesture} survives a queued bottom scroll before the upward movement`, async () => {
+        const h = fixture(wide), target = wide ? h.feed : h.win
+        h.chat.mount(h.host, true); await flush(); h.layout()
+        h.tap('latest') // its final scroll/RAF can still be pending when the next gesture starts
+        h.emit(target, gesture, { deltaY: -1 })
+        h.emit(target, 'scroll') // delivered at bottom before the gesture has moved any pixels
+        h.scroll.scrollTop -= 1; h.emit(target, 'scroll')
+        const before = h.scroll.scrollTop
+        h.emit(h.win.visualViewport, 'resize'); h.layout()
+        h.grow(100); h.emit(h.feed, 'load'); h.layout()
+        h.chat._paintFeed(false); h.layout()
+        expect(h.scroll.scrollTop).toBe(before)
+      })
+    }
+    it(`${label}: touching the bottom during a gesture reversal does not take ownership from the reader`, async () => {
+      const h = fixture(wide), target = wide ? h.feed : h.win
+      h.chat.mount(h.host, true); await flush(); h.layout(); h.tap('latest')
+      h.emit(target, 'touchstart')
+      h.scroll.scrollTop -= 40; h.emit(target, 'scroll')
+      h.scroll.scrollTop = h.scroll.scrollHeight - h.scroll.clientHeight; h.emit(target, 'scroll')
+      h.scroll.scrollTop -= 2; h.emit(target, 'scroll')
+      const before = h.scroll.scrollTop
+      h.emit(h.win.visualViewport, 'scroll'); h.grow(90); h.layout()
+      expect(h.scroll.scrollTop).toBe(before)
+      h.tap('latest'); h.layout()
+      expect(h.scroll.scrollTop).toBe(h.scroll.scrollHeight - h.scroll.clientHeight)
+    })
   }
   it('a missing notification falls back to latest after the archive lookup', async () => {
     const h = fixture(true)

@@ -843,7 +843,9 @@
     function scrolled() {
       if (!tailShown(t)) return;
       if (t.following) queueTail();
-      else { var sc = scrollerOf(feed); if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 4) t.following = true; }
+      // A pending programmatic scroll can arrive after touchstart but before the finger moves. Being at the bottom
+      // is not renewed consent to follow: that would undo the gesture and pin every later resize back to the end.
+      // Read-back intent keeps ownership until Jump to latest (or reopening the chat) explicitly follows again.
     }
     ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(function (name) {
       listen(feed, name, intent);

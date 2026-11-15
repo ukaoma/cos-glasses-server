@@ -5,6 +5,7 @@
 - Phone sign-in QRs and copied links prefer trusted HTTPS when the certificate and listener are ready. Displayed web codes update to the selected address without changing their expiry.
 - Session notifications open the Sessions list; message notifications open their COS message. Mixed updates stay together in Messages.
 - Phone pings retain per-device opt-in, preview privacy controls, quiet hours and interruption limits.
+- After Jump to latest, scrolling back keeps your place instead of being pulled to the bottom during layout changes.
 
 ## 7.0.47: Shared chat navigation and phone notification preparation
 
