@@ -45,6 +45,8 @@
   /* 7.0.2 (A4): with the keyboard up the composer sticks above it: --vv-below is the layout viewport under the visible
      box (0 where the web view itself shrank). The home indicator is under the keyboard, so its inset goes. */
   html.kb-chat .msg-split[data-show='chat'] .cc-composer { bottom: var(--vv-below, 0px); padding-bottom: 8px; }
+  /* A bad visual viewport cannot anchor a sticky footer safely: keep it in flow rather than cover history. */
+  .msg-split[data-show='chat'] .cc-composer.cc-vv-lost { position: static; }
 }
 
 /* ── the pinned row ───────────────────────────────────── */

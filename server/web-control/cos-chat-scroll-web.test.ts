@@ -26,10 +26,10 @@ function fixture(wide: boolean) {
   const host: any = { querySelector: (s: string) => s === '[data-cos-feed]' ? feed : s === '[data-cos-chat]' ? chatEl : null }
   const frames: Function[] = [], resizes: Function[] = []
   const answers: Record<string, any> = {}
-  const route = { pane: 'messages', args: ['cos'] }
+  const route = { pane: 'messages', args: ['cos'] }, viewport = { bad: false }
   const W: any = { $: () => null, esc: String, md: String, readStore: () => ({}), writeStore() {}, toDate: (s: string) => new Date(s),
-    parseRoute: () => route, autoGrow() {}, skeletonRows: () => '', api: (p: string) => Promise.resolve(answers[p] || {}), toast() {} }
-  const win: any = events({ COSWeb: W, matchMedia: () => ({ matches: wide, addEventListener() {} }),
+    parseRoute: () => route, viewportFit: () => viewport, autoGrow() {}, skeletonRows: () => '', api: (p: string) => Promise.resolve(answers[p] || {}), toast() {} }
+  const win: any = events({ COSWeb: W, visualViewport: events({}), matchMedia: () => ({ matches: wide, addEventListener() {} }),
     scrollTo: (_x: number, y: number) => { scroll.scrollTop = y }, scrollBy: (_x: number, y: number) => { scroll.scrollTop += y },
     requestAnimationFrame: (fn: Function) => { frames.push(fn); return frames.length }, cancelAnimationFrame() {} })
   const fonts = events({ ready: Promise.resolve() })
@@ -42,12 +42,31 @@ function fixture(wide: boolean) {
   Object.assign(chat._state, { host, caps: { jobs: true }, items: [], feedState: 'ready', feedMode: 'ask' })
   const layout = () => { resizes.forEach(fn => fn()); const now = frames.splice(0); now.forEach(fn => fn()) }
   const tap = (what: string) => chat.onClick({ getAttribute: (s: string) => s === 'data-cos' ? what : null })
-  return { chat, host, feed, scroll, emit, win, doc, route, fonts, layout, tap, answers, grow: (n: number) => { height += n } }
+  return { chat, host, feed, scroll, emit, win, doc, route, fonts, layout, tap, answers, viewport, grow: (n: number) => { height += n } }
 }
 
 describe('COS chat scroll ownership', () => {
   for (const wide of [true, false]) {
     const label = wide ? 'wide feed' : 'narrow page'
+    it(`${label}: a malformed viewport releases the narrow sticky composer, then restores it without moving the reader`, () => {
+      const h = fixture(wide), classes = new Set<string>()
+      const form = { classList: { toggle: (key: string, on: boolean) => on ? classes.add(key) : classes.delete(key) } }
+      const original = h.host.querySelector
+      h.host.querySelector = (s: string) => s === '[data-cos-form="chat"]' ? form : original(s)
+      h.viewport.bad = true
+      h.chat._paintFeed(true); h.layout()
+      expect(classes.has('cc-vv-lost')).toBe(!wide)
+      h.emit(wide ? h.feed : h.win, 'wheel', { deltaY: -200 }); h.scroll.scrollTop = 600
+      h.viewport.bad = false; h.emit(h.win.visualViewport, 'resize'); h.layout()
+      expect(classes.has('cc-vv-lost')).toBe(false)
+      expect(h.scroll.scrollTop).toBe(600)
+      h.viewport.bad = true; h.emit(h.win.visualViewport, 'scroll'); h.layout()
+      expect(classes.has('cc-vv-lost')).toBe(!wide)
+      expect(h.scroll.scrollTop).toBe(600)
+      h.viewport.bad = false; h.emit(h.win, 'pageshow'); h.layout()
+      expect(classes.has('cc-vv-lost')).toBe(false)
+      expect(css).toMatch(/\.msg-split\[data-show='chat'\] \.cc-composer\.cc-vv-lost \{ position: static; \}/)
+    })
     it(`${label}: opening follows delayed layout, media, fonts and restored scroll`, async () => {
       const h = fixture(wide)
       h.chat.mount(h.host, true); await flush(); h.layout()

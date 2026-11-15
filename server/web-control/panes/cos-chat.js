@@ -815,8 +815,17 @@
     // The feed itself is fixed height on desktop; observe its intrinsic content too.
     [t.feed, t.feed.querySelector && t.feed.querySelector('[data-cos-content]'), C.host.querySelector('[data-cos-form="chat"]')].forEach(function (el) { if (el) t.ro.observe(el); });
   }
+  // A malformed Safari viewport can leave the page panned beyond the layout viewport. Its sticky bottom then
+  // crosses the history being read. Use the question footer's safe fallback until a valid reading returns.
+  function fitComposerViewport() {
+    var form = C.host && C.host.querySelector('[data-cos-form="chat"]');
+    if (!form || !form.classList) return;
+    var v = W.viewportFit ? W.viewportFit() : null;
+    form.classList.toggle('cc-vv-lost', !!(v && v.bad && !wide()));
+  }
   function watchTail(feed) {
     if (!feed) return;
+    fitComposerViewport();
     if (TAIL && TAIL.feed === feed) return;
     if (TAIL) { if (TAIL.ro) TAIL.ro.disconnect(); TAIL.clean.forEach(function (fn) { fn(); }); }
     var t = TAIL = { feed: feed, active: true, following: false, frame: 0, clean: [], ro: null };
@@ -843,7 +852,9 @@
     });
     listen(feed, 'scroll', scrolled); listen(window, 'scroll', function () { if (!wide()) scrolled(); });
     listen(feed, 'load', queueTail, true); listen(feed, 'loadedmetadata', queueTail, true);
-    listen(window, 'resize', queueTail); listen(window, 'pageshow', queueTail);
+    function viewportChanged() { fitComposerViewport(); queueTail(); }
+    listen(window, 'resize', viewportChanged); listen(window, 'pageshow', viewportChanged);
+    listen(window.visualViewport, 'resize', viewportChanged); listen(window.visualViewport, 'scroll', viewportChanged);
     listen(document.fonts, 'loadingdone', queueTail);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { if (TAIL === t) queueTail(); });
     if (typeof ResizeObserver === 'function') t.ro = new ResizeObserver(queueTail);
