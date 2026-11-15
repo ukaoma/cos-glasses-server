@@ -226,7 +226,7 @@ describe('PingEngine phone destination', () => {
       banner: () => { order.push('mac'); if (opts.macThrows) throw new Error('mac') },
       phoneBanner: b => { order.push('phone'); expect(state.get().ledger.some(l => l.ids[0] === b.feedIds[0])).toBe(true); phones.push(b); if (opts.phoneThrows) return Promise.reject(new Error('network')) },
     })
-    const candidate = (key: string, source: PingSource = 'resolution'): PingCandidate => ({ key, source, line: 'Private', title: 'Secret', createdAt: clock.now })
+    const candidate = (key: string, source: PingSource = 'resolution'): PingCandidate => ({ key, source, line: 'Private', title: 'Secret', createdAt: clock.now, links: [], actions: [] })
     return { engine, phones, order, state, feed, clock, candidate }
   }
   it('writes the ledger before either destination, never repeats after failure or restart, and isolates Mac and phone failures', async () => {
