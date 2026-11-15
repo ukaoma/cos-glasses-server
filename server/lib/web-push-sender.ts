@@ -110,7 +110,9 @@ export function bannerPayload(banner: PingBanner, origin: string, showWords = fa
   const kind = banner.feedIds.length > 1 ? `${banner.feedIds.length} updates` : SOURCE_LABEL[banner.sources[0]] ?? 'Update'
   const body = showWords ? Array.from(banner.line.split(/[\r\n]/, 1)[0]).slice(0, 100).join('') : kind
   const item = banner.feedIds[0]
-  const navigate = `${origin}/control#/messages/cos${item ? '/' + encodeURIComponent(item) : ''}`
+  // Session completions belong in Sessions. Mixed digests retain their COS message so all updates remain visible.
+  const sessionOnly = banner.sources.length > 0 && banner.sources.every(source => source === 'agent')
+  const navigate = sessionOnly ? `${origin}/control#/sessions/t/sessions` : `${origin}/control#/messages/cos${item ? '/' + encodeURIComponent(item) : ''}`
   return Buffer.from(JSON.stringify({ web_push: 8030, notification: { title: 'COS', body, navigate, silent: false } }))
 }
 

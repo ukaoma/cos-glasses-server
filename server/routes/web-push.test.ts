@@ -174,7 +174,7 @@ describe('X1 web push: one ping', () => {
     r.store.add({ ...r.p.subscription, origin: ORIGIN, production: true })
     await sendBannerPush(r.store, b, { post: r.post })
     expect(r.sent).toHaveLength(1)
-    expect(JSON.parse(decrypt(r.sent[0].body, r.p))).toEqual({ web_push: 8030, notification: { title: 'COS', body: 'Agent finished', navigate: `${ORIGIN}/control#/messages/cos/fi_abc`, silent: false } })
+    expect(JSON.parse(decrypt(r.sent[0].body, r.p))).toEqual({ web_push: 8030, notification: { title: 'COS', body: 'Agent finished', navigate: `${ORIGIN}/control#/sessions/t/sessions`, silent: false } })
     expect(r.store.preferences(r.id, true)).toBe(true)
     // Reopening the proof page cannot change the explicit production/privacy settings.
     r.store.add({ ...r.p.subscription, origin: ORIGIN })
@@ -205,6 +205,23 @@ describe('X1 web push: one ping', () => {
     expect(r.store.devices()).toHaveLength(1)
     const failing: PushPost = async () => { throw new Error('private URL must not escape') }
     await expect(sendBannerPush(r.store, { ...b, sources: [...b.sources] }, { post: failing })).resolves.toBeUndefined()
+  })
+
+  it('opens the relevant pane for session updates and message digests, keeping item IDs inside the route', () => {
+    const base = { feedIds: ['fi_abc'], title: 'Private title', line: 'Private content', exempt: false }
+    const destination = (sources: Parameters<typeof bannerPayload>[0]['sources'], feedIds = base.feedIds) =>
+      JSON.parse(bannerPayload({ ...base, sources, feedIds }, ORIGIN).toString()).notification.navigate
+    expect(destination(['agent'])).toBe(`${ORIGIN}/control#/sessions/t/sessions`)
+    expect(destination(['agent', 'agent'], ['one', 'two'])).toBe(`${ORIGIN}/control#/sessions/t/sessions`)
+    for (const source of ['reminder', 'resolution', 'prep', 'followups', 'stale', 'checkin'] as const) {
+      expect(destination([source])).toBe(`${ORIGIN}/control#/messages/cos/fi_abc`)
+    }
+    expect(destination(['agent', 'reminder'])).toBe(`${ORIGIN}/control#/messages/cos/fi_abc`)
+    expect(destination([], [])).toBe(`${ORIGIN}/control#/messages/cos`)
+    const link = new URL(destination(['reminder'], ['id/with?#parts']))
+    expect(link.origin).toBe(ORIGIN)
+    expect(link.pathname).toBe('/control')
+    expect(link.hash).toBe('#/messages/cos/id%2Fwith%3F%23parts')
   })
 
   it('410 or 404 (the subscription is gone) removes the device; other refusals keep it and return Apple\'s reason code', async () => {

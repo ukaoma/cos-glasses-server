@@ -253,6 +253,7 @@ import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFi
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
 import { controlHttpsOptions, controlTsnetHttpsEnabled, controlTsnetSelfDnsName, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
+import { trustedControlPhoneHttpsPort } from './lib/control-phone-url.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -1749,6 +1750,7 @@ if (webControlEnabled()) {
     serverVersion: () => managedServerVersion() ?? 'unknown',
     port: () => PORT,
     httpsPort: () => existsSync(path.join(__dirname, 'certs', 'cert.pem')) ? HTTPS_PORT : null,
+    trustedPhoneHttpsPort: name => trustedControlPhoneHttpsPort(name, controlTsnetTls, listeners),
     selfDnsName: () => tailnetSelf.currentSelfDnsName(),
     // A glasses pairing code typed on the web sign-in page gets its own message (read only).
     glassesCodeIsLive: code => pairingState.isLiveCode(code),

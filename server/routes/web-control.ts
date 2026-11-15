@@ -49,6 +49,7 @@ import { getWebUsageSummary } from '../lib/web-usage-bridge.js'
 import { WEB_PET_POSES, controlSupportDir, petChunk, petPreview, planPose, readPetSources, webPetManifest, type WebPetPose } from '../lib/web-pet.js'
 import { controlResourcesDir, galleryPets, galleryThumb, parsePetChoice, petChoiceKey, resolvePet, shippedPets, type PetChoice, type PetFetcher } from '../lib/web-pet-choice.js'
 import { dataPath } from '../lib/data-dir.js'
+import { controlPhoneUrl } from '../lib/control-phone-url.js'
 
 export { isMemoryWebOpReadOnly, MUTATING_MEMORY_WEB_OPS, READ_ONLY_MEMORY_WEB_OPS }
 
@@ -63,6 +64,8 @@ export interface WebControlRouterDeps {
   port: () => number
   publicPort?: () => number
   httpsPort?: () => number | null
+  /** Exact-name trusted TLS AND a live Control HTTPS listener. Never inferred from httpsPort. */
+  trustedPhoneHttpsPort?: (name: string) => number | null
   handoffStore?: WebHandoffStore
   loginLimiter?: WebLoginLimiter
   deviceCodeStore?: WebDeviceCodeStore
@@ -244,8 +247,8 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   }
 
   /** This Mac's tailnet name (when known) and Tailscale IPv4, for links a phone opens. */
-  async function tailnetAddress(): Promise<{ name: string | null; ip: string | null }> {
-    let name = selfDns()
+  async function tailnetAddress(status?: { selfDnsName?: string | null; selfIps?: string[] } | null): Promise<{ name: string | null; ip: string | null }> {
+    let name = normalizeTailscaleDnsName(status?.selfDnsName ?? null) ?? selfDns()
     if (!name && deps.queryTailscaleStatus) {
       const status = await deps.queryTailscaleStatus().catch(() => null)
       name = normalizeTailscaleDnsName(status?.selfDnsName ?? null)
@@ -254,7 +257,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     try {
       ip = deps.tailnetIpv4
         ? deps.tailnetIpv4()
-        : reachableIpv4Addresses(networkInterfaces()).find(a => a.kind === 'tailscale')?.address ?? null
+        : status?.selfIps?.[0] ?? reachableIpv4Addresses(networkInterfaces()).find(a => a.kind === 'tailscale')?.address ?? null
     } catch {
       ip = null
     }
@@ -417,12 +420,13 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     const controlPath = `/control?handoff=${encodeURIComponent(ticket)}`
     const nameUrl = name ? `http://${name}:${pubPort}${controlPath}` : null
     const ipUrl = ip ? `http://${ip}:${pubPort}${controlPath}` : null
+    const phoneBase = controlPhoneUrl(name, ip, pubPort, deps.trustedPhoneHttpsPort)
     return res.json({
       ok: true,
       ticket,
       expiresAt,
       url: `http://127.0.0.1:${pubPort}${controlPath}`,
-      phoneUrl: nameUrl ?? ipUrl,
+      phoneUrl: phoneBase ? `${phoneBase}?handoff=${encodeURIComponent(ticket)}` : null,
       tailnet: { ipUrl, nameUrl },
     })
   })
@@ -477,7 +481,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     }
     const { ticket, expiresAt } = handoffStore.mint()
     const code = deviceCodes.mint()
-    const base = `http://${host}:${pubPort}/control`
+    const base = controlPhoneUrl(name, tailIp, pubPort, deps.trustedPhoneHttpsPort)!
     log(`[web-phone-link] minted via=${name ? 'name' : 'ip'} ip=${ip}`)
     return res.json({
       ok: true,
@@ -493,12 +497,12 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     res.set('Cache-Control', 'private, no-store')
     const queryFn = deps.queryTailscaleStatus ?? (() => getTailscaleNudger().queryStatus())
     const status = await queryFn().catch(() => null)
-    const dns = normalizeTailscaleDnsName(status?.selfDnsName ?? selfDns())
+    const { name: dns, ip: tailscaleIp } = await tailnetAddress(status)
     const addrs = reachableIpv4Addresses(networkInterfaces())
-    const tailscaleIp = status?.selfIps?.[0] ?? addrs.find(a => a.kind === 'tailscale')?.address ?? null
     const lanIp = addrs.find(a => a.kind === 'lan')?.address ?? null
     const port = deps.publicPort?.() ?? deps.port()
     const httpsPort = deps.httpsPort?.() ?? null
+    const phoneUrl = controlPhoneUrl(dns, tailscaleIp, port, deps.trustedPhoneHttpsPort)
     const nodeName = dns ? dns.split('.')[0] : hostname().replace(/\.local$/i, '')
 
     res.json({
@@ -510,8 +514,9 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       lanIpv4: lanIp,
       port,
       httpsPort,
+      phoneUrl,
       magicDnsUrl: dns ? `http://${dns}:${port}/control` : null,
-      magicDnsHttpsUrl: dns && httpsPort ? `https://${dns}:${httpsPort}/control` : null,
+      magicDnsHttpsUrl: phoneUrl?.startsWith('https:') ? phoneUrl : null,
       ipv4Url: tailscaleIp ? `http://${tailscaleIp}:${port}/control` : null,
       loopbackUrl: `http://127.0.0.1:${port}/control`,
     })

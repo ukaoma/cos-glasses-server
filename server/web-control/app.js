@@ -816,6 +816,7 @@
     var changedPane = forceChanged === true || r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
     if (state.pane !== r.pane && PANES[state.pane] && PANES[state.pane].leave) { try { PANES[state.pane].leave(); } catch (err) { console.error(err); } }
     state.pane = r.pane;
+    if (r.pane === 'settings' && changedPane) loadTailnetUrl();
     crumbDetail = '';
     document.querySelectorAll('.pane').forEach(function (sec) { sec.classList.toggle('hidden', sec.id !== 'pane-' + r.pane); });
     document.querySelectorAll('#section-menu [data-goto]').forEach(function (b) { if (b.getAttribute('data-goto') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
@@ -7897,6 +7898,8 @@
     var s = $('today-story'); if (s && s.style) s.style.minHeight = '';
   }
   var codeTimer = null;
+  var PHONE_LINK = { generation: 0, pending: null };
+  var DEVICE_CODE = { generation: 0, current: null };
   // A QR as inline SVG from vendor/qrcode-encoder.js (window.COSQR). Only numbers reach the
   // markup; the text is encoded, never inserted. Empty when the encoder did not load.
   function qrSvg(text) {
@@ -7909,39 +7912,89 @@
   }
   function showDeviceCode() {
     var panel = $('device-code-panel');
+    if (!panel) return;
+    var generation = ++DEVICE_CODE.generation;
+    DEVICE_CODE.current = null;
+    clearInterval(codeTimer); codeTimer = null;
     panel.classList.remove('hidden');
     panel.innerHTML = '<p>Getting a code</p>';
-    api('/api/web-session/device-code', { method: 'POST', body: {} }).then(function (d) {
-      var url = state.tailnetUrl || (location.origin + '/control');
-      var exp = toDate(d.expiresAt);
-      // The QR is the phone link with this code on it: the camera opens it, the page signs in
-      // with the code (one use, five minutes), and nothing is typed. Same code, same rules.
-      var link = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'code=' + encodeURIComponent(d.code);
-      panel.innerHTML = qrSvg(link) +
+    // Wait for the address too: a quick code must never paint a local/HTTP QR while the trusted link is loading.
+    return Promise.all([loadTailnetUrl(true), api('/api/web-session/device-code', { method: 'POST', body: {} })]).then(function (answers) {
+      if (generation !== DEVICE_CODE.generation || $('device-code-panel') !== panel) return;
+      var d = answers[1];
+      DEVICE_CODE.current = { panel: panel, code: d.code, expires: toDate(d.expiresAt), painted: '' };
+      paintDeviceCode();
+      if (DEVICE_CODE.current) codeTimer = setInterval(paintDeviceCode, 1000);
+    }).catch(function (err) {
+      if (generation === DEVICE_CODE.generation && $('device-code-panel') === panel) panel.innerHTML = '<p class="status-line error">' + esc(err.message) + '</p>';
+    });
+  }
+  function phoneLinkUrl() { return state.tailnetUrl || (location.origin + '/control'); }
+  function paintDeviceCode() {
+    var c = DEVICE_CODE.current;
+    if (!c) return;
+    if ($('device-code-panel') !== c.panel) { clearInterval(codeTimer); codeTimer = null; DEVICE_CODE.current = null; return; }
+    var left = c.expires ? Math.ceil((c.expires.getTime() - Date.now()) / 1000) : 0;
+    if (left <= 0) {
+      clearInterval(codeTimer); codeTimer = null; DEVICE_CODE.current = null;
+      c.panel.innerHTML = '<p>That code expired. Choose Use COS on another phone or browser for a new one.</p>';
+      return;
+    }
+    var url = phoneLinkUrl(), key = url + '\n' + c.code;
+    if (c.painted !== key) {
+      // Same one-use code and deadline when the address changes; only the destination changes.
+      var link = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'code=' + encodeURIComponent(c.code);
+      c.panel.innerHTML = qrSvg(link) +
         '<p class="qr-hint">Scan with your phone\'s camera to sign it in.</p>' +
         '<p>Or open <span class="url">' + esc(url) + '</span> on the phone and type this code:</p>' +
-        '<span class="code">' + esc(d.code) + '</span>' +
-        '<p id="device-code-left"></p>';
-      clearInterval(codeTimer);
-      var tick = function () {
-        var left = exp ? Math.round((exp.getTime() - Date.now()) / 1000) : 0;
-        var el = $('device-code-left');
-        if (!el) { clearInterval(codeTimer); return; }
-        if (left <= 0) { clearInterval(codeTimer); panel.innerHTML = '<p>That code expired. Choose Use COS on another phone or browser for a new one.</p>'; return; }
-        el.textContent = 'Works once, for ' + (left >= 60 ? Math.ceil(left / 60) + ' more min' : left + ' more sec') + '.';
-      };
-      tick(); codeTimer = setInterval(tick, 1000);
-    }).catch(function (err) { panel.innerHTML = '<p class="status-line error">' + esc(err.message) + '</p>'; });
+        '<span class="code">' + esc(c.code) + '</span><p id="device-code-left"></p>';
+      c.painted = key;
+    }
+    var el = $('device-code-left');
+    if (el) el.textContent = 'Works once, for ' + (left >= 60 ? Math.ceil(left / 60) + ' more min' : left + ' more sec') + '.';
   }
-  function loadTailnetUrl() {
-    api('/api/tailscale/web-url').then(function (d) {
-      // The phone link is plain http by name, then by address. The https name link comes last:
-      // the Mac's local certificate does not cover the Tailscale name, so Safari refuses it.
-      state.tailnetUrl = d.magicDnsUrl || d.ipv4Url || d.magicDnsHttpsUrl || '';
-      // Settings renders this line itself; fill it only if it is on screen now.
+  function recommendedPhoneUrl(d) {
+    // New servers check the certificate AND the running listener. Older servers keep their HTTP-first contract.
+    var url = d.phoneUrl || d.magicDnsUrl || d.ipv4Url || d.magicDnsHttpsUrl || '';
+    // Already using HTTPS on that same host: an older server must not send this browser back to HTTP.
+    try { if (location.protocol === 'https:' && new URL(url).hostname === location.hostname && new URL(url).protocol === 'http:') return location.origin + '/control'; } catch (_e) {}
+    return url;
+  }
+  function loadTailnetUrl(force) {
+    if (PHONE_LINK.pending && !force) return PHONE_LINK.pending;
+    var generation = ++PHONE_LINK.generation;
+    var read = api('/api/tailscale/web-url').then(function (d) {
+      if (generation !== PHONE_LINK.generation) return PHONE_LINK.pending || phoneLinkUrl();
+      state.tailnetUrl = recommendedPhoneUrl(d);
       var el = $('tailnet-url'); if (el) el.textContent = state.tailnetUrl || 'Tailscale is not running on the Mac';
-    }).catch(function () { var el = $('tailnet-url'); if (el) el.textContent = 'Tailscale address unavailable'; });
+      paintDeviceCode();
+      return phoneLinkUrl();
+    }, function () {
+      if (generation !== PHONE_LINK.generation) return PHONE_LINK.pending || phoneLinkUrl();
+      // An unavailable refresh does not revoke the last usable address or downgrade its QR.
+      var el = $('tailnet-url'); if (el) el.textContent = state.tailnetUrl || 'Tailscale address unavailable';
+      return phoneLinkUrl();
+    });
+    PHONE_LINK.pending = read.then(function (url) { if (generation === PHONE_LINK.generation) PHONE_LINK.pending = null; return url; });
+    return PHONE_LINK.pending;
   }
+  function copyPhoneLink() {
+    var fresh = loadTailnetUrl(true);
+    // Start the clipboard write in the tap itself. Safari may lose its user gesture after a network await;
+    // a promised ClipboardItem lets the bytes wait for the canonical address without copying an older HTTP link.
+    if (navigator.clipboard && navigator.clipboard.write && window.ClipboardItem && window.Blob) {
+      try {
+        var item = new window.ClipboardItem({ 'text/plain': fresh.then(function (link) { return new window.Blob([link], { type: 'text/plain' }); }) });
+        return navigator.clipboard.write([item]).then(function () { toast('Link copied'); }, function () { return fresh.then(function (link) { toast(link); }); });
+      } catch (_e) { /* an older clipboard implementation: use the existing selected-text fallback below */ }
+    }
+    return fresh.then(function (link) { return copyText(link).then(function () { toast('Link copied'); }, function () { toast(link); }); });
+  }
+
+  // Use the existing Settings refresh/resume lifecycle; no polling while the page sits idle.
+  document.addEventListener('click', function (e) {
+    if (state.pane === 'settings' && e.target && e.target.closest && e.target.closest('[data-set="refresh"]')) loadTailnetUrl(true);
+  });
 
   // ── Ask sheet (⌘K) ──────────────────────────────────────
   var JUMPS = [
@@ -8147,10 +8200,7 @@
     if (t.id === 'ask-close') return closeAsk();
     if (t.id === 'sign-out') { api('/api/web-session/logout', { method: 'POST' }).finally(function () { showAuth(); }); return; }
     if (t.id === 'copy-link') {
-      var link = state.tailnetUrl || location.origin + '/control';
-      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(function () { toast('Link copied'); }, function () { toast(link); });
-      else toast(link);
-      return;
+      return copyPhoneLink();
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
     if (t.hasAttribute('data-today')) {
@@ -8307,6 +8357,7 @@
   window.addEventListener('pageshow', function (e) {
     if (!e || !e.persisted) return;
     liveResume();   // 7.0.1: re-read the list now, then resume the live stream from its last id
+    if (state.pane === 'settings') loadTailnetUrl(true);
     var r = state.reading;
     if (r && r.provider && r.id) {
       if (state.stream) { try { state.stream.close(); } catch (_e) {} state.stream = null; }
@@ -8317,6 +8368,7 @@
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) { liveHide(); return; }
     if ($('app-shell').classList.contains('hidden')) return;
+    if (state.pane === 'settings') loadTailnetUrl(true);
     liveResume();   // 7.0.1: re-read the list now, then resume the live stream from its last id
     // Coming back to the page refreshes Today in place. Other panes keep what is on screen:
     // rebuilding them here moved the page under Miles's finger ("it reloads the section").

@@ -79,6 +79,38 @@ async function login(h: Harness, body: Record<string, string>): Promise<Response
 }
 
 describe('POST /api/web-session/phone-link', () => {
+  it('uses one trusted phone URL across handoff, copied link, typed code and recommendation; loopback stays HTTP', async () => {
+    let ready = true
+    const h = await start({
+      httpsPort: () => 3143,
+      trustedPhoneHttpsPort: name => ready && name === DNS ? 3143 : null,
+      queryTailscaleStatus: async () => ({ backendState: 'Running', selfIps: [TAIL_IP], selfDnsName: DNS }),
+    })
+    const headers = { 'X-COS-Token': API_TOKEN }
+    for (const secure of [true, false, true]) {
+      ready = secure
+      const base = `${secure ? 'https' : 'http'}://${DNS}:${secure ? 3143 : 3141}/control`
+      const copied = await phoneLink(h)
+      expect(copied.body.codeAddress).toBe(base)
+      expect(copied.body.url).toBe(`${base}?handoff=${ticketOf(copied.body.url)}`)
+      const handoff = await (await fetch(`${h.base}/web-session/handoff`, { method: 'POST', headers })).json()
+      expect(handoff.phoneUrl).toBe(`${base}?handoff=${handoff.ticket}`)
+      expect(handoff.url).toBe(`http://127.0.0.1:3141/control?handoff=${handoff.ticket}`)
+      const recommended = await (await fetch(`${h.base}/tailscale/web-url`, { headers })).json()
+      expect(recommended.phoneUrl).toBe(base)
+      expect(recommended.magicDnsHttpsUrl).toBe(secure ? base : null)
+    }
+  })
+
+  it('a configured HTTPS port alone never recommends the mkcert origin', async () => {
+    const h = await start({ httpsPort: () => 3143, queryTailscaleStatus: async () => null })
+    const copied = await phoneLink(h)
+    expect(copied.body.codeAddress).toBe(`http://${DNS}:3141/control`)
+    const recommended = await (await fetch(`${h.base}/tailscale/web-url`, { headers: { 'X-COS-Token': API_TOKEN } })).json()
+    expect(recommended.phoneUrl).toBe(`http://${DNS}:3141/control`)
+    expect(recommended.magicDnsHttpsUrl).toBeNull()
+  })
+
   it('answers 401 without the pairing token, and with a wrong one', async () => {
     const h = await start()
     expect((await phoneLink(h, {})).status).toBe(401)

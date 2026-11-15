@@ -1,4 +1,12 @@
-## 7.0.47 — Shared chat navigation and phone notification preparation
+## 7.0.48: Secure phone links and notification destinations
+
+2026-11-15.
+
+- Phone sign-in QRs and copied links prefer trusted HTTPS when the certificate and listener are ready. Displayed web codes update to the selected address without changing their expiry.
+- Session notifications open the Sessions list; message notifications open their COS message. Mixed updates stay together in Messages.
+- Phone pings retain per-device opt-in, preview privacy controls, quiet hours and interruption limits.
+
+## 7.0.47: Shared chat navigation and phone notification preparation
 
 2026-11-15. Private candidate; activation and publication remain separate.
 
