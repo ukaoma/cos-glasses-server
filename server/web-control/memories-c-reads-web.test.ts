@@ -78,6 +78,8 @@ describe('Today reads needsYou.total', () => {
     expect(todayRead({ details: OLD })).toEqual({ state: 'answered', n: 7 })
     expect(todayRead({ details: {} })).toEqual({ state: 'failed', n: 0 })
     expect(todayRead(null)).toEqual({ state: 'failed', n: 0 })
+    // Q1 18:23 survivor: a needsYou that is an array is not the server's object, so the older field stays in charge.
+    expect(todayRead({ details: { ...OLD, needsYou: [19] } })).toEqual({ state: 'answered', n: 7 })
   })
   it('a partial answer waits the minute before Today reads it again (no CLI on every paint)', () => {
     const cond = /if \(force === true \|\| Date\.now\(\) - TODAY\.extraAt > 60000 \|\| TODAY\.voices\.state === 'failed' \|\| \(TODAY\.memories\.state === 'failed' && !TODAY\.memories\.partial\)\) \{/
