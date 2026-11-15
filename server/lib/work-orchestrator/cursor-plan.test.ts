@@ -13,6 +13,7 @@ import {
 } from './cursor-plan.js'
 import { UsageMonitor, UsageProbeError, USAGE_BREAKER_MS, USAGE_FAILURE_HOLD_MS, USAGE_POLL_MS, headroomOf, safeFailureText, viewOf, type UsageEntry } from './usage.js'
 import { planLine, planPane } from './plan-pane.js'
+import { readPlan, readUsage } from '../../routes/work-orchestrator.js'
 
 const NOW = Date.parse('2026-11-15T02:30:00Z') // 8:30 PM CST, Nov 14
 const TZ = 'America/Chicago'
@@ -60,7 +61,7 @@ describe('the switch (COS_CURSOR_PLAN_USAGE)', () => {
   it('off: the monitor never probes Cursor (no Keychain read, no network), and Cursor reads as before 7.0.45', async () => {
     const cursor = vi.fn(async () => parseCursorUsage(usageReply())!)
     const m = new UsageMonitor({ probes: { claude: async () => { throw new UsageProbeError('timed_out', 'timed out') }, codex: async () => { throw new UsageProbeError('timed_out', 'timed out') }, cursor }, now: () => NOW, cursorPlan: false })
-    await m.ensureFresh(0); await m.onDemand(true); await m.forPlan(); await m.refresh('cursor')
+    await m.ensureFresh(0); await m.onDemand(true, true); await m.forPlan(); await m.refresh('cursor')
     expect(cursor).not.toHaveBeenCalled()
     expect(m.views().find(v => v.provider === 'cursor')!.note).toBe('not read: Cursor usage needs its app or a Keychain read, neither approved')
     expect(planLine(m.entry('cursor'), NOW, TZ, m.cursorPlanOn())).toMatchObject({ state: 'no_plan', short: 'No plan reading', long: 'No plan reading. Cursor does not report its plan to COS.' })
@@ -287,8 +288,8 @@ describe('the monitor, switched on: the same holds as Claude', () => {
       const fetchFn = fakeFetch(goodReplies)
       const m = new UsageMonitor({ probes: { claude: async () => parseCursorUsage(usageReply())!, codex: async () => parseCursorUsage(usageReply())!, cursor: () => probeCursorUsage(deps({ exec, fetch: fetchFn })) }, now: () => now, cursorPlan: true })
       const quiet = vi.spyOn(console, 'warn').mockImplementation(() => {})
-      await m.onDemand(true)
-      now += USAGE_FAILURE_HOLD_MS - 1000; await m.onDemand(true); await m.refresh('cursor')
+      await m.onDemand(true, true)
+      now += USAGE_FAILURE_HOLD_MS - 1000; await m.onDemand(true, true); await m.refresh('cursor')
       quiet.mockRestore()
       expect(exec).toHaveBeenCalledTimes(1); expect(fetchFn).not.toHaveBeenCalled()
       expect(m.entry('cursor')).toMatchObject({ lastFailure: 'keychain_refused', holdUntil: NOW + USAGE_FAILURE_HOLD_MS })
@@ -303,9 +304,9 @@ describe('the monitor, switched on: the same holds as Claude', () => {
     let now = NOW
     const failing = vi.fn(async () => { throw new UsageProbeError('sign_in_expired', 'Cursor sign-in expired') })
     const m = new UsageMonitor({ probes: { claude: async () => parseCursorUsage(usageReply())!, codex: async () => parseCursorUsage(usageReply())!, cursor: failing }, now: () => now, cursorPlan: true })
-    await m.onDemand(false)
+    await m.onDemand(false, true)
     expect(failing).toHaveBeenCalledTimes(1)
-    await m.onDemand(true); await m.refresh('cursor')
+    await m.onDemand(true, true); await m.refresh('cursor')
     expect(failing).toHaveBeenCalledTimes(1) // held
     now += USAGE_FAILURE_HOLD_MS + 1; await m.refresh('cursor')
     now += USAGE_FAILURE_HOLD_MS + 1; await m.refresh('cursor')
@@ -325,7 +326,7 @@ describe('the monitor, switched on: the same holds as Claude', () => {
     const views = await m.forPlan()
     expect(exec).not.toHaveBeenCalled(); expect(calls()).toBe(0)
     expect(views.find(v => v.provider === 'cursor')).toMatchObject({ state: 'unknown', headroomPct: null })
-    await m.onDemand(false)
+    await m.onDemand(false, true)
     expect(exec).toHaveBeenCalledTimes(1); expect(calls()).toBe(3) // opening Usage does read
     await m.forPlan()
     expect(exec).toHaveBeenCalledTimes(1); expect(calls()).toBe(3)
@@ -344,16 +345,25 @@ describe('the monitor, switched on: the same holds as Claude', () => {
       expect(exec).not.toHaveBeenCalled(); expect((fetchFn as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0)
     } finally { vi.useRealTimers() }
   })
+  it('lead 21:42: only the plan ruler route (Usage open, Refresh) reads Cursor; GET /work/orchestrator/usage never does', async () => {
+    const exec = okExec(), fetchFn = fakeFetch(goodReplies)
+    const m = new UsageMonitor({ probes: { claude: async () => parseCursorUsage(usageReply())!, codex: async () => parseCursorUsage(usageReply())!, cursor: () => probeCursorUsage(deps({ exec, fetch: fetchFn })) }, now: () => NOW, cursorPlan: true })
+    await readUsage(false, m); await readUsage(true, m)
+    expect(exec).not.toHaveBeenCalled()
+    const pane = await readPlan(true, m, () => NOW)
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(pane.lines.find(l => l.provider === 'cursor')).toMatchObject({ state: 'fresh', usedPct: 62 })
+  })
   it('re-reads Cursor only past 10 minutes on the usage route (2 on Refresh), and never for a Work plan', async () => {
     let now = NOW
     const cursor = vi.fn(async () => parseCursorUsage(usageReply())!)
     const m = new UsageMonitor({ probes: { claude: async () => parseCursorUsage(usageReply())!, codex: async () => parseCursorUsage(usageReply())!, cursor }, now: () => now, cursorPlan: true })
-    await m.onDemand(false); now += 5 * 60_000; await m.onDemand(false)
+    await m.onDemand(false, true); now += 5 * 60_000; await m.onDemand(false, true)
     expect(cursor).toHaveBeenCalledTimes(1)
     // Q1 21:13: a Work plan never reads Cursor (no Keychain prompt while he is away); it sees the cached reading.
     now += 5 * 60_000; await m.forPlan(); await m.forPlan()
     expect(cursor).toHaveBeenCalledTimes(1)
-    now += 6 * 60_000; await m.onDemand(false)
+    now += 6 * 60_000; await m.onDemand(false, true)
     expect(cursor).toHaveBeenCalledTimes(2)
   })
 })

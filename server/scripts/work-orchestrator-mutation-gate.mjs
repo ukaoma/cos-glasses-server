@@ -105,9 +105,10 @@ const mutations = [
   // 6.83.0 release: usage is read on demand; the timer is opt-in (COS_WORK_USAGE_POLL=1) and off by default.
   ['usage-poll-opt-in', US, "return env.COS_WORK_USAGE_POLL === '1' }", "return env.COS_WORK_USAGE_POLL !== '0' }"],
   ['usage-poll-gate', US, '    if (this.timer || !(this.options.pollEnabled ?? usagePollOptedIn(env))) return\n', '    if (this.timer) return\n'],
-  ['usage-on-demand-reads', US, 'async onDemand(refresh = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS); return this.views() }', 'async onDemand(refresh = false): Promise<UsageView[]> { return this.views() }'],
-  ['usage-on-demand-cache', US, '(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS)', '(USAGE_FRESH_MS)'],
-  ['usage-on-demand-refresh', US, ' ? USAGE_FRESH_MS : USAGE_CACHE_MS)', ' ? USAGE_CACHE_MS : USAGE_CACHE_MS)'],
+  // 7.0.45: onDemand gained `cursor` (only the plan ruler route reads Cursor); the reads it guards are unchanged.
+  ['usage-on-demand-reads', US, 'async onDemand(refresh = false, cursor = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS, undefined, cursor); return this.views() }', 'async onDemand(refresh = false, cursor = false): Promise<UsageView[]> { return this.views() }'],
+  ['usage-on-demand-cache', US, '(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS, undefined, cursor)', '(USAGE_FRESH_MS, undefined, cursor)'],
+  ['usage-on-demand-refresh', US, ' ? USAGE_FRESH_MS : USAGE_CACHE_MS, undefined, cursor)', ' ? USAGE_CACHE_MS : USAGE_CACHE_MS, undefined, cursor)'],
   // 7.0.45: forPlan now also says "not Cursor" (Q1 21:13); the 2-minute age it guards is unchanged.
   ['usage-plan-fresh', US, 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS, undefined, false);', 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_CACHE_MS, undefined, false);'],
   ['usage-cache-window', US, 'export const USAGE_CACHE_MS = 10 * 60_000\n', 'export const USAGE_CACHE_MS = 60 * 60_000\n'],
@@ -192,8 +193,8 @@ const mutations = [
   // Lead 13:00: Miles's open rule, killed by the execution test (real pane, renderUsageView, route and monitor).
   ['lead-pane-refresh-on-open', PR, "api('/api/usage/plan' + (refresh ? '?refresh=1' : '')", "api('/api/usage/plan' + '?refresh=1'"],
   ['lead-repaint-reads', PR, '    if (!el.innerHTML) paint();\n  }', '    if (!el.innerHTML) paint();\n    read(false);\n  }'],
-  ['lead-open-reads-at-2-min', US, 'await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS)', 'await this.ensureFresh(USAGE_FRESH_MS)'],
-  ['lead-refresh-reads-at-10-min', US, 'await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS)', 'await this.ensureFresh(USAGE_CACHE_MS)'],
+  ['lead-open-reads-at-2-min', US, 'await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS, undefined, cursor)', 'await this.ensureFresh(USAGE_FRESH_MS, undefined, cursor)'],
+  ['lead-refresh-reads-at-10-min', US, 'await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS, undefined, cursor)', 'await this.ensureFresh(USAGE_CACHE_MS, undefined, cursor)'],
   // 7.0.45 Cursor plan read (U1): each guard of cursor-plan.ts and its switch, proven by a named test.
   ["cur-switch-any-value", CP, "return env.COS_CURSOR_PLAN_USAGE === '1' }", "return !!env.COS_CURSOR_PLAN_USAGE }"],
   ["cur-monitor-refresh-ignores-switch", US, "    if (p === 'cursor' && !this.cursorPlanOn()) return Promise.resolve() // the switch is checked before anything else\n", ""],
@@ -235,6 +236,8 @@ const mutations = [
   ["cur-cap-no-abort", CP, "  const tooBig = () => { onCap(); return new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }", "  const tooBig = () => { return new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }"],
   ["cur-plan-reads-cursor", US, "await this.ensureFresh(USAGE_FRESH_MS, undefined, false)", "await this.ensureFresh(USAGE_FRESH_MS)"],
   ["cur-poll-reads-cursor", US, "    const tick = () => { void this.refresh('claude'); void this.refresh('codex') }", "    const tick = () => { void this.refresh('claude'); void this.refresh('codex'); void this.refresh('cursor') }"],
+  ["cur-usage-route-reads-cursor", US, "  async onDemand(refresh = false, cursor = false): Promise<UsageView[]>", "  async onDemand(refresh = false, cursor = true): Promise<UsageView[]>"],
+  ["cur-ruler-route-skips-cursor", OR, "  await monitor.onDemand(refresh, true) //", "  await monitor.onDemand(refresh) //"],
   ["cur-off-serves-plan-name", US, "{ ...base, plan: null, reason: null, lastGoodAt: null, ageSec: null, state: 'unknown',", "{ ...base, state: 'unknown',"],
   ['q1-escape-long', PR, "' + esc(l.long) + '</div></div>'", "' + l.long + '</div></div>'"],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],

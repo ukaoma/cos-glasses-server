@@ -48,7 +48,7 @@ export interface WorkOrchestratorDeps {
 export const readUsage = (refresh: boolean, monitor: UsageMonitor = orchestratorUsage()): Promise<UsageView[]> => monitor.onDemand(refresh)
 /** GET /usage/plan: the same on-demand read, then the ruler's lines (plan-pane.ts). */
 export const readPlan = async (refresh: boolean, monitor: UsageMonitor = orchestratorUsage(), now: () => number = Date.now): Promise<PlanPane> => {
-  await monitor.onDemand(refresh)
+  await monitor.onDemand(refresh, true) // the plan ruler: the one route that reads Cursor (Usage open and Refresh)
   return planPane(USAGE_PROVIDERS.map(p => monitor.entry(p)), now(), undefined, monitor.cursorPlanOn())
 }
 

@@ -358,7 +358,8 @@ export class UsageMonitor {
   // must not raise the Keychain prompt or wait on it; the plan sees Cursor's cached reading.
   async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS, undefined, false); return this.views() }
   /** On demand (GET /usage): answer from a reading younger than 10 minutes; `refresh` tightens that to 2. */
-  async onDemand(refresh = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS); return this.views() }
+  // `cursor`: only the plan ruler's route (Usage open, Refresh) passes true (lead 21:42); GET /work/orchestrator/usage does not.
+  async onDemand(refresh = false, cursor = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS, undefined, cursor); return this.views() }
   /** A plan-lane COS job on this provider finished with an answer (never a key-lane job). Saved at most once a minute. */
   noteAnswered(p: UsageProvider): void {
     const e = this.entries[p], now = this.now()
