@@ -1,3 +1,22 @@
+## 7.0.45 - A response's images open as one set you can swipe through, and the review switch leaves Memory settings
+
+2026-11-14. 7.0.44 plus the changes below; everything in 7.0.44 is in this update too (see its entry), so one install from 7.0.43 carries both.
+
+**On for everyone, one line each:**
+- Control Web: in a session's reader and in Today's session sheet, opening any image of a response shows that image with the response's other images as one set, in the order shown. Previous and Next, the left and right arrow keys, and a sideways swipe move through them, with a counter ("2 of 3"). The ends do not wrap. A tap on the dark area around the image closes it, and closing lands where he was. One image shows as before (Miles 19:29).
+- Control Web: Memory settings no longer shows the read-only "Review new memories before recall" row (Miles's 15:06 pick).
+
+**In detail:**
+- **One set per response.** (W1.) The set is every output image between two of his messages, so images from one call and images from two separate calls of the same response move as one. Images a session looked at in a step (a Read, a screenshot) stay their own set. A vertical drag, a short drag or two fingers never moves; a touch that moved 10 px or more never closes. Moving adds no history entry and Back closes the viewer once. Only the shown image and the next one are fetched, through the same route as before; a failed image says so with Retry and he can move past it.
+- **The pack test.** (W1, test only.) A test asks npm what ships and fails if any mutation gate, gate anchor tool or test file is in the package, so a new gate cannot ship by mistake (7.0.44's catch-up gate did, and was caught before install).
+
+**Not covered, said plainly:**
+- **Not on a real phone:** the swipe was checked in WebKit with touch events sent to the viewer; a real finger on his phone is the last check.
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+
 ## 7.0.44 - The Memories page as one index with one Needs you number, Skip this meeting, and a reader that opens on its question
 
 2026-11-14. 7.0.43 plus the changes below; everything in 7.0.43 is in this update too (see its entry).
