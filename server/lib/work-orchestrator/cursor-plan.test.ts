@@ -177,7 +177,9 @@ describe('Q1 21:13: bounds, a broken token, a huge reply, and TLS checks off', (
   it('a reply is capped while it streams: an endless body is cancelled just past the cap, a stated huge length is never read', async () => {
     let pulled = 0, cancelled = false
     const endless: FetchFn = async () => ({ status: 200, headers: { get: () => null }, text: async () => { throw new Error('not buffered') },
-      body: new ReadableStream<Uint8Array>({ pull(c) { pulled += 64 * 1024; c.enqueue(new Uint8Array(64 * 1024)) }, cancel() { cancelled = true } }, { highWaterMark: 0 }) })
+      // Bounded (Q1 21:31): it ends after 4 x the cap, so with the cap removed this test fails fast (read whole, never
+      // cancelled) instead of hanging and growing a worker without limit.
+      body: new ReadableStream<Uint8Array>({ pull(c) { if (pulled >= 4 * MAX_REPLY_BYTES) return c.close(); pulled += 64 * 1024; c.enqueue(new Uint8Array(64 * 1024)) }, cancel() { cancelled = true } }, { highWaterMark: 0 }) })
     let signal: AbortSignal | null = null
     const watched: FetchFn = async (url, init) => { signal = init.signal; return endless(url, init) }
     await expect(probeCursorUsage(deps({ fetch: watched }))).rejects.toMatchObject({ code: 'unknown_shape' })
@@ -187,7 +189,7 @@ describe('Q1 21:13: bounds, a broken token, a huge reply, and TLS checks off', (
     let read = false
     const stated: FetchFn = async () => ({ status: 200, headers: { get: (n: string) => (n === 'content-length' ? String(10 * 1024 * 1024) : null) }, text: async () => '{}',
       // highWaterMark 0: the stream pulls only when someone reads, so `read` stays false unless the reader runs.
-      body: new ReadableStream<Uint8Array>({ pull(c) { read = true; c.enqueue(new Uint8Array(10)) } }, { highWaterMark: 0 }) })
+      body: new ReadableStream<Uint8Array>({ pull(c) { if (read) return c.close(); read = true; c.enqueue(new Uint8Array(10)) } }, { highWaterMark: 0 }) })
     await expect(probeCursorUsage(deps({ fetch: stated }))).rejects.toMatchObject({ code: 'unknown_shape' })
     expect(read).toBe(false)
   })
