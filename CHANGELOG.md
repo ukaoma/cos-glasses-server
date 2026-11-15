@@ -1,4 +1,4 @@
-## 7.0.48: Secure phone links and notification destinations
+## 7.0.48 - Secure phone links and notification destinations
 
 2026-11-15.
 
@@ -7,7 +7,7 @@
 - Phone pings retain per-device opt-in, preview privacy controls, quiet hours and interruption limits.
 - After Jump to latest, scrolling back keeps your place instead of being pulled to the bottom during layout changes.
 
-## 7.0.47: Shared chat navigation and phone notification preparation
+## 7.0.47 - Shared chat navigation and phone notification preparation
 
 2026-11-15. Private candidate; activation and publication remain separate.
 
