@@ -11,7 +11,7 @@
   var REASONS = { outside_workspace: 'Not available on this Mac.', missing: 'Not available on this Mac.',
     secret_file: 'Not shown: this file may hold secrets.', unavailable: 'This image is temporarily unavailable. Retry in a moment.', too_large: 'Too large to show here.' };
   var style = document.createElement('style');
-  style.textContent = '.rm-item{display:flex;flex-direction:column;gap:6px;max-width:180px}.rm-label,.rm-status{font:12px/1.4 var(--body);color:var(--sub);overflow-wrap:anywhere}.rm-label{color:var(--text)}.rm-item .cx-thumb{cursor:pointer}.rm-view{position:fixed;inset:0;z-index:10000;background:var(--bg,#171717);color:var(--text,#fff);display:flex;flex-direction:column;padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));gap:16px}.rm-view-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.rm-view-label{margin:0;overflow-wrap:anywhere;font:16px/1.4 var(--body)}.rm-view-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}.rm-view img{max-width:100%;max-height:100%;object-fit:contain}.rm-viewing{overflow:hidden!important}.rm-files{display:flex;flex-direction:column;gap:8px;margin-top:10px}.rm-file{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:10px 12px;border:1px solid var(--panel-border);border-radius:12px;background:var(--panel);max-width:560px}.rm-file-icon{grid-row:1/span 2;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;background:var(--bg);border:1px solid var(--panel-border);font:600 11px/1 var(--body);letter-spacing:.04em;color:var(--sub)}.rm-file-name{font:500 14px/1.35 var(--body);color:var(--text);overflow-wrap:anywhere;min-width:0}.rm-file-meta{font:12px/1.4 var(--body);color:var(--sub);grid-column:2;min-width:0}.rm-file-acts{grid-column:3;grid-row:1/span 2;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.rm-file-acts .cx-btn{min-height:44px}.rm-file .rm-status{grid-column:1/-1}.rm-file.off{opacity:.78}.rm-view-acts{display:flex;gap:8px;align-items:center}.rm-text{flex:1;min-height:0;width:100%;overflow:auto;margin:0;padding:12px;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);color:var(--ink);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.rm-frame{flex:1;min-height:0;width:100%;border:1px solid var(--panel-border);border-radius:10px;background:#fff}.rm-tools{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0 2px;align-items:flex-start}.rm-tools.before{margin:2px 0 10px}.rm-tool{display:flex;flex-direction:column;gap:4px;width:132px;min-width:0}.rm-tool-thumb{display:flex;align-items:center;justify-content:center;width:132px;height:88px;padding:0;overflow:hidden;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);color:var(--sub);font:12px/1.3 var(--body);cursor:pointer;text-align:center}.rm-tool-thumb:disabled{cursor:default}.rm-tool-thumb:focus-visible{outline:2px solid var(--accent,currentColor);outline-offset:2px}.rm-tool-thumb img{width:100%;height:100%;object-fit:cover;object-position:top center;display:block}.rm-tool-cap{display:flex;justify-content:space-between;gap:6px;font:12px/1.3 var(--body);min-width:0}.rm-tool-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rm-tool-pos{color:var(--sub);white-space:nowrap}.rm-tool .rm-status{font-size:11.5px}.rm-tool-more{display:flex;align-items:center;justify-content:center;width:88px;height:88px;border:1px dashed var(--panel-border);border-radius:10px;color:var(--sub);font:13px/1.3 var(--body)}@media (max-width:599px){.rm-tool{width:104px}.rm-tool-thumb{width:104px;height:72px}.rm-tool-more{width:72px;height:72px}}@media (max-width:599px){.rm-file{grid-template-columns:40px minmax(0,1fr)}.rm-file-icon{width:40px;height:40px}.rm-file-acts{grid-column:1/-1;grid-row:auto;justify-content:flex-start}}';
+  style.textContent = '.rm-item{display:flex;flex-direction:column;gap:6px;max-width:180px}.rm-label,.rm-status{font:12px/1.4 var(--body);color:var(--sub);overflow-wrap:anywhere}.rm-label{color:var(--text)}.rm-item .cx-thumb{cursor:pointer}.rm-view{position:fixed;inset:0;z-index:10000;background:var(--bg,#171717);color:var(--text,#fff);display:flex;flex-direction:column;padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));gap:16px}.rm-view-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.rm-view-label{margin:0;overflow-wrap:anywhere;font:16px/1.4 var(--body)}.rm-view-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}.rm-view img{max-width:100%;max-height:100%;object-fit:contain}.rm-view-nav{display:flex;align-items:center;justify-content:center;gap:16px}.rm-view-step{min-width:44px;min-height:44px;padding:0;display:inline-flex;align-items:center;justify-content:center}.rm-view-step:disabled{opacity:.35}.rm-view-count{min-width:64px;text-align:center;font:14px/1.4 var(--body);color:var(--sub);font-variant-numeric:tabular-nums}.rm-viewing{overflow:hidden!important}.rm-files{display:flex;flex-direction:column;gap:8px;margin-top:10px}.rm-file{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:10px 12px;border:1px solid var(--panel-border);border-radius:12px;background:var(--panel);max-width:560px}.rm-file-icon{grid-row:1/span 2;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;background:var(--bg);border:1px solid var(--panel-border);font:600 11px/1 var(--body);letter-spacing:.04em;color:var(--sub)}.rm-file-name{font:500 14px/1.35 var(--body);color:var(--text);overflow-wrap:anywhere;min-width:0}.rm-file-meta{font:12px/1.4 var(--body);color:var(--sub);grid-column:2;min-width:0}.rm-file-acts{grid-column:3;grid-row:1/span 2;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.rm-file-acts .cx-btn{min-height:44px}.rm-file .rm-status{grid-column:1/-1}.rm-file.off{opacity:.78}.rm-view-acts{display:flex;gap:8px;align-items:center}.rm-text{flex:1;min-height:0;width:100%;overflow:auto;margin:0;padding:12px;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);color:var(--ink);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.rm-frame{flex:1;min-height:0;width:100%;border:1px solid var(--panel-border);border-radius:10px;background:#fff}.rm-tools{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0 2px;align-items:flex-start}.rm-tools.before{margin:2px 0 10px}.rm-tool{display:flex;flex-direction:column;gap:4px;width:132px;min-width:0}.rm-tool-thumb{display:flex;align-items:center;justify-content:center;width:132px;height:88px;padding:0;overflow:hidden;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);color:var(--sub);font:12px/1.3 var(--body);cursor:pointer;text-align:center}.rm-tool-thumb:disabled{cursor:default}.rm-tool-thumb:focus-visible{outline:2px solid var(--accent,currentColor);outline-offset:2px}.rm-tool-thumb img{width:100%;height:100%;object-fit:cover;object-position:top center;display:block}.rm-tool-cap{display:flex;justify-content:space-between;gap:6px;font:12px/1.3 var(--body);min-width:0}.rm-tool-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rm-tool-pos{color:var(--sub);white-space:nowrap}.rm-tool .rm-status{font-size:11.5px}.rm-tool-more{display:flex;align-items:center;justify-content:center;width:88px;height:88px;border:1px dashed var(--panel-border);border-radius:10px;color:var(--sub);font:13px/1.3 var(--body)}@media (max-width:599px){.rm-tool{width:104px}.rm-tool-thumb{width:104px;height:72px}.rm-tool-more{width:72px;height:72px}}@media (max-width:599px){.rm-file{grid-template-columns:40px minmax(0,1fr)}.rm-file-icon{width:40px;height:40px}.rm-file-acts{grid-column:1/-1;grid-row:auto;justify-content:flex-start}}';
   document.head.appendChild(style);
 
   function element(tag, cls, text) {
@@ -65,9 +65,10 @@
       pump();
     });
   }
-  function fetchImage(scope, item, variant, target, ready, failed) {
+  // 7.0.45: background (the viewer's preload of the next image) waits its turn behind what is on screen.
+  function fetchImage(scope, item, variant, target, ready, failed, background) {
     var generation = ++target.generation;
-    imageRequest(path(scope, item.id, variant), function () { return scope.alive && target.active !== false && generation === target.generation; }, variant === 'phone').then(function (blob) {
+    imageRequest(path(scope, item.id, variant), function () { return scope.alive && target.active !== false && generation === target.generation; }, variant === 'phone' && !background).then(function (blob) {
       if (!scope.alive || target.active === false || generation !== target.generation) return;
       if (!imageBlob(blob)) throw new Error('Not a supported image');
       revoke(target); target.url = URL.createObjectURL(blob); ready(target.url);
@@ -130,7 +131,8 @@
   // keepEntry: another viewer replaces this one and takes over its history entry.
   function closeViewer(restore, keepEntry) {
     var v = viewer; if (!v) return;
-    viewer = null; v.generation++; revoke(v); if (v.unpin) v.unpin(); v.el.remove(); document.documentElement.classList.remove('rm-viewing');
+    viewer = null; v.generation++; revoke(v); if (v.cache) v.cache.forEach(function (t) { if (t) { t.generation++; t.active = false; revoke(t); } });
+    if (v.unpin) v.unpin(); v.el.remove(); document.documentElement.classList.remove('rm-viewing');
     if (v.pushed && !keepEntry) { v.pushed = false; dropEntry(); }
     if (restore !== false && v.opener && v.opener.isConnected) { try { v.opener.focus({ preventScroll: true }); } catch (_e) { v.opener.focus(); } }
     if (restore !== false) restoreSpots(v.spots);
@@ -165,36 +167,141 @@
       if (frame) { if (window.cancelAnimationFrame) window.cancelAnimationFrame(frame); else clearTimeout(frame); frame = 0; }
     };
   }
+  // 7.0.45 (Miles 19:29): a response's images open as one set. Opening any of them shows THAT image with the rest of its
+  // slot (one turn's output images, or one step's images) in the order shown; Previous and Next, the left and right arrow
+  // keys, and a horizontal swipe move through them, with a counter ("2 of 3"). No wrap: the end arrow is disabled. One image:
+  // no arrows and no counter, as before. A tap on the dark area around the image closes it. Moving never adds a history
+  // entry, never re-reads the reader, and closing lands on the thumbnail he opened, scrolled as he left it.
+  var SWIPE_MIN_PX = 40, TAP_MAX_PX = 10;
+  // A response is every assistant turn between two of his (the reader draws a turn per transcript row, so three images
+  // sent by one call share a turn, and images from two calls sit in two turns of the same response). Its output images
+  // are one set, in the order drawn. A step's looked-at images (a Read, a screenshot) stay their own set.
+  function responseOf(slot) {
+    var t = slot && slot.closest ? slot.closest('.turn') : null;
+    if (!t) return slot;
+    for (var p = t.previousElementSibling; p; p = p.previousElementSibling) if (p.classList && p.classList.contains('turn') && p.classList.contains('user')) return p;
+    return t.parentElement || slot;
+  }
+  function setOf(scope, item) {
+    var home = null, homeSlot = null;
+    scope.records.forEach(function (record, slot) { if (!home && record.items && record.items.indexOf(item) >= 0) { home = record; homeSlot = slot; } });
+    var items = home ? home.items : [item];
+    if (home && home.kind === 'output') {
+      var key = responseOf(homeSlot), slots = [];
+      scope.records.forEach(function (record, slot) { if (record.kind === 'output' && slot.isConnected !== false && responseOf(slot) === key) slots.push(slot); });
+      if (slots.length > 1 && slots[0].compareDocumentPosition) slots.sort(function (a, b) { return a.compareDocumentPosition(b) & 4 ? -1 : 1; });
+      items = []; slots.forEach(function (slot) { items = items.concat(scope.records.get(slot).items); });
+    }
+    var set = items.filter(function (it) { return it.active !== false && it.open; });
+    return set.indexOf(item) >= 0 ? set : [item];
+  }
+  function chevron(left) {
+    var NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS ? document.createElementNS(NS, 'svg') : element('svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '22'); svg.setAttribute('height', '22'); svg.setAttribute('aria-hidden', 'true');
+    var p = document.createElementNS ? document.createElementNS(NS, 'path') : element('path');
+    p.setAttribute('d', left ? 'M15 5l-7 7 7 7' : 'M9 5l7 7-7 7'); p.setAttribute('fill', 'none'); p.setAttribute('stroke', 'currentColor');
+    p.setAttribute('stroke-width', '2'); p.setAttribute('stroke-linecap', 'round'); p.setAttribute('stroke-linejoin', 'round');
+    svg.appendChild(p); return svg;
+  }
   function openViewer(scope, item) {
     if (!scope.alive || item.active === false) return;
     var had = viewer; closeViewer(false, true);
+    var set = setOf(scope, item), many = set.length > 1;
     var el = element('div', 'rm-view'), head = element('div', 'rm-view-head'), body = element('div', 'rm-view-body');
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', 'Image preview: ' + item.label);
     var close = button('Close image', function () { closeViewer(); });
-    head.appendChild(element('h2', 'rm-view-label', item.label)); head.appendChild(close); el.appendChild(head); el.appendChild(body);
-    var v = viewer = { el: el, body: body, scope: scope, opener: item.open, close: close, url: '', generation: 0 };
+    var label = element('h2', 'rm-view-label', item.label);
+    head.appendChild(label); head.appendChild(close); el.appendChild(head); el.appendChild(body);
+    var v = viewer = { el: el, body: body, scope: scope, opener: item.open, close: close, url: '', generation: 0, set: set, index: set.indexOf(item), cache: [] };
+    if (many) {
+      var nav = element('div', 'rm-view-nav'), counter = element('span', 'rm-view-count');
+      var prev = button('', function () { step(-1); }, 'cx-btn quiet rm-view-step'), next = button('', function () { step(1); }, 'cx-btn quiet rm-view-step');
+      prev.setAttribute('aria-label', 'Previous image'); next.setAttribute('aria-label', 'Next image');
+      prev.appendChild(chevron(true)); next.appendChild(chevron(false));
+      nav.appendChild(prev); nav.appendChild(counter); nav.appendChild(next); el.appendChild(nav);
+      v.prev = prev; v.next = next; v.counter = counter;
+    }
     takeOver(v, had);
     document.body.appendChild(el); document.documentElement.classList.add('rm-viewing'); close.focus();
-    function load() {
-      body.textContent = ''; var status = element('p', 'rm-status', 'Loading image…'); status.setAttribute('role', 'status'); body.appendChild(status);
-      fetchImage(scope, item, 'phone', v, function (url) {
-        if (viewer !== v) return;
-        body.textContent = ''; var img = element('img'); img.alt = item.label;
-        img.addEventListener('error', function () { if (viewer === v && v.url === url) { revoke(v); failure(new Error('Image decode failed')); } });
-        img.src = url; body.appendChild(img);
-      }, failure);
+    // One fetch target per image of the set: the shown one, and the next one preloaded. The rest are not fetched.
+    function target(i) { return v.cache[i] || (v.cache[i] = { generation: 0, url: '', active: true, state: '' }); }
+    function drop(i) { var t = v.cache[i]; if (t) { t.generation++; revoke(t); t.state = ''; } }
+    function status(words) { var s = element('p', 'rm-status', words); s.setAttribute('role', 'status'); return s; }
+    function show(i) {
+      v.index = i; var it = set[i];
+      label.textContent = it.label; el.setAttribute('aria-label', 'Image preview: ' + it.label);
+      if (many) {
+        v.counter.textContent = (i + 1) + ' of ' + set.length; v.counter.setAttribute('aria-label', 'Image ' + (i + 1) + ' of ' + set.length);
+        v.prev.disabled = i === 0; v.next.disabled = i === set.length - 1;
+        // An arrow that just went quiet at an end hands focus to the other one, so the keyboard is never left nowhere.
+        if (document.activeElement && document.activeElement.disabled) (v.prev.disabled ? v.next : v.prev).focus();
+      }
+      set.forEach(function (_x, j) { if (j !== i && j !== i + 1) drop(j); });
+      load(i, true);
     }
-    function failure(err) {
-      if (viewer !== v) return;
-      body.textContent = ''; var status = element('p', 'rm-status', failWords(err)); status.setAttribute('role', 'status'); body.appendChild(status);
-      if (retryable(err)) body.appendChild(button('Retry image', load));
+    function load(i, shown) {
+      var it = set[i], t = target(i);
+      if (shown) { body.textContent = ''; body.appendChild(status(it.unavailable || 'Loading image…')); }
+      if (it.unavailable) { t.state = 'failed'; return; }
+      if (t.url) { if (shown) draw(i, t.url); return; }
+      if (t.state === 'loading') return;
+      // A preload that failed is tried again when he gets to it.
+      if (t.state === 'failed' && !shown) return;
+      t.state = 'loading';
+      fetchImage(scope, it, 'phone', t, function (url) {
+        t.state = 'ready';
+        if (viewer === v && v.index === i) { draw(i, url); if (i + 1 < set.length) load(i + 1, false); }
+      }, function (err) {
+        t.state = 'failed';
+        if (viewer === v && v.index === i) failure(i, err);
+      }, !shown);
     }
-    load();
+    function draw(i, url) {
+      body.textContent = ''; var img = element('img'); img.alt = set[i].label;
+      img.addEventListener('error', function () { var t = v.cache[i]; if (viewer === v && v.index === i && t && t.url === url) { revoke(t); t.state = 'failed'; failure(i, new Error('Image decode failed')); } });
+      img.src = url; body.appendChild(img);
+      if (i + 1 < set.length) load(i + 1, false);
+    }
+    function failure(i, err) {
+      body.textContent = ''; body.appendChild(status(failWords(err)));
+      if (retryable(err)) body.appendChild(button('Retry image', function () { drop(i); load(i, true); }));
+    }
+    function step(d) {
+      var i = v.index + d;
+      if (viewer !== v || i < 0 || i >= set.length) return;
+      show(i);
+    }
+    v.step = step;
+    // A swipe: one finger, mostly sideways, at least SWIPE_MIN_PX. Two fingers (a pinch) or a mostly vertical drag never
+    // moves to another image. A tap (under TAP_MAX_PX) on the dark area itself closes; on the image or a control it does not.
+    var touch = null, movedAt = 0;
+    body.addEventListener('touchstart', function (e) {
+      var ts = e.touches || [];
+      touch = ts.length === 1 ? { x: ts[0].clientX, y: ts[0].clientY, multi: false } : touch ? (touch.multi = true, touch) : { multi: true };
+    }, { passive: true });
+    body.addEventListener('touchend', function (e) {
+      var t0 = touch, ch = e.changedTouches && e.changedTouches[0];
+      if (e.touches && e.touches.length) return;
+      touch = null;
+      if (!t0 || !ch) return;
+      // A touch that moved TAP_MAX_PX or more is never a tap: the click the browser may send after it does not close.
+      if (t0.multi || Math.abs(ch.clientX - t0.x) >= TAP_MAX_PX || Math.abs(ch.clientY - t0.y) >= TAP_MAX_PX) movedAt = Date.now();
+      if (t0.multi || !many) return;
+      var dx = ch.clientX - t0.x, dy = ch.clientY - t0.y;
+      if (Math.abs(dx) >= SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
+    }, { passive: true });
+    body.addEventListener('touchcancel', function () { touch = null; }, { passive: true });
+    body.addEventListener('click', function (e) { if (e.target === body && Date.now() - movedAt > 600) closeViewer(); });
+    show(v.index);
   }
   // Window capture runs before Today's document capture handler. An image never pushes history or closes its parent.
   window.addEventListener('keydown', function (e) {
     if (!viewer) return;
     if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeViewer(); return; }
+    // 7.0.45: the left and right arrow keys move through the set (a text viewer's words are not a set, so it has no step).
+    if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && viewer.step && viewer.set && viewer.set.length > 1) {
+      e.preventDefault(); e.stopImmediatePropagation(); viewer.step(e.key === 'ArrowRight' ? 1 : -1); return;
+    }
     if (e.key === 'Tab') {
       var buttons = Array.prototype.slice.call(viewer.el.querySelectorAll('button')).filter(function (b) { return !b.hidden && !b.disabled; });
       var at = buttons.indexOf(document.activeElement), next = e.shiftKey ? (at <= 0 ? buttons.length - 1 : at - 1) : (at + 1) % buttons.length;
@@ -236,7 +343,7 @@
       if (scope.records.has(slot)) return;
       var raw; try { raw = JSON.parse(slot.getAttribute('data-reader-images') || '[]'); } catch (_e) { raw = []; }
       slot.textContent = ''; slot.className = 'cx-strip'; slot.setAttribute('aria-label', 'Session output images');
-      var record = { items: [] }; scope.records.set(slot, record);
+      var record = { items: [], kind: 'output' }; scope.records.set(slot, record);
       (Array.isArray(raw) ? raw : []).forEach(function (dto) {
         if (!dto || !ID.test(dto.id || '') || ['available', 'unavailable'].indexOf(dto.state) < 0) return;
         var item = { id: dto.id, label: String(dto.label || 'Output image').slice(0, 180), generation: 0, url: '', busy: false };
@@ -248,7 +355,7 @@
         item.retry = button('Retry image', function () { loadThumb(scope, item); }, 'link-btn'); item.retry.hidden = true;
         wrap.appendChild(item.open); wrap.appendChild(element('span', 'rm-label', item.label)); wrap.appendChild(item.status); wrap.appendChild(item.retry); slot.appendChild(wrap);
         if (dto.state === 'available') loadThumb(scope, item);
-        else { item.status.textContent = REASONS[dto.reason] || REASONS.unavailable; item.retry.hidden = dto.reason === 'outside_workspace' || dto.reason === 'missing' || dto.reason === 'secret_file'; }
+        else { item.unavailable = REASONS[dto.reason] || REASONS.unavailable; item.status.textContent = item.unavailable; item.retry.hidden = dto.reason === 'outside_workspace' || dto.reason === 'missing' || dto.reason === 'secret_file'; }
       });
     });
   }
@@ -284,7 +391,7 @@
       var raw; try { raw = JSON.parse(slot.getAttribute('data-reader-tools') || '{}'); } catch (_e) { raw = {}; }
       var list = raw && Array.isArray(raw.items) ? raw.items : [];
       slot.textContent = ''; slot.className = 'rm-tools' + (raw && raw.before ? ' before' : ''); slot.setAttribute('aria-label', 'Images the session looked at');
-      var record = { items: [] }; scope.records.set(slot, record);
+      var record = { items: [], kind: 'tools' }; scope.records.set(slot, record);
       var io = toolObserver(scope);
       list.forEach(function (dto) {
         if (!dto || !TOOL_ID.test(dto.id || '') || ['available', 'unavailable'].indexOf(dto.state) < 0) return;
@@ -302,7 +409,7 @@
         wrap.appendChild(item.open); wrap.appendChild(cap); wrap.appendChild(item.status); wrap.appendChild(item.retry); slot.appendChild(wrap);
         if (dto.state !== 'available') {
           item.open.textContent = 'Unavailable';
-          item.status.textContent = REASONS[dto.reason] || REASONS.unavailable;
+          item.unavailable = REASONS[dto.reason] || REASONS.unavailable; item.status.textContent = item.unavailable;
           item.retry.hidden = dto.reason !== 'unavailable' && !!dto.reason;
           return;
         }
