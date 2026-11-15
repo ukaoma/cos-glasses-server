@@ -80,6 +80,9 @@
     if (!scope.alive || item.active === false || item.busy) return;
     item.busy = true; item.open.textContent = 'Loading image…'; item.status.textContent = 'Loading image…'; item.retry.hidden = true; item.open.disabled = true;
     fetchImage(scope, item, 'thumb', item, function (url) {
+      // 7.0.45 (Q1 20:13): an image that was temporarily unavailable and now loads on Retry is available again, so the
+      // viewer fetches it instead of showing the old reason.
+      item.unavailable = '';
       item.busy = false; item.busyTries = 0; item.open.textContent = '';
       var img = element('img'); img.alt = item.label;
       img.addEventListener('error', function () {

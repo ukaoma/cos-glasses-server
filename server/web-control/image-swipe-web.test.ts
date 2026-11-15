@@ -46,13 +46,19 @@ class El {
   click() { if (!this.disabled) for (const fn of this.listeners.click ?? []) fn({ target: this }) }
   get parentElement() { return this.parent }
   get previousElementSibling(): El | null { const p = this.parent; if (!p) return null; const i = p.children.indexOf(this); return i > 0 ? p.children[i - 1]! : null }
+  compareDocumentPosition(other: El): number {
+    const path = (e: El) => { const out: number[] = []; for (let x: El | null = e; x && x.parent; x = x.parent) out.unshift(x.parent.children.indexOf(x)); return out }
+    const a = path(this), b = path(other)
+    for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i]! < b[i]! ? 4 : 2
+    return a.length < b.length ? 20 : 10
+  }
   closest(sel: string): El | null { const want = sel.replace(/^\./, ''); for (let e: El | null = this; e; e = e.parent) if (e.className.split(' ').includes(want) || e.classes.has(want)) return e; return null }
   querySelectorAll(sel: string): El[] {
     return this.children.flatMap(c => [(sel === 'button' ? c.tag === 'button' : sel === 'img' ? c.tag === 'img' : sel === '[data-reader-images]' ? 'data-reader-images' in c.attrs : false) ? c : null, ...c.querySelectorAll(sel)]).filter(Boolean) as El[]
   }
 }
 
-function load(fail: (path: string) => boolean = () => false) {
+function load(fail: (path: string) => boolean = () => false, hold: (path: string) => boolean = () => false) {
   const listeners: Record<string, Function[]> = {}, document: any = { ids: new Map(), activeElement: null }
   document.createElement = (tag: string) => new El(tag, document)
   document.head = document.createElement('head'); document.body = document.createElement('body'); document.documentElement = document.createElement('html')
@@ -63,8 +69,10 @@ function load(fail: (path: string) => boolean = () => false) {
   const history: any = { state: null, pushState() { hist.pushes++ }, back() { hist.backs++; for (const fn of listeners.popstate ?? []) fn({}) } }
   const W: any = { esc, registerPane: (name: string, kit: any) => { panes[name] = kit }, setCrumb() {}, toDate: () => null, clock: () => '' }
   const window: any = { COSWeb: W, AbortController, addEventListener: (name: string, fn: Function) => { (listeners[name] ??= []).push(fn) }, scrollTo() {} }
+  const held: Array<() => void> = []
   const fetch = async (path: string) => {
     calls.push(path)
+    if (hold(path)) await new Promise<void>(r => held.push(r))
     if (fail(path)) return { status: 500, ok: false, text: async () => JSON.stringify({ error: 'boom' }) }
     const blob = new Blob(['image'], { type: 'image/png' })
     return { status: 200, ok: true, blob: async () => blob, text: async () => { throw new Error('Blob passed through JSON') } }
@@ -103,7 +111,8 @@ function load(fail: (path: string) => boolean = () => false) {
     hooks.mount(host, { provider: 'codex', id: SID }); await flush()
   }
   const back = () => { for (const fn of listeners.popstate ?? []) fn({}) }
-  return { W, document, host, mount, mountTurns, calls, made, revoked, key, view, viewBody, label, counter, step, thumbs, touch, hist, back }
+  const release = async () => { for (const r of held.splice(0)) r(); await flush() }
+  return { W, document, host, mount, mountTurns, calls, made, revoked, key, view, viewBody, label, counter, step, thumbs, touch, hist, back, release, held }
 }
 const IDS = ['a', 'b', 'c'].map(ch => 'ai_' + ch.repeat(64))
 const THREE = IDS.map((id, i) => ({ id, label: ['First.png', 'Second.png', 'Third.png'][i], state: 'available' }))
@@ -239,6 +248,79 @@ describe('a response\'s images open as one set (7.0.45)', () => {
     t.back()
     expect(t.W.readerMedia.isOpen()).toBe(false)
     expect(t.hist.backs, 'the viewer does not go back again on its own').toBe(0)
+  })
+  it('an image temporarily unavailable that loads on its Retry opens and fetches like any other (Q1 20:13)', async () => {
+    const t = load(); await t.mount([THREE[0], { id: IDS[1], label: 'Later.png', state: 'unavailable', reason: 'unavailable' }, THREE[2]])
+    expect(t.calls.some(c => c.includes(IDS[1]!)), 'nothing fetched while unavailable').toBe(false)
+    const retry = t.host.querySelectorAll('button').find((b: El) => b.textContent === 'Retry image' && !b.hidden)!
+    retry.click(); await flush()
+    expect(t.calls.some(c => c.includes(IDS[1]!) && c.includes('variant=thumb')), 'Retry loaded the thumbnail').toBe(true)
+    t.thumbs()[0]!.click(); await flush()
+    t.key('ArrowRight'); await flush()
+    expect(t.label()).toBe('Later.png')
+    expect(t.viewBody().textContent).not.toContain('temporarily unavailable')
+    expect(t.viewBody().children[0]!.tag).toBe('img')
+    expect(t.calls.some(c => c.includes(IDS[1]!) && c.includes('variant=phone')), 'the viewer fetched it').toBe(true)
+  })
+  // Q1 20:15, its seven survivors (qa/q1_image_swipe_165a40a9_mutants.py), one test each.
+  it('Q1 S20: stepping onto an image whose preload is still in flight does not fetch it again', async () => {
+    const t = load(() => false, p => p.includes(IDS[1]!) && p.includes('variant=phone')); await t.mount(THREE)
+    t.thumbs()[0]!.click(); await flush()
+    expect(phone(t.calls)).toEqual([0, 1])
+    t.key('ArrowRight')            // the preload of 1 is still held
+    await t.release()
+    expect(phone(t.calls).filter(i => i === 1).length, 'one fetch for image 2').toBe(1)
+    expect(t.viewBody().children[0]!.tag).toBe('img')
+  })
+  it('Q1 S6: the next image stays kept, so back then forward does not fetch it again', async () => {
+    const t = load(); await t.mount(THREE)
+    t.thumbs()[0]!.click(); await flush()
+    t.key('ArrowRight'); await flush(); t.key('ArrowLeft'); await flush(); t.key('ArrowRight'); await flush()
+    expect(phone(t.calls).filter(i => i === 1).length, 'image 2 fetched once').toBe(1)
+  })
+  it('Q1 S12: a preload that failed is not fetched again on every draw, only when he gets to it', async () => {
+    const t = load(p => p.includes(IDS[1]!) && p.includes('variant=phone')); await t.mount(THREE)
+    t.thumbs()[0]!.click(); await flush()                 // preload of 2 fails (fetch 1)
+    t.key('ArrowRight'); await flush()                    // shown: tried again (fetch 2)
+    t.key('ArrowLeft'); await flush()                     // image 1 drawn again: 2 is not preloaded a third time
+    expect(phone(t.calls).filter(i => i === 1).length).toBe(2)
+  })
+  it('Q1 S1: the preload waits its turn behind other images (a background request)', async () => {
+    const big = ['c', 'd', 'e', 'f'].map(ch => ({ id: 'ai_' + ch.repeat(64), label: ch + '.png', state: 'available' }))
+    const held = (p: string) => big.some(x => p.includes(x.id))
+    const t = load(() => false, held)
+    await t.mountTurns([['user', []], ['assistant', [THREE[0], THREE[1]]], ['user', []], ['assistant', big]])
+    // Thumbnails: 1 and 2 load; c and d are held in both slots; e and f wait in the queue.
+    t.thumbs()[0]!.click(); await flush()                 // image 1 full size waits at the front of the queue
+    const before = t.calls.length
+    await t.release()                                     // c, d land: image 1 and e run; image 1 lands; e is held
+    expect(t.calls.slice(before).some(c => c.includes(IDS[0]!) && c.includes('variant=phone'))).toBe(true)
+    const preloadAt = t.calls.findIndex(c => c.includes(IDS[1]!) && c.includes('variant=phone'))
+    const fAt = t.calls.findIndex(c => c.includes(big[3]!.id))
+    expect(fAt, 'the waiting thumbnail f ran').toBeGreaterThan(-1)
+    expect(preloadAt === -1 || preloadAt > fAt, 'the preload went behind f, not in front of it').toBe(true)
+    await t.release()
+  })
+  it('Q1 S8: the set follows the order drawn, not the order the slots were mounted', async () => {
+    const t = load()
+    const img = (n: number, label: string) => ({ id: 'ai_' + String(n).repeat(64), label, state: 'available' })
+    await t.mountTurns([['user', []], ['assistant', [img(2, 'Later.png')]]])
+    // A turn drawn BEFORE the existing one, mounted after it (an older page of the same response loading in).
+    const turn = new El('div', t.document); turn.className = 'turn assistant sx-turn'; for (const c of turn.className.split(' ')) turn.classes.add(c)
+    const slot = new El('div', t.document); slot.attrs['data-reader-images'] = JSON.stringify([img(1, 'Earlier.png')]); turn.appendChild(slot)
+    turn.parent = t.host; t.host.children.splice(1, 0, turn)
+    t.W.readerMedia.mount(t.host, 'codex', SID); await flush()
+    const later = t.thumbs().find((b: El) => b.attrs['aria-label'] === 'Open image: Later.png')!
+    later.click(); await flush()
+    expect(t.label()).toBe('Later.png'); expect(t.counter()!.textContent, 'Earlier is first, as drawn').toBe('2 of 2')
+  })
+  it('Q1 S9: a slot no longer in the page is not in the set', async () => {
+    const t = load()
+    const img = (n: number, label: string) => ({ id: 'ai_' + String(n).repeat(64), label, state: 'available' })
+    await t.mountTurns([['user', []], ['assistant', [img(1, 'One.png')]], ['assistant', [img(2, 'Two.png')]]])
+    const two = t.host.children[2]!.children[0]!; two.isConnected = false   // the redraw replaced it; not re-mounted yet
+    t.thumbs()[0]!.click(); await flush()
+    expect(t.counter(), 'only One.png is left: no counter').toBeNull()
   })
   it('only the shown image and the next one are kept; moving on releases the one left behind', async () => {
     const t = load(); await t.mount(THREE)
