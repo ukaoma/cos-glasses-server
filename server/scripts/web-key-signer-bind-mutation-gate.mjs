@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SR-15 (review finding 9) mutation gate: the 3144 signer binds only this Mac's tailnet addresses
+// SR-15 (review finding 9, fix round 1 for review PA-R S1/S2/S4) mutation gate: the 3144 signer binds only this Mac's tailnet addresses
 // (lib/web-key-signer-bind.ts), refuses connections on any other local address, and
 // /api/web-key/status reports signerBindFixVersion, signerBind and certDisclosure (routes/web-key.ts).
 // Same harness as web-key-signer-mutation-gate.mjs: mutations run only in a disposable copy of the
@@ -29,30 +29,43 @@ const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] ==
 const drop = (name, file, line, tests) => m(name, file, [line, ''], tests)
 
 const mutations = [
-  // ── Which addresses are tailnet addresses ──
-  drop('iface-cgnat-accepted', BIND, '    if (!tailscaleInterface) continue\n', BT),
-  m('iface-internal-taken', BIND, ['(infos ?? []).filter(info => info && !info.internal)', '(infos ?? []).filter(info => info)'], BT),
+  // ── Which interface is Tailscale's (review S1, fix round 1) ──
+  drop('iface-name-not-required', BIND, '  if (!MAC_TUNNEL.test(name)) return false\n', BT),
+  m('iface-utun-unanchored', BIND, ['const MAC_TUNNEL = /^utun\\d+$/', 'const MAC_TUNNEL = /utun/'], BT),
+  m('iface-v4-sibling-dropped', BIND, ['  return hasV4 && hasV6\n', '  return hasV6\n'], BT),
+  m('iface-v6-sibling-dropped', BIND, ['  return hasV4 && hasV6\n', '  return hasV4\n'], BT),
+  drop('iface-check-skipped', BIND, '    if (!isTailscaleInterface(name, infos)) continue\n', BT),
+  m('iface-internal-counts', BIND, ['  if (!MAC_TUNNEL.test(name)) return false\n  const list = (infos ?? []).filter(info => info && !info.internal)', '  if (!MAC_TUNNEL.test(name)) return false\n  const list = (infos ?? []).filter(info => info)'], BT),
   m('iface-v4-range', BIND, ["if (family === 'IPv4' && isTailscaleIpv4(addr))", "if (family === 'IPv4')"], BT),
   m('iface-v6-range', BIND, ["else if (family === 'IPv6' && isTailscaleIpv6(addr))", "else if (family === 'IPv6')"], BT),
-  m('iface-ula-sibling', BIND, ["|| list.some(info => familyOf(info) === 'IPv6' && isTailscaleIpv6(normalizeBindAddress(info.address)))", "|| list.some(info => isTailnetAddress(info.address))"], BT),
   m('normalize-mapped', BIND, [".replace(/^::ffff:(?=\\d+\\.\\d+\\.\\d+\\.\\d+$)/, '')", ''], BT),
   // ── The bind plan ──
   drop('plan-https-unavailable', BIND, "  if (!opts.httpsAvailable) return { scope: 'none', addresses: [], reason: 'https_unavailable' }\n", BT),
   drop('plan-bindhost-not-tailnet', BIND, "    if (!isTailnetAddress(host)) return { scope: 'none', addresses: [], reason: 'bind_host_not_tailnet' }\n", BT),
   drop('plan-bindhost-not-present', BIND, "    if (!found.includes(host)) return { scope: 'none', addresses: [], reason: 'no_tailnet_address' }\n", BT),
   m('plan-no-address-wildcard', BIND, ["  if (found.length === 0) return { scope: 'none', addresses: [], reason: 'no_tailnet_address' }", "  if (found.length === 0) return { scope: 'tailnet', addresses: ['0.0.0.0'], reason: null }"], BT),
-  // ── Per-connection refusal ──
-  m('conn-range-dropped', BIND, ['  return isTailnetAddress(addr) && bound.includes(addr)', '  return bound.includes(addr)'], BT),
-  m('conn-bound-dropped', BIND, ['  return isTailnetAddress(addr) && bound.includes(addr)', '  return isTailnetAddress(addr)'], BT),
+  // ── Per-connection refusal (review S2, fix round 1) ──
+  m('conn-local-range-dropped', BIND, ['  if (!isTailnetAddress(local) || !bound.includes(local)) return false', '  if (!bound.includes(local)) return false'], BT),
+  m('conn-local-bound-dropped', BIND, ['  if (!isTailnetAddress(local) || !bound.includes(local)) return false', '  if (!isTailnetAddress(local)) return false'], BT),
+  drop('conn-remote-range-dropped', BIND, '  if (!isTailnetAddress(remote)) return false\n', BT),
+  drop('conn-onlink-dropped', BIND, "  if (onLink && onLink.check(remote, remote.includes(':') ? 'ipv6' : 'ipv4')) return false\n", BT),
+  drop('subnets-include-tailscale', BIND, '    if (isTailscaleInterface(name, infos)) continue\n    for (const info of infos ?? []) {', BT),
+  m('guard-remote-not-passed', BIND, ['allowed(socket.localAddress, socket.remoteAddress) === true', 'allowed(socket.localAddress, socket.localAddress) === true'], BT),
   drop('guard-no-destroy', BIND, '    socket.destroy()\n', BT),
-  m('guard-throw-allows', BIND, ['try { ok = allowed(socket.localAddress) === true } catch { ok = false }', 'try { ok = allowed(socket.localAddress) === true } catch { ok = true }'], BT),
+  m('guard-throw-allows', BIND, ['try { ok = allowed(socket.localAddress, socket.remoteAddress) === true } catch { ok = false }', 'try { ok = allowed(socket.localAddress, socket.remoteAddress) === true } catch { ok = true }'], BT),
   // ── Status shape ──
   m('status-listening-any-plan', BIND, ["listening: plan.scope === 'tailnet' && listening", 'listening'], BT),
   m('status-addresses-shared', BIND, ['addresses: [...plan.addresses], reason: plan.reason', 'addresses: plan.addresses, reason: plan.reason'], BT),
-  // ── Late open ──
-  m('late-open-any-plan', BIND, ["if (plan && plan.scope === 'tailnet' && plan.addresses.length > 0)", 'if (plan && plan.addresses.length > 0)'], BT),
-  drop('late-open-no-retry', BIND, '    if (!stopped) timer = schedule(() => { void tick() }, interval)\n', BT),
-  drop('late-open-never-marked', BIND, '        opened = true\n', BT),
+  // ── The keeper (review S4, fix round 1) ──
+  m('keeper-ignores-set-change', BIND, ['if (curTailnet && sameAddresses(cur.addresses, bound.addresses) && alive)', 'if (curTailnet && alive)'], BT),
+  m('keeper-ignores-dead-listener', BIND, ['if (curTailnet && sameAddresses(cur.addresses, bound.addresses) && alive)', 'if (curTailnet && sameAddresses(cur.addresses, bound.addresses))'], BT),
+  m('keeper-same-ignores-length', BIND, ['a.length === b.length && a.every(x => b.includes(x))', 'a.every(x => b.includes(x))'], BT),
+  drop('keeper-no-close', BIND, '        try { await opts.close() } catch { /* the servers are dropped either way */ }\n', BT),
+  drop('keeper-no-address-lost', BIND, "        shown = none('address_lost')\n", BT),
+  m('keeper-lost-not-sticky', BIND, ['      } else if (!lost) {\n        shown = cur\n', '      } else {\n        shown = cur\n'], BT),
+  drop('keeper-no-listen-failed', BIND, "          shown = none('listen_failed')\n", BT),
+  m('keeper-opens-any-plan', BIND, ["const curTailnet = cur.scope === 'tailnet' && cur.addresses.length > 0", 'const curTailnet = cur.addresses.length > 0'], BT),
+  drop('keeper-no-rescan', BIND, '    if (!stopped) timer = schedule(() => { void tick() }, interval)\n', BT),
   // ── Certificate disclosure ──
   m('cert-any-name', BIND, ['issued = publicName ? leaf.checkHost(publicName) !== undefined :', 'issued = publicName ? true :'], BT),
   m('cert-size-uncapped', BIND, ['st.size <= STORED_CERT_MAX_BYTES', 'true'], BT),
@@ -65,9 +78,10 @@ const mutations = [
   m('route-facts-throw-escapes', WKR, ['try { facts = deps.signerFacts?.() ?? null } catch { facts = null }', 'facts = deps.signerFacts?.() ?? null'], RT),
   // ── index.ts wiring (source pins) ──
   m('index-signer-binds-bind-host', IDX, ['    return { server, port: entry.port, host: address, label: entry.label }', '    return { server, port: entry.port, host: BIND_HOST, label: entry.label }'], BT),
-  drop('index-signer-unguarded', IDX, '    guardSignerConnections(server, plan.addresses, { log: line => console.warn(line) })\n', BT),
+  drop('index-signer-unguarded', IDX, '    guardSignerConnections(server, plan.addresses, { nets: signerNets, log: line => console.warn(line) })\n', BT),
   drop('index-status-unwired', IDX, '  signerFacts: webKeySignerFacts,\n', BT),
-  drop('index-late-open-not-stopped', IDX, '  webKeySignerLateOpen?.stop()\n', BT),
+  drop('index-keeper-not-stopped', IDX, '  webKeySignerKeeper?.stop()\n', BT),
+  m('index-close-keeps-servers', IDX, ['    const closing = webKeySignerServers.splice(0, webKeySignerServers.length)\n', '    const closing = [...webKeySignerServers]\n'], BT),
 ]
 
 const args = process.argv.slice(2)

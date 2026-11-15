@@ -9,29 +9,36 @@
 //
 // THE FIX. The signer binds only this Mac's own tailnet addresses (IPv4 100.64.0.0/10 and IPv6
 // fd7a:115c:a1e0::/48), one listener per address. No address: it does not open, and
-// /api/web-key/status says why (signerBind.reason). Each accepted connection is checked again by its
-// local address (signerConnectionAllowed) and destroyed if that is not one of the bound tailnet
-// addresses, so a later edit back to a wildcard bind still cannot serve a LAN caller.
+// /api/web-key/status says why (signerBind.reason). Each accepted connection is checked again
+// (signerConnectionAllowed): its local address must be one of the bound tailnet addresses AND its remote
+// address must be tailnet-range and outside every non-Tailscale interface's subnet. Every 30 s the keeper
+// (keepSignerBind) re-reads the interfaces: a bound address that is gone closes the listeners (status
+// `address_lost`), and a changed set reopens on the new one.
 //
 // WHY os.networkInterfaces AND NOT THE TAILSCALE CLI. The CLI under the LaunchAgent needs a hand-built env
 // (SHLVL=1, web-key-signer-tls.ts signerTlsCliEnv), can hang or answer "GUI failed to start", is async at a
 // point where the listener set is built synchronously, and tells us what Tailscale THINKS its addresses are,
 // not what this process can bind. tailnet-self-name.ts already chose the interface table over the CLI for
 // the same reasons. The interface table is synchronous, needs no child process and is a plain value a test
-// can hand in.
+// can hand in. (Fix round 1 kept this choice; see the review S1 note below.)
 //
-// WHY A 100.64/10 ADDRESS ALONE IS NOT ENOUGH. 100.64.0.0/10 is also RFC 6598 carrier-grade NAT space:
-// a phone hotspot or a CGNAT ISP can give the Wi-Fi interface a 100.x address. Binding that would put the
-// signer on the hotspot network, the exact exposure SR-15 is about. So an interface counts as the tailnet
-// interface only when it ALSO carries an address in fd7a:115c:a1e0::/48, Tailscale's own IPv6 prefix that
-// no ISP hands out, or when it is named `tailscale*` (Linux tailscaled's own interface). A 100.x address
-// on any other interface is refused. If a tailnet ever runs without IPv6 addresses on macOS, the signer
-// stays closed and says `no_tailnet_address`: the failure is closed, never a wider bind.
+// WHICH INTERFACE IS TAILSCALE'S (review PA-R S1, fix round 1). Address ranges prove nothing about who
+// configured them: 100.64.0.0/10 is RFC 6598 carrier-grade NAT space a hotspot or rogue DHCP server can hand
+// out, and fd7a:115c:a1e0::/48 is a ULA prefix any LAN peer can announce in a Router Advertisement (no RA
+// guard on hotel or cafe Wi-Fi), so `en0` can carry BOTH. The first build trusted "carries an fd7a address",
+// which a hostile LAN satisfies. What a LAN cannot do is create an interface: on macOS Tailscale's is a
+// kernel `utun<N>` tunnel, on Linux tailscaled names its own `tailscale<N>`. So an interface counts only when
+//   - it is named utun<N> AND carries BOTH a 100.64/10 IPv4 AND an fd7a:115c:a1e0::/48 IPv6, or
+//   - it is named tailscale<N> (Linux).
+// Only its tailnet-range addresses are taken. A utun with one family, any en/bridge/awdl interface, and every
+// address in those ranges on them are refused. A second local VPN that put both ranges on its own utun would
+// pass this test; that needs software installed on this Mac, not a network. If a tailnet ever runs without
+// IPv6 on macOS, the signer stays closed and says `no_tailnet_address`: closed, never a wider bind.
 
 import { X509Certificate } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Server, Socket } from 'node:net'
+import { BlockList, type Server, type Socket } from 'node:net'
 import { isTailscaleIpv4, isTailscaleIpv6 } from './network-policy.js'
 import { webKeyRpId } from './web-key-origin.js'
 
@@ -50,6 +57,10 @@ export type SignerBindReason =
   | 'bind_host_not_tailnet'
   /** No mkcert pair in server/certs, so no https listener at all (listener-startup.ts listenerPlan). */
   | 'https_unavailable'
+  /** The signer was listening and a bound address left the Tailscale interface; listeners closed (review S4). */
+  | 'address_lost'
+  /** A tailnet address exists but binding it failed (e.g. the port is held); tried again every rescan. */
+  | 'listen_failed'
 
 export interface SignerBindPlan {
   scope: 'tailnet' | 'none'
@@ -59,7 +70,7 @@ export interface SignerBindPlan {
   reason: SignerBindReason | null
 }
 
-type InterfaceInfo = { address: string; family: string | number; internal: boolean }
+type InterfaceInfo = { address: string; family: string | number; internal: boolean; cidr?: string | null }
 export type InterfaceTable = Record<string, InterfaceInfo[] | undefined>
 
 /** Lower case, IPv4-mapped prefix and IPv6 zone dropped. */
@@ -81,19 +92,32 @@ const familyOf = (info: InterfaceInfo): 'IPv4' | 'IPv6' | null => {
   return null
 }
 
+const MAC_TUNNEL = /^utun\d+$/
+const LINUX_TAILSCALE = /^tailscale\d*$/
+
 /**
- * This Mac's own tailnet addresses from the interface table: every tailnet-range address on an interface
- * that is provably Tailscale's (it carries an fd7a:115c:a1e0::/48 address, or it is named `tailscale*`).
- * IPv4 first, then IPv6, each in table order, no duplicates.
+ * Whether this interface is Tailscale's (review S1): a macOS utun<N> carrying BOTH a 100.64/10 IPv4 and an
+ * fd7a:115c:a1e0::/48 IPv6, or a Linux tailscale<N>. Never decided by address ranges alone.
+ */
+export function isTailscaleInterface(name: string, infos: InterfaceInfo[] | undefined): boolean {
+  if (LINUX_TAILSCALE.test(name)) return true
+  if (!MAC_TUNNEL.test(name)) return false
+  const list = (infos ?? []).filter(info => info && !info.internal)
+  const hasV4 = list.some(info => familyOf(info) === 'IPv4' && isTailscaleIpv4(normalizeBindAddress(info.address)))
+  const hasV6 = list.some(info => familyOf(info) === 'IPv6' && isTailscaleIpv6(normalizeBindAddress(info.address)))
+  return hasV4 && hasV6
+}
+
+/**
+ * This Mac's own tailnet addresses from the interface table: the tailnet-range addresses of Tailscale's own
+ * interface(s) (isTailscaleInterface). IPv4 first, then IPv6, each in table order, no duplicates.
  */
 export function tailnetInterfaceAddresses(nets: InterfaceTable): string[] {
   const v4: string[] = []
   const v6: string[] = []
   for (const [name, infos] of Object.entries(nets)) {
+    if (!isTailscaleInterface(name, infos)) continue
     const list = (infos ?? []).filter(info => info && !info.internal)
-    const tailscaleInterface = name.startsWith('tailscale')
-      || list.some(info => familyOf(info) === 'IPv6' && isTailscaleIpv6(normalizeBindAddress(info.address)))
-    if (!tailscaleInterface) continue
     for (const info of list) {
       const addr = normalizeBindAddress(info.address)
       const family = familyOf(info)
@@ -102,6 +126,29 @@ export function tailnetInterfaceAddresses(nets: InterfaceTable): string[] {
     }
   }
   return [...v4, ...v6]
+}
+
+/**
+ * The subnets of every interface that is NOT Tailscale's (review S2; loopback included, harmless). A remote address inside one of
+ * them is on-link through that interface, so a packet "from" it may have come from the LAN, not the tailnet:
+ * the weak host model can deliver a LAN packet addressed to the utun address. Null when nothing to check.
+ */
+export function nonTailscaleSubnets(nets: InterfaceTable): BlockList | null {
+  const list = new BlockList()
+  let any = false
+  for (const [name, infos] of Object.entries(nets)) {
+    if (isTailscaleInterface(name, infos)) continue
+    for (const info of infos ?? []) {
+      if (!info || typeof info.cidr !== 'string') continue
+      const [net, bits] = info.cidr.split('/')
+      const prefix = Number(bits)
+      const family = familyOf(info)
+      const addr = normalizeBindAddress(net)
+      if (!addr || !Number.isInteger(prefix) || !family) continue
+      try { list.addSubnet(addr, prefix, family === 'IPv4' ? 'ipv4' : 'ipv6'); any = true } catch { /* malformed row: skip */ }
+    }
+  }
+  return any ? list : null
 }
 
 const WILDCARD_BIND = new Set(['', '0.0.0.0', '::'])
@@ -124,31 +171,41 @@ export function planSignerBind(opts: { nets: InterfaceTable; bindHost: string | 
   return { scope: 'tailnet', addresses: found, reason: null }
 }
 
-/** Whether a connection that arrived on `localAddress` may be served by the signer. */
-export function signerConnectionAllowed(localAddress: unknown, bound: readonly string[]): boolean {
-  const addr = normalizeBindAddress(localAddress)
-  return isTailnetAddress(addr) && bound.includes(addr)
+/**
+ * Whether a connection may be served by the signer:
+ *   - its LOCAL address is tailnet-range and one of the bound addresses, and
+ *   - its REMOTE address is tailnet-range and not inside any non-Tailscale interface's subnet (review S2).
+ * `nets` is read per connection (os.networkInterfaces is cheap), so a LAN joined later is seen at once.
+ */
+export function signerConnectionAllowed(localAddress: unknown, remoteAddress: unknown, bound: readonly string[], nets: InterfaceTable): boolean {
+  const local = normalizeBindAddress(localAddress)
+  if (!isTailnetAddress(local) || !bound.includes(local)) return false
+  const remote = normalizeBindAddress(remoteAddress)
+  if (!isTailnetAddress(remote)) return false
+  const onLink = nonTailscaleSubnets(nets)
+  if (onLink && onLink.check(remote, remote.includes(':') ? 'ipv6' : 'ipv4')) return false
+  return true
 }
 
 /**
- * Defense in depth on each signer server: a connection whose local address is not one of `bound` is
- * destroyed before any byte is read. Registered after the server's own (TLS) connection listener, so the
- * TLS wrapper sees an ordinary close. Returns the count of refusals so far (for logs and tests).
+ * Defense in depth on each signer server: a connection that signerConnectionAllowed refuses is destroyed
+ * before any byte is read. Registered after the server's own (TLS) connection listener, so the TLS wrapper
+ * sees an ordinary close. Returns the count of refusals so far (for logs and tests).
  */
 export function guardSignerConnections(
   server: Server,
   bound: readonly string[],
-  opts: { allowed?: (localAddress: unknown) => boolean; log?: (line: string) => void } = {},
+  opts: { nets: () => InterfaceTable; allowed?: (localAddress: unknown, remoteAddress: unknown) => boolean; log?: (line: string) => void },
 ): () => number {
-  const allowed = opts.allowed ?? ((addr: unknown) => signerConnectionAllowed(addr, bound))
+  const allowed = opts.allowed ?? ((local: unknown, remote: unknown) => signerConnectionAllowed(local, remote, bound, opts.nets()))
   let refused = 0
   server.on('connection', (socket: Socket) => {
     let ok = false
-    try { ok = allowed(socket.localAddress) === true } catch { ok = false }
+    try { ok = allowed(socket.localAddress, socket.remoteAddress) === true } catch { ok = false }
     if (ok) return
     refused++
     // First refusal and then every hundredth, so a LAN scanner cannot fill the log.
-    if (refused === 1 || refused % 100 === 0) opts.log?.(`[web-key-signer] refused a 3144 connection on a non-tailnet address (${refused} so far)`)
+    if (refused === 1 || refused % 100 === 0) opts.log?.(`[web-key-signer] refused a 3144 connection that is not tailnet to tailnet (${refused} so far)`)
     socket.destroy()
   })
   return () => refused
@@ -207,7 +264,7 @@ export function readCertDisclosure(opts: { dir: string; certFile: string; selfDn
   return { issued, publicName }
 }
 
-/** How often a signer that found no tailnet address at boot looks again. */
+/** How often the keeper re-reads the interfaces (a synchronous table read, no child process). */
 export const SIGNER_BIND_RESCAN_MS = 30_000
 
 export type BindTimer = { cancel: () => void }
@@ -217,37 +274,72 @@ const defaultBindSchedule = (fn: () => void, ms: number): BindTimer => {
   return { cancel: () => clearTimeout(t) }
 }
 
+const sameAddresses = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every(x => b.includes(x))
+
 /**
- * The login race: the server's LaunchAgent can start before the Tailscale app has its address up. A signer
- * planned with no tailnet address looks again every SIGNER_BIND_RESCAN_MS (a synchronous interface read,
- * no child process) and opens once an address appears. `open` binds exactly the plan's addresses and
- * resolves true when every one is listening; false (e.g. EADDRINUSE) means try again next time. It never
- * widens the bind: a plan that is not `tailnet` is never opened.
+ * Keeps the signer bound to exactly this Mac's current tailnet addresses, every SIGNER_BIND_RESCAN_MS:
+ *   - not open and a tailnet plan appears (the login race): open it;
+ *   - open and the plan still names the same addresses with a live listener: nothing;
+ *   - open and anything else (an address gone, the set changed, the listener dead, review S4): close every
+ *     signer listener first, then open the new plan if there is one. Until a later open succeeds, status
+ *     says `address_lost` instead of claiming a listener on a dead address.
+ * `open` binds exactly the plan's addresses and resolves true when every one listens; false (EADDRINUSE)
+ * means try again next time. A plan that is not `tailnet` is never opened. `status()` is what
+ * /api/web-key/status reports.
  */
-export function openSignerWhenTailnetAppears(opts: {
+export function keepSignerBind(opts: {
+  /** The boot plan. `tailnet`: index.ts already queued its listeners (REQUIRED) and they count as bound. */
+  initial: SignerBindPlan
   plan: () => SignerBindPlan
   open: (plan: SignerBindPlan) => Promise<boolean>
+  close: () => Promise<void>
+  listening: () => boolean
   schedule?: (fn: () => void, ms: number) => BindTimer
   intervalMs?: number
   log?: (line: string) => void
-}): { stop: () => void; opened: () => boolean } {
+}): { stop: () => void; status: () => SignerBindPlan } {
   const schedule = opts.schedule ?? defaultBindSchedule
   const interval = opts.intervalMs ?? SIGNER_BIND_RESCAN_MS
+  const none = (reason: SignerBindReason): SignerBindPlan => ({ scope: 'none', addresses: [], reason })
+  let bound: SignerBindPlan | null = opts.initial.scope === 'tailnet' ? opts.initial : null
+  let shown: SignerBindPlan = opts.initial
+  let lost = false
   let timer: BindTimer | null = null
   let stopped = false
-  let opened = false
   const tick = async (): Promise<void> => {
     timer = null
-    if (stopped || opened) return
-    let plan: SignerBindPlan | null = null
-    try { plan = opts.plan() } catch { plan = null }
-    if (plan && plan.scope === 'tailnet' && plan.addresses.length > 0) {
-      let ok = false
-      try { ok = await opts.open(plan) } catch { ok = false }
-      if (ok) {
-        opened = true
-        opts.log?.(`[web-key-signer] 3144 opened late on the tailnet address${plan.addresses.length > 1 ? 'es' : ''} ${plan.addresses.join(', ')}`)
-        return
+    if (stopped) return
+    let cur: SignerBindPlan
+    try { cur = opts.plan() } catch { cur = none('no_tailnet_address') }
+    const curTailnet = cur.scope === 'tailnet' && cur.addresses.length > 0
+    if (bound) {
+      let alive = false
+      try { alive = opts.listening() === true } catch { alive = false }
+      if (curTailnet && sameAddresses(cur.addresses, bound.addresses) && alive) {
+        shown = bound
+      } else {
+        try { await opts.close() } catch { /* the servers are dropped either way */ }
+        opts.log?.(`[web-key-signer] 3144 closed: the tailnet address set changed or a listener died (was ${bound.addresses.join(', ')})`)
+        bound = null
+        lost = true
+        shown = none('address_lost')
+      }
+    }
+    if (!bound && !stopped) {
+      if (curTailnet) {
+        let ok = false
+        try { ok = await opts.open(cur) } catch { ok = false }
+        if (ok) {
+          bound = cur
+          shown = cur
+          lost = false
+          opts.log?.(`[web-key-signer] 3144 opened on the tailnet address${cur.addresses.length > 1 ? 'es' : ''} ${cur.addresses.join(', ')}`)
+        } else if (!lost) {
+          shown = none('listen_failed')
+        }
+      } else if (!lost) {
+        shown = cur
       }
     }
     if (!stopped) timer = schedule(() => { void tick() }, interval)
@@ -255,6 +347,6 @@ export function openSignerWhenTailnetAppears(opts: {
   timer = schedule(() => { void tick() }, interval)
   return {
     stop: () => { stopped = true; timer?.cancel(); timer = null },
-    opened: () => opened,
+    status: () => shown,
   }
 }
