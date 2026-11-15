@@ -252,7 +252,8 @@ import { webControlOffnetResponse } from './lib/web-control-offnet-page.js'
 import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
-import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
+import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_CERT_FILE, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
+import { guardSignerConnections, openSignerWhenTailnetAppears, planSignerBind, readCertDisclosure, SIGNER_BIND_FIX_VERSION, signerBindStatus, type SignerBindPlan } from './lib/web-key-signer-bind.js'
 import { controlHttpsOptions, controlTsnetHttpsEnabled, controlTsnetSelfDnsName, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
 import { trustedControlPhoneHttpsPort } from './lib/control-phone-url.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
@@ -455,6 +456,22 @@ const webKeySignerIntegrity: WebControlIntegrity | null = webKeyAuthorityEnabled
 // listener loop below ONLY when the 3144 listener is (flag on at boot, HTTPS available); otherwise null, and no
 // Tailscale call, file or listener change happens. 3143 is never given SNI selection.
 let webKeySignerTls: SignerTls | null = null
+// SR-15 (review finding 9, lib/web-key-signer-bind.ts): the 3144 signer binds only this Mac's tailnet addresses.
+// The plan it was built from (null until the listener loop plans it), its live servers, and the late opener
+// when no tailnet address existed at boot. 3141 and 3143 keep BIND_HOST exactly as before.
+let webKeySignerBindPlan: SignerBindPlan | null = null
+const webKeySignerServers: RequiredListener['server'][] = []
+let webKeySignerLateOpen: { stop: () => void } | null = null
+// What /api/web-key/status reports about the signer bind and the certificate disclosure (read at request time).
+const webKeySignerFacts = (): Record<string, unknown> => ({
+  signerBindFixVersion: SIGNER_BIND_FIX_VERSION,
+  // Planned: the plan it bound (or waits on). Not planned (authority off): where it WOULD bind if turned on now.
+  signerBind: signerBindStatus(
+    webKeySignerBindPlan ?? planSignerBind({ nets: networkInterfaces(), bindHost: process.env.BIND_HOST, httpsAvailable: existsSync(path.join(__dirname, 'certs', 'cert.pem')) }),
+    webKeySignerServers.some(server => server.listening),
+  ),
+  certDisclosure: readCertDisclosure({ dir: dataPath(SIGNER_TLS_DIR), certFile: SIGNER_TLS_CERT_FILE, selfDnsName: webKeySelfDnsName() }),
+})
 // X1 (iPhone pings): 3143 over https on this Mac's ts.net name (lib/control-tsnet-tls.ts). Null unless
 // COS_CONTROL_TSNET_HTTPS is on at boot and 3143 is planned; then 3143 gains SNI and nothing else changes.
 let controlTsnetTls: ControlTsnetTls | null = null
@@ -1043,6 +1060,8 @@ app.use('/api', createWebKeyRouter({
   integrityStatus: () => ({ ...(webControlIntegrity?.status() ?? { enabled: false }), signer: webKeySignerIntegrity?.status() ?? null }),
   // SR-04: an authenticated status read may start one bounded re-check (lib/web-key-signer-tls.ts statusRead).
   signerTls: () => webKeySignerTls?.statusRead() ?? null,
+  // SR-15: signerBindFixVersion, signerBind and certDisclosure in every status answer (and a token-only answer when off).
+  signerFacts: webKeySignerFacts,
   // Phase 3: the phone's key steps and the handoff claim answer only on the 3144 signer listener.
   isSignerRequest: req => req.socket?.localPort === WEB_KEY_SIGNER_PORT,
   handoffs: webKeySignHandoffs,
@@ -1663,6 +1682,7 @@ async function gracefulShutdown(): Promise<void> {
   stopRoutineScheduler()
   tailscaleNudger.stop()
   webKeySignerTls?.stop()
+  webKeySignerLateOpen?.stop()
   controlTsnetTls?.stop()
   await workReviewRuntime?.close()
   dropP2.stop()
@@ -1828,10 +1848,44 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
   const mkcertFiles = entry.tls ? { cert: readFileSync(path.join(certDir, 'cert.pem')), key: readFileSync(path.join(certDir, 'key.pem')) } : null
   // X1: on 3143 only, exact-name SNI for this Mac's ts.net host when COS_CONTROL_TSNET_HTTPS is on; off, the pair alone.
   const mkcertPair = mkcertFiles && entry.label === 'HTTPS' ? controlHttpsOptions(mkcertFiles, controlTsnetTls) as { cert: Buffer; key: Buffer } : mkcertFiles
-  const server = mkcertPair
+  const makeServer = () => mkcertPair
     ? withRequestTimeout(createHttpsServer(signer ? signerHttpsOptions(mkcertPair, webKeySignerTls) : mkcertPair, handler))
     : withRequestTimeout(createHttpServer(app))
-  listeners.push({ server, port: entry.port, host: BIND_HOST, label: entry.label })
+  if (!signer) {
+    listeners.push({ server: makeServer(), port: entry.port, host: BIND_HOST, label: entry.label })
+    continue
+  }
+  // SR-15: never BIND_HOST's wildcard. One listener per tailnet address of this Mac, each refusing any connection
+  // whose local address is not one of them. Found at boot: REQUIRED like before (a squatter fails the boot closed).
+  // None: 3144 stays closed, status says why, and it opens later if Tailscale comes up (the login race).
+  const signerListeners = (plan: SignerBindPlan): RequiredListener[] => plan.addresses.map(address => {
+    const server = makeServer()
+    guardSignerConnections(server, plan.addresses, { log: line => console.warn(line) })
+    webKeySignerServers.push(server)
+    return { server, port: entry.port, host: address, label: entry.label }
+  })
+  webKeySignerBindPlan = planSignerBind({ nets: networkInterfaces(), bindHost: process.env.BIND_HOST, httpsAvailable })
+  if (webKeySignerBindPlan.scope === 'tailnet') {
+    listeners.push(...signerListeners(webKeySignerBindPlan))
+  } else {
+    console.warn(`[web-key-signer] 3144 not opened: ${webKeySignerBindPlan.reason}. It binds this Mac's tailnet address only and will open when one appears.`)
+    webKeySignerLateOpen = openSignerWhenTailnetAppears({
+      plan: () => planSignerBind({ nets: networkInterfaces(), bindHost: process.env.BIND_HOST, httpsAvailable }),
+      open: async plan => {
+        const late = signerListeners(plan)
+        try {
+          await listenRequiredServers(late)
+          webKeySignerBindPlan = plan
+          return true
+        } catch (error) {
+          for (const item of late) webKeySignerServers.splice(webKeySignerServers.indexOf(item.server), 1)
+          console.warn(`[web-key-signer] 3144 late open failed: ${error instanceof Error ? error.message : String(error)}`)
+          return false
+        }
+      },
+      log: line => console.log(line),
+    })
+  }
 }
 
 listenRequiredServers(listeners).then(() => {

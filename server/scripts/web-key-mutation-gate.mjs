@@ -255,7 +255,8 @@ const mutations = [
   m('bootstrap-routes-need-mode', WKR, ["    if (deps.authority.mode() === 'off') { next('router'); return }", "    if (!deps.authority.enabled()) { next('router'); return }"], INTT),
   m('bootstrap-anchor-route-gated', WKR, ["  router.post('/web-key/anchor', anchorRoutes, (req, res) => {", "  router.post('/web-key/anchor', (req, res) => {"], INTT),
   // Re-aimed 2026-11-12: the handler became async with learnSelfName (867db2ff); the old targets matched nothing.
-  m('bootstrap-status-route-gated', WKR, ["  router.get('/web-key/status', anchorRoutes, async (req, res) => {", "  router.get('/web-key/status', async (req, res) => {"], INTT),
+  // Re-aimed 2026-11-15 (SR-15): the status route's gate is statusRoutes (anchorRoutes plus a token-only door when off).
+  m('bootstrap-status-route-gated', WKR, ["  router.get('/web-key/status', statusRoutes, async (req, res) => {", "  router.get('/web-key/status', async (req, res) => {"], INTT),
   m('bootstrap-on-authority-only', WKR, ["    if (!deps.authority.enabled()) { next('router'); return }", "    if (deps.authority.mode() === 'off') { next('router'); return }"], INTT),
   m('bootstrap-status-branch', WKR, ["    if (deps.authority.mode() !== 'authority') {", '    if (false) {'], INTT),
   m('bootstrap-status-token-only', WKR, ["      if (!hasToken(req)) return refuse(res, 401, 'unauthorized')\n      await learnSelfName()", '      await learnSelfName()'], INTT),
