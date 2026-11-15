@@ -95,7 +95,10 @@ describe('end to end with the server: the rail and Today show the server\'s sum'
 
   it('17 meetings, 1 decision and the batch: 19 everywhere', async () => {
     const out = await dispatchMemoriesWebOp('status', {}, loopback, 'x', async () => HIS, () => 17)
-    expect(out.details.needsYou).toEqual(computeNeedsYou(HIS, 17))
+    // The four counts, not the whole object: S1's async read adds ageSeconds and fresh beside them (build after 7.0.46).
+    const want = computeNeedsYou(HIS, 17)
+    expect(out.details.needsYou).toMatchObject({ meetings: want.meetings, decisions: want.decisions, quarantineBatch: want.quarantineBatch, total: want.total })
+    expect(want.total).toBe(19)
     expect(rail(out.details)).toEqual({ text: '19 need you', hot: true })
     expect(todayRead({ details: out.details }).n).toBe(19)
   })
