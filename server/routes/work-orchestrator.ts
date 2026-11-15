@@ -49,7 +49,7 @@ export const readUsage = (refresh: boolean, monitor: UsageMonitor = orchestrator
 /** GET /usage/plan: the same on-demand read, then the ruler's lines (plan-pane.ts). */
 export const readPlan = async (refresh: boolean, monitor: UsageMonitor = orchestratorUsage(), now: () => number = Date.now): Promise<PlanPane> => {
   await monitor.onDemand(refresh)
-  return planPane(USAGE_PROVIDERS.map(p => monitor.entry(p)), now())
+  return planPane(USAGE_PROVIDERS.map(p => monitor.entry(p)), now(), undefined, monitor.cursorPlanOn())
 }
 
 const DEFAULTS: WorkOrchestratorDeps = {

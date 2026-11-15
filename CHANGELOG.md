@@ -1,3 +1,20 @@
+## Unreleased (draft, U1): Cursor's plan usage on the Usage view, read like Claude's (off unless switched on)
+
+Draft for 7.0.46. Miles, 2026-11-14: the plan relayed from his glasses at 8:23 PM ("Yes, that was me", 20:46), and at 21:06 "No, I wnat you to actually install it and turn it on as well". Not a release entry until it is cut.
+
+**Off for everyone unless switched on:**
+- server: **Cursor's plan usage is read only when the server's environment says `COS_CURSOR_PLAN_USAGE=1`** (exactly "1"). Off, nothing below runs: no Keychain read, no network call, and Cursor reads "No plan reading" as before. The lead sets it on Miles's Mac only, at install.
+
+**When it is on:**
+- **What it reads, and from where:** Cursor's sign-in from the macOS login Keychain (generic password, service `cursor-access-token`, account `cursor-user`), read with `/usr/bin/security find-generic-password -w` at the moment of each read and kept only in memory. It is never logged, saved, put in an error, an argument or a child's environment. An expired sign-in is caught locally (its exp claim) before any network call; the refresh item is never touched. The copy in Cursor's state.vscdb is encrypted and is never opened.
+- **The calls:** three POSTs to `https://api2.cursor.sh` with body `{}`: `aiserver.v1.DashboardService/GetCurrentPeriodUsage`, `GetPlanInfo` and `GetHardLimit`. That host and those three methods are a fixed list in the code; no write is ever called (no `UseSandBankedReset`), a redirect is not followed, and the cursor-agent TUI is never launched. Headers: Authorization Bearer, Content-Type application/json, x-cursor-client-type cli, x-cursor-client-version (from the installed CLI's folder name, never by running it), x-ghost-mode true, and Connect-Protocol-Version 1 (the one header added to his list: the Connect protocol header the Mac app's working Cursor feed already sends).
+- **What the Mac asks the first time:** "security wants to use your confidential information stored in "cursor-access-token" in your keychain", with his login password. The Usage view says so before the first read. Saying no reads as "Cursor's sign-in was not shared with COS" and waits 10 minutes before asking again.
+- **What it shows:** Cursor like Claude: percent used of the higher of its Auto and API buckets (named in the open row; its total is a note), the billing period's reset day and time, and how old the reading is. With the period's start it also shows how much of the period has gone and a labelled pace estimate; without it, the reset only. Cursor's own displayMessage is kept as a note and never drawn (it did not match the percentages on 2026-11-14). On-demand spending is its own figure, not the bar.
+- **When it reads:** the same rules as Claude: opening Usage reads a reading over 10 minutes old, Refresh one over 2, a plan input one over 2; no timer unless COS_WORK_USAGE_POLL=1; each read is killed at 15 seconds; any failure waits 10 minutes, three in a row an hour.
+
+**Not covered, said plainly:**
+- No Cursor reply has been recorded yet: the parser follows the shape Miles saw on 2026-11-14 as relayed. The lead's first live read, with Miles at the Mac, is the first real sample, and the parser may need a fix from it.
+
 ## 7.0.45 - A response's images open as one set you can swipe through, and the review switch leaves Memory settings
 
 2026-11-14. 7.0.44 plus the changes below; everything in 7.0.44 is in this update too (see its entry), so one install from 7.0.43 carries both.

@@ -5,7 +5,8 @@
  *
  * What the numbers are: each provider states a percentage of a window used and when that window resets. Never tokens.
  * A reading that failed, is missing, or belongs to a window that has ended draws no ruler, so it can never look like 0%.
- * Cursor states no plan usage that COS reads: "No plan reading".
+ * Cursor states no plan usage that COS reads: "No plan reading". 7.0.45: unless COS_CURSOR_PLAN_USAGE=1 (cursor-plan.ts),
+ * when its higher bucket (Auto or API) of the billing period is drawn like the others. Off, its line is exactly as before.
  */
 import { USAGE_STALE_MS, windowLive, type UsageEntry, type UsageFailureCode, type UsageProvider, type UsageWindow } from './usage.js'
 
@@ -43,13 +44,19 @@ const WEEK_MINS = 7 * 24 * 60
 /** No estimate until this much of the window has passed: an average over a few hours says little. */
 export const PLAN_ESTIMATE_MIN_ELAPSED_MS = 12 * 3_600_000
 
-/** The window the ruler draws: Claude's week across all models; Codex's longest window. */
+/** The window the ruler draws: Claude's week across all models; Codex's longest window; Cursor's higher bucket (Auto or
+ *  API) of its billing period, `mins` 0 when Cursor did not state the period's start. */
 export function rulerWindow(provider: UsageProvider, windows: UsageWindow[]): { w: UsageWindow; mins: number } | null {
   if (provider === 'claude') { const w = windows.find(x => x.kind === 'weekly_all'); return w ? { w, mins: WEEK_MINS } : null }
   if (provider === 'codex') {
     const sized = windows.filter(x => typeof x.durationMins === 'number' && x.durationMins > 0)
     const w = sized.sort((a, b) => b.durationMins! - a.durationMins!)[0]
     return w ? { w, mins: w.durationMins! } : null
+  }
+  if (provider === 'cursor') {
+    const buckets = windows.filter(x => x.kind === 'auto' || x.kind === 'api')
+    const w = buckets.length ? buckets.reduce((a, b) => (b.usedPct > a.usedPct ? b : a)) : null
+    return w ? { w, mins: typeof w.durationMins === 'number' && w.durationMins > 0 ? w.durationMins : 0 } : null
   }
   return null
 }
@@ -81,6 +88,9 @@ export function ageWords(iso: string, now: number, tz?: string): string {
 }
 
 /** A failure's reason in plain words, never the exception's own text. */
+/** 7.0.45, Cursor switched on and never read: what the Mac will ask on the first read. Never a suggestion to allow it always. */
+export const CURSOR_FIRST_READ_WORDS = 'Not read yet. The first read asks this Mac to share Cursor\'s sign-in from the Keychain with COS: a "security wants to use … cursor-access-token" prompt and your login password. Refresh to read it.'
+
 export function failureWords(provider: UsageProvider, code: UsageFailureCode | null | undefined): string {
   switch (code) {
     case 'no_limits': return `refused by ${NAME[provider]}`
@@ -89,6 +99,12 @@ export function failureWords(provider: UsageProvider, code: UsageFailureCode | n
     case 'not_found': return `${NAME[provider]} is not installed on this Mac`
     case 'unknown_shape': return 'an answer COS cannot read'
     case 'exited': return `${NAME[provider]} stopped before answering`
+    case 'sign_in_missing': return 'no Cursor sign-in in the Keychain'
+    case 'keychain_refused': return "Cursor's sign-in was not shared with COS"
+    case 'keychain_locked': return 'the Keychain is locked'
+    case 'sign_in_expired': return `the ${NAME[provider]} sign-in has expired; opening ${NAME[provider]} renews it`
+    case 'redirected': return `${NAME[provider]} answered with a redirect, which COS does not follow`
+    case 'http_error': return `${NAME[provider]} answered with an error`
     default: return 'unexpected error'
   }
 }
@@ -99,7 +115,7 @@ const span = (ms: number) => {
 }
 
 /** The labelled estimate: only for a live reading, past 12 hours into its window, under 100%. */
-export function estimateFor(name: string, usedPct: number, startMs: number, resetMs: number, now: number, tz?: string): PlanEstimate | null {
+export function estimateFor(name: string, usedPct: number, startMs: number, resetMs: number, now: number, tz?: string, unit = 'week'): PlanEstimate | null {
   const elapsed = now - startMs, total = resetMs - startMs
   if (elapsed < PLAN_ESTIMATE_MIN_ELAPSED_MS || usedPct <= 0 || usedPct >= 100 || total <= 0 || now >= resetMs) return null
   const perHour = usedPct / (elapsed / 3_600_000)
@@ -109,21 +125,22 @@ export function estimateFor(name: string, usedPct: number, startMs: number, rese
   // Today: "about 4:30 PM"; another day: "about tomorrow 9:00 AM".
   const atWords = at.short === 'today' || at.short === 'tonight' ? timeOf(rounded, tz) : at.long
   const text = fullAt < resetMs
-    ? `At this week's average pace, ${name} reaches its limit about ${atWords}, before it resets ${reset}.`
-    : `At this week's average pace, ${name} stays under its limit until it resets ${reset}.`
+    ? `At this ${unit}'s average pace, ${name} reaches its limit about ${atWords}, before it resets ${reset}.`
+    : `At this ${unit}'s average pace, ${name} stays under its limit until it resets ${reset}.`
   const arithmetic = `Worked out from ${Math.round(usedPct)}% used in ${span(elapsed)} of ${span(total)}, about ${perHour < 1 ? perHour.toFixed(1) : Math.round(perHour)}% an hour.`
   return { text, arithmetic }
 }
 
-export function planLine(e: UsageEntry, now: number, tz?: string): PlanLine {
+export function planLine(e: UsageEntry, now: number, tz?: string, cursorOn = false): PlanLine {
   const name = NAME[e.provider]
   const base = { provider: e.provider, name, readAt: e.observedAt ? new Date(e.observedAt).toISOString() : null,
     lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null, reason: e.lastFailure ?? null, estimate: null as PlanEstimate | null }
   const none = { usedPct: null, gonePct: null, windowStart: null, resetsAt: null }
-  if (e.provider === 'cursor') {
+  if (e.provider === 'cursor' && !cursorOn) {
     return { ...base, ...none, state: 'no_plan', windowWords: '', short: 'No plan reading', shortLong: 'No plan reading',
       long: 'No plan reading. Cursor does not report its plan to COS.', quiet: 'Cursor no plan reading', readAt: null, lastGoodAt: null }
   }
+  const period = e.provider === 'cursor' ? 'Billing period' : 'Week'
   const found = e.reading?.available ? rulerWindow(e.provider, e.reading.windows) : null
   const live = found && windowLive(found.w, now) && found.w.resetsAt ? found : null
   // A stated limit, from the provider: a full ruler and when it lifts. It beats every percentage (the reader's rule).
@@ -135,55 +152,84 @@ export function planLine(e: UsageEntry, now: number, tz?: string): PlanLine {
       long: `Limit reached. ${name} says new work waits until ${back.long}.`, quiet: `${name} at its limit` }
   }
   const held = Math.max(e.pausedUntil ?? 0, e.holdUntil ?? 0)
+  // 7.0.45: he said no to sharing Cursor's sign-in. Said as that, in the row itself, not as a pause or a failure.
+  if (e.provider === 'cursor' && e.lastFailure === 'keychain_refused') {
+    const again = held > now ? ` COS asks again after ${timeOf(new Date(held), tz)}.` : ' Refresh to ask again.'
+    return { ...base, ...none, state: held > now ? 'paused' : 'failed', windowWords: 'Billing period not known', short: 'Sign-in not shared',
+      shortLong: "Cursor's sign-in was not shared with COS", long: `Cursor's sign-in was not shared with COS.${again} No number is shown until a read succeeds.`, quiet: 'Cursor sign-in not shared' }
+  }
   if (held > now) {
     const at = timeOf(new Date(held), tz)
     const why = e.lastFailure ? ` The last read: ${failureWords(e.provider, e.lastFailure)}.` : ''
-    return { ...base, ...none, state: 'paused', windowWords: 'Week not known', short: `Paused until ${at}`, shortLong: `Paused until ${at}`,
+    return { ...base, ...none, state: 'paused', windowWords: `${period} not known`, short: `Paused until ${at}`, shortLong: `Paused until ${at}`,
       long: `Paused until ${at}. COS waits before asking ${name} again, so a failing read is not repeated.${why} No number is shown until a read succeeds.`, quiet: `${name} paused` }
   }
   if (e.lastFailure) {
     const w = failureWords(e.provider, e.lastFailure)
-    return { ...base, ...none, state: 'failed', windowWords: 'Week not known', short: `Read failed, ${w}`, shortLong: `Read failed, ${w}`,
+    return { ...base, ...none, state: 'failed', windowWords: `${period} not known`, short: `Read failed, ${w}`, shortLong: `Read failed, ${w}`,
       long: `Read failed: ${w}. No number is shown until a read succeeds.`, quiet: `${name} read failed` }
   }
   const readWords = e.observedAt ? `read ${ageWords(new Date(e.observedAt).toISOString(), now, tz)}` : ''
   // Read, but with no window COS can draw (Q1 b): say so, never "not read".
   if (e.reading && !found) {
     const why = e.reading.available ? `${name} gave no window COS can draw` : 'this login has no plan limits'
-    return { ...base, ...none, state: 'not_read', windowWords: 'Week not known', short: 'No week to draw', shortLong: 'No week to draw',
-      long: `${readWords ? `${readWords[0]!.toUpperCase()}${readWords.slice(1)}; ` : ''}${why}. No number is shown.`, quiet: `${name} no week to draw` }
+    return { ...base, ...none, state: 'not_read', windowWords: `${period} not known`, short: `No ${period.toLowerCase()} to draw`, shortLong: `No ${period.toLowerCase()} to draw`,
+      long: `${readWords ? `${readWords[0]!.toUpperCase()}${readWords.slice(1)}; ` : ''}${why}. No number is shown.`, quiet: `${name} no ${period.toLowerCase()} to draw` }
   }
   // A live window that states no reset (Q1 a): its share used is real; the week's span is not known, so no "now" line.
   if (found && windowLive(found.w, now) && !found.w.resetsAt) {
     const used = Math.max(0, Math.min(100, Math.round(found.w.usedPct)))
     const readLongAgo = !e.observedAt || now - e.observedAt > USAGE_STALE_MS
-    return { ...base, usedPct: used, gonePct: null, windowStart: null, resetsAt: null, state: readLongAgo ? 'older' : 'fresh', windowWords: 'Week not known',
+    return { ...base, usedPct: used, gonePct: null, windowStart: null, resetsAt: null, state: readLongAgo ? 'older' : 'fresh', windowWords: `${period} not known`,
       short: readLongAgo ? `${used}% used, ${readWords || 'read earlier'}` : `${used}% used`, shortLong: readLongAgo ? `${used}% used, ${readWords || 'read earlier'}` : `${used}% used`,
-      long: `${used}% used. Week not known: ${name} gave no reset time.`, quiet: `${name} ${used}% used` }
+      long: `${used}% used. ${period} not known: ${name} gave no reset time.`, quiet: `${name} ${used}% used` }
   }
   if (!live) {
-    return { ...base, ...none, state: 'not_read', windowWords: 'Week not known', short: 'Not read today', shortLong: 'Not read today',
-      long: found ? `Not read since its window ended${e.observedAt ? ` (last read ${dateTime(new Date(e.observedAt).toISOString(), tz)})` : ''}. Refresh to read it.` : 'Not read yet. Refresh to read it.',
+    return { ...base, ...none, state: 'not_read', windowWords: `${period} not known`, short: 'Not read today', shortLong: 'Not read today',
+      long: found ? `Not read since its window ended${e.observedAt ? ` (last read ${dateTime(new Date(e.observedAt).toISOString(), tz)})` : ''}. Refresh to read it.`
+        : e.provider === 'cursor' ? CURSOR_FIRST_READ_WORDS : 'Not read yet. Refresh to read it.',
       quiet: `${name} not read` }
   }
-  const reset = Date.parse(live.w.resetsAt!), start = reset - live.mins * 60_000
   const used = Math.max(0, Math.min(100, Math.round(live.w.usedPct)))
+  const cursorNote = e.provider === 'cursor' ? cursorWords(e.reading!.windows, live.w) : ''
+  // Cursor without the period's start: the share used and the reset are real; there is no "now" line and no pace.
+  if (live.mins === 0) {
+    const whenEnd = whenWords(live.w.resetsAt!, now, tz)
+    const olderNs = !e.observedAt || now - e.observedAt > USAGE_STALE_MS
+    const readAgo = `read ${e.observedAt ? ageWords(new Date(e.observedAt).toISOString(), now, tz) : 'earlier'}`
+    return { ...base, usedPct: used, gonePct: null, windowStart: null, resetsAt: new Date(Date.parse(live.w.resetsAt!)).toISOString(),
+      state: olderNs ? 'older' : 'fresh', windowWords: `${period} ends ${dateTime(live.w.resetsAt!, tz)}`,
+      short: olderNs ? `${used}% used, ${readAgo}` : `${used}% used, resets ${whenEnd.short}`,
+      shortLong: olderNs ? `${used}% used, ${readAgo}` : `${used}% used, resets ${whenEnd.long}`,
+      long: `${used}% used.${cursorNote} Its start was not stated, so there is no pace line.${olderNs ? ` ${readAgo[0]!.toUpperCase()}${readAgo.slice(1)}; it may have moved.` : ''}`,
+      quiet: `${name} ${used}% used` }
+  }
+  const reset = Date.parse(live.w.resetsAt!), start = reset - live.mins * 60_000
   const gone = Math.max(0, Math.min(100, Math.round(((now - start) / (reset - start)) * 1000) / 10))
   const when = whenWords(live.w.resetsAt!, now, tz)
   const older = !e.observedAt || now - e.observedAt > USAGE_STALE_MS
-  const unit = live.mins === WEEK_MINS ? 'week' : 'window'
+  const unit = e.provider === 'cursor' ? 'billing period' : live.mins === WEEK_MINS ? 'week' : 'window'
   return { ...base, usedPct: used, gonePct: gone, windowStart: new Date(start).toISOString(), resetsAt: new Date(reset).toISOString(),
     state: older ? 'older' : 'fresh', windowWords: `${dateTime(new Date(start).toISOString(), tz)} to ${dateTime(live.w.resetsAt!, tz)}`,
     short: older ? `${used}% used, read ${e.observedAt ? ageWords(new Date(e.observedAt).toISOString(), now, tz) : 'earlier'}` : `${used}% used, resets ${when.short}`,
     shortLong: older ? `${used}% used, read ${e.observedAt ? ageWords(new Date(e.observedAt).toISOString(), now, tz) : 'earlier'}` : `${used}% used, resets ${when.long}`,
-    long: `${used}% used. ${Math.round(gone)}% of the ${unit} gone.${older ? ` Read ${e.observedAt ? ageWords(new Date(e.observedAt).toISOString(), now, tz) : 'earlier'}; it may have moved.` : ''}`,
-    quiet: `${name} ${used}% used`, estimate: estimateFor(name, used, start, reset, now, tz) }
+    long: `${used}% used.${cursorNote} ${Math.round(gone)}% of the ${unit} gone.${older ? ` Read ${e.observedAt ? ageWords(new Date(e.observedAt).toISOString(), now, tz) : 'earlier'}; it may have moved.` : ''}`,
+    quiet: `${name} ${used}% used`, estimate: estimateFor(name, used, start, reset, now, tz, unit) }
+}
+
+/** Cursor's open-row words: which bucket the bar is, and the other numbers as a note. Never Cursor's own displayMessage. */
+function cursorWords(windows: UsageWindow[], drawn: UsageWindow): string {
+  const pct = (k: string) => { const w = windows.find(x => x.kind === k); return w ? Math.round(w.usedPct) : null }
+  const auto = pct('auto'), api = pct('api'), total = pct('included')
+  const label = drawn.kind === 'auto' ? 'Auto' : 'API'
+  const other = drawn.kind === 'auto' ? `API ${api}%` : `Auto ${auto}%`
+  return ` The bar is the ${label} bucket, the higher of the two (${other}).${total !== null ? ` Total used: ${total}%.` : ''}`
 }
 
 /** The whole pane: one line per provider, the closest to its limit for the closed row, and the rest in quiet words. */
-export function planPane(entries: UsageEntry[], now: number, tz?: string): PlanPane {
+export function planPane(entries: UsageEntry[], now: number, tz?: string, cursorOn = false): PlanPane {
   const order: UsageProvider[] = ['claude', 'codex', 'cursor']
-  const lines = order.map(p => entries.find(e => e.provider === p)).filter((e): e is UsageEntry => !!e).map(e => planLine(e, now, tz))
+  const lines = order.map(p => entries.find(e => e.provider === p)).filter((e): e is UsageEntry => !!e).map(e => planLine(e, now, tz, cursorOn))
   const ranked = lines.filter(l => l.usedPct !== null).sort((a, b) => b.usedPct! - a.usedPct!)
   const closest = ranked[0]?.provider ?? null
   const others = lines.filter(l => l.provider !== closest).map(l => l.quiet).join('. ')

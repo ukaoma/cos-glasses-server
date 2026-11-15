@@ -21,6 +21,9 @@
  * 7.0.39+: a Claude answer of "limits available" with none (its usage service refused the CLI) holds Claude's probe for
  * 10 minutes, saved across restarts, and counts toward the breaker. Every failed probe logs one line with a code.
  * 7.0.41: every failed probe holds that provider for 10 minutes, whatever the code.
+ * 7.0.45: Cursor's plan usage can be read the same way (cursor-plan.ts), only when the server's environment says
+ * COS_CURSOR_PLAN_USAGE=1 (a Keychain credential read, so the switch is Miles's typed call). Off, the note above stands:
+ * no Keychain read, no network call, and Cursor stays "not read".
  */
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
@@ -28,6 +31,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { atomicWriteFileSync } from '../atomic-fs.js'
 import { resolveProviderBinary } from '../provider-binary.js'
+import { cursorPlanUsageOn, probeCursorUsage, type CursorDetail } from './cursor-plan.js'
 
 export type UsageProvider = 'claude' | 'codex' | 'cursor'
 export const USAGE_PROVIDERS: UsageProvider[] = ['claude', 'codex', 'cursor']
@@ -53,6 +57,8 @@ export const USAGE_FAILURE_HOLD_MS = USAGE_NO_LIMITS_HOLD_MS
 
 /** Why a probe failed, as a code: logged on every failure and served on the usage route (never an account detail). */
 export type UsageFailureCode = 'no_limits' | 'unknown_shape' | 'refused' | 'timed_out' | 'exited' | 'not_found' | 'error'
+  // 7.0.45, Cursor's read: the Keychain item missing, refused or locked; its sign-in expired (or a 401/403); a redirect; another HTTP status.
+  | 'sign_in_missing' | 'keychain_refused' | 'keychain_locked' | 'sign_in_expired' | 'redirected' | 'http_error'
 export class UsageProbeError extends Error {
   constructor(readonly code: UsageFailureCode, message: string) { super(message) }
 }
@@ -63,10 +69,13 @@ export class UsageProbeError extends Error {
  *  older build is checked too. */
 const SAFE_FAILURE_TEXT = new Set(['Claude gave no plan limits (its usage service may be refusing reads)', 'codex not found',
   'get_usage refused', 'rateLimits/read refused', 'timed out', 'unknown get_usage shape', 'unknown rateLimits shape', 'unexpected error',
-  'not probed inside a test']) // runtime.ts's test-only stand-in probe
+  'not probed inside a test', // runtime.ts's test-only stand-in probe
+  // 7.0.45, Cursor (cursor-plan.ts): fixed words only, never the token or a reply.
+  'Cursor CLI not found', 'Keychain read timed out', 'Cursor sign-in not found in the Keychain',
+  'Keychain locked', 'Keychain read failed', "Cursor's sign-in was not shared with COS", 'Cursor sign-in expired', 'Cursor answered with a redirect', 'unknown Cursor usage shape'])
 export function safeFailureText(text: string | null | undefined): string {
   if (!text) return 'unexpected error'
-  return SAFE_FAILURE_TEXT.has(text) || /^exited (?:-?\d+|on error) before answering$/.test(text) ? text : 'unexpected error'
+  return SAFE_FAILURE_TEXT.has(text) || /^exited (?:-?\d+|on error) before answering$/.test(text) || /^Cursor answered HTTP \d{1,3}$/.test(text) ? text : 'unexpected error'
 }
 
 export interface UsageWindow { kind: string; usedPct: number; resetsAt: string | null; durationMins?: number }
@@ -77,6 +86,8 @@ export interface UsageReading {
   allowed: boolean | null
   /** Claude `rate_limits_available: false` (an API key or a third-party login): no plan limits to read. */
   available: boolean
+  /** 7.0.45: Cursor's extras (its note, Auto-bucket models, on-demand). Never the bar. */
+  cursor?: CursorDetail
 }
 export interface UsageEntry {
   provider: UsageProvider
@@ -108,11 +119,12 @@ export interface UsageView { provider: UsageProvider; state: UsageState; headroo
   /** 7.0.39+: when a plan-lane COS job on this provider last finished with an answer. */
   answeredAt?: string | null }
 
-/** The windows that bind: Claude's 5-hour session and weekly all-models; every Codex window; Cursor's included. */
+/** The windows that bind: Claude's 5-hour session and weekly all-models; every Codex window; Cursor's Auto and API buckets
+ *  (7.0.45: headroom is 100 minus the higher of the two; its included total is a note). */
 const BINDING: Record<UsageProvider, (kind: string) => boolean> = {
   claude: kind => kind === 'session' || kind === 'weekly_all',
   codex: () => true,
-  cursor: kind => kind === 'included',
+  cursor: kind => kind === 'auto' || kind === 'api',
 }
 
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -188,7 +200,10 @@ export function headroomOf(provider: UsageProvider, reading: UsageReading | null
   return Math.max(0, Math.round(100 - Math.max(...bind.map(w => w.usedPct))))
 }
 
-export function viewOf(e: UsageEntry, now: number): UsageView {
+/** 7.0.45, the on-state words before Cursor's first read: what the Mac will ask. Never a suggestion to allow it always. */
+export const CURSOR_FIRST_READ_NOTE = 'not read yet: the first read asks this Mac to share Cursor\'s sign-in from the Keychain with COS (a "security wants to use … cursor-access-token" prompt and your login password)'
+
+export function viewOf(e: UsageEntry, now: number, cursorOn = false): UsageView {
   const ageSec = e.observedAt ? Math.round((now - e.observedAt) / 1000) : null
   const stale = !e.observedAt || now - e.observedAt > USAGE_STALE_MS
   const headroom = headroomOf(e.provider, e.reading, now)
@@ -203,12 +218,13 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
     return { ...base, state: 'exhausted', headroomPct: 0, resetsAt: new Date(e.limitUntil).toISOString(), source: e.limitSource ?? 'provider_limit', note: 'plan limit reached' }
   }
   if (e.reading?.allowed === false) return { ...base, state: 'exhausted', headroomPct: 0, resetsAt: tightest?.resetsAt ?? null, note: 'the provider says ordinary usage is not allowed now' }
-  if (e.provider === 'cursor' && !e.reading) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' }
+  // Off (the default): exactly as before 7.0.45, whatever an earlier on-period left in the cache.
+  if (e.provider === 'cursor' && !cursorOn) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: 'not read: Cursor usage needs its app or a Keychain read, neither approved' }
   // Every window this reading had has reset: its numbers describe a window that is over, so they are not shown.
   if (e.reading?.available && allBind.length && !bind.length) {
     return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: `not read since its window ended${e.lastError ? `; last read failed: ${safeFailureText(e.lastError)}` : ''}` }
   }
-  if (!e.reading || headroom === null) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: e.reading && !e.reading.available ? 'no plan limits on this login' : e.lastError ? `not read: ${safeFailureText(e.lastError)}` : 'not read yet' }
+  if (!e.reading || headroom === null) return { ...base, state: 'unknown', headroomPct: null, resetsAt: null, note: e.reading && !e.reading.available ? 'no plan limits on this login' : e.lastError ? `not read: ${safeFailureText(e.lastError)}` : e.provider === 'cursor' ? CURSOR_FIRST_READ_NOTE : 'not read yet' }
   // A warning holds only until the window it warned about resets; an old frame cannot keep a new week at "low".
   const warned = e.warning && !(typeof e.warningUntil === 'number' && e.warningUntil <= now)
   const state: UsageState = headroom <= 0 ? 'exhausted' : headroom < USAGE_LOW_HEADROOM || warned ? 'low' : 'ok'
@@ -265,9 +281,12 @@ export function usagePollOptedIn(env: NodeJS.ProcessEnv = process.env): boolean 
 export interface UsageProbes {
   claude: () => Promise<UsageReading>
   codex: () => Promise<UsageReading>
+  /** 7.0.45: called only while cursorPlanOn() is true. */
+  cursor: () => Promise<UsageReading>
 }
 
-export interface UsageMonitorOptions { path?: string; probes?: Partial<UsageProbes>; now?: () => number; pollEnabled?: boolean }
+/** `cursorPlan` overrides the COS_CURSOR_PLAN_USAGE switch (tests); the server leaves it unset and reads the switch. */
+export interface UsageMonitorOptions { path?: string; probes?: Partial<UsageProbes>; now?: () => number; pollEnabled?: boolean; cursorPlan?: boolean }
 
 export class UsageMonitor {
   private entries: Record<UsageProvider, UsageEntry>
@@ -277,7 +296,7 @@ export class UsageMonitor {
   private readonly probes: UsageProbes
   constructor(private readonly options: UsageMonitorOptions = {}) {
     this.now = options.now ?? Date.now
-    this.probes = { claude: options.probes?.claude ?? probeClaudeUsage, codex: options.probes?.codex ?? probeCodexUsage }
+    this.probes = { claude: options.probes?.claude ?? probeClaudeUsage, codex: options.probes?.codex ?? probeCodexUsage, cursor: options.probes?.cursor ?? (() => probeCursorUsage()) }
     const blank = (provider: UsageProvider): UsageEntry => ({ provider, reading: null, observedAt: null, source: 'none', lastError: null, failures: 0, pausedUntil: null, limitUntil: null, limitSource: null, warning: false })
     this.entries = { claude: blank('claude'), codex: blank('codex'), cursor: blank('cursor') }
     if (options.path) {
@@ -292,9 +311,12 @@ export class UsageMonitor {
     try { mkdirSync(dirname(this.options.path), { recursive: true, mode: 0o700 }); atomicWriteFileSync(this.options.path, JSON.stringify(this.entries)) } catch { /* cache only */ }
   }
   entry(p: UsageProvider): UsageEntry { return this.entries[p] }
-  views(): UsageView[] { const now = this.now(); return USAGE_PROVIDERS.map(p => viewOf(this.entries[p], now)) }
+  /** 7.0.45: whether Cursor's plan read is on (COS_CURSOR_PLAN_USAGE=1). Off: no probe, no Keychain read, no network. */
+  cursorPlanOn(): boolean { return this.options.cursorPlan ?? cursorPlanUsageOn() }
+  views(): UsageView[] { const now = this.now(), on = this.cursorPlanOn(); return USAGE_PROVIDERS.map(p => viewOf(this.entries[p], now, on)) }
   /** Probe one provider now (shares a probe already running). Failures count toward the breaker; never throws. */
-  refresh(p: 'claude' | 'codex'): Promise<void> {
+  refresh(p: 'claude' | 'codex' | 'cursor'): Promise<void> {
+    if (p === 'cursor' && !this.cursorPlanOn()) return Promise.resolve() // the switch is checked before anything else
     if (this.inflight[p]) return this.inflight[p]!
     const e = this.entries[p]
     if (e.pausedUntil && e.pausedUntil > this.now()) return Promise.resolve()
@@ -326,7 +348,8 @@ export class UsageMonitor {
   /** Re-read any provider whose reading is older than `maxAgeMs` (default 2 minutes), waiting at most `waitMs`. */
   async ensureFresh(maxAgeMs = USAGE_FRESH_MS, waitMs = 16_000): Promise<void> {
     const now = this.now()
-    const due = (['claude', 'codex'] as const).filter(p => !this.entries[p].observedAt || now - this.entries[p].observedAt! > maxAgeMs)
+    const readable: Array<'claude' | 'codex' | 'cursor'> = this.cursorPlanOn() ? ['claude', 'codex', 'cursor'] : ['claude', 'codex']
+    const due = readable.filter(p => !this.entries[p].observedAt || now - this.entries[p].observedAt! > maxAgeMs)
     if (!due.length) return
     await Promise.race([Promise.all(due.map(p => this.refresh(p))), new Promise(r => setTimeout(r, waitMs).unref?.())])
   }
@@ -366,7 +389,7 @@ export class UsageMonitor {
   /** The opt-in background poll. Off unless `pollEnabled` is true or the env says `COS_WORK_USAGE_POLL=1`. */
   start(env: NodeJS.ProcessEnv = process.env): void {
     if (this.timer || !(this.options.pollEnabled ?? usagePollOptedIn(env))) return
-    const tick = () => { void this.refresh('claude'); void this.refresh('codex') }
+    const tick = () => { void this.refresh('claude'); void this.refresh('codex'); void this.refresh('cursor') } // cursor: a no-op while its switch is off
     this.timer = setInterval(tick, USAGE_POLL_MS)
     this.timer.unref?.()
     setTimeout(tick, 30_000).unref?.()

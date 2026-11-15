@@ -26,12 +26,13 @@ const tests = [
   'server/lib/ask-work-plan.test.ts',
   'server/lib/work-orchestrator/plan-pane.test.ts',
   'server/web-control/plan-ruler-web.test.ts',
+  'server/lib/work-orchestrator/cursor-plan.test.ts',
 ]
 const O = 'server/lib/work-orchestrator/'
 const TG = O + 'tags.ts', RD = O + 'redact.ts', SL = O + 'session-log.ts', PK = O + 'pickup.ts', TI = O + 'tag-index.ts', DI = O + 'discovery.ts'
 const IN = O + 'input.ts', SN = O + 'snapshot.ts', US = O + 'usage.ts', RT = O + 'runtime.ts', PL = O + 'plan-log.ts'
 const WC = 'server/lib/work-chat.ts', WR = 'server/routes/work-chat.ts', OR = 'server/routes/work-orchestrator.ts'
-const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts', PR = 'server/web-control/panes/plan-ruler.js', APP = 'server/web-control/app.js'
+const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts', PR = 'server/web-control/panes/plan-ruler.js', APP = 'server/web-control/app.js', CP = O + 'cursor-plan.ts'
 // Defense in depth that no test can reach on purpose, each with the guard that already stops the same outcome.
 const EXPECTED_SURVIVORS = new Set([
   'tail-drops-partial-line',     // a row cut by the seek never parses (JSON.parse rejects it), so it is skipped either way
@@ -133,7 +134,7 @@ const mutations = [
   ['usage-failure-cleared', US, '        e.lastFailure = null; e.lastFailureAt = null; e.holdUntil = null\n', '        e.lastFailureAt = null; e.holdUntil = null\n'],
   ['usage-view-reason', US, 'reason: e.lastFailure ?? null,', 'reason: null,'],
   ['usage-view-last-good', US, 'lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null', 'lastGoodAt: null'],
-  ['usage-failure-text-safe', US, "before answering$/.test(text) ? text : 'unexpected error'", 'before answering$/.test(text) ? text : text'],
+  ['usage-failure-text-safe', US, "\\d{1,3}$/.test(text) ? text : 'unexpected error'", '\\d{1,3}$/.test(text) ? text : text'],
   ['usage-failure-text-exited-exact', US, '/^exited (?:-?\\d+|on error) before answering$/', '/^exited /'],
   ['usage-failure-text-window-note', US, '`; last read failed: ${safeFailureText(e.lastError)}`', '`; last read failed: ${e.lastError}`'],
   // 7.0.39 (U1): the provider order Miles set (verified G2 turn 2026-11-14), one mutant per rule.
@@ -192,6 +193,35 @@ const mutations = [
   ['lead-repaint-reads', PR, '    if (!el.innerHTML) paint();\n  }', '    if (!el.innerHTML) paint();\n    read(false);\n  }'],
   ['lead-open-reads-at-2-min', US, 'await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS)', 'await this.ensureFresh(USAGE_FRESH_MS)'],
   ['lead-refresh-reads-at-10-min', US, 'await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS)', 'await this.ensureFresh(USAGE_CACHE_MS)'],
+  // 7.0.45 Cursor plan read (U1): each guard of cursor-plan.ts and its switch, proven by a named test.
+  ["cur-switch-any-value", CP, "return env.COS_CURSOR_PLAN_USAGE === '1' }", "return !!env.COS_CURSOR_PLAN_USAGE }"],
+  ["cur-monitor-refresh-ignores-switch", US, "    if (p === 'cursor' && !this.cursorPlanOn()) return Promise.resolve() // the switch is checked before anything else\n", ""],
+  ["cur-view-off-uses-cache", US, "  if (e.provider === 'cursor' && !cursorOn) return", "  if (e.provider === 'cursor' && !e.reading) return"],
+  ["cur-pane-off-draws", PP, "  if (e.provider === 'cursor' && !cursorOn) {", "  if (e.provider === 'cursor' && false) {"],
+  ["cur-probe-ignores-switch", CP, "  if (!cursorPlanUsageOn(env)) throw new UsageProbeError('error', 'unexpected error') // never reached: the monitor checks first\n", ""],
+  ["cur-keychain-env-leaks", CP, "  return { HOME: env.HOME ?? '', PATH: '/usr/bin:/bin' }", "  return { ...env, HOME: env.HOME ?? '', PATH: '/usr/bin:/bin' } as Record<string, string>"],
+  ["cur-keychain-cancel-not-refused", CP, "  if (r.code === 51 || r.code === 128) throw", "  if (r.code === 51) throw"],
+  ["cur-keychain-locked-unnamed", CP, "  if (r.code === 36) throw new UsageProbeError('keychain_locked', 'Keychain locked')\n", ""],
+  ["cur-jwt-never-expires", CP, "claims.exp * 1000 <= nowMs", "claims.exp * 1000 <= 0"],
+  ["cur-expired-still-calls", CP, "  if (jwtExpired(token, (deps.now ?? Date.now)())) throw new UsageProbeError('sign_in_expired', 'Cursor sign-in expired')\n", ""],
+  ["cur-version-not-required", CP, "  if (!version) throw new UsageProbeError('not_found', 'Cursor CLI not found')\n", ""],
+  ["cur-version-any-folder", CP, "return /^\\d{4}\\.\\d{1,2}\\.\\d{1,2}-[0-9a-f]{6,40}$/.test(v) ? v : null", "return v || null"],
+  ["cur-allowlist-open", CP, "  if (!(CURSOR_READS as readonly string[]).includes(method)) throw new UsageProbeError('error', 'unexpected error')\n", ""],
+  ["cur-redirect-followed", CP, "body: '{}', redirect: 'manual', signal })", "body: '{}', redirect: 'follow' as 'manual', signal })"],
+  ["cur-redirect-status-ok", CP, "(reply.status >= 300 && reply.status < 400)", "false"],
+  ["cur-403-not-expired", CP, "  if (reply.status === 401 || reply.status === 403) throw", "  if (reply.status === 401) throw"],
+  ["cur-percent-over-100", CP, "return n === null || n < 0 || n > 100 ? 'bad' : n", "return n === null || n < 0 ? 'bad' : n"],
+  ["cur-display-message-is-bar", CP, "const auto = percent(pu.autoPercentUsed),", "const auto = percent(Number(String(u.displayMessage ?? '').match(/\\d+/)?.[0] ?? pu.autoPercentUsed)),"],
+  ["cur-binding-included", US, "  cursor: kind => kind === 'auto' || kind === 'api',", "  cursor: kind => kind === 'included',"],
+  ["cur-grok-on-api", CP, "listed.includes(model) || /^grok/i.test(model) ? 'auto' : 'api'", "listed.includes(model) ? 'auto' : 'api'"],
+  ["cur-network-text-kept", CP, "    throw new UsageProbeError('error', 'unexpected error') // a network error's own text is never kept\n", "    throw error\n"],
+  ["cur-timeout-unnamed", CP, "    if (ctl.signal.aborted) throw new UsageProbeError('timed_out', 'timed out')\n", ""],
+  ["cur-extras-required", CP, "    const planInfo = await cursorRead(fetchFn, 'GetPlanInfo', token, version, ctl.signal).catch(() => null)", "    const planInfo = await cursorRead(fetchFn, 'GetPlanInfo', token, version, ctl.signal)"],
+  ["cur-pane-no-period-start-guess", PP, "  if (live.mins === 0) {", "  if (false) {"],
+  ["cur-refused-said-generically", PP, "  if (e.provider === 'cursor' && e.lastFailure === 'keychain_refused') {", "  if (false) {"],
+  ["cur-refused-message-generic", CP, "throw new UsageProbeError('keychain_refused', \"Cursor's sign-in was not shared with COS\")", "throw new UsageProbeError('keychain_refused', 'Keychain read refused')"],
+  ["cur-first-read-says-nothing", PP, "        : e.provider === 'cursor' ? CURSOR_FIRST_READ_WORDS : 'Not read yet. Refresh to read it.',", "        : 'Not read yet. Refresh to read it.',"],
+  ["cur-copy-suggests-always", PP, "a \"security wants to use \u2026 cursor-access-token\" prompt and your login password. Refresh to read it.'", "a \"security wants to use \u2026 cursor-access-token\" prompt and your login password; choose Always Allow. Refresh to read it.'"],
   ['q1-escape-long', PR, "' + esc(l.long) + '</div></div>'", "' + l.long + '</div></div>'"],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new UsageProbeError('timed_out', 'timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
