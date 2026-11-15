@@ -1,7 +1,8 @@
 /**
  * 7.0.45 (U1; Miles 2026-11-14, plan relayed from his glasses 8:23 PM, confirmed in the lead session 20:46): Cursor's plan
  * usage, read the way Claude's is, with no model turn. Read through the same UsageMonitor (usage.ts): the same cache,
- * holds and breaker, and no timer unless COS_WORK_USAGE_POLL=1.
+ * holds and breaker. Only two things read it: opening Usage and Refresh. Never a Work plan, never the timer, even with
+ * COS_WORK_USAGE_POLL=1 (lead 21:19 and 21:42), so nothing unattended can raise the Keychain prompt.
  *
  * OFF unless the server's environment says COS_CURSOR_PLAN_USAGE=1. Off means none of this runs: no Keychain read, no
  * network call, and Cursor reads "No plan reading" exactly as before. Reading his Cursor sign-in from the Keychain is a

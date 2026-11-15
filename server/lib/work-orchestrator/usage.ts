@@ -391,7 +391,8 @@ export class UsageMonitor {
   /** The opt-in background poll. Off unless `pollEnabled` is true or the env says `COS_WORK_USAGE_POLL=1`. */
   start(env: NodeJS.ProcessEnv = process.env): void {
     if (this.timer || !(this.options.pollEnabled ?? usagePollOptedIn(env))) return
-    const tick = () => { void this.refresh('claude'); void this.refresh('codex'); void this.refresh('cursor') } // cursor: a no-op while its switch is off
+    // Never Cursor (lead 21:42): only opening Usage and Refresh read Cursor, so a timer can never raise the Keychain prompt.
+    const tick = () => { void this.refresh('claude'); void this.refresh('codex') }
     this.timer = setInterval(tick, USAGE_POLL_MS)
     this.timer.unref?.()
     setTimeout(tick, 30_000).unref?.()

@@ -11,7 +11,7 @@ import {
   cursorReadUrl, jwtExpired, keychainEnv, parseCursorUsage, probeCursorUsage, readCursorToken,
   MAX_REPLY_BYTES, type ExecFn, type FetchFn, type FetchInit,
 } from './cursor-plan.js'
-import { UsageMonitor, UsageProbeError, USAGE_BREAKER_MS, USAGE_FAILURE_HOLD_MS, headroomOf, safeFailureText, viewOf, type UsageEntry } from './usage.js'
+import { UsageMonitor, UsageProbeError, USAGE_BREAKER_MS, USAGE_FAILURE_HOLD_MS, USAGE_POLL_MS, headroomOf, safeFailureText, viewOf, type UsageEntry } from './usage.js'
 import { planLine, planPane } from './plan-pane.js'
 
 const NOW = Date.parse('2026-11-15T02:30:00Z') // 8:30 PM CST, Nov 14
@@ -329,6 +329,20 @@ describe('the monitor, switched on: the same holds as Claude', () => {
     expect(exec).toHaveBeenCalledTimes(1); expect(calls()).toBe(3) // opening Usage does read
     await m.forPlan()
     expect(exec).toHaveBeenCalledTimes(1); expect(calls()).toBe(3)
+  })
+  it('lead 21:42: with the poll and the Cursor switch both on, a tick spawns no Keychain child and makes no Cursor fetch', async () => {
+    vi.useFakeTimers()
+    try {
+      let now = NOW
+      const exec = okExec(), fetchFn = fakeFetch(goodReplies)
+      const claude = vi.fn(async () => parseCursorUsage(usageReply())!)
+      const m = new UsageMonitor({ probes: { claude, codex: claude, cursor: () => probeCursorUsage(deps({ exec, fetch: fetchFn })) }, now: () => now, cursorPlan: true, pollEnabled: true })
+      m.start({ COS_WORK_USAGE_POLL: '1' })
+      for (let i = 0; i < 3; i++) { now += USAGE_POLL_MS; await vi.advanceTimersByTimeAsync(USAGE_POLL_MS) }
+      m.stop()
+      expect(claude.mock.calls.length).toBeGreaterThanOrEqual(3) // the timer does run, for Claude and Codex
+      expect(exec).not.toHaveBeenCalled(); expect((fetchFn as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(0)
+    } finally { vi.useRealTimers() }
   })
   it('re-reads Cursor only past 10 minutes on the usage route (2 on Refresh), and never for a Work plan', async () => {
     let now = NOW

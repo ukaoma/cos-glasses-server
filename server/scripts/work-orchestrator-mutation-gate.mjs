@@ -234,6 +234,7 @@ const mutations = [
   ["cur-tls-off-ignored", CP, "  if (env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new UsageProbeError('tls_off', 'TLS checks are off on this Mac; Cursor was not read')\n", ""],
   ["cur-cap-no-abort", CP, "  const tooBig = () => { onCap(); return new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }", "  const tooBig = () => { return new UsageProbeError('unknown_shape', 'unknown Cursor usage shape') }"],
   ["cur-plan-reads-cursor", US, "await this.ensureFresh(USAGE_FRESH_MS, undefined, false)", "await this.ensureFresh(USAGE_FRESH_MS)"],
+  ["cur-poll-reads-cursor", US, "    const tick = () => { void this.refresh('claude'); void this.refresh('codex') }", "    const tick = () => { void this.refresh('claude'); void this.refresh('codex'); void this.refresh('cursor') }"],
   ["cur-off-serves-plan-name", US, "{ ...base, plan: null, reason: null, lastGoodAt: null, ageSec: null, state: 'unknown',", "{ ...base, state: 'unknown',"],
   ['q1-escape-long', PR, "' + esc(l.long) + '</div></div>'", "' + l.long + '</div></div>'"],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
