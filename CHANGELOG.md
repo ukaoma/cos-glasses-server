@@ -27,9 +27,19 @@
 - **Not in this build:** the reader's one strip (the activity line with Check for new), the pings button, the archive boot fix.
 - **A known older issue:** the live-cues verdicts mutation gate has 3 targets that no longer match (route-max-cues, env-max-per-meeting-read, env-daily-read), in 7.0.43 too; the code it guards is unchanged here.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on 4947c7de, the release commit itself; after it, one package.json files line leaves out server/scripts/session-catch-up-mutation-gate.mjs, which changes what is packed and nothing that runs, and this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 17,287 passed, 6 skipped (17,293) in 957 files (955 passed, 2 skipped); type check clean. In the same lease, first: the web set 1,923 passed, and the 11 server tests that read web-control source, the key-lane census, hazard invariants and every route suite 3,095 passed.
+- **The layout sweep in a test browser (WebKit), quick set, on 4947c7de (F1):** exit 0; 0 defect keys over 625 states in 1110 s (14 known keys, not failing, as F1 classes them); 625 states on 4947c7de and on a same-day recheck of 7.0.43 (ff57406b), against 640 on the earlier 7.0.43 gate, so the same 15 are missing on the installed build too; which 15 is not yet named (the sweep gained state keys after this gate and was not used for it); verdict hit areas at least 49 x 44.8 px at 382 and 65.5 x 44.8 at 449; open on the card at 382 x 557 with the question and first option in view (F1_evidence/sweep_gate_4947c7de.log).
+- **The package line:** every test that reads package.json or the pack manifest, on the exclusion commit: 6 files, 178 passed.
+- **Not on a real phone** (see above).
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **The folded reader (W1, claude/web-folded-reader-413 25491866: items 4, 1, 3):** item 4 reader-open-question-web.test.ts 17 and the frame pins, 16 of 16 mutants; F1 WebKit on 071d7cbf 15 of 18 against 9 of 18 (the 3 misses are the folded body height); item 1 bar-skip-open-session-web.test.ts 11, 8 of 8 mutants (with d5c694f6); item 3 signin-reader-window-web.test.ts 8, 9 of 9. Q1 PASS on the stack 18:52.
+- **Memories C (S1 server 47b69e23, W1 reads 95adbb8f, F1 pane 57424db3, together):** Q1 PASS 18:56, 524 green combined; W1 reads 18 of 18 mutants plus Q1's survivor test; F1's rail parity line lands with them.
+- **Session catch-up (X1, ccd0bb00):** X1's counted run: session-catch-up 40 of 40, turn-end-ask 60 of 60, question-8h 43 of 43, 968 suite tests. Q1 final 18:24.
+- **Verdict hit areas (F1, 3b8804be, memories.css only):** F1 WebKit evidence; Q1 PASS 19:13.
+- **Settings Refresh once (W1, 7ac248f6):** settings-refresh-once-web.test.ts 3, 18 of 18 with refresh-keep, 4 of 4 mutants. Q1 PASS 19:16.
+- **The cut:** 19 picks on 35b08611; every replayed commit's lines equal its source (catch-up 90788c4b's health.ts resolved additively, its sorted lines equal); 50 of 54 files byte-identical to their one piece, the rest the exact union of their pieces.
 
 ## 7.0.43 - The question card in a session's reader no longer hides behind its own Submit, the plan ruler on Usage, and Refresh that keeps the page
 
