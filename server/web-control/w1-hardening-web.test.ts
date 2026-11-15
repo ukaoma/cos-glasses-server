@@ -569,6 +569,7 @@ describe('the session reader mounts its question cards above the verdict and the
     expect(at, 'its last part, before the dock').toBeLessThan(dock)
     expect(at, 'above the verdict and the Send box').toBeLessThan(verdict)
     expect(verdict).toBeLessThan(send)
-    expect(APP).toContain("r.qMount = qk.mount(qhost, id, function () {")
+    // The build after 7.0.43 (folded reader item 4): the callback takes the cards' count for the open-on-question rule.
+    expect(APP).toContain("r.qMount = qk.mount(qhost, id, function (n) {")
   })
 })
