@@ -109,7 +109,8 @@ const mutations = [
   ['usage-on-demand-refresh', US, ' ? USAGE_FRESH_MS : USAGE_CACHE_MS)', ' ? USAGE_CACHE_MS : USAGE_CACHE_MS)'],
   ['usage-plan-fresh', US, 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS);', 'async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_CACHE_MS);'],
   ['usage-cache-window', US, 'export const USAGE_CACHE_MS = 10 * 60_000\n', 'export const USAGE_CACHE_MS = 60 * 60_000\n'],
-  ['runtime-input-reads-for-plan', RT, '  const usageViews = await monitor.forPlan()\n', '  const usageViews = monitor.views()\n'],
+  // Target moved by eebd1737 (2026-11-05, Ask's proposals read cached usage): the plan path is now the ternary's live arm.
+  ['runtime-input-reads-for-plan', RT, "? monitor.views() : await monitor.forPlan()\n", "? monitor.views() : monitor.views()\n"],
   ['route-usage-on-demand', OR, 'Promise<UsageView[]> => monitor.onDemand(refresh)', 'Promise<UsageView[]> => Promise.resolve(monitor.views())'],
   ['route-usage-refresh-param', OR, "usage: await deps.usage(req.query.refresh === '1')", 'usage: await deps.usage(false)'],
   ['usage-rejected-frame', US, "    if (info.status === 'rejected') {", "    if (false) {"],
@@ -208,7 +209,9 @@ const mutations = [
   ['wr-every-plan-logged', WR, '      try { deps.planLog(planLogRow(input,outcome,answer,deps.now()-started)) } catch { /* observation only */ }\n', ''],
   ['wr-invalid-answer-outcome', WR, "      try { answer=parseWorkChatAnswer(out.text,input) } catch (e) { outcome='invalid_answer'; throw e }", "      answer=parseWorkChatAnswer(out.text,input)"],
   ['wr-log-left-out', WR, '    leftOut: (input.leftOut ?? []).map(l => ({ id: l.id, reason: l.reason })),', '    leftOut: [],'],
-  ['or-stores-snapshot', OR, '      deps.putSnapshot(snapshot)\n', ''],
+  // Target moved by 48450029 (2026-11-06, POST /work/orchestrator/snapshot added a second putSnapshot): this mutant was
+  // written (4e64ffad, 2026-10-20) for the store inside POST /input, so it is anchored there.
+  ['or-stores-snapshot', OR, '      deps.putSnapshot(snapshot)\n    }\n    try {\n      const input', '    }\n    try {\n      const input'],
   ['or-validates-snapshot', OR, "      try { ({ snapshot, droppedLiveRows } = parseSnapshotReport(body.snapshot, deps.now())) } catch (e) { return res.status(400).json({ error: 'invalid_snapshot', reason: (e as Error).message }) }", "      snapshot = body.snapshot as ControlSnapshot"],
   // 7.0.13: a live row Control cannot name is left out and counted; the count reaches both answers.
   ['or-input-reports-dropped', OR, "      return res.json(droppedLiveRows ? { ...input, droppedLiveRows } : input)", "      return res.json(input)"],
