@@ -59,6 +59,14 @@ export interface WebKeyRouterDeps {
    */
   signerTls?: () => object | null
   /**
+   * SR-15 (lib/web-key-signer-bind.ts): `signerBindFixVersion`, `signerBind` (where 3144 binds or would
+   * bind, and whether it is listening) and `certDisclosure` (whether a certificate is stored and the exact
+   * name it puts in public certificate logs). Spread into every status answer. Given, a token-only status
+   * read also answers with both switches off (`mode: 'off'`, these facts only), so COS Control can show the
+   * disclosure before the first On. Absent: status is exactly as before, and off still falls through.
+   */
+  signerFacts?: () => Record<string, unknown> | null
+  /**
    * Phase 3: whether this request reached the 3144 signer listener (index.ts: the socket's local
    * port). Given, the phone's key steps (enroll start and prove, nonce) and the handoff claim answer
    * only there, so a page on 3143 can neither make a key nor fetch a handoff. Absent (tests that
@@ -122,8 +130,27 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     return state ? { signerTls: state } : {}
   }
 
-  router.get('/web-key/status', anchorRoutes, async (req, res) => {
+  const signerFactsField = (): Record<string, unknown> => {
+    let facts: Record<string, unknown> | null = null
+    try { facts = deps.signerFacts?.() ?? null } catch { facts = null }
+    return facts && typeof facts === 'object' ? facts : {}
+  }
+
+  // SR-15: like anchorRoutes, plus one more door with both switches off: a token-bearing read when the
+  // deployment reports the signer facts. Anything else with both switches off falls through as before.
+  const statusRoutes = (req: Request, res: Response, next: NextFunction): void => {
+    if (deps.authority.mode() === 'off' && !(deps.signerFacts && hasToken(req))) { next('router'); return }
+    res.set('Cache-Control', 'private, no-store')
+    next()
+  }
+
+  router.get('/web-key/status', statusRoutes, async (req, res) => {
     const registry = deps.authority.registry
+    if (deps.authority.mode() === 'off') {
+      // SR-15: both switches off. Only a token-bearing read gets here (statusRoutes). The signer facts and
+      // nothing else: no origin, aud or anchor field, so a Control that reads a missing origin as "off" stays hidden.
+      return void res.json({ ok: true, enabled: false, mode: 'off', ...signerFactsField() })
+    }
     if (deps.authority.mode() !== 'authority') {
       // Bootstrap only: COS Control's anchor state, nothing that suggests approvals. Token only:
       // no web page needs it while no phone can enroll. `enabled: false` keeps older Controls hidden.
@@ -141,6 +168,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
         aud: registry.aud(selfDns),
         origin: deps.expectedOrigin(),
         epoch: registry.epoch(),
+        ...signerFactsField(),
       })
     }
     if (!hasToken(req) && !web(req)) return refuse(res, 401, 'unauthorized')
@@ -160,6 +188,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
       activeKeys: registry.activeCount(selfDns),
       ...(deps.integrityStatus ? { integrity: deps.integrityStatus() } : {}),
       ...signerTlsField(),
+      ...signerFactsField(),
     })
   })
 
