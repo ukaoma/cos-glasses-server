@@ -1,3 +1,15 @@
+## 7.0.47 — Shared chat navigation and phone notification preparation
+
+2026-11-15. Private candidate; activation and publication remain separate.
+
+- COS chat opens at the latest messages after delayed layout, provides Jump to latest, and preserves the message being read when history or updates load. Notification links can open their specific message.
+- Memories counts return promptly from the cache. Unconfigured learning rows are omitted and old counts show their age.
+- Phone notification setup supports test-only subscriptions, removal, and explicit per-device message-preview preferences. Test pings can be scheduled 15 seconds later so the phone can be locked.
+- Real phone notifications use the existing ping engine's selected, budgeted banners. Both `COS_WEB_PUSH` and the separate `COS_WEB_PUSH_PRODUCTION` remain off by default. A test subscription does not enroll a phone for real notifications.
+- Includes the reviewed spawn-census test coverage queued after 7.0.46.
+
+Physical iPhone delivery and phone-key enrollment still require acceptance tests. Server tests alone do not establish delivery or permission readiness.
+
 ## 7.0.46 - Cursor's plan usage on the Usage view, read like Claude's, off unless switched on
 
 2026-11-14. 7.0.45 plus the change below; everything in 7.0.45 and 7.0.44 is in this update too (see their entries).
