@@ -422,9 +422,22 @@ describe('Control Web Memories: Copy context and settings', () => {
     await h.open()
     h.tap('settings'); await flush()
     const html: string = h.t.modalHtml()
-    expect(html.match(/role="switch"[^>]*disabled/g)).toHaveLength(2)
+    // One switch since Miles's 15:06 pick (Capture); the review row is gone.
+    expect(html.match(/role="switch"[^>]*disabled/g)).toHaveLength(1)
     expect(html).toContain('Read-only: the memory workspace on your Mac is not set up yet.')
     expect(html).not.toContain('adoption_required')
+  })
+
+  it('Memory settings show Capture and no longer the review row, though the policy still carries review_required (Miles 15:06)', async () => {
+    const h = load({ answers: { 'ws:policy_get': { policy: { capture_enabled: true, review_required: true, revision: 3 }, writable: true, state: 'available', protocol: 1 } } })
+    await h.open()
+    h.tap('settings'); await flush()
+    const html: string = h.t.modalHtml()
+    expect(html).toContain('Capture completed sessions')
+    expect(html).toMatch(/role="switch" aria-checked="true" aria-label="Capture completed sessions" data-mm="policy" data-arg="capture_enabled"/)
+    expect(html).not.toContain('Review new memories before recall')
+    expect(html).not.toContain('data-arg="review_required"')
+    expect(html.match(/role="switch"/g)).toHaveLength(1)
   })
 
   it('a writable policy sends policy_set with the flipped value, its revision and a fresh key', async () => {

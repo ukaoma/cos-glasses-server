@@ -1779,8 +1779,9 @@
       return '<div class="cx-set-row"><span class="cx-set-text"><span class="cx-set-name">' + esc(title) + '</span><span class="cx-set-desc">' + esc(sub) + '</span></span>' +
         '<button type="button" class="switch" role="switch" aria-checked="' + on + '" aria-label="' + esc(title) + '" data-mm="policy" data-arg="' + key + '"' + (dis ? ' disabled' : '') + '></button></div>';
     }
-    var policy = p ? '<div class="cx-list">' + row('capture_enabled', 'Capture completed sessions', 'Pausing affects new automatic captures. What COS already knows stays readable.') +
-      row('review_required', 'Review new memories before recall', 'New memories wait for your acceptance. Accepted memories stay active.') + '</div>' +
+    // Miles 15:06 (lead's 7.0.44 order): the read-only "Review new memories before recall" row is gone; the policy's
+    // review_required field is left as it is on the server, and Capture stays.
+    var policy = p ? '<div class="cx-list">' + row('capture_enabled', 'Capture completed sessions', 'Pausing affects new automatic captures. What COS already knows stays readable.') + '</div>' +
       (d && !d.writable ? '<p class="mm-muted">Read-only: ' + esc(readOnlyWords(d.state)) + '</p>' : '<p class="mm-muted">Only the owner can change these. Skill changes need a reviewed, checked version.</p>') :
       S.policyError ? '' : '<p class="cx-note">Reading your memory settings…</p>';
     if (S.policyError) policy += '<p class="mm-bad">' + esc(S.policyError) + '</p>' + btn(S.policyIntent ? 'policy-retry' : 'policy-load', 'Try again');
