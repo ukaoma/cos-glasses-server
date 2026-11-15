@@ -464,10 +464,24 @@
     var want = String(sessionId || '').toLowerCase();
     return Q.items.filter(function (i) { return !want || String(i.sessionId || '').toLowerCase() === want; });
   }
+  // The build after 7.0.43 (folded reader item 1, F1's scope): the page's own bar (#sq-host) leaves out the questions of
+  // the session the reader is showing now, whose card is already drawn there (a connected mount for it), and counts the
+  // others. Only the session the route reads: a reader left in the DOM behind another pane does not count, and a reader
+  // whose cards are not mounted keeps the bar. It is re-read on every route change (hashchange, below).
+  function readerShowing() {
+    var r = W.parseRoute ? W.parseRoute() : null;
+    if (!r || r.pane !== 'sessions' || !r.args || r.args.length !== 2) return '';
+    var want = String(r.args[1] || '').toLowerCase();
+    return want && mounts.some(function (x) { return x.sessionId === want && x.el.isConnected !== false; }) ? want : '';
+  }
+  function hostItems() {
+    var skip = readerShowing();
+    return itemsFor(null).filter(function (i) { return !skip || String(i.sessionId || '').toLowerCase() !== skip; });
+  }
   function drawInto(m) {
     var active = document.activeElement;
     var focus = active && active.hasAttribute && active.hasAttribute('data-sq-other') && m.el.contains && m.el.contains(active) ? { id: active.getAttribute('data-sq-id'), q: active.getAttribute('data-q'), start: active.selectionStart, end: active.selectionEnd } : null;
-    var list = itemsFor(m.sessionId), mac = atMacFor(m.sessionId);
+    var list = m.el === host ? hostItems() : itemsFor(m.sessionId), mac = atMacFor(m.sessionId);
     var cards = list.map(function (i) { return i.kind === 'approval' ? approvalCard(i) : questionCard(i, m.scope); }).join('') + mac.map(macCard).join('');
     // The page's own host (over every pane): folded it is one line until tapped (questions.css .sq-banner, 6.99.30).
     if (m.el === host && list.length) cards = bannerHtml(list) + '<div class="sq-cards' + (Q.bannerOpen ? ' open' : '') + '" id="sq-cards">' + cards + '</div>';
@@ -819,6 +833,8 @@
     if (!el) return null;
     var m = { el: el, sessionId: String(sessionId || '').toLowerCase(), scope: 'sqm' + (mounts.length + 1), onChange: onChange || null };
     mounts.push(m); listen(el); drawInto(m);
+    // Folded reader item 1: a reader's cards now drawn take this session's questions off the page's bar at once.
+    if (host) drawInto({ el: host, sessionId: null, scope: 'sq' });
     if (!Q.stopped) nudge();
     return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
   }
@@ -853,6 +869,8 @@
   if (window.visualViewport) { window.visualViewport.addEventListener('resize', fitKeyboard); window.visualViewport.addEventListener('scroll', fitKeyboard); }
   window.addEventListener('resize', fitKeyboard); window.addEventListener('orientationchange', fitKeyboard);
   window.addEventListener('pageshow', fitKeyboard);
+  // Folded reader item 1: the bar is re-read when the route changes (into or out of a reader).
+  window.addEventListener('hashchange', function () { render(); });
   host.addEventListener('focusin', fitKeyboard); host.addEventListener('focusout', function () { setTimeout(fitKeyboard, 0); });
   // The Mac going away or coming back redraws the cards at once (their buttons wait while it is away).
   if (W.onServer) W.onServer(function () { render(); });
