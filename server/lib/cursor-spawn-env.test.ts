@@ -263,7 +263,14 @@ describe('the Cursor spawn census', () => {
     const plan = readFileSync(join(REPO, 'server/lib/work-orchestrator/cursor-plan.ts'), 'utf8')
     expect(plan).toContain("export const CURSOR_KEYCHAIN_TOOL = '/usr/bin/security'")
     expect(plan.match(/\bexec\(/g)).toEqual(['exec('])
-    expect(plan).toContain('await exec(CURSOR_KEYCHAIN_TOOL, CURSOR_KEYCHAIN_ARGS,')
+    expect(plan).toContain('await exec(CURSOR_KEYCHAIN_TOOL, CURSOR_KEYCHAIN_ARGS, { env: keychainEnv(env), timeoutMs })')
+    // The child's env is not the server's: `security` gets HOME (its keychain search list) and a fixed PATH, nothing else.
+    expect(plan).toContain("return { HOME: env.HOME ?? '', PATH: '/usr/bin:/bin' }")
+    // The Cursor CLI path is only read (its folder name is the version header), never run: the resolved path reaches
+    // nothing but realpath, and no spawn-family call in the file names it.
+    expect(plan.match(/bin\.path/g)?.length).toBe(2)
+    expect(plan).toContain('basename(dirname(real(bin.path)))')
+    expect(spawnCalls(plan).some(call => /bin\.path|resolveProviderBinary|agent/.test(call))).toBe(false)
     // Each of the ten sites contributed at least one checked call.
     expect(new Set(calls.map(line => line.split(':')[0])).size).toBeGreaterThanOrEqual(8)
   })
