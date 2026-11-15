@@ -19,9 +19,16 @@ Miles, 2026-11-14 21:06: "No, I wnat you to actually install it and turn it on a
 
 **The lead's install condition, settled in code:** Cursor is read in exactly two ways, opening Usage and Refresh. The background poll (COS_WORK_USAGE_POLL=1, off by default) never reads Cursor.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent 075c6a26, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 17,349 passed, 6 skipped (17,355) in 958 files; type check clean. In the same lease, first: the web set 1,945 passed, and the 11 server tests that read web-control source with the key-lane census, hazard invariants and routes 3,095 passed.
+- **The layout sweep in a test browser (WebKit), quick set, on 075c6a26 (F1):** RESULT 0 defect keys (14 known, not failing) over 625 states (lanes/F1_evidence/sweep_gate_075c6a26.log).
+- **F1's other WebKit checks on 075c6a26:** the image swipe 51 of 51; verdict hit areas at least 44 px at 382 x 557 and 449 x 798, light and dark; the folded reader opens on its card.
+- **Not covered:** no file under server/web-control changes in this build; the Cursor read itself is off in every run above (no Keychain read, no network), so its first live read is the lead's, at install (see Not covered).
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **Cursor plan read (U1, claude/server-cursor-plan-usage 96e9eb62):** U1's leased run on 49da66bf, 22:06: tsc 0, 289 focused tests passed, the work-orchestrator gate 199 of 201 killed by a named test (2 expected survivors, both on the documented list). Q1 PASS on code with the security lens 21:49 (after FIX FIRST 21:13 and the lead's 21:19 and 21:42 rulings).
+- **Census fix (U1, 96e9eb62, test only):** the first counted suite of this build (88b1db10, 22:24) failed one test, the Cursor spawn census, which found cursor-plan.ts unreviewed. 96e9eb62 lists it as a reviewed site (its execFile runs /usr/bin/security only), so a future Cursor spawn there still fails the census. Q1 PASS 22:28. The extra census pins (5c644f9f) go in the next build (lead 22:35).
+- **The cut:** 8 picks on e712ca9f; every replayed commit's lines equal its source; the tree equals 96e9eb62 plus the release commit.
 
 ## 7.0.45 - A response's images open as one set you can swipe through, and the review switch leaves Memory settings
 
@@ -38,9 +45,17 @@ Miles, 2026-11-14 21:06: "No, I wnat you to actually install it and turn it on a
 **Not covered, said plainly:**
 - **Not on a real phone:** the swipe was checked in WebKit with touch events sent to the viewer; a real finger on his phone is the last check.
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent e712ca9f, the release commit itself; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 17,312 passed, 6 skipped (17,318) in 959 files (957 passed, 2 skipped); type check clean. In the same lease, first: the web set 1,945 passed, and the 11 server tests that read web-control source, the key-lane census, hazard invariants and every route suite 3,095 passed.
+- **The layout sweep in a test browser (WebKit), quick set, on e712ca9f (F1):** exit 0; 0 defect keys over 625 states in 1110 s (14 known keys, not failing, as F1 classes them); the sweep gained per-state keys after the 7.0.44 gate, and its count is unchanged, 625 against 7.0.44's 625; verdict hit areas and the folded open-on-card at 382 x 557 pass (F1_evidence/sweep_gate_e712ca9f.log).
+- **The image swipe in WebKit on e712ca9f (F1):** 51 of 51 checks hold at 382 x 557, 449 x 798 and 1119 x 787, exit 0 (F1_evidence/check_image_swipe_gate_e712ca9f.log); drags are touch events sent to the viewer, so a real finger on his phone is the last check.
+- **Not on a real phone** (see above).
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **Image swipe (W1, claude/web-image-swipe fe810e9a):** image-swipe-web.test.ts 21, with reader-media-web 35 and 1,944 in the web set; W1's 23 of 23 mutants on 165a40a9, Q1's 24 of 27 on fe810e9a (the 3 left equivalent); F1 WebKit 51 of 51 at 382 x 557, 449 x 798 and 1119 x 787, with 165a40a9 as a control failing the Retry case. Q1 PASS 20:35.
+- **Pack test (W1, claude/server-pack-no-gates e2212830):** 3 tests; removing the generic runner's, the catch-up gate's or the anchor tool's exclusion makes it fail. Q1 PASS 20:34, 6 of 6 mutants.
+- **Review row removal (F1, claude/server-memories-c-pane 52d0c449):** memories-web.test.ts; web set and readers 1,989. Q1 PASS 20:28.
+- **The cut:** 5 picks on 2342b8ab; every replayed commit's lines equal its source; all 5 files byte-identical to their heads.
 
 ## 7.0.44 - The Memories page as one index with one Needs you number, Skip this meeting, and a reader that opens on its question
 
