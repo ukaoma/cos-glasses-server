@@ -438,6 +438,18 @@
   // renewal can reach (30 days from the first sign-in). A server without renewal sends no cap: then the cookie's end is the end.
   var CONN = { timer: null, retrying: false, signin: null, hideFor: 0, lapsed: false };
   var CONN_RETRY_MS = 30000, SIGNIN_WARN_MS = 24 * 3600000, SIGNIN_STORE = 'cos.web.signinEnds';
+  // The build after 7.0.43 (folded reader item 3, F1's scope): on a folded phone's session reader the conversation area is
+  // about 110 px, so the sign-in line (56 px plus its gap) shows there only in the last 2 hours before the end; Today and
+  // the other panes keep the 24-hour notice. The Mac-not-answering line is not affected: Submit waits on it.
+  var SIGNIN_WARN_READER_MS = 2 * 3600000, SIGNIN_FOLDED_MQ = '(max-width: 599px)';
+  function signinWarnMs() {
+    try {
+      var r = typeof parseRoute === 'function' ? parseRoute() : null;
+      var reader = !!(r && r.pane === 'sessions' && r.args && r.args.length === 2);
+      var folded = typeof matchMedia === 'function' && matchMedia(SIGNIN_FOLDED_MQ).matches;
+      return reader && folded ? SIGNIN_WARN_READER_MS : SIGNIN_WARN_MS;
+    } catch (_e) { return SIGNIN_WARN_MS; }
+  }
   // Names the row, never the Settings page: that page was renamed in COS Control 0.5.387, and a phone may pair with either build.
   var SIGNIN_HOW = 'On your Mac, open COS Control Settings and choose Open COS on your phone. Or get a code from another signed-in browser, or from the COS Glasses app.';
   function connWhen(ms) {
@@ -494,7 +506,7 @@
         '<button type="button" class="btn small" data-action="conn-retry"' + (CONN.retrying ? ' disabled' : '') + '>' + (CONN.retrying ? 'Checking' : 'Retry') + '</button></div>';
     }
     var ends = signinEndsAt(), left = ends - Date.now();
-    if (ends && left > 0 && left <= SIGNIN_WARN_MS && CONN.hideFor !== ends) {
+    if (ends && left > 0 && left <= signinWarnMs() && CONN.hideFor !== ends) {
       html += '<div class="conn-line" role="status"><strong>Sign-in here ends ' + esc(connWhen(ends)) + '.</strong><span class="conn-sub">' +
         esc('Sign in again before then from COS Control Settings on your Mac: Open COS on your phone.') + '</span>' +
         '<button type="button" class="btn small" data-action="conn-hide-signin">Hide</button></div>';
@@ -799,6 +811,8 @@
   function route(forceChanged) {
     if (typeof navStamp === 'function') navStamp();
     var r = parseRoute();
+    // Folded reader item 3: the sign-in line's window depends on the route (a session reader, folded).
+    if (typeof connPaint === 'function') connPaint();
     var changedPane = forceChanged === true || r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
     if (state.pane !== r.pane && PANES[state.pane] && PANES[state.pane].leave) { try { PANES[state.pane].leave(); } catch (err) { console.error(err); } }
     state.pane = r.pane;
@@ -8261,6 +8275,8 @@
     });
   });
   window.addEventListener('hashchange', route);
+  // Folded reader item 3: folding or unfolding changes the sign-in line's window on a session reader.
+  window.addEventListener('resize', function () { if (typeof connPaint === 'function') connPaint(); });
   window.addEventListener('scroll', onScroll, { passive: true });
   // 6.99.30: back from the browser's back-forward cache (a swipe back, the app switcher) the open reader's live stream
   // is closed and the page's last reading is however old the visit was. Open the stream again and read the turns.
