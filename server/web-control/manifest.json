@@ -1,0 +1,11 @@
+{
+  "id": "/control",
+  "name": "COS Control",
+  "short_name": "COS",
+  "start_url": "/control",
+  "scope": "/control",
+  "display": "standalone",
+  "background_color": "#f5f0e6",
+  "theme_color": "#f5f0e6",
+  "icons": [{ "src": "/control/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }]
+}

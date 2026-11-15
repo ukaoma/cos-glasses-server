@@ -49,10 +49,14 @@ export interface PushDevice {
   origin: string
   label: string
   addedAt: string
+  /** Explicit per-device opt-in. Old proof subscriptions never receive production banners. */
+  production?: boolean
+  /** Lock-screen words are off unless explicitly chosen for this device. */
+  showWords?: boolean
 }
 
 /** What a route may show: never the endpoint path or the keys. */
-export interface PushDeviceView { id: string; label: string; addedAt: string; service: string }
+export interface PushDeviceView { id: string; label: string; addedAt: string; service: string; production: boolean; showWords: boolean }
 
 export class WebPushStore {
   constructor(private readonly dir: string, private readonly now: () => number = Date.now) {}
@@ -96,7 +100,7 @@ export class WebPushStore {
    * Adds a phone, or refreshes it when the same endpoint subscribes again (same id). Refuses an endpoint off Apple's
    * service, bad keys, and a ninth device. Returns the id.
    */
-  add(input: { endpoint: unknown; keys: unknown; origin: string; label?: unknown }): { ok: true; id: string } | { ok: false; reason: 'bad_endpoint' | 'bad_keys' | 'too_many_devices' } {
+  add(input: { endpoint: unknown; keys: unknown; origin: string; label?: unknown; production?: boolean; showWords?: boolean }): { ok: true; id: string } | { ok: false; reason: 'bad_endpoint' | 'bad_keys' | 'too_many_devices' } {
     if (!isAllowedPushEndpoint(input.endpoint)) return { ok: false, reason: 'bad_endpoint' }
     if (!validPushKeys(input.keys)) return { ok: false, reason: 'bad_keys' }
     const label = typeof input.label === 'string' ? input.label.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, MAX_DEVICE_LABEL) : ''
@@ -107,15 +111,25 @@ export class WebPushStore {
       existing.keys = { p256dh: (input.keys as PushKeys).p256dh, auth: (input.keys as PushKeys).auth }
       existing.origin = input.origin
       if (label) existing.label = label
-      existing.addedAt = at
+      // A proof-page refresh never silently enrolls a phone for production or changes its privacy preference.
+      if (input.production !== undefined) existing.production = input.production === true
+      if (input.showWords !== undefined) existing.showWords = input.showWords === true
       this.write('devices.json', { devices })
       return { ok: true, id: existing.id }
     }
     if (devices.length >= MAX_PUSH_DEVICES) return { ok: false, reason: 'too_many_devices' }
     const id = randomBytes(8).toString('hex')
-    devices.push({ id, endpoint: input.endpoint, keys: { p256dh: (input.keys as PushKeys).p256dh, auth: (input.keys as PushKeys).auth }, origin: input.origin, label: label || 'Phone', addedAt: at })
+    devices.push({ id, endpoint: input.endpoint, keys: { p256dh: (input.keys as PushKeys).p256dh, auth: (input.keys as PushKeys).auth }, origin: input.origin, label: label || 'Phone', addedAt: at, production: input.production === true, showWords: input.showWords === true })
     this.write('devices.json', { devices })
     return { ok: true, id }
+  }
+
+  preferences(id: string, showWords: boolean): boolean {
+    const devices = this.devices(), device = devices.find(d => d.id === id)
+    if (!device) return false
+    device.showWords = showWords
+    this.write('devices.json', { devices })
+    return true
   }
 
   /** Removes one phone by id. True when it was there. */
@@ -162,6 +176,6 @@ export class WebPushStore {
 
   /** The list a route shows. */
   view(): PushDeviceView[] {
-    return this.devices().map(d => ({ id: d.id, label: d.label, addedAt: d.addedAt, service: new URL(d.endpoint).hostname }))
+    return this.devices().map(d => ({ id: d.id, label: d.label, addedAt: d.addedAt, service: new URL(d.endpoint).hostname, production: d.production === true, showWords: d.showWords === true }))
   }
 }

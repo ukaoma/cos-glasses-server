@@ -47,6 +47,8 @@ export interface DropP2Deps {
   board?: () => Promise<BoardRowLite[]>
   /** Work journal receipts; undefined when the journal is not available. */
   journal?: () => JournalReceiptLite[] | undefined
+  /** Independent optional phone destination; the engine calls it after the ledger write. */
+  phoneBanner?: (b: PingBanner) => void | Promise<void>
   /** Publishes a lens event (display bus). */
   emitLens?: (event: { type: 'cos_ping'; data: Record<string, unknown> }) => void
   enabled?: () => readonly PingSource[]
@@ -115,6 +117,7 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     state: deps.pingState,
     feed: feedSink(deps.feed, now),
     banner,
+    ...(deps.phoneBanner ? { phoneBanner: deps.phoneBanner } : {}),
     now,
     timezone: deps.timezone,
     enabled: deps.enabled ?? (() => DEFAULT_BANNER_SOURCES),

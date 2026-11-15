@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { b64u, fromB64u, vapidPublicKeyObject } from '../lib/web-push-crypto.js'
 import { isAllowedPushEndpoint, MAX_PUSH_DEVICES, PUSH_DIR_MODE, PUSH_FILE_MODE, TEST_PING_GAP_MS, TEST_PINGS_PER_DAY, WebPushStore } from '../lib/web-push-store.js'
-import { applePushReason, PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
-import { createWebPushRouter, TEST_PING_REFUSED_COPY, webPushEnabled } from './web-push.js'
+import { applePushReason, bannerPayload, sendBannerPush, PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
+import { createWebPushRouter, TEST_PING_REFUSED_COPY, webPushEnabled, webPushProductionEnabled } from './web-push.js'
 import { requireApiToken } from '../lib/api-auth.js'
 import { isPublicApiRequest } from '../lib/api-auth.js'
 
@@ -58,7 +58,9 @@ describe('X1 web push: the switch COS_WEB_PUSH', () => {
     expect(index.split('new WebPushStore(').length - 1).toBe(1)
     expect(index.indexOf('createWebPushRouter(')).toBeGreaterThan(at)
     expect(index.indexOf('new WebPushStore(')).toBeGreaterThan(at)
-    expect(index.slice(at, index.indexOf('\n}\n', at))).toContain("store: new WebPushStore(dataPath('push')),")
+    expect(index.slice(at, index.indexOf('\n}\n', at))).toContain("webPushStore = new WebPushStore(dataPath('push'))")
+    expect(index).toContain('webPushStore && webPushProductionOn ? { phoneBanner:')
+    expect(index).toContain('const webPushProductionOn = webPushProductionEnabled()')
     expect(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')).toContain('"COS_WEB_PUSH"')
     expect(readFileSync(new URL('../../.env.example', import.meta.url), 'utf8')).toMatch(/^# COS_WEB_PUSH=1$/m)
   })
@@ -66,7 +68,7 @@ describe('X1 web push: the switch COS_WEB_PUSH', () => {
 
 describe('X1 web push: behind the sign-in', () => {
   it('every /web-push path needs the API token or the signed-in web session: none is public, and the router mounts after requireApiToken', () => {
-    for (const [method, path] of [['GET', '/web-push/key'], ['GET', '/web-push/devices'], ['POST', '/web-push/devices'], ['DELETE', '/web-push/devices/0123456789abcdef'], ['POST', '/web-push/test']]) {
+    for (const [method, path] of [['GET', '/web-push/key'], ['GET', '/web-push/devices'], ['POST', '/web-push/devices'], ['DELETE', '/web-push/devices/0123456789abcdef'], ['POST', '/web-push/test'], ['PATCH', '/web-push/devices/0123456789abcdef'], ['POST', '/web-push/subscription/status']]) {
       expect({ method, path, public: isPublicApiRequest(method!, path!) }).toEqual({ method, path, public: false })
     }
     const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
@@ -111,7 +113,7 @@ describe('X1 web push: the store', () => {
     expect(again).toEqual(a)
     expect(store.devices()).toHaveLength(1)
     const view = store.view()
-    expect(view).toEqual([{ id: (a as { id: string }).id, label: 'iPhone Duo', addedAt: expect.any(String), service: 'web.push.apple.com' }])
+    expect(view).toEqual([{ id: (a as { id: string }).id, label: 'iPhone Duo', addedAt: expect.any(String), service: 'web.push.apple.com', production: false, showWords: false }])
     expect(JSON.stringify(view)).not.toContain('QGuQ')
     expect(JSON.stringify(view)).not.toContain(p.subscription.keys.auth)
     expect(store.add({ endpoint: 'https://fcm.googleapis.com/x', keys: p.subscription.keys, origin: ORIGIN })).toEqual({ ok: false, reason: 'bad_endpoint' })
@@ -126,13 +128,14 @@ describe('X1 web push: the store', () => {
 
 describe('X1 web push: one ping', () => {
   function rig() {
-    const store = new WebPushStore(storeDir())
+    const dir = storeDir()
+    const store = new WebPushStore(dir)
     const p = phone()
     const added = store.add({ endpoint: p.subscription.endpoint, keys: p.subscription.keys, origin: ORIGIN }) as { ok: true; id: string }
     const sent: { url: string; headers: Record<string, string>; body: Buffer }[] = []
     let answer = { status: 201, reason: null as string | null }
     const post: PushPost = async (url, headers, body) => { sent.push({ url, headers, body }); return answer }
-    return { store, p, id: added.id, sent, post, answer: (a: { status: number; reason: string | null }) => { answer = a } }
+    return { dir, store, p, id: added.id, sent, post, answer: (a: { status: number; reason: string | null }) => { answer = a } }
   }
 
   it('sends exactly one POST to the device endpoint, title only, opening his Control Web; Apple gets only ciphertext', async () => {
@@ -160,6 +163,48 @@ describe('X1 web push: one ping', () => {
     expect(VAPID_SUBJECT).toBe('https://gotcos.com')
     expect(m[4]).toBe(keys.publicKey)
     expect(verify('sha256', Buffer.from(`${m[1]}.${m[2]}`), { key: vapidPublicKeyObject(keys.publicKey), dsaEncoding: 'ieee-p1363' }, fromB64u(m[3]!))).toBe(true)
+  })
+
+  it('production requires explicit opt-in, uses only kinds by default, and respects each device words preference', async () => {
+    const r = rig()
+    const banner = { feedIds: ['fi_abc'], title: 'Secret session and person', line: 'Private first line\nNever show this', sources: ['agent'] as const, exempt: false }
+    const b = { ...banner, sources: [...banner.sources] }
+    await sendBannerPush(r.store, b, { post: r.post })
+    expect(r.sent).toHaveLength(0) // old test subscription is never production opt-in
+    r.store.add({ ...r.p.subscription, origin: ORIGIN, production: true })
+    await sendBannerPush(r.store, b, { post: r.post })
+    expect(r.sent).toHaveLength(1)
+    expect(JSON.parse(decrypt(r.sent[0].body, r.p))).toEqual({ web_push: 8030, notification: { title: 'COS', body: 'Agent finished', navigate: `${ORIGIN}/control#/messages/cos/fi_abc`, silent: false } })
+    expect(r.store.preferences(r.id, true)).toBe(true)
+    // Reopening the proof page cannot change the explicit production/privacy settings.
+    r.store.add({ ...r.p.subscription, origin: ORIGIN })
+    await sendBannerPush(r.store, b, { post: r.post })
+    expect(JSON.parse(decrypt(r.sent[1].body, r.p)).notification.body).toBe('Private first line')
+    expect(JSON.parse(bannerPayload({ ...b, line: '😀'.repeat(110) }, ORIGIN, true)).notification.body).toBe('😀'.repeat(100))
+    expect(JSON.parse(bannerPayload({ ...b, feedIds: ['one', 'two'] }, ORIGIN)).notification.body).toBe('2 updates')
+    expect(r.store.preferences(r.id, false)).toBe(true)
+    expect(new WebPushStore(r.dir).get(r.id)?.showWords).toBe(false)
+    r.store.remove(r.id)
+    await sendBannerPush(r.store, b, { post: r.post })
+    expect(r.sent).toHaveLength(2)
+  })
+
+  it('a failed or expired production device never blocks the other phone and is never retried', async () => {
+    const r = rig()
+    r.store.add({ ...r.p.subscription, origin: ORIGIN, production: true })
+    const second = phone()
+    r.store.add({ endpoint: ENDPOINT + 'second', keys: second.subscription.keys, origin: ORIGIN, production: true })
+    const sent: string[] = []
+    const b = { feedIds: ['fi_abc'], title: 'Secret', line: 'Private', sources: ['reminder'] as const, exempt: true }
+    await sendBannerPush(r.store, { ...b, sources: [...b.sources] }, { post: async url => {
+      sent.push(url)
+      return url === ENDPOINT ? { status: 410, reason: 'ExpiredSubscription' } : { status: 201, reason: null }
+    } })
+    expect(sent).toHaveLength(2)
+    expect(r.store.get(r.id)).toBeNull()
+    expect(r.store.devices()).toHaveLength(1)
+    const failing: PushPost = async () => { throw new Error('private URL must not escape') }
+    await expect(sendBannerPush(r.store, { ...b, sources: [...b.sources] }, { post: failing })).resolves.toBeUndefined()
   })
 
   it('410 or 404 (the subscription is gone) removes the device; other refusals keep it and return Apple\'s reason code', async () => {
@@ -209,11 +254,11 @@ describe('X1 web push: one ping', () => {
 describe('X1 web push: the routes (as mounted with the switch on)', () => {
   let server: Server | null = null
   afterEach(async () => { if (server) await new Promise<void>(r => server!.close(() => r())); server = null })
-  async function start(store: WebPushStore, post: PushPost): Promise<string> {
+  async function start(store: WebPushStore, post: PushPost, productionEnabled = true, scheduleForPhoneLock?: (send: () => Promise<void>) => void): Promise<string> {
     const app = express()
     app.use(express.json())
     // Like isAllowedNetworkOrigin in index.ts: this Mac's name or IP, http OR https. The route itself must refuse http.
-    app.use('/api', createWebPushRouter({ store, originAllowed: o => /^https?:\/\/(mac-x1\.example-tailnet\.ts\.net|100\.112\.1\.2)(:\d+)?$/.test(o), post }))
+    app.use('/api', createWebPushRouter({ store, productionEnabled, scheduleForPhoneLock, originAllowed: o => /^https?:\/\/(mac-x1\.example-tailnet\.ts\.net|100\.112\.1\.2)(:\d+)?$/.test(o), post }))
     await new Promise<void>(r => { server = app.listen(0, '127.0.0.1', () => r()) })
     return `http://127.0.0.1:${(server!.address() as { port: number }).port}`
   }
@@ -227,6 +272,62 @@ describe('X1 web push: the routes (as mounted with the switch on)', () => {
       req.end()
     })
   }
+
+  it('a delayed test claims its cap exactly once, responds scheduled before sending, and removal cancels the pending send', async () => {
+    const store = new WebPushStore(storeDir())
+    const added = store.add({ ...phone().subscription, origin: ORIGIN }) as { ok: true; id: string }
+    let claims = 0, sent = 0
+    const scheduled: Array<() => Promise<void>> = []
+    const claim = store.claimTestPing.bind(store)
+    store.claimTestPing = () => { claims++; return claim() }
+    const base = await start(store, async () => { sent++; return { status: 201, reason: null } }, false, send => {
+      expect(claims).toBe(1); expect(sent).toBe(0); scheduled.push(send)
+    })
+    const answer = await call(base, 'POST', '/api/web-push/test', { deviceId: added.id, delaySeconds: 15 })
+    expect(answer.status).toBe(202)
+    expect(answer.json).toEqual({ scheduled: true, delaySeconds: 15 })
+    expect({ claims, sent, pending: scheduled.length }).toEqual({ claims: 1, sent: 0, pending: 1 })
+    const refused = await call(base, 'POST', '/api/web-push/test', { deviceId: added.id, delaySeconds: 15 })
+    expect(refused.status).toBe(429)
+    expect(refused.json.scheduled).toBeUndefined()
+    expect(scheduled).toHaveLength(1)
+    store.remove(added.id)
+    await scheduled[0]()
+    expect(sent).toBe(0)
+  })
+
+  it('the independent production gate stays off during proof; status tells the truth and rejects production enrollment', async () => {
+    expect(webPushProductionEnabled({})).toBe(false)
+    expect(webPushProductionEnabled({ COS_WEB_PUSH: '1' })).toBe(false)
+    expect(webPushProductionEnabled({ COS_WEB_PUSH_PRODUCTION: '1' })).toBe(false)
+    expect(webPushProductionEnabled({ COS_WEB_PUSH: '1', COS_WEB_PUSH_PRODUCTION: '1' })).toBe(true)
+    const store = new WebPushStore(storeDir())
+    const base = await start(store, async () => { throw new Error('no send') }, false)
+    expect((await call(base, 'GET', '/api/web-push/status')).json).toEqual({ enabled: true, productionEnabled: false })
+    expect((await call(base, 'POST', '/api/web-push/devices', { subscription: phone().subscription, production: true }, ORIGIN)).json).toEqual({ error: 'production_off' })
+    expect(store.devices()).toEqual([])
+    expect((await call(base, 'POST', '/api/web-push/devices', { subscription: phone().subscription, production: false }, ORIGIN)).status).toBe(201)
+  })
+
+  it('production subscribe, privacy changes, origin-bound status and remote removal contain no subscription secrets', async () => {
+    const store = new WebPushStore(storeDir())
+    const base = await start(store, async () => { throw new Error('no send on subscription') })
+    const p = phone()
+    const added = await call(base, 'POST', '/api/web-push/devices', { subscription: p.subscription, production: true }, ORIGIN)
+    expect(added.status).toBe(201)
+    const id = added.json.id
+    expect(store.get(id)).toMatchObject({ production: true, showWords: false })
+    expect((await call(base, 'PATCH', `/api/web-push/devices/${id}`, { showWords: 'true' })).status).toBe(400)
+    expect((await call(base, 'PATCH', `/api/web-push/devices/${id}`, { showWords: true })).json).toEqual({ ok: true })
+    const status = await call(base, 'POST', '/api/web-push/subscription/status', { endpoint: ENDPOINT }, ORIGIN)
+    expect(status.json.device).toMatchObject({ id, production: true, showWords: true })
+    expect(status.text).not.toContain(ENDPOINT)
+    expect(status.text).not.toContain(p.subscription.keys.auth)
+    expect((await call(base, 'POST', '/api/web-push/subscription/status', { endpoint: ENDPOINT }, 'https://evil.example')).status).toBe(400)
+    await call(base, 'DELETE', `/api/web-push/devices/${id}`)
+    expect((await call(base, 'POST', '/api/web-push/subscription/status', { endpoint: ENDPOINT }, ORIGIN)).json).toEqual({ device: null })
+    expect((await call(base, 'PATCH', `/api/web-push/devices/${id}`, { showWords: false })).status).toBe(404)
+  })
 
   it('subscribe from his https origin, list without endpoints, send ONE test ping on the call, remove the device', async () => {
     const dir = storeDir()

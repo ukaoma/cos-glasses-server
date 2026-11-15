@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DropStore, InboxFeedStore, type DropRecord } from './drop-store.js'
-import { PingStateStore } from './ping-engine.js'
+import { PingStateStore, type PingBanner } from './ping-engine.js'
 import { createDropP2Runtime, journalReceiptsLite, readCacheArray, P2_TIMING, type BoardRowLite } from './drop-p2-runtime.js'
 import { taskInstant } from './morning-brief-schedule.js'
 
@@ -13,7 +13,7 @@ const local = (day: string, hhmm: string) => { const [h, m] = hhmm.split(':').ma
 const dirs: string[] = []
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
 
-function rig(start: number, opts: { paused?: () => boolean } = {}) {
+function rig(start: number, opts: { paused?: () => boolean; phoneBanner?: (b: PingBanner) => void | Promise<void> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cos-p2-')); dirs.push(dir)
   const scripts = join(dir, 'scripts'); mkdirSync(scripts)
   const clock = { now: start }
@@ -26,7 +26,7 @@ function rig(start: number, opts: { paused?: () => boolean } = {}) {
     drops, feed, pingState, timezone: () => TZ, now: () => clock.now, scriptsDir: scripts,
     nextEvent: async () => null, intakeOpen: () => [],
     board: async () => { boardRef.reads++; if (!boardRef.rows) throw new Error('board unread'); return boardRef.rows },
-    journal: () => [], emitLens: e => lens.push(e), bootId: 'boot-a', paused: opts.paused,
+    journal: () => [], emitLens: e => lens.push(e), bootId: 'boot-a', paused: opts.paused, phoneBanner: opts.phoneBanner,
   })
   const close = () => { runtime.stop(); drops.close(); feed.close(); pingState.close() }
   return { dir, scripts, clock, drops, feed, runtime, lens, boardRef, close }
@@ -37,8 +37,9 @@ function baseDrop(text: string, at: number, extra: Partial<DropRecord>): DropRec
 }
 
 describe('Drop it P2 runtime, end to end on fixtures', () => {
-  it('a reminder fires into the chat, the Mac outbox and the lens, once', async () => {
-    const r = rig(local('2026-11-04', '09:59'))
+  it('a reminder fires into the chat, the Mac outbox, the lens and the optional phone destination, once', async () => {
+    const phones: PingBanner[] = []
+    const r = rig(local('2026-11-04', '09:59'), { phoneBanner: b => { phones.push(b) } })
     const d = r.drops.insert(baseDrop('remind me at 10am to call Pete', local('2026-11-04', '09:00'), {
       dest: 'reminder', kind: 'reminder', links: [], remind: { at: new Date(local('2026-11-04', '10:00')).toISOString(), tz: TZ, firedAt: null, ackAt: null, snoozes: 0 },
     })).drop
@@ -46,8 +47,10 @@ describe('Drop it P2 runtime, end to end on fixtures', () => {
     r.clock.now = local('2026-11-04', '10:00')
     expect(r.runtime.tickReminders().fired).toBe(1)
     expect(r.runtime.tickReminders().fired).toBe(0)
+    expect(phones).toHaveLength(1)
     const pings = r.feed.list().filter(i => i.kind === 'ping')
     expect(pings.map(p => [p.line, p.readAt, p.source])).toEqual([['Reminder: call Pete', null, 'cos']])
+    expect(phones[0].feedIds).toEqual([pings[0].id])
     const out = r.runtime.banners()
     expect(out.banners.map(b => [b.line, b.notifyId, b.seq])).toEqual([['Reminder: call Pete', `reminder-${d.id}`, 1]])
     expect(r.runtime.banners({ bootId: 'boot-a', seq: 1 }).banners).toEqual([])

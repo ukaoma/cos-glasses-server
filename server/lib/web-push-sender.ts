@@ -1,4 +1,4 @@
-// X1 (iPhone pings, one-ping proof): one push, to one phone, on an explicit call. Not wired to the ping engine.
+// X1 (iPhone pings, one-ping proof): test pushes plus the independently gated production banner destination.
 //
 // What leaves the Mac: one HTTPS POST to the device's endpoint on Apple's push service, carrying the encrypted payload
 // (RFC 8291; Apple cannot read it), the VAPID token (sub is the product URL, never a person's address), and the
@@ -9,6 +9,7 @@
 import { request } from 'node:https'
 import { createHash } from 'node:crypto'
 import { b64u, encryptPushMessage, vapidAuthorization } from './web-push-crypto.js'
+import type { PingBanner } from './ping-engine.js'
 import { isAllowedPushEndpoint, type WebPushStore } from './web-push-store.js'
 
 /** Short: a stale ping is noise. Apple keeps an undelivered message at most this long. */
@@ -26,7 +27,7 @@ export function pingPayload(kind: PingKind, origin: string): Buffer {
 }
 
 /** An opaque Topic per kind and install: 22 URL-safe characters (Apple allows 32), revealing nothing. */
-export function pingTopic(kind: PingKind, vapidPublicKey: string): string {
+export function pingTopic(kind: string, vapidPublicKey: string): string {
   return b64u(createHash('sha256').update(`cos-ping:${vapidPublicKey}:${kind}`).digest()).slice(0, 22)
 }
 
@@ -63,24 +64,31 @@ export const httpsPushPost: PushPost = (url, headers, body, timeoutMs) => new Pr
 export interface PingResult { ok: boolean; status: number; reason: string | null; removed: boolean }
 
 /**
- * Sends one ping of `kind` to the device `id`. 201 is delivered to Apple. 404 or 410 means the subscription is gone,
+ * Sends one ping of `kind` to the device `id`. 201 is accepted by Apple, not proof of delivery to a phone. 404 or 410 means the subscription is gone,
  * so the device is removed. Anything else keeps it and returns Apple's reason code. Never throws.
  */
 export async function sendOnePing(store: WebPushStore, id: string, kind: PingKind, deps: { post?: PushPost; nowSeconds?: () => number } = {}): Promise<PingResult> {
-  const device = store.get(id)
+  let device: ReturnType<WebPushStore['get']>
+  try { device = store.get(id) } catch { return { ok: false, status: 0, reason: 'store_unavailable', removed: false } }
   if (!device) return { ok: false, status: 0, reason: 'unknown_device', removed: false }
   if (!isAllowedPushEndpoint(device.endpoint)) return { ok: false, status: 0, reason: 'bad_endpoint', removed: false }
+  return sendPayload(store, id, pingPayload(kind, device.origin), kind, deps)
+}
+
+async function sendPayload(store: WebPushStore, id: string, payload: Buffer, topic: string, deps: { post?: PushPost; nowSeconds?: () => number }): Promise<PingResult> {
   try {
+    const device = store.get(id)
+    if (!device || !isAllowedPushEndpoint(device.endpoint)) return { ok: false, status: 0, reason: 'unknown_device', removed: false }
     const keys = store.vapidKeys()
     const now = deps.nowSeconds ? deps.nowSeconds() : Math.floor(Date.now() / 1000)
-    const body = encryptPushMessage(pingPayload(kind, device.origin), device.keys)
+    const body = encryptPushMessage(payload, device.keys)
     const headers: Record<string, string> = {
       Authorization: vapidAuthorization(device.endpoint, keys, now, VAPID_SUBJECT),
       'Content-Encoding': 'aes128gcm',
       'Content-Type': 'application/octet-stream',
       TTL: String(PING_TTL_SECONDS),
       Urgency: 'normal',
-      Topic: pingTopic(kind, keys.publicKey),
+      Topic: pingTopic(topic, keys.publicKey),
     }
     const res = await (deps.post ?? httpsPushPost)(device.endpoint, headers, body, PUSH_POST_TIMEOUT_MS)
     if (res.status === 201) return { ok: true, status: 201, reason: null, removed: false }
@@ -90,4 +98,27 @@ export async function sendOnePing(store: WebPushStore, id: string, kind: PingKin
   } catch {
     return { ok: false, status: 0, reason: 'send_failed', removed: false }
   }
+}
+
+
+const SOURCE_LABEL: Record<PingBanner['sources'][number], string> = {
+  reminder: 'Reminder', resolution: 'Follow-up', prep: 'Meeting prep', agent: 'Agent finished',
+  followups: 'Follow-ups ready', stale: 'Update', checkin: 'Weekly check-in',
+}
+/** Only the kind leaves the Mac by default. Never copy the Mac banner title: it can contain private words. */
+export function bannerPayload(banner: PingBanner, origin: string, showWords = false): Buffer {
+  const kind = banner.feedIds.length > 1 ? `${banner.feedIds.length} updates` : SOURCE_LABEL[banner.sources[0]] ?? 'Update'
+  const body = showWords ? Array.from(banner.line.split(/[\r\n]/, 1)[0]).slice(0, 100).join('') : kind
+  const item = banner.feedIds[0]
+  const navigate = `${origin}/control#/messages/cos${item ? '/' + encodeURIComponent(item) : ''}`
+  return Buffer.from(JSON.stringify({ web_push: 8030, notification: { title: 'COS', body, navigate, silent: false } }))
+}
+
+/** Called only for the engine's already-ledgered banners. No retries: a failed phone never repeats the Mac's ping. */
+export async function sendBannerPush(store: WebPushStore, banner: PingBanner, deps: { post?: PushPost; nowSeconds?: () => number } = {}): Promise<void> {
+  try {
+    const devices = store.devices().filter(d => d.production === true)
+    await Promise.all(devices.map(d => sendPayload(store, d.id, bannerPayload(banner, d.origin, d.showWords === true),
+      banner.sources.join(':'), deps)))
+  } catch { /* store, crypto and network failures never fail the original ping */ }
 }

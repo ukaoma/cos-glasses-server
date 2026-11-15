@@ -388,3 +388,8 @@ table.tf-grid { border-collapse: separate; border-spacing: 0; }
 table.tf-grid th, table.tf-grid td { border: 0; border-right: 1px solid var(--tf-line, var(--hairline)); border-bottom: 1px solid var(--tf-line, var(--hairline)); }
 table.tf-grid tr > :first-child { border-left: 1px solid var(--tf-line, var(--hairline)); }
 table.tf-grid > :first-child > tr:first-child > * { border-top: 1px solid var(--tf-line, var(--hairline)); }
+
+/* Phone setup actions stay below their explanation, including the 15-second lock-phone test. */
+.cx-set-row:has(.cx-push-action) { flex-wrap: wrap; }
+.cx-set-row:has(.cx-push-action) > .cx-set-text { flex-basis: 100%; }
+.cx-push-action { max-width: 100%; white-space: normal; }

@@ -214,3 +214,57 @@ describe('canary 9: no LLM and nothing outward in the ping path', () => {
     expect(FORBIDDEN.test('/ping-engine.ts')).toBe(false)
   })
 })
+
+
+describe('PingEngine phone destination', () => {
+  function setup(opts: { macThrows?: boolean; phoneThrows?: boolean; writeThrows?: boolean; now?: number; enabled?: PingSource[] } = {}) {
+    const feed = fakeFeed(), state = memState(), order: string[] = [], phones: PingBanner[] = []
+    const clock = { now: opts.now ?? local('2026-11-04', '10:00') }
+    const engine = new PingEngine({
+      feed: feed.sink, state: { read: state.store.read, write: s => { order.push('ledger'); if (opts.writeThrows) throw new Error('disk'); state.store.write(s) } },
+      read: async () => ({}), now: () => clock.now, timezone: () => TZ, enabled: () => opts.enabled ?? ['resolution', 'reminder'],
+      banner: () => { order.push('mac'); if (opts.macThrows) throw new Error('mac') },
+      phoneBanner: b => { order.push('phone'); expect(state.get().ledger.some(l => l.ids[0] === b.feedIds[0])).toBe(true); phones.push(b); if (opts.phoneThrows) return Promise.reject(new Error('network')) },
+    })
+    const candidate = (key: string, source: PingSource = 'resolution'): PingCandidate => ({ key, source, line: 'Private', title: 'Secret', createdAt: clock.now })
+    return { engine, phones, order, state, feed, clock, candidate }
+  }
+  it('writes the ledger before either destination, never repeats after failure or restart, and isolates Mac and phone failures', async () => {
+    const r = setup({ macThrows: true, phoneThrows: true })
+    expect(r.engine.push([r.candidate('one')]).posted).toBe(1)
+    await Promise.resolve()
+    expect(r.order).toEqual(['ledger', 'mac', 'phone'])
+    expect(r.phones).toHaveLength(1)
+    r.engine.push([r.candidate('one')])
+    expect(r.phones).toHaveLength(1)
+    const again = new PingEngine({ feed: r.feed.sink, state: r.state.store, read: async () => ({}), now: () => r.clock.now,
+      timezone: () => TZ, banner: () => {}, phoneBanner: b => { r.phones.push(b) } })
+    again.push([r.candidate('one')])
+    expect(r.phones).toHaveLength(1)
+    const ok = setup({ phoneThrows: true })
+    expect(ok.engine.push([ok.candidate('two')]).banners).toBe(1)
+    await Promise.resolve()
+  })
+  it('a ledger write failure starts no phone request', () => {
+    const r = setup({ writeThrows: true })
+    expect(() => r.engine.push([r.candidate('one')])).toThrow('disk')
+    expect(r.phones).toEqual([])
+  })
+  it('inherits the existing gap, kind selection, quiet hours, weekend and reminder exemption without another budget', () => {
+    const r = setup()
+    r.engine.push([r.candidate('one')])
+    r.engine.push([r.candidate('gap')])
+    expect(r.phones).toHaveLength(1)
+    r.clock.now += 46 * 60_000
+    r.engine.push([r.candidate('kind-off', 'agent')])
+    expect(r.phones).toHaveLength(1)
+    const weekend = setup({ now: local('2026-11-07', '10:00') })
+    expect(weekend.engine.push([weekend.candidate('work', 'agent')]).held).toBe(1)
+    expect(weekend.phones).toEqual([])
+    weekend.engine.push([weekend.candidate('reminder', 'reminder')])
+    expect(weekend.phones).toHaveLength(1)
+    const quiet = setup({ now: local('2026-11-04', '23:00') })
+    quiet.engine.push([quiet.candidate('resolution')])
+    expect(quiet.phones).toEqual([])
+  })
+})

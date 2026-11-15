@@ -117,6 +117,8 @@ export interface PingEngineDeps {
   read: () => Promise<PingSnapshot>
   /** Shows a banner (macOS notification; a reminder also pushes to the lens). Called only after the ledger write. */
   banner: (b: PingBanner) => void
+  /** A second destination for the exact chosen banners, after the durable ledger; never a new budget decision. */
+  phoneBanner?: (b: PingBanner) => void | Promise<void>
   now?: () => number
   timezone: () => string
   enabled?: () => readonly PingSource[]
@@ -234,6 +236,7 @@ export class PingEngine {
       if (changed) { this.deps.state.write(state, nowMs); changed = false }
       for (const b of banners) {
         try { this.deps.banner(b); result.banners++ } catch { /* a notifier failure never fails delivery: the item is in the chat */ }
+        try { void Promise.resolve(this.deps.phoneBanner?.(structuredClone(b))).catch(() => {}) } catch { /* phone failure is independent of the Mac and feed */ }
       }
     }
     if (changed) this.deps.state.write(state, nowMs)

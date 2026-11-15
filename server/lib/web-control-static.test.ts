@@ -166,8 +166,8 @@ describe('the shipped web-control folder', () => {
   const table = buildWebAssetTable(REAL_DIR)
   const html = table.get('/index.html')!.body.toString()
 
-  it('versions every boot script and stylesheet in index.html', () => {
-    const refs = [...html.matchAll(/(?:src|href)="(\/control\/[^"]+\.(?:js|css))([^"]*)"/g)]
+  it('versions every boot script, stylesheet and app manifest in index.html', () => {
+    const refs = [...html.matchAll(/(?:src|href)="(\/control\/[^"]+\.(?:json|js|css))([^"]*)"/g)]
     expect(refs.length).toBeGreaterThanOrEqual(13)
     for (const [, url, query] of refs) {
       const asset = table.get(url.replace(/^\/control/, ''))

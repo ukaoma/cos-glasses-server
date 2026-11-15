@@ -160,6 +160,131 @@
   }
 
   // ── COS reaching out (6.99.11) ──────────────────────────
+  // A subscription belongs to this origin. No worker or permission prompt runs on load.
+  var PUSH = { loaded: false, generation: 0, busy: false, key: null, productionAllowed: false, subscription: null, current: null, devices: [], error: '' };
+  function pushOn() { return !!(S.data && S.data.health && S.data.health.features && S.data.health.features.webPush === true); }
+  function pushManager() { return window.isSecureContext && window.pushManager ? window.pushManager : null; }
+  function pushHome() { return !!(window.navigator && window.navigator.standalone) || !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); }
+  function pushProblem() {
+    if (!window.isSecureContext) return 'Open COS over trusted HTTPS to set up phone pings.';
+    if (!pushHome()) return 'Add COS to your Home Screen, then open that app to set up phone pings.';
+    if (!pushManager()) return 'This phone needs a compatibility check before pings can be set up.';
+    if (window.Notification && window.Notification.permission === 'denied') return 'Notifications are blocked for COS. Allow them in your phone settings, then reopen COS.';
+    return '';
+  }
+  function pushLoad() {
+    if (!pushOn() || PUSH.loaded) return;
+    PUSH.loaded = true;
+    var generation = ++PUSH.generation, manager = pushManager();
+    function current() { return generation === PUSH.generation && !PUSH.busy; }
+    function apply(r, device, sub) {
+      if (!current()) return;
+      PUSH.devices = r[0].devices || []; PUSH.subscription = sub; PUSH.current = device;
+      PUSH.productionAllowed = r[2].productionEnabled === true;
+      render();
+    }
+    Promise.all([api('/api/web-push/devices'), manager ? manager.getSubscription() : Promise.resolve(null), api('/api/web-push/status')]).then(function (r) {
+      if (!current()) return;
+      if (!r[1]) return apply(r, null, null);
+      return api('/api/web-push/subscription/status', { method: 'POST', body: { endpoint: r[1].endpoint } }).then(function (answer) {
+        if (!current()) return;
+        if (answer.device) return apply(r, answer.device, r[1]);
+        // A remotely removed device stops receiving immediately. No new opt-in can race browser cleanup.
+        PUSH.busy = true; render();
+        return r[1].unsubscribe().then(function () {
+          PUSH.busy = false; apply(r, null, null);
+        }, function () { PUSH.busy = false; throw new Error('unsubscribe'); });
+      });
+    }).catch(function () {
+      if (!current()) return;
+      PUSH.error = 'Phone pings could not be checked. Refresh to try again.'; render();
+    });
+  }
+  function pushBody() {
+    if (!pushOn()) return '';
+    pushLoad();
+    var current = PUSH.current, on = current && current.production, problem = pushProblem();
+    var control = on ? '<button type="button" class="btn cx-push-action" data-set="push-off"' + (PUSH.busy ? ' disabled' : '') + '>Stop pings to this phone</button>' :
+      '<button type="button" class="btn cx-push-action" data-set="push-on"' + (PUSH.busy || problem ? ' disabled' : '') + '>' + (PUSH.key ? 'Allow pings on this phone' : 'Send pings to this phone') + '</button>';
+    var rows = PUSH.productionAllowed ? row('This phone', problem || (on ? 'On. Uses the same kinds, quiet hours and interruption limits as your Mac.' : PUSH.key ? 'Tap Allow to let COS ask your phone for notification permission.' : 'Off. Setup takes two taps; permission comes from your phone.'), control) : '';
+    if (on && PUSH.productionAllowed) rows += row('Show the words', 'Off shows only COS and the kind. On includes the first line, up to 100 characters. Your phone controls lock-screen previews.', toggle(current.showWords, 'data-set="push-words"', 'Show the words on this phone'));
+    rows += row('Test this phone', PUSH.productionAllowed ? 'Send a test notification to this phone.' : 'Temporary delivery check: tap Send test ping, close COS and lock the phone within 15 seconds. Check three pings arrive within one minute each and open COS when tapped. Tests are at least 10 seconds apart, with a limit of 20 a day. Remove the test device afterward.',
+      current ? '<button type="button" class="btn cx-push-action" data-set="push-test"' + (PUSH.busy ? ' disabled' : '') + '>Send test ping</button>' :
+      '<button type="button" class="btn cx-push-action" data-set="push-test-on"' + (PUSH.busy || problem ? ' disabled' : '') + '>' + (PUSH.key ? 'Allow test pings on this phone' : 'Set up test pings') + '</button>');
+    if (!PUSH.productionAllowed) rows += row('Production pings', 'Off. Test delivery does not enable COS notifications.', value('Off'));
+    if (problem && !PUSH.productionAllowed) rows += '<p class="cx-set-blurb">' + esc(problem) + '</p>';
+    PUSH.devices.forEach(function (d) {
+      rows += row(d.label, 'Added ' + String(d.addedAt || '').slice(0, 10) + (current && current.id === d.id ? ' · This phone' : ''),
+        '<button type="button" class="btn cx-push-action" data-set="push-remove" data-device="' + esc(d.id) + '"' + (PUSH.busy ? ' disabled' : '') + '>Remove</button>');
+    });
+    if (PUSH.error) rows += '<p role="status" class="cx-set-blurb">' + esc(PUSH.error) + '</p>';
+    return group('Phone pings', 'The Mac sends encrypted notifications through Apple. Apple sees delivery timing, not the words. The Mac must be awake and online.', rows);
+  }
+  function pushFinish() { ++PUSH.generation; PUSH.busy = false; render(); }
+  function pushError() { PUSH.error = 'Phone pings could not be saved. Try again.'; pushFinish(); }
+  function pushRemove(id) {
+    ++PUSH.generation; PUSH.busy = true; PUSH.error = ''; render();
+    api('/api/web-push/devices/' + encodeURIComponent(id), { method: 'DELETE' }).then(function () {
+      PUSH.devices = PUSH.devices.filter(function (d) { return d.id !== id; });
+      if (!PUSH.current || PUSH.current.id !== id) return;
+      PUSH.current = null;
+      var sub = PUSH.subscription;
+      if (sub) return sub.unsubscribe().then(function (ok) {
+        if (!ok) throw new Error('unsubscribe');
+        PUSH.subscription = null;
+      }, function () { throw new Error('unsubscribe'); });
+    }).then(function () { PUSH.error = 'Device removed. COS will send no more pings to it.'; pushFinish(); }, function () { PUSH.error = 'Delivery has stopped if the device was removed. Refresh to check and finish turning off this phone.'; pushFinish(); });
+  }
+  function pushClick(act, button) {
+    if (!pushOn() || PUSH.busy) return;
+    if (act === 'push-remove') return pushRemove(button.getAttribute('data-device'));
+    if (act === 'push-off' && PUSH.current) return pushRemove(PUSH.current.id);
+    if (act === 'push-words' && PUSH.current) {
+      ++PUSH.generation; PUSH.busy = true;
+      var words = !PUSH.current.showWords;
+      return api('/api/web-push/devices/' + encodeURIComponent(PUSH.current.id), { method: 'PATCH', body: { showWords: words } }).then(function () { PUSH.current.showWords = words; pushFinish(); }, pushError);
+    }
+    if (act === 'push-test' && PUSH.current) {
+      ++PUSH.generation; PUSH.busy = true; PUSH.error = 'Scheduling test ping…'; render();
+      return api('/api/web-push/test', { method: 'POST', body: { deviceId: PUSH.current.id, delaySeconds: 15 } }).then(function (answer) {
+        PUSH.error = answer.scheduled === true ? (PUSH.productionAllowed ? 'Test ping scheduled. Check your phone in 15 seconds.' : 'Test scheduled in 15 seconds. Close COS and lock your phone now. A server restart cancels this test.') : 'Test ping could not be scheduled.';
+        pushFinish();
+      }, function () { PUSH.error = 'Test ping could not be scheduled. Wait at least 10 seconds before trying again.'; pushFinish(); });
+    }
+    if ((act !== 'push-on' && act !== 'push-test-on') || pushProblem()) return;
+    var production = act === 'push-on';
+    if (production && !PUSH.productionAllowed) return;
+    ++PUSH.generation;
+    if (!PUSH.key) {
+      PUSH.busy = true; PUSH.error = ''; render();
+      // Prepare the key on the first explicit opt-in tap. The next tap calls subscribe immediately, keeping Safari's gesture.
+      return api('/api/web-push/key').then(function (answer) {
+        var raw = window.atob(answer.publicKey.replace(/-/g, '+').replace(/_/g, '/'));
+        PUSH.key = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) PUSH.key[i] = raw.charCodeAt(i);
+        pushFinish();
+      }).catch(pushError);
+    }
+    var subscribing;
+    try { subscribing = pushManager().subscribe({ userVisibleOnly: true, applicationServerKey: PUSH.key }); }
+    catch (err) { pushError(); return; }
+    PUSH.busy = true; PUSH.error = ''; render();
+    var subscribed;
+    return subscribing.then(function (sub) {
+      subscribed = sub;
+      return api('/api/web-push/devices', { method: 'POST', body: { subscription: sub.toJSON(), label: production ? 'Phone' : 'Phone test', production: production, showWords: false } });
+    }).then(function (answer) {
+      PUSH.subscription = subscribed;
+      PUSH.current = { id: answer.id, label: production ? 'Phone' : 'Phone test', production: production, showWords: false, addedAt: new Date().toISOString() };
+      PUSH.devices = PUSH.devices.filter(function (d) { return d.id !== answer.id; }).concat([PUSH.current]);
+      pushFinish();
+    }, function () {
+      // A refused server write must not leave a newly permitted orphan subscription.
+      if (subscribed && !PUSH.subscription) subscribed.unsubscribe().then(function () {}, function () {});
+      pushError();
+    });
+  }
+
   function p2On() {
     var d = S.data || {}, cap = d.health && d.health.capabilities && d.health.capabilities.dropIt;
     return !!(cap && cap.enabled && cap.p2Settings && d.p2 && d.p2.settings);
@@ -176,7 +301,7 @@
   var FULL_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   function reachBody() {
     var day = p2Get('checkin.weekday');
-    return group('Pings', 'COS posts these in the COS chat. They interrupt you only within these limits.',
+    return pushBody() + group('Pings', 'COS posts these in the COS chat. They interrupt you only within these limits.',
         row('Pings', 'Turn off to keep COS from posting on its own. Reminders and follow-ups on your drops still come.', p2Switch('pings.on', 'Pings')) +
         row('Interruptions a day', 'On a weekday. Reminders do not count.', p2Num('pings.dailyCap', 0, 20, 'Interruptions a day')) +
         row('From one kind a day', '', p2Num('pings.perSource', 1, 10, 'Interruptions from one kind a day')) +
@@ -289,7 +414,7 @@
   function categoryBody(cat) {
     var d = S.data || {};
     var out = '';
-    if (cat.id === 'reach') return reachBody();
+    if (cat.id === 'reach') return p2On() ? reachBody() : pushBody();
     if (cat.id === 'pet') return petBody() + onMac(cat.mac);
     if (cat.id === 'privacy') out += sessionFilesGroup(d);
     // The Today summary (routes/today-brief.ts): Sonnet on the Mac writes Today's top lines (7.0.1; Haiku before). Off unless switched on here or
@@ -401,7 +526,7 @@
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-set="refresh"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div></header>' +
       browserGroup() + failLine() +
       (!S.data ? '<div class="cx-list" style="margin-top:18px">' + W.skeletonRows(4) + '</div>' :
-        CATEGORIES.filter(function (cat) { return !cat.p2 || p2On(); }).map(function (cat) {
+        CATEGORIES.filter(function (cat) { return !cat.p2 || p2On() || pushOn(); }).map(function (cat) {
           return '<section class="cx-set-cat" id="set-cat-' + cat.id + '"><h2 class="cx-col-title">' + esc(cat.title) + '</h2><p class="cx-set-blurb">' + esc(cat.summary) + '</p>' + categoryBody(cat) + '</section>';
         }).join('')) +
       '<p class="status-line" id="settings-status"></p></div>';
@@ -435,7 +560,9 @@
     if (t.getAttribute('data-set') === 'pet-retry') { PET.state = 'idle'; return render(); }
     var act = t.getAttribute('data-set');
     // F1 (A4): Refresh keeps the settings on screen; the new values swap in when they arrive.
+    if (act && act.indexOf('push-') === 0) { pushClick(act, t); return; }
     if (act === 'refresh') {
+      ++PUSH.generation; PUSH.loaded = false; PUSH.error = '';
       if (S.refreshing && Date.now() - S.refreshAt < REFRESH_STUCK_MS) return;
       S.state = 'idle'; S.refreshing = true; S.refreshAt = Date.now(); load(true); return render();
     }

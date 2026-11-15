@@ -125,7 +125,8 @@
     "COS_WEB_KEY_DEVICES",
     "COS_WEB_KEY_ANCHOR_BOOTSTRAP",
     "COS_CONTROL_TSNET_HTTPS",
-    "COS_WEB_PUSH"
+    "COS_WEB_PUSH",
+    "COS_WEB_PUSH_PRODUCTION"
   ],
   "maintenance": {
     "scope": "cross_boot",

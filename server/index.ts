@@ -13,8 +13,9 @@ import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
-import { createWebPushRouter, webPushEnabled } from './routes/web-push.js'
+import { createWebPushRouter, webPushEnabled, webPushProductionEnabled } from './routes/web-push.js'
 import { markWebPushRoutesMounted } from './lib/web-push-mounted.js'
+import { sendBannerPush } from './lib/web-push-sender.js'
 import { WebPushStore } from './lib/web-push-store.js'
 import { diagRouter } from './routes/diag.js'
 import { createClientInstanceRouter, isMeetingChunkPost, pairedInstanceFrom } from './routes/client-instance.js'
@@ -1006,9 +1007,13 @@ function forkDepsClearingIdleHalt(provider: 'claude' | 'codex' | 'cursor', threa
 app.use('/api', healthRouter)
 // X1 (iPhone pings, one-ping proof): subscribe, list, remove, and one explicit test ping. ONLY with COS_WEB_PUSH on at
 // boot (default off): off, none of these paths exists, no key is made and nothing goes to Apple's push service.
+const webPushProductionOn = webPushProductionEnabled()
+let webPushStore: WebPushStore | null = null
 if (webPushEnabled()) {
+  webPushStore = new WebPushStore(dataPath('push'))
   app.use('/api', createWebPushRouter({
-    store: new WebPushStore(dataPath('push')),
+    store: webPushStore,
+    productionEnabled: webPushProductionOn,
     // A phone subscribes from Control Web over https on 3143 (this Mac's ts.net name, or its IP).
     originAllowed: origin => isAllowedNetworkOrigin(origin, { selfDnsName: webKeySelfDnsName(), allowedPorts: [HTTPS_PORT] }),
   }))
@@ -1111,6 +1116,7 @@ const dropP2 = createDropP2Boot({
   pingRoot: dataPath('pings'),
   make: (stores, pingState) => createDropP2Runtime({
     ...stores, pingState,
+    ...(webPushStore && webPushProductionOn ? { phoneBanner: (b: Parameters<typeof sendBannerPush>[1]) => sendBannerPush(webPushStore!, b) } : {}),
     timezone: () => serverTimezone(),
     nextEvent: async () => { const r = await fetchNextEvent(); return r.read ? r.event : undefined },
     intakeOpen: () => workIntakeStore?.open(),
