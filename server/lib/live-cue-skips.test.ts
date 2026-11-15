@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { execFileSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { LiveCueSkipStore, MAX_MEETING_SKIPS, SKIP_TTL_MS, SkipsUnreadableError } from './live-cue-skips.js'
 import { LiveCueLog, LiveCueVerdicts, LiveCueVerdictStore, VerdictsUnreadableError, type LiveCueLogRow } from './live-cue-verdicts.js'
@@ -88,6 +89,20 @@ describe('the skip store', () => {
       expect(readFileSync(h.file, 'utf8')).toBe(text)
     }
   })
+
+  it('a FIFO at the path is refused at once, never read (it would block the event loop) (Q1 18:13)', () => {
+    const h = harness()
+    execFileSync('mkfifo', [h.file])
+    // A writer feeding a valid skips file into the FIFO, so a store that DID read it would get skips back (and fail this
+    // test) rather than hang. With the guard the FIFO is never opened; the writer is killed below either way.
+    const writer = spawn('sh', ['-c', 'printf %s "$1" > "$2"', 'sh', JSON.stringify({ v: 1, skips: { fed: { at: T0 } } }), h.file], { stdio: 'ignore' })
+    try {
+      const started = Date.now()
+      expect(() => h.skips.read()).toThrow(SkipsUnreadableError)
+      expect(() => h.skips.skip('meeting_a')).toThrow(SkipsUnreadableError)
+      expect(Date.now() - started).toBeLessThan(2000)
+    } finally { writer.kill('SIGKILL') }
+  }, 5_000)
 
   it('a malformed entry is left out, the rest kept', () => {
     const h = harness()
