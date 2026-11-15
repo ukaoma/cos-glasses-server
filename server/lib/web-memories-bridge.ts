@@ -1,12 +1,20 @@
 import { getOwnerName } from './profile.js'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
-import { getNeedsYouReader, memoryReview, needsYouCount, type NeedsYouBlock } from './learning-needs-you.js'
+import { getNeedsYouReader, memoryReview, needsYouCount, NEEDS_YOU_TTL_MS, type NeedsYouBlock, type NeedsYouPeek } from './learning-needs-you.js'
 import { liveCueVerdicts } from './live-cue-verdicts.js'
 
 /** The build after 7.0.42 (Memories C): the window "meetings to rate" counts, the same 7 days the page shows. */
 export const NEEDS_YOU_CUE_DAYS = 7
 
-export interface NeedsYouSummary { meetings: number | null; decisions: number | null; quarantineBatch: number | null; total: number | null }
+export interface NeedsYouSummary {
+  meetings: number | null; decisions: number | null; quarantineBatch: number | null; total: number | null
+  /** The build after 7.0.46: 'not_set_up' (COS_SCRIPTS_DIR unset: no learning pipeline, so no decisions or quarantine rows
+   *  at all, and the total is the meetings), 'read' (a good block), or 'unknown' (anything else: no number). */
+  learning: 'not_set_up' | 'read' | 'unknown'
+  /** How old the block is, in seconds, and whether it is under the 90 s TTL. A saved count past the TTL is never fresh. */
+  ageSeconds: number | null
+  fresh: boolean | null
+}
 
 /**
  * The one "Needs you" number the rail, Today and the Memories page all show (lead 2026-11-14 15:49, F1's option (a)).
@@ -17,15 +25,26 @@ export interface NeedsYouSummary { meetings: number | null; decisions: number | 
  * A part that cannot be read is null, and then so is the total: the rail never shows a number built from a guess.
  * The producer's `count` and `gates` both cover every item past the shown cap (learning_events.py needs-you).
  */
-export function computeNeedsYou(block: NeedsYouBlock | null, meetings: number | null): NeedsYouSummary {
+export function computeNeedsYou(
+  block: NeedsYouBlock | null, meetings: number | null,
+  opts: { notSetUp?: boolean; ageMs?: number | null } = {},
+): NeedsYouSummary {
+  const m = typeof meetings === 'number' && Number.isInteger(meetings) && meetings >= 0 ? meetings : null
+  // Lead 22:0x: absent is not unknown, for exactly this one case. No pipeline means nothing to decide and nothing to
+  // quarantine, so those rows are not drawn (null, never a 0 that would claim a count was taken) and the total is the
+  // meetings alone.
+  if (opts.notSetUp === true) return { meetings: m, decisions: null, quarantineBatch: null, total: m, learning: 'not_set_up', ageSeconds: null, fresh: null }
   const all = block ? memoryReview.total(block) : null
   const gates = block && block.gates && typeof block.gates === 'object' && !Array.isArray(block.gates) ? block.gates as Record<string, unknown> : null
   const prune = gates ? (typeof gates.prune_ready === 'number' && Number.isInteger(gates.prune_ready) && gates.prune_ready > 0 ? gates.prune_ready : 0) : null
   const decisions = typeof all === 'number' && prune !== null ? Math.max(0, all - prune) : null
   const quarantineBatch = prune === null ? null : prune > 0 ? 1 : 0
-  const m = typeof meetings === 'number' && Number.isInteger(meetings) && meetings >= 0 ? meetings : null
   const total = m !== null && decisions !== null && quarantineBatch !== null ? m + decisions + quarantineBatch : null
-  return { meetings: m, decisions, quarantineBatch, total }
+  const age = block && typeof opts.ageMs === 'number' && Number.isFinite(opts.ageMs) && opts.ageMs >= 0 ? opts.ageMs : null
+  return {
+    meetings: m, decisions, quarantineBatch, total, learning: block ? 'read' : 'unknown',
+    ageSeconds: age === null ? null : Math.floor(age / 1000), fresh: age === null ? null : age < NEEDS_YOU_TTL_MS,
+  }
 }
 
 function defaultUnratedMeetings(): number | null {
@@ -93,8 +112,12 @@ export async function dispatchMemoriesWebOp(
   args: Record<string, unknown>,
   loopbackFetch: LoopbackFetchFn,
   serverVersion = 'unknown',
-  readNeedsYou: () => Promise<NeedsYouBlock | null> = () => getNeedsYouReader().read(),
+  /** Tests: an awaited block read just now. Absent (the server): the non-blocking peek below. */
+  readNeedsYou?: () => Promise<NeedsYouBlock | null>,
   countUnratedMeetings: () => number | null = defaultUnratedMeetings,
+  /** The build after 7.0.46: what to show at once; the reader refreshes in the background past the TTL. */
+  peekNeedsYou: () => NeedsYouPeek = () => getNeedsYouReader().peek(),
+  now: () => number = Date.now,
 ): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
   const reply = (ok: boolean, message: string, details: Record<string, unknown> = {}) => ({ ok, message, details })
 
@@ -106,11 +129,17 @@ export async function dispatchMemoriesWebOp(
         : reply(false, r.body.message || r.body.error || `Workspace error (${r.status})`)
     }
     case 'status': {
-      const [ctx, health, needsYou] = await Promise.all([
+      // The build after 7.0.46 (lead 22:0x): never wait on the needs-you CLI here. Its read can take 10 s or more on a
+      // loaded Mac, and the whole status (and so the page) waited with it. The peek answers at once.
+      const peeked: Promise<NeedsYouPeek> = readNeedsYou
+        ? readNeedsYou().catch(() => null).then(b => (b ? { state: 'ok' as const, block: b, at: now() } : { state: 'unknown' as const }))
+        : Promise.resolve((() => { try { return peekNeedsYou() } catch { return { state: 'unknown' as const } } })())
+      const [ctx, health, peek] = await Promise.all([
         loopbackFetch('/api/context/status', { timeoutMs: 10_000 }),
         loopbackFetch('/api/health', { timeoutMs: 5_000 }),
-        readNeedsYou().catch(() => null),
+        peeked,
       ])
+      const needsYou = peek.state === 'ok' ? peek.block : null
       const c = ctx.body
       const learning = (c.learning ?? {}) as Record<string, any>
       const graph = (c.graph ?? {}) as Record<string, any>
@@ -136,7 +165,8 @@ export async function dispatchMemoriesWebOp(
         learningToReviewTotal: needsYou ? memoryReview.total(needsYou) : null,
         // The build after 7.0.42 (Memories C): the one number for the rail, Today and the page. The two fields above stay
         // for older clients.
-        needsYou: computeNeedsYou(needsYou, (() => { try { return countUnratedMeetings() } catch { return null } })()),
+        needsYou: computeNeedsYou(needsYou, (() => { try { return countUnratedMeetings() } catch { return null } })(),
+          { notSetUp: peek.state === 'not_set_up', ageMs: peek.state === 'ok' ? Math.max(0, now() - peek.at) : null }),
         learningTotal: learning.total ?? 0,
         learningRewardEnabled: needsYou ? needsYou.reward_enabled === true : learning.reward_enabled === true,
         ...(needsYou ? { needs_you: needsYou } : {}),

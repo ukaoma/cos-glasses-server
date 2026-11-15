@@ -77,7 +77,10 @@ describe('needs-you count for the web Memories page', () => {
     // Control's helper constants (main.swift 10969-10970), pinned here so a change is deliberate.
     expect(NEEDS_YOU_TTL_MS).toBe(90_000)
     expect(NEEDS_YOU_STALE_FLAG_LIMIT_MS).toBe(3_600_000)
-    expect(NEEDS_YOU_TIMEOUT_MS).toBe(10_000)
+    // The build after 7.0.46: a background read, two thirds of the TTL (lead 22:0x), so it always ends inside it.
+    expect(NEEDS_YOU_TIMEOUT_MS).toBe(Math.round(NEEDS_YOU_TTL_MS * 2 / 3))
+    expect(NEEDS_YOU_TIMEOUT_MS).toBe(60_000)
+    expect(NEEDS_YOU_TIMEOUT_MS).toBeLessThan(NEEDS_YOU_TTL_MS)
     const dir = scriptsDir()
     let clock = 0
     let mode: 'ok' | 'fail' = 'ok'

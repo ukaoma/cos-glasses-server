@@ -29,6 +29,6 @@ describe('needsYou.meetings, default counter', () => {
       ? { status: 200, body: { server_version: '7.0.42' } }
       : { status: 200, body: { available: true, learning: {}, memory: {}, threads: {}, graph: {} } }
     const out = await dispatchMemoriesWebOp('status', {}, loopback, 'x', async () => ({ count: 0, gates: {} }))
-    expect(out.details.needsYou).toEqual({ meetings: 2, decisions: 0, quarantineBatch: 0, total: 2 })
+    expect(out.details.needsYou).toMatchObject({ meetings: 2, decisions: 0, quarantineBatch: 0, total: 2 })
   })
 })
