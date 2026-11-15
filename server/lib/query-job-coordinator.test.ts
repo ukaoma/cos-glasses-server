@@ -595,8 +595,8 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
   }
 
   /** The store production builds: it re-queues never-started work for its coordinator. */
-  function liveStore(root: string, storage?: QueryJobJournalStorage): QueryJobStore {
-    return new QueryJobStore({ root, bootId: randomUUID(), requeueNeverStartedOnBoot: true, ...(storage ? { storage } : {}) })
+  function liveStore(root: string, storage?: QueryJobJournalStorage, now?: () => Date): QueryJobStore {
+    return new QueryJobStore({ root, bootId: randomUUID(), requeueNeverStartedOnBoot: true, ...(storage ? { storage } : {}), ...(now ? { now } : {}) })
   }
 
   function answeringRunner(calls: Array<{ query: string; atMs: number }>): QueryJobRunner {
@@ -655,10 +655,12 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
   })
 
   it('ends a hold on cancel, and the canceled prompt never reaches a provider after the fence clears', async () => {
-    const fenceEndsAtMs = Date.now() + 400
+    // Keep the store clock fenced through journal setup; disk latency is not the test's clock.
+    const clock = { now: Date.now() }
+    const fenceEndsAtMs = clock.now + 400
     const root = await fencedRoot(fenceEndsAtMs)
     const calls: Array<{ query: string; atMs: number }> = []
-    const value = new QueryJobCoordinator(liveStore(root), answeringRunner(calls), { partialFlushMs: 0 })
+    const value = new QueryJobCoordinator(liveStore(root, undefined, () => new Date(clock.now)), answeringRunner(calls), { partialFlushMs: 0, holdRecheckMs: 10 })
     await value.init()
 
     const admitted = await value.submit(heldRequest())
@@ -666,8 +668,9 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     const canceled = await value.cancel(admitted.job.jobId, 1)
     expect(canceled).toMatchObject({ applied: true, job: { status: 'canceled' } })
     await waitFor(() => value.getHealth(), health => health.heldRuns === 0, 1_000)
-    // Past the fence: a hold that ignored the cancel would have started by now.
-    await waitFor(() => Date.now(), now => now > fenceEndsAtMs + 500)
+    // Move the same store clock beyond the fence, then give a surviving hold multiple rechecks.
+    clock.now = fenceEndsAtMs + 500
+    await new Promise(resolve => setTimeout(resolve, 50))
     expect(calls).toEqual([])
     expect((await value.getSnapshot(admitted.job.jobId)).status).toBe('canceled')
   })
