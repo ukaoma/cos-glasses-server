@@ -294,6 +294,17 @@ describe('Memories C: the index', () => {
   })
 })
 
+describe('Memories C: a malformed needsYou', () => {
+  it('a needsYou sent as an array is treated as absent, not as a count (Q1 minor, 18:29)', async () => {
+    const h = load({ answers: { status: status({ needsYou: [2, 1, 1, 4] }) } })
+    await h.open()
+    const absent = load({ answers: { status: status({ needsYou: undefined }) } })
+    await absent.open()
+    expect(h.t.needsParts()).toEqual(absent.t.needsParts())
+    expect(needsHeader(h.html('mm-list'))).toBe(4)
+  })
+})
+
 describe('Memories C: the health line', () => {
   it('working: "recalled N times in 90 days", never "used", and Details ends with the Activity log', async () => {
     const h = load()
@@ -360,7 +371,9 @@ describe('Memories C: meetings to rate', () => {
     expect(groups.map((g: { sid: string }) => g.sid)).toEqual([MAC, G2])
     const job = h.html('mm-reader')
     // The newest meeting's card: from this Mac, its two cues, five verdicts each, none chosen.
-    expect(job).toContain('On this Mac · 2 cues fired · about a minute')
+    // No invented time (lead 18:30): with every cue unrated the subtitle says only how many fired.
+    expect(job).toContain('On this Mac · 2 cues fired</p>')
+    expect(job).not.toMatch(/about a minute|minutes?\b/)
     expect(job).toContain('Cue text cue-mac-0001')
     expect((job.match(/data-mm="cue-rate"/g) ?? []).length).toBe(10)
     expect(job).not.toContain('aria-pressed="true"')
@@ -378,7 +391,7 @@ describe('Memories C: meetings to rate', () => {
     expect(posts).toEqual([{ method: 'POST', path: '/api/live-cues/feedback', body: { sessionId: MAC, cueId: 'cue-mac-0001', verdict: 'useful' } }])
     const job = h.html('mm-reader')
     expect(job).toContain('Cue text cue-mac-0001')
-    expect(job).toMatch(/data-id="cue-mac-0001" data-arg="useful" aria-pressed="true"/)
+    expect(job).toMatch(/data-id="cue-mac-0001" data-arg="useful" aria-label="Useful" aria-pressed="true"/)
   })
 
   it('Skip this meeting calls the skip route with the meeting, folds it with Undo, and Undo calls clear', async () => {
@@ -590,11 +603,241 @@ describe('Memories C: the meeting card keeps what the rating flow could do (lead
     expect(h.html('mm-reader')).toMatch(/data-mm="cue-meet-skip" data-id="mac_[^"]+">Skip this meeting</)
     expect(h.html('mm-reader')).not.toContain('Skip the rest')
     h.tap('cue-rate', { 'data-id': 'cue-mac-0001', 'data-arg': 'useful' }); await flush()
-    expect(h.html('mm-reader')).toMatch(/data-mm="cue-meet-skip" data-id="mac_[^"]+">Skip the rest</)
+    expect(h.html('mm-reader')).toMatch(/data-mm="cue-meet-skip" data-id="mac_[^"]+">Skip the rest \(1\)</)
     expect(h.html('mm-reader')).not.toContain('>Skip this meeting<')
     expect(h.html('mm-reader')).toContain('Keys 1 to 5 rate the cue in focus, N opens its note and details, S skips the rest of the meeting.')
     h.tap('cue-meet-skip', { 'data-id': MAC }); await flush()
     expect(h.cueCalls.filter(c => c.path === '/api/live-cues/skip').map(c => c.body)).toEqual([{ sessionId: MAC }])
     expect(h.cueCalls.filter(c => c.path === '/api/live-cues/feedback')).toHaveLength(1)
+  })
+})
+
+// Q1 on 338a95c2: tests owed for its surviving mutants (P3, P4, P15, P16, P17) and four small edges.
+describe('Memories C: the meeting card escapes what it draws (Q1 P15, P16, P17)', () => {
+  it('a cue\'s text is drawn as text, never as markup', async () => {
+    const h = load({ cues: cueRoutes({ week: () => history({ cues: [cue('cue-mac-0001', MAC, NOW - 110 * MIN, { detail: '<img src=x onerror=alert(1)>' })] }) }) })
+    await h.open(['i', 'meetings'])
+    const card = h.html('mm-reader')
+    expect(card).toContain('<p class="mm-meet-text">&lt;img src=x onerror=alert(1)&gt;</p>')
+    expect(card).not.toContain('<img')
+  })
+
+  it('the line said before is escaped in its title attribute and in its text', async () => {
+    const before = '"><b>x</b><script>alert(1)</script>'
+    const h = load({ cues: cueRoutes({ week: () => history({ cues: [cue('cue-mac-0001', MAC, NOW - 110 * MIN, { before })] }) }) })
+    await h.open(['i', 'meetings'])
+    const card = h.html('mm-reader')
+    const safe = '&quot;&gt;&lt;b&gt;x&lt;/b&gt;&lt;script&gt;alert(1)&lt;/script&gt;'
+    expect(card).toContain('<p class="mm-meet-before" title="' + safe + '">')
+    expect(card).toContain('>Just before: ' + safe + '</p>')
+    expect(card).not.toContain('<b>x</b>')
+    expect(card).not.toContain('<script>')
+  })
+
+  it('the meeting\'s title is escaped in the card\'s heading', async () => {
+    const h = load({ cues: cueRoutes({ week: () => history({ cues: [cue('cue-mac-0001', MAC, NOW - 110 * MIN, { title: '<i>Board</i> review' })] }) }) })
+    await h.open(['i', 'meetings'])
+    const card = h.html('mm-reader')
+    expect(card).toContain('<h3>&lt;i&gt;Board&lt;/i&gt; review</h3>')
+    expect(card).not.toContain('<i>')
+  })
+})
+
+describe('Memories C: Needs you after quarantining on the page (Q1 P3, P4)', () => {
+  // Two memories ready to quarantine, both listed by the needs-you block and the review page, and one who-said-it item.
+  const twoPrune = () => ({
+    status: status({ needs_you: block({ count: 3, gates: { prune_ready: 2, attribution: 1 }, items: [
+      needsItem({ lesson_id: 'mem_who', event_id: 'evt_who', title: 'decision: Bradley wants the discount as a percentage' }),
+      needsItem({ gate: 'prune_ready', reason: 'never recalled', lesson_id: 'mem_old1', event_id: 'evt_pr1', title: 'Old memory one' }),
+      needsItem({ gate: 'prune_ready', reason: 'never recalled', lesson_id: 'mem_old2', event_id: 'evt_pr2', title: 'Old memory two' }),
+    ] }) }),
+    'ws:review_page': { protocol: 1, matched_total: 2, next_cursor: null, items: [
+      { event_id: 'evt_pr1', lesson_id: 'mem_old1', event_type: 'captured', store: 'bot_memory', category: 'Prune ready · never recalled', title: 'Old memory one', target: { kind: 'memory' }, source_refs: [], ts: '2026-05-07T01:37:36Z' },
+      { event_id: 'evt_pr2', lesson_id: 'mem_old2', event_type: 'captured', store: 'bot_memory', category: 'Prune ready · never recalled', title: 'Old memory two', target: { kind: 'memory' }, source_refs: [], ts: '2026-05-08T01:37:36Z' },
+    ] },
+  })
+
+  it('deciding a memory ready to quarantine leaves the decisions part alone', async () => {
+    const h = load({ answers: twoPrune() })
+    await h.open()
+    expect(h.t.needsParts()).toMatchObject({ decisions: 1, quarantineBatch: 1, total: 4 })
+    h.S.decisions.mem_old1 = 'pruned'; h.t.paint()
+    expect(h.t.needsParts().decisions).toBe(1)
+    expect(rowNumber(h.html('mm-list'), 'who')).toBe('1')
+  })
+
+  it('quarantining every memory in the batch on the page takes the batch to 0 and the header down by 1 before the next status read', async () => {
+    const h = load({ answers: twoPrune() })
+    await h.open(['i', 'quarantine'])
+    expect(needsHeader(h.html('mm-list'))).toBe(4)
+    h.tap('prune-all'); await flush()
+    h.tap('prune-all'); await flush()
+    expect(h.calls.filter(c => c.op === 'memory.review').map(c => c.args.id)).toEqual(['mem_old1', 'mem_old2'])
+    // The status read after the writes still says one batch; the page knows better until the server catches up.
+    expect(h.calls.filter(c => c.op === 'status').length).toBeGreaterThanOrEqual(2)
+    expect(h.t.needsParts()).toMatchObject({ decisions: 1, quarantineBatch: 0 })
+    expect(rowNumber(h.html('mm-list'), 'quarantine')).toBe('0')
+    expect(needsHeader(h.html('mm-list'))).toBe(3)
+    expectHeaderIsSum(h.html('mm-list'))
+  })
+
+  it('quarantining only some of the batch keeps it at 1', async () => {
+    const h = load({ answers: twoPrune() })
+    await h.open()
+    h.S.decisions.mem_old1 = 'pruned'; h.S.decided.mem_old1 = 1; h.t.paint()
+    expect(h.t.needsParts().quarantineBatch).toBe(1)
+  })
+})
+
+describe('Memories C: small edges (Q1)', () => {
+  it('a cue logged at the skip\'s own time stays skipped; one a millisecond later brings the meeting back (the server\'s <=)', async () => {
+    const at = NOW - 100 * MIN
+    const exact = load({ cues: cueRoutes({ week: () => history({ skips: { [MAC]: at } }) }) })
+    await exact.open(['i', 'meetings'])
+    expect(exact.t.meetingGroups().map((g: { sid: string }) => g.sid)).toEqual([G2])
+    const later = load({ cues: cueRoutes({ week: () => history({ skips: { [MAC]: at - 1 } }) }) })
+    await later.open(['i', 'meetings'])
+    expect(later.t.meetingGroups().map((g: { sid: string }) => g.sid)).toEqual([MAC, G2])
+  })
+
+  it('a truncated history read is never used as the meetings count', async () => {
+    const h = load({ answers: { status: status({ needsYou: undefined }) }, cues: cueRoutes({ week: () => ({ ...history(), truncated: true }) }) })
+    await h.open()
+    expect(h.t.needsParts().meetings).toBeNull()
+    expect(rowNumber(h.html('mm-list'), 'meetings')).toBe('')
+    expect(needsHeader(h.html('mm-list'))).toBeNull()
+    // The same read, whole, counts.
+    const whole = load({ answers: { status: status({ needsYou: undefined }) } })
+    await whole.open()
+    expect(whole.t.needsParts().meetings).toBe(2)
+  })
+
+  it('Undo with no skip recorded does nothing and calls no route', async () => {
+    const h = load()
+    await h.open(['i', 'meetings'])
+    h.tap('cue-meet-unskip', { 'data-id': MAC }); await flush()
+    expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
+    expect(h.t.meetingGroups().map((g: { sid: string }) => g.sid)).toEqual([MAC, G2])
+  })
+})
+
+// Lead 18:30, ruling (c): a long meeting (his average is 22 cues) shows its first five unrated cues, then one line that
+// shows the rest in place. "Skip the rest" counts every unrated cue, shown or not. No time estimate anywhere.
+describe('Memories C: a long meeting shows five cues, then the rest in place (lead 18:30)', () => {
+  const LONG = Array.from({ length: 22 }, (_, i) => cue('cue-long-' + String(i + 1).padStart(2, '0'), MAC, NOW - 110 * MIN + i * MIN))
+  const longLoad = () => load({ cues: cueRoutes({ week: () => history({ cues: LONG }) }) })
+  const shownIds = (job: string) => [...job.matchAll(/data-mm="cue-rate" data-id="([^"]+)" data-arg="useful"/g)].map(m => m[1])
+
+  it('draws the first five unrated cues and one line "17 more in this meeting", with no time estimate', async () => {
+    const h = longLoad()
+    await h.open(['i', 'meetings'])
+    const job = h.html('mm-reader')
+    expect(shownIds(job)).toEqual(['cue-long-01', 'cue-long-02', 'cue-long-03', 'cue-long-04', 'cue-long-05'])
+    expect((job.match(/data-mm="cue-rate"/g) ?? []).length).toBe(25)
+    expect(job).not.toContain('Cue text cue-long-06')
+    expect(job).toMatch(/data-mm="cue-meet-more" data-id="mac_[^"]+">17 more in this meeting</)
+    expect(job).toContain('22 cues fired</p>')
+    expect(job).not.toMatch(/about a minute|minutes?\b/)
+    expect(job).toMatch(/>Skip this meeting</)
+  })
+
+  it('after a rating the card keeps the same five cues in place, and Skip the rest counts the hidden ones too', async () => {
+    const h = longLoad()
+    await h.open(['i', 'meetings'])
+    h.tap('cue-rate', { 'data-id': 'cue-long-01', 'data-arg': 'useful' }); await flush()
+    let job = h.html('mm-reader')
+    // The rated cue stays where it was with its verdict; cue 6 does not slide up under his thumb.
+    expect(shownIds(job)).toEqual(['cue-long-01', 'cue-long-02', 'cue-long-03', 'cue-long-04', 'cue-long-05'])
+    expect(job).toMatch(/data-id="cue-long-01" data-arg="useful" aria-label="Useful" aria-pressed="true"/)
+    expect(job).not.toContain('Cue text cue-long-06')
+    expect(job).toMatch(/>17 more in this meeting</)
+    expect(job).toMatch(/data-mm="cue-meet-skip" data-id="mac_[^"]+">Skip the rest \(21\)</)
+    // The subtitle does not change as he rates (a longer one wrapped at 382 and moved the next cue).
+    expect(job).toContain('22 cues fired</p>')
+    for (const id of ['cue-long-02', 'cue-long-03', 'cue-long-04', 'cue-long-05']) { h.tap('cue-rate', { 'data-id': id, 'data-arg': 'late' }); await flush() }
+    job = h.html('mm-reader')
+    expect(shownIds(job)).toEqual(['cue-long-01', 'cue-long-02', 'cue-long-03', 'cue-long-04', 'cue-long-05'])
+    expect(job).toMatch(/>17 more in this meeting</)
+    expect(job).toMatch(/>Skip the rest \(17\)</)
+    h.tap('cue-meet-skip', { 'data-id': MAC }); await flush()
+    expect(h.cueCalls.filter(c => c.path === '/api/live-cues/skip').map(c => c.body)).toEqual([{ sessionId: MAC }])
+  })
+
+  it('the more line shows every cue in place, in order, and goes away; nothing is fetched for it', async () => {
+    const h = longLoad()
+    await h.open(['i', 'meetings'])
+    h.tap('cue-rate', { 'data-id': 'cue-long-03', 'data-arg': 'repeat' }); await flush()
+    const before = h.cueCalls.length
+    h.tap('cue-meet-more', { 'data-id': MAC }); await flush()
+    const job = h.html('mm-reader')
+    expect(shownIds(job)).toEqual(LONG.map(c => c.cueId))
+    expect(job).toMatch(/data-id="cue-long-03" data-arg="repeat" aria-label="Repeat" aria-pressed="true"/)
+    expect(job).not.toContain('cue-meet-more')
+    expect(job).not.toMatch(/more in this meeting/)
+    expect(job).toMatch(/>Skip the rest \(21\)</)
+    expect(h.cueCalls.length).toBe(before)
+  })
+
+  it('a meeting of five or fewer cues has no more line', async () => {
+    const h = load()
+    await h.open(['i', 'meetings'])
+    expect(h.html('mm-reader')).not.toContain('cue-meet-more')
+  })
+
+  it('every verdict carries its full word as the accessible name', async () => {
+    const h = longLoad()
+    await h.open(['i', 'meetings'])
+    const job = h.html('mm-reader')
+    for (const v of ['Useful', 'Late', 'Repeat', 'Wrong', 'Obvious']) expect((job.match(new RegExp('aria-label="' + v + '"', 'g')) ?? []).length).toBe(5)
+  })
+})
+
+describe('Memories C: a long meeting after the week is read again (lead 18:30)', () => {
+  const LONG = Array.from({ length: 22 }, (_, i) => cue('cue-long-' + String(i + 1).padStart(2, '0'), MAC, NOW - 110 * MIN + i * MIN))
+  const ids = (job: string) => [...job.matchAll(/data-mm="cue-rate" data-id="([^"]+)" data-arg="useful"/g)].map(m => m[1])
+  const five = ['cue-long-01', 'cue-long-02', 'cue-long-03', 'cue-long-04', 'cue-long-05']
+
+  it('Check again keeps the five rated cues in place with the more line; Refresh starts the card on the next five', async () => {
+    let week = LONG
+    const h = load({ cues: cueRoutes({ week: () => history({ cues: week }) }) })
+    await h.open(['i', 'meetings'])
+    for (const id of five) { h.tap('cue-rate', { 'data-id': id, 'data-arg': 'useful' }); await flush() }
+    week = LONG.slice(5)
+    h.tap('cue-check'); await flush()
+    let job = h.html('mm-reader')
+    expect(ids(job)).toEqual(five)
+    expect(job).toMatch(/>17 more in this meeting</)
+    h.tap('cue-meet-more', { 'data-id': MAC }); await flush()
+    expect(ids(h.html('mm-reader'))).toHaveLength(22)
+    h.tap('refresh'); await flush()
+    job = h.html('mm-reader')
+    expect(ids(job)).toEqual(['cue-long-06', 'cue-long-07', 'cue-long-08', 'cue-long-09', 'cue-long-10'])
+    expect(job).toMatch(/>12 more in this meeting</)
+  })
+})
+
+describe('Memories C: a meeting with every cue rated (lead 18:30)', () => {
+  it('says All rated in the button\'s place and offers no skip, since nothing is left to skip', async () => {
+    const h = load()
+    await h.open(['i', 'meetings'])
+    for (const id of ['cue-mac-0001', 'cue-mac-0002']) { h.tap('cue-rate', { 'data-id': id, 'data-arg': 'obvious' }); await flush() }
+    const card = h.html('mm-reader').split('<section class="cx-card mm-meet"')[1] ?? ''
+    expect(card).toContain('2 cues fired</p>')
+    expect(card).not.toContain('cue-meet-skip')
+    // The button's slot keeps its height with a quiet line, so the last rating does not move the cues below.
+    expect(card).toContain('<p class="mm-meet-done">All rated</p>')
+  })
+})
+
+describe('Memories C: the more line counts only unrated cues (lead 18:30)', () => {
+  it('a hidden cue rated from elsewhere leaves the more line and the skip count both one lower', async () => {
+    const LONG = Array.from({ length: 22 }, (_, i) => cue('cue-long-' + String(i + 1).padStart(2, '0'), MAC, NOW - 110 * MIN + i * MIN))
+    const h = load({ cues: cueRoutes({ week: () => history({ cues: LONG }) }) })
+    await h.open(['i', 'meetings'])
+    h.tap('cue-rate', { 'data-id': 'cue-long-08', 'data-arg': 'wrong' }); await flush()
+    const job = h.html('mm-reader')
+    expect(job).not.toContain('Cue text cue-long-08')
+    expect(job).toMatch(/>16 more in this meeting</)
+    expect(job).toMatch(/>Skip the rest \(21\)</)
   })
 })

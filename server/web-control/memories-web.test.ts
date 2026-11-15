@@ -631,7 +631,7 @@ describe('Control Web Memories: Cues to rate and Rated cues', () => {
     expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-mid', 'c-new'])
     expect(h.S.cue.counts).toMatchObject({ rated: 2, unrated: 2, byVerdict: { late: 1 } })
     // The rated cue keeps its place with its verdict; the meeting still has cues to rate.
-    expect(h.t.jobHtml('meetings')).toMatch(/data-id="c-old" data-arg="late" aria-pressed="true"/)
+    expect(h.t.jobHtml('meetings')).toMatch(/data-id="c-old" data-arg="late" aria-label="Late" aria-pressed="true"/)
     expect(h.t.jobHtml('meetings')).toContain('Middle unrated cue')
     expect(h.t.indexHtml()).toMatch(/data-arg="meetings"[^>]*data-counted="1"/)
     expect(h.writes()).toEqual([])
@@ -689,7 +689,7 @@ describe('Control Web Memories: Cues to rate and Rated cues', () => {
     expect(h.cueCalls.some(c => c.path === '/api/live-cues/history?days=30&limit=1000')).toBe(true)
     const html: string = h.t.jobHtml('rated')
     expect(html).toContain('Rated Useful · “spot on”')
-    expect(html).toMatch(/data-arg="useful" aria-pressed="true"/)
+    expect(html).toMatch(/data-arg="useful" aria-label="Useful" aria-pressed="true"/)
     h.tap('cue-rate', { 'data-id': 'c-rated', 'data-arg': 'useful' }); await flush()
     expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
     h.tap('cue-rate', { 'data-id': 'c-rated', 'data-arg': 'repeat' }); await flush()

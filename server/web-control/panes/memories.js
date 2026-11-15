@@ -531,7 +531,7 @@
     // Memories C, rating a meeting at a time: the server's skips (sessionId to when), whether this server has them, the
     // meetings folded here (newest first) for their Undo, the cues rated here (they stay drawn with their verdict, so
     // nothing moves under the reader), the meeting open, and a note field opened on request.
-    skips: {}, skipsOn: null, truncated: false, folded: [], meetBusy: {}, meetErrors: {}, here: {}, meet: '', noteOpen: {} };
+    skips: {}, skipsOn: null, truncated: false, folded: [], meetBusy: {}, meetErrors: {}, here: {}, meet: '', noteOpen: {}, shown: {}, allShown: {} };
   var RATED_DAYS = 30;
   function verdictLabel(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : ''; }
   function cueNum(v) { var n = Number(v); return isFinite(n) ? n : 0; }
@@ -721,7 +721,7 @@
   function verdictButtons(id, selected, showKeys, disabled) {
     return '<div class="mm-verdicts" role="group" aria-label="Rate this cue">' + VERDICTS.map(function (v, i) {
       var on = v === selected;
-      return '<button type="button" class="cx-btn' + (on ? ' primary' : ' quiet') + '" data-mm="cue-rate" data-id="' + esc(id) + '" data-arg="' + v + '" aria-pressed="' + on + '"' + (disabled ? ' disabled' : '') + '>' +
+      return '<button type="button" class="cx-btn' + (on ? ' primary' : ' quiet') + '" data-mm="cue-rate" data-id="' + esc(id) + '" data-arg="' + v + '" aria-label="' + esc(verdictLabel(v)) + '" aria-pressed="' + on + '"' + (disabled ? ' disabled' : '') + '>' +
         (showKeys ? '<span class="mm-key" aria-hidden="true">' + (i + 1) + '</span>' : '') + esc(verdictLabel(v)) + '</button>';
     }).join('') + '</div>';
   }
@@ -773,7 +773,17 @@
     if (!g) { g = groups.filter(function (x) { return x.unrated.length > 0; })[0] || null; C.meet = g ? g.sid : ''; }
     return g;
   }
-  function minutesLine(n) { var m = Math.max(1, Math.round(n * 10 / 60)); return m === 1 ? 'about a minute' : 'about ' + m + ' minutes'; }
+  // Lead 18:30 (c): a card shows its first CARD_CUES unrated cues, chosen when it is first drawn and then held, so a rating
+  // never slides the next cue under his thumb; one line shows the rest in place. No time estimate: none is measured.
+  var CARD_CUES = 5;
+  function shownCues(g) {
+    var C = S.cue;
+    if (C.allShown[g.sid]) return g.cues;
+    // Rated cues stay in the meeting's list (C.here) until Refresh, which also clears these, so the held five never vanish.
+    if (!C.shown[g.sid]) C.shown[g.sid] = g.cues.filter(function (c) { return !cueVerdict(c); }).slice(0, CARD_CUES).map(function (c) { return c.cueId; });
+    var ids = C.shown[g.sid];
+    return g.cues.filter(function (c) { return ids.indexOf(c.cueId) >= 0; });
+  }
   // One cue in a meeting card (lead, F1 review: nothing the rating flow could do may disappear). The face: the cue, the
   // line said just before it (one quiet line), the glasses vote, the five verdicts (none chosen) and one disclosure. Behind
   // the disclosure: the note, the full line said before, the kind, the score and the sources.
@@ -803,13 +813,18 @@
   function meetingCardHtml(g) {
     var C = S.cue, busy = !!C.meetBusy[g.sid], n = g.cues.length;
     // One skip route either way: it covers the cues shown now. Once a cue here is rated, what it skips is the rest.
-    var some = g.cues.some(function (c) { return !!cueVerdict(c); });
-    var skip = C.skipsOn === true ? btn('cue-meet-skip', busy ? 'Skipping…' : some ? 'Skip the rest' : 'Skip this meeting', { id: g.sid, disabled: busy }) : '';
+    var some = g.cues.some(function (c) { return !!cueVerdict(c); }), left = g.unrated.length;
+    // "Skip the rest" covers every unrated cue in the meeting, shown or not, and says how many (lead 18:30).
+    // The subtitle never changes as he rates, and the button's slot keeps its height when the last cue is rated, so a
+    // rating never moves the cues below it (at 382 a growing subtitle wrapped and pushed the next cue down 18 px).
+    var skip = C.skipsOn !== true ? '' : left ? btn('cue-meet-skip', busy ? 'Skipping…' : some ? 'Skip the rest (' + fmt(left) + ')' : 'Skip this meeting', { id: g.sid, disabled: busy }) : '<p class="mm-meet-done">All rated</p>';
+    var cues = shownCues(g), more = g.cues.filter(function (c) { return !cueVerdict(c) && cues.indexOf(c) < 0; }).length;
     return '<section class="cx-card mm-meet" aria-label="' + esc(meetingTitle(g)) + '"><div class="mm-meet-head"><div><h3>' + esc(meetingTitle(g)) + '</h3>' +
-      '<p>' + esc([meetingPlace(g.sid), g.title ? meetingWhen(g.start) : '', n + ' ' + plural(n, 'cue', 'cues') + ' fired', g.unrated.length ? minutesLine(g.unrated.length) : 'all rated'].filter(Boolean).join(' · ')) + '</p></div>' + skip + '</div>' +
+      '<p>' + esc([meetingPlace(g.sid), g.title ? meetingWhen(g.start) : '', n + ' ' + plural(n, 'cue', 'cues') + ' fired'].filter(Boolean).join(' · ')) + '</p></div>' + skip + '</div>' +
       '<p class="mm-muted mm-keys-hint">Keys 1 to 5 rate the cue in focus, N opens its note and details, S skips the rest of the meeting.</p>' +
       (C.meetErrors[g.sid] ? '<p class="mm-warn">' + esc(C.meetErrors[g.sid]) + '</p>' : '') +
-      g.cues.map(meetingCueHtml).join('') + '</section>';
+      cues.map(meetingCueHtml).join('') +
+      (more ? '<p class="mm-meet-more">' + textBtn('cue-meet-more', fmt(more) + ' more in this meeting', { id: g.sid }) + '</p>' : '') + '</section>';
   }
   function foldedHtml() {
     var C = S.cue, rows = C.folded.filter(function (f) { return typeof C.skips[f.sid] === 'number'; });
@@ -894,6 +909,7 @@
     if (name === 'cue-meet') { C.meet = id || ''; return paint(); }
     if (name === 'cue-meet-skip') return skipMeeting(id, false);
     if (name === 'cue-meet-unskip') return skipMeeting(id, true);
+    if (name === 'cue-meet-more') { C.allShown[id] = true; return paint(); }
     if (name === 'cue-note-open') { if (C.noteOpen[id]) { delete C.noteOpen[id]; return paint(); } C.noteOpen[id] = true; paint(); var n = el('mm-cue-note-' + id); if (n && n.focus) n.focus(); return; }
     if (name === 'cue-memory') { setJob('corrections'); return W.go('memories', ['m', id]); }
     if (name === 'cue-rate') {
@@ -984,7 +1000,7 @@
   // status.needsYou when it sends one, else the same sum from the needs-you block; less what was decided on this page since
   // (the server's next read catches up). A part that cannot be read is null, and so is the total: never a guessed number.
   function needsParts() {
-    var s = S.status, ny = s && s.needsYou && typeof s.needsYou === 'object' ? s.needsYou : null, block = needsBlock(), prune = pruneWaiting();
+    var s = S.status, ny = s && s.needsYou && typeof s.needsYou === 'object' && !Array.isArray(s.needsYou) ? s.needsYou : null, block = needsBlock(), prune = pruneWaiting();
     var decisions = null, batch = null, meetings = null;
     if (ny) { decisions = numOrNull(ny.decisions); batch = numOrNull(ny.quarantineBatch); meetings = numOrNull(ny.meetings); }
     else if (block && R) { var all = R.total(block); if (typeof all === 'number' && prune !== null) { decisions = Math.max(0, all - prune); batch = prune > 0 ? 1 : 0; } }
@@ -2442,7 +2458,7 @@
   }
   function refresh() {
     S.loadedAt = Date.now(); S.detail = {}; S.passages = {}; S.decided = {}; S.wrong = {};
-    S.cue.folded = []; S.cue.here = {}; S.cue.meet = '';
+    S.cue.folded = []; S.cue.here = {}; S.cue.meet = ''; S.cue.shown = {}; S.cue.allShown = {};
     loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph(); loadApplied(false); loadMemCounts();
     if (S.mem.loaded || S.view === 'memories') loadMem(false);
     if (S.setup) loadSetup();

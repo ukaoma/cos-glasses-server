@@ -69,6 +69,18 @@ body:has(#nav-trail:not([hidden])) .mm-trail { display: none; }
 .mm-meet-note { margin: 4px 0 2px; font-size: 13px; }
 .mm-meet-note .mm-link { font-size: 13px; position: relative; }
 @media (max-width: 520px) { .mm-meet-head { flex-direction: column; } }
+/* Lead 18:30 (c): the rest of a long meeting opens in place from one line under its first five cues. */
+.mm-meet-more { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--hairline); font-size: 14px; }
+.mm-meet-more .mm-link { position: relative; }
+/* Phones: the five verdicts on one row, each a 44 px target sharing the width; the word is the accessible name. */
+/* Equal shares, but never narrower than the word: a short word gives its spare width to the others. */
+@media (max-width: 599px) {
+  .mm-meet-cue .mm-verdicts { flex-wrap: nowrap; gap: 4px; }
+  .mm-meet-cue .mm-verdicts .cx-btn { flex: 1 1 0; min-width: min-content; height: 44px; padding: 0 4px; justify-content: center; }
+}
+/* At the folded width the five words fit at 14.5 px only with 2 px of padding; 13 px (the pane's smallest is 12) fits. */
+@media (max-width: 419px) { .mm-meet-cue .mm-verdicts .cx-btn { font-size: 13px; } }
+.mm-meet-done { margin: 0; min-height: 32px; display: flex; align-items: center; font-size: 13px; font-weight: 600; color: var(--sub); flex: none; }
 
 /* Wrong on a memory shown as used or learned, then its Undo in place (the row keeps its height). */
 .mm-wrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; position: relative; }
@@ -79,7 +91,7 @@ body:has(#nav-trail:not([hidden])) .mm-trail { display: none; }
 .mm-folded { margin: 0 0 12px; }
 /* A 44 px tap floor on touch for the quiet text buttons, on an invisible layer that takes no room. */
 @media (pointer: coarse) {
-  .mm-wrong::before, .mm-removed .mm-link::before, .mm-hl .mm-link::before, .mm-trail .mm-link::before, .mm-meet-note .mm-link::before, .mm-index-foot .mm-link::before {
+  .mm-wrong::before, .mm-removed .mm-link::before, .mm-hl .mm-link::before, .mm-trail .mm-link::before, .mm-meet-note .mm-link::before, .mm-meet-more .mm-link::before, .mm-index-foot .mm-link::before {
     content: ''; position: absolute; left: -8px; right: -8px; top: 50%; height: 44px; transform: translateY(-50%);
   }
   .mm-meet-cue .mm-verdicts .cx-btn { height: 44px; }
