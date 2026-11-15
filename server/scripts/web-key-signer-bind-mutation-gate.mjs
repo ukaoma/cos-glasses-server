@@ -49,7 +49,7 @@ const mutations = [
   m('conn-local-bound-dropped', BIND, ['  if (!isTailnetAddress(local) || !bound.includes(local)) return false', '  if (!isTailnetAddress(local)) return false'], BT),
   drop('conn-remote-range-dropped', BIND, '  if (!isTailnetAddress(remote)) return false\n', BT),
   drop('conn-onlink-dropped', BIND, "  if (onLink && onLink.check(remote, remote.includes(':') ? 'ipv6' : 'ipv4')) return false\n", BT),
-  drop('subnets-include-tailscale', BIND, '    if (isTailscaleInterface(name, infos)) continue\n    for (const info of infos ?? []) {', BT),
+  m('subnets-include-tailscale', BIND, ['    if (isTailscaleInterface(name, infos)) continue\n    for (const info of infos ?? []) {', '    for (const info of infos ?? []) {'], BT),
   m('guard-remote-not-passed', BIND, ['allowed(socket.localAddress, socket.remoteAddress) === true', 'allowed(socket.localAddress, socket.localAddress) === true'], BT),
   drop('guard-no-destroy', BIND, '    socket.destroy()\n', BT),
   m('guard-throw-allows', BIND, ['try { ok = allowed(socket.localAddress, socket.remoteAddress) === true } catch { ok = false }', 'try { ok = allowed(socket.localAddress, socket.remoteAddress) === true } catch { ok = true }'], BT),

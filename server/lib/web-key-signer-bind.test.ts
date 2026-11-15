@@ -94,6 +94,9 @@ describe('which interface is Tailscale\'s (review S1)', () => {
   it('numeric families (older Node), internal rows never count, duplicates dropped', () => {
     expect(tailnetInterfaceAddresses({ utun3: [iface(TS4, 4, 32), iface(TS6, 6, 48)] })).toEqual([TS4, TS6])
     expect(tailnetInterfaceAddresses({ utun9: [iface(TS4, 'IPv4', 32, true), iface(TS6, 'IPv6', 48, true)] })).toEqual([])
+    // An internal row never vouches for the interface (found by the gate: iface-internal-counts survived).
+    expect(tailnetInterfaceAddresses({ utun9: [iface(TS4, 'IPv4', 32), iface(TS6, 'IPv6', 48, true)] })).toEqual([])
+    expect(tailnetInterfaceAddresses({ utun9: [iface(TS4, 'IPv4', 32, true), iface(TS6, 'IPv6', 48)] })).toEqual([])
     expect(tailnetInterfaceAddresses({ utun4: [iface(TS4, 'IPv4', 32), iface(TS6, 'IPv6', 48)], utun5: [iface(TS6, 'IPv6', 48), iface(TS4, 'IPv4', 32)] })).toEqual([TS4, TS6])
   })
 
