@@ -18,7 +18,7 @@ function packedFiles(): string[] {
 
 /** Gate and test tools: never for an installed server. */
 export const NOT_SHIPPED = [
-  /^server\/scripts\/.*-mutation-gate\.mjs$/,
+  /^server\/scripts\/(.*-)?mutation-gate\.mjs$/,
   /^server\/scripts\/(check-gate-anchors|gate-anchor-check)\.mjs$/,
   /\.test\.(ts|mjs|js)$/,
 ]
@@ -31,13 +31,15 @@ describe('the npm tarball carries no gate or test tool', () => {
   })
 
   it('every gate script in the repo is left out, by name (a new one fails here until its "!" line is added)', () => {
-    const gates = readdirSync(resolve(REPO_ROOT, 'server', 'scripts')).filter(n => n.endsWith('-mutation-gate.mjs'))
+    const gates = readdirSync(resolve(REPO_ROOT, 'server', 'scripts')).filter(n => n === 'mutation-gate.mjs' || n.endsWith('-mutation-gate.mjs'))
     expect(gates.length).toBeGreaterThan(40)
     for (const g of gates) expect(files, g).not.toContain('server/scripts/' + g)
   })
 
   it('the patterns are not vacuous: they match the real gate names', () => {
     expect(NOT_SHIPPED.some(re => re.test('server/scripts/session-catch-up-mutation-gate.mjs'))).toBe(true)
+    // Q1 20:13: the generic runner has no dash before mutation-gate.
+    expect(NOT_SHIPPED.some(re => re.test('server/scripts/mutation-gate.mjs'))).toBe(true)
     expect(NOT_SHIPPED.some(re => re.test('server/scripts/check-gate-anchors.mjs'))).toBe(true)
     expect(NOT_SHIPPED.some(re => re.test('server/lib/package-no-gates.test.ts'))).toBe(true)
     expect(NOT_SHIPPED.some(re => re.test('server/scripts/hooks-cli.ts'))).toBe(false)
