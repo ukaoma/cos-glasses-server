@@ -348,6 +348,7 @@
     var drop = !!o.drop;
     var hint = keyboardFirst() ? (drop ? 'Return asks. Option-Return drops. Shift-Return starts a new line.' : 'Return asks. Shift-Return starts a new line.') : '';
     return '<form class="cc-composer" data-cos-form="' + esc(k.name) + '" autocomplete="off">' +
+      (k === CHAT ? '<div class="cc-latest-row"><button type="button" class="link-btn cc-latest" data-cos="latest">Jump to latest</button></div>' : '') +
       '<div class="cc-chips hidden" data-cos-chips></div>' +
       '<textarea class="field cc-input" id="' + esc(k.inputId) + '" rows="1" maxlength="2000" placeholder="' + esc(o.placeholder) + '" aria-label="' + esc(o.label) + '"></textarea>' +
       '<div class="cc-buttons">' +
@@ -393,13 +394,22 @@
       hydrate(CHAT);
       if (P) paintPrep(true);
     }
-    if (!visible) return;
+    if (!visible) { stopFollowing(); return; }
+    var feed = host.querySelector('[data-cos-feed]');
+    if (!TAIL || TAIL.feed !== feed || !TAIL.active) { watchTail(feed); followLatest(); }
+    var route = W.parseRoute(), routeItem = route.args[0] === 'cos' ? route.args[1] || '' : '';
+    if (TAIL && TAIL.routeItem !== routeItem) {
+      TAIL.routeItem = routeItem;
+      // Notification links name a feed card, never HTML or a selector. The normal feed/archive reads resolve it.
+      if (/^[A-Za-z0-9_.:-]{1,160}$/.test(routeItem)) { C.focusItem = routeItem; TAIL.following = false; }
+      else { C.focusItem = ''; followLatest(); }
+    }
     loadModels();
     if (threadOn()) loadThread();
     if (historyOn() && C.hist.state !== 'ready') loadHistory();
     // Ask only: no inbox to read; the chat holds this page's Asks. Inbox lines from a Drop it session are not shown.
-    if (!dropOn()) { if (C.feedMode !== 'ask') { C.items = []; C.feedState = 'ready'; C.feedMode = 'ask'; } paintFeed(true); return; }
-    if (C.items === null || C.feedState === 'error' || C.feedMode !== 'drop') loadFeed(); else paintFeed(true);
+    if (!dropOn()) { if (C.feedMode !== 'ask') { C.items = []; C.feedState = 'ready'; C.feedMode = 'ask'; } paintFeed(false); return; }
+    if (C.items === null || C.feedState === 'error' || C.feedMode !== 'drop') loadFeed(); else paintFeed(false);
   }
   function chatVisible() { var el = C.host && C.host.querySelector('[data-cos-chat]'); return !!(el && el.offsetParent !== null); }
 
@@ -411,7 +421,7 @@
     api('/api/inbox/feed?limit=100').then(function (d) {
       C.items = (d && d.items) || [];
       C.feedState = 'ready';
-      paintFeed(true);
+      paintFeed(false);
       markReadIfShown();
     }, function (err) {
       C.feedState = 'error';
@@ -759,17 +769,88 @@
     }
     var scroller = scrollerOf(feed);
     var atBottom = scroller ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 : true;
-    feed.innerHTML = html;
+    // A poll can replace an earlier answer with a longer one. Hold the visible card, just as older pagination does.
+    if (!stick && (TAIL ? !TAIL.following : !atBottom) && !PLACING) {
+      keepPlace(function () { paintFeed(false); }, true);
+      return;
+    }
+    feed.innerHTML = '<div data-cos-content>' + html + '</div>';
     if (historyOn()) paintTrim(feed);
-    if (stick || atBottom) scrollToEnd(feed);
+    watchTail(feed);
+    if (stick) followLatest();
+    else if (TAIL && TAIL.following && !PLACING) { scrollToEnd(feed); queueTail(); }
+    observeTail();
     // A note's link asked for a notification card that was filed under the older questions: once they are read, go to it.
-    if (C.focusItem && C.archiveOpen && C.archive !== null && !showFocusItem()) { C.focusItem = ''; W.toast('That notification is no longer kept in this chat.'); }
+    if (C.focusItem && !showFocusItem() && C.feedState === 'ready') {
+      if (!C.archiveOpen) toggleArchive();
+      else if (C.archive !== null) { C.focusItem = ''; W.toast('That notification is no longer kept in this chat.'); followLatest(); }
+    }
   }
   // From 860 px the chat column scrolls by itself; on a phone the page does.
   function scrollerOf(feed) { return wide() ? feed : document.scrollingElement; }
   function scrollToEnd(feed) {
     if (wide()) feed.scrollTop = feed.scrollHeight;
     else if (W.parseRoute().args[0] === 'cos') window.scrollTo(0, document.body.scrollHeight);
+  }
+  // Follow the newest line until he chooses to read back. Intrinsic content and dock sizes can settle after paint
+  // (fonts, images, streaming, split resizing); a synchronous scroll alone loses the end at each of those changes.
+  var TAIL = null, PLACING = false, TAIL_ROUTE_LISTENED = false;
+  function stopFollowing() { if (TAIL) { TAIL.following = false; TAIL.active = false; TAIL.routeItem = null; } }
+  function tailShown(t) { return TAIL === t && t.active && chatVisible() && W.parseRoute().pane === 'messages'; }
+  function queueTail() {
+    var t = TAIL;
+    if (!t || t.frame || !t.following || !tailShown(t) || !window.requestAnimationFrame) return;
+    t.frame = window.requestAnimationFrame(function () { t.frame = 0; if (tailShown(t) && t.following) scrollToEnd(t.feed); });
+  }
+  function followLatest() {
+    if (!TAIL) return;
+    TAIL.following = true; TAIL.active = true;
+    if (tailShown(TAIL)) scrollToEnd(TAIL.feed);
+    queueTail();
+  }
+  function observeTail() {
+    var t = TAIL;
+    if (!t || !t.ro) return;
+    t.ro.disconnect();
+    // The feed itself is fixed height on desktop; observe its intrinsic content too.
+    [t.feed, t.feed.querySelector && t.feed.querySelector('[data-cos-content]'), C.host.querySelector('[data-cos-form="chat"]')].forEach(function (el) { if (el) t.ro.observe(el); });
+  }
+  function watchTail(feed) {
+    if (!feed) return;
+    if (TAIL && TAIL.feed === feed) return;
+    if (TAIL) { if (TAIL.ro) TAIL.ro.disconnect(); TAIL.clean.forEach(function (fn) { fn(); }); }
+    var t = TAIL = { feed: feed, active: true, following: false, frame: 0, clean: [], ro: null };
+    function listen(el, name, fn, capture) {
+      if (!el || !el.addEventListener) return;
+      var opts = { passive: true, capture: !!capture };
+      el.addEventListener(name, fn, opts);
+      t.clean.push(function () { if (el.removeEventListener) el.removeEventListener(name, fn, opts); });
+    }
+    function intent(e) {
+      if (!tailShown(t)) return;
+      if (e.type === 'keydown' && (!/^(ArrowUp|ArrowDown|PageUp|PageDown|Home|End| )$/.test(e.key) || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target && e.target.tagName))) return;
+      t.following = false;
+    }
+    function scrolled() {
+      if (!tailShown(t)) return;
+      if (t.following) queueTail();
+      else { var sc = scrollerOf(feed); if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 4) t.following = true; }
+    }
+    ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(function (name) {
+      listen(feed, name, intent);
+      // On a narrow phone the page is the scroller, including gestures on the dock or page gutter.
+      listen(window, name, function (e) { if (!wide()) intent(e); });
+    });
+    listen(feed, 'scroll', scrolled); listen(window, 'scroll', function () { if (!wide()) scrolled(); });
+    listen(feed, 'load', queueTail, true); listen(feed, 'loadedmetadata', queueTail, true);
+    listen(window, 'resize', queueTail); listen(window, 'pageshow', queueTail);
+    listen(document.fonts, 'loadingdone', queueTail);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { if (TAIL === t) queueTail(); });
+    if (typeof ResizeObserver === 'function') t.ro = new ResizeObserver(queueTail);
+    if (W.onRoute && !TAIL_ROUTE_LISTENED) {
+      TAIL_ROUTE_LISTENED = true;
+      W.onRoute(function (r) { if (r && r.pane !== 'messages') stopFollowing(); });
+    }
   }
   // A running Ask updates its own card in place, so a poll never rebuilds the chat (or the reader).
   // `inPlace`: repaint this card only, never the chat around it (a late answer from recoverAnswer).
@@ -1272,6 +1353,7 @@
   }
   function loadHistory() {
     if (!historyOn() || C.hist.state === 'loading') return;
+    if (!TAIL) { watchTail(C.host && C.host.querySelector('[data-cos-feed]')); followLatest(); }
     histListen();
     if (timelineOn()) loadEra();
     C.hist.state = 'loading';
@@ -1282,7 +1364,7 @@
       C.hist.older = d && typeof d.older === 'string' && d.older ? d.older : null;
       C.hist.newest = d && typeof d.newest === 'string' ? d.newest : '';
       C.hist.state = 'ready';
-      paintFeed(true);
+      paintFeed(false);
       fillUp(0);
       reattach();
     }, function () { if (H !== C.hist) return; C.hist.state = 'error'; paintFeed(false); });
@@ -1334,17 +1416,26 @@
   /** Run a repaint that adds entries ABOVE what he is reading, then put the entry he was looking at back where it was, to
    *  the fraction of a pixel (WebKit measured 0.5 px off when only the total height was compared). With no entry to hold
    *  (an empty column), the total height is taken up instead. */
-  function keepPlace(paint) {
+  function keepPlace(paint, polling) {
     var feed = C.host && C.host.querySelector('[data-cos-feed]');
     if (!feed) { paint(); return; }
+    var sc = scrollerOf(feed);
+    if (TAIL && sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight >= 80) TAIL.following = false;
     var w = wide(), top0 = w && feed.getBoundingClientRect ? feed.getBoundingClientRect().top : 0;
-    var held = null, at = 0;
-    var cards = feed.querySelectorAll ? feed.querySelectorAll('[data-hist]') : [];
-    for (var i = 0; i < cards.length; i++) { var r = cards[i].getBoundingClientRect(); if (r.bottom > top0) { held = cards[i].getAttribute('data-hist'); at = r.top; break; } }
+    var held = null, attr = '', at = 0;
+    var cards = feed.querySelectorAll ? feed.querySelectorAll('[data-hist],[data-item-id],[data-ask]') : [];
+    for (var i = 0; i < cards.length; i++) {
+      var r = cards[i].getBoundingClientRect();
+      if (r.bottom > top0) {
+        attr = cards[i].hasAttribute('data-hist') ? 'data-hist' : cards[i].hasAttribute('data-item-id') ? 'data-item-id' : 'data-ask';
+        held = cards[i].getAttribute(attr); at = r.top; break;
+      }
+    }
     var h0 = feed.scrollHeight;
-    paint();
-    var el = held ? feed.querySelector('[data-hist="' + held.replace(/["\\]/g, '') + '"]') : null;
-    var d = el ? el.getBoundingClientRect().top - at : feed.scrollHeight - h0;
+    var wasPlacing = PLACING; PLACING = true;
+    try { paint(); } finally { PLACING = wasPlacing; }
+    var el = held ? feed.querySelector('[' + attr + '="' + held.replace(/["\\]/g, '') + '"]') : null;
+    var d = el ? el.getBoundingClientRect().top - at : polling ? 0 : feed.scrollHeight - h0;
     if (!d) return;
     // WebKit keeps a scroll position in whole CSS pixels, and the added height is fractional: a spacer above the history
     // takes the fraction (0 to 1 px), so the scroll is a whole number and nothing on screen moves at all.
@@ -1472,6 +1563,7 @@
     var el = id && C.host && C.host.querySelector('[data-item-id="' + String(id).replace(/["\\]/g, '') + '"]');
     if (!el) return false;
     C.focusItem = '';
+    if (TAIL) TAIL.following = false;
     if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     return true;
   }
@@ -2709,6 +2801,7 @@
     if (what === 'ask') return doAsk(kOf(t));
     if (what === 'drop') return doDrop();
     if (what === 'all') return W.go('messages');
+    if (what === 'latest') { var feed = C.host && C.host.querySelector('[data-cos-feed]'); watchTail(feed); followLatest(); return; }
     if (what === 'read-all') return markReadIfShown(true);
     if (what === 'new-thread') return newThread();
     if (what === 'hist-full') return loadFull(t.getAttribute('data-id'));
