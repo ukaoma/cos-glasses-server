@@ -58,6 +58,12 @@ describe('which addresses are this Mac\'s tailnet addresses', () => {
     expect(tailnetInterfaceAddresses({ ...MAC, en5: [iface(CGNAT, 'IPv4')] })).toEqual([TS4, TS6])
   })
 
+  it('on Tailscale\'s own interface, takes only the tailnet-range addresses (never a LAN or other IPv4 or IPv6 it also carries)', () => {
+    // Found by the mutation gate (iface-v4-range survived): no fixture had a non-tailnet IPv4 on the tailnet interface.
+    expect(tailnetInterfaceAddresses({ utun4: [iface(LAN, 'IPv4'), iface('10.0.0.5', 'IPv4'), iface(TS4, 'IPv4'), iface(TS6, 'IPv6'), iface('2600:1700:abcd:1230::17', 'IPv6')] })).toEqual([TS4, TS6])
+    expect(tailnetInterfaceAddresses({ tailscale0: [iface('10.0.0.5', 'IPv4'), iface(TS4, 'IPv4')] })).toEqual([TS4])
+  })
+
   it('accepts numeric families (older Node) and a Linux tailscale0 interface without IPv6', () => {
     expect(tailnetInterfaceAddresses({ utun3: [iface(TS4, 4), iface(TS6, 6)] })).toEqual([TS4, TS6])
     expect(tailnetInterfaceAddresses({ tailscale0: [iface(TS4, 'IPv4')], eth0: [iface('10.0.0.5', 'IPv4')] })).toEqual([TS4])
