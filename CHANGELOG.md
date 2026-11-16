@@ -1,4 +1,4 @@
-## 7.0.52 - Ask COS keeps today's asks after a reload, Today without Work set up, and Salesforce beside Tableau in Live Ask
+## 7.0.52 - Ask COS keeps today's asks after a reload, Today without Work set up, Salesforce beside Tableau in Live Ask, and phone notifications that open the session that replied
 
 2026-11-16. 7.0.51 plus the changes below. The lead's order 09:5x and rulings 10:08 (Ask COS and Today); Miles, 11:59: "Fold it into 7.0.52 and install" (Salesforce).
 
@@ -7,6 +7,8 @@
 - Control Web, Reply ready cards in the COS thread: Open result opened the Sessions list; it now opens that session's reader. The ping's session link carries its provider (Claude, Codex or Cursor). An older card takes the provider from its own fixed line, only when the card names that session; otherwise it keeps the old tap and never guesses.
 - Back from that reader returns to the COS thread with the tapped card at the same height on screen, never jumping to the newest line.
 - A Reply ready card is headed by its session's name when the session list has one; the line under it still names the provider. The server's title and line are unchanged.
+- Phone notifications (every enrolled phone): one about a single session's reply opens that session's reader instead of the Sessions list; one about several sessions opens the COS thread. A session with no known provider (Claude, Codex or Cursor), and any notification that mixes kinds, keeps today's target. The session's provider and id now travel inside the encrypted payload; its title never does. (Miles, 16:08.)
+- Phone notifications on a phone whose owner chose "show words" for it: a Reply ready now reads "Reply ready: <session title> (Claude)" (the title from the Sessions list, hidden and control characters removed, cut to 60 characters), "Reply ready: session ab12cd34 (Claude)" with no title, or "3 sessions replied" for several, with no names. The notification title stays "COS"; reply text never leaves the Mac. A phone with words off still shows the kind only. This is on at install for any phone that already has words on.
 - Today: with no Work handoffs file (COS Control has not written Work yet, or the server is not on a Mac), Work reads as nothing open, so Today no longer says "Couldn't read Work". That includes a Mac with Control installed but no Work handoff yet. A real failed read still says "Couldn’t read Work. Try again".
 - Live Ask and data cues: nothing changes on an install without the Quilt funnel files (data-facts.json and funnel-log.json in the data folder). A question that names Salesforce there gets no new source and no new notice.
 
@@ -19,8 +21,18 @@
 - When the log is missing, unreadable, invalid, more than 5 days old or dated in the future, the answer to a funnel question says so ("The daily Salesforce funnel log is not available (stale), so no Salesforce figures were used.") and uses Tableau alone.
 - No model, network, Salesforce or Coefficient call is added: one local file check per Ask, and a cue reads the log only when it already has a Tableau note.
 
+**Off by default for everyone: one merged notification for session replies (P2 setting pings.mergeReplies; Miles, 16:08 and 16:29):**
+- With it on, Reply ready pings banner as one notification at most once per gapMinutes, and never more often than once per 45 minutes whatever that setting says, on the Mac and the phone alike. Replies that land inside the gap wait and come out together on the first minute tick after the gap ends (up to 60 seconds late).
+- What the Mac shows: "Reply ready" and the session's own line ("Claude has a reply ready.") for one session; "N sessions replied" and "N sessions have a reply ready." for several. Several replies from one session count once.
+- These notifications do not count against the daily cap, the per-source cap or the other kinds' gap, and they never move another kind's gap; another kind's notification never moves theirs either. That is Miles's choice (16:29).
+- Quiet hours (18:00 to 06:00 and weekends) and the 08:00 first notification still hold. "Stopped on", finished pings and reminders never wait.
+- Control 0.5.400 and 0.5.401 neither show nor change this setting; it is switched through the settings route, and a save from Control keeps it as it is.
+
 **Not covered, said plainly:**
 - Ask COS after a reload: earlier days and an ended conversation are not shown. While the read is in flight, "Ask COS anything." can show for a moment (W1's note 1, a visible change left for Miles). An ask with no message number answered during the read could be drawn twice (W1's note 2); web asks are numbered at admission.
+- Merged reply notifications: a reply he has already answered at his desk can still be announced, because the release does not yet check the session's state (only that the item is still in the chat). A named 7.0.53 follow-up (the lead, 16:42).
+- Merged reply notifications: replies still waiting when quiet hours begin are not announced later. They are in the chat, as an ordinary reply inside the gap was before (the lead, 16:47).
+- The merged reply notification is new on the Mac and the phone, and was exercised with fakes only, not on his phone.
 - The layout sweep (F1) and Q1's mutants on the merged head have not run yet.
 
 **Tested on this build** (the full suite on its parent b1ff9b90; this commit adds only these lines):
