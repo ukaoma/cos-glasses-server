@@ -203,6 +203,28 @@ describe('Ask COS (Drop it off): a reload keeps his earlier asks in the chat', (
     }
   })
 
+  it('a read for a conversation the page has moved on from is dropped when it lands, and the new one is untouched (Q1 W5)', async () => {
+    let landA: (v: unknown) => void = () => {}, landB: (v: unknown) => void = () => {}
+    const a = new Promise(r => { landA = r }), b = new Promise(r => { landB = r })
+    const h = load({ [MSGS]: () => a, '/api/sessions/swebB/messages': () => b, '/api/models': {} })
+    h.chat.mount(h.host, true); await flush()
+    expect(h.calls).toContain(MSGS)
+    // A new Ask started another conversation today (cos-chat.js doAsk sets C.session); the next mount reads that one.
+    h.chat._state.session = { id: 'swebB', day: TODAY }
+    h.chat.mount(h.host, true); await flush()
+    expect(h.calls).toContain('/api/sessions/swebB/messages')
+    landA(PAIRS); await flush()
+    expect(h.chat._state.back.sid).toBe('swebB')
+    expect(h.chat._state.back.state).toBe('loading')
+    expect(h.chat._state.back.entries).toEqual([])
+    for (const n of [3, 4, 5]) expect(h.feed.innerHTML).not.toContain('Answer number ' + n)
+    landB({ messages: [{ query: 'Question in B', text: 'Answer in B', timestamp: now - 60_000, sessionId: 'swebB', no: 9 }] }); await flush()
+    const html = h.feed.innerHTML
+    expect(html).toContain('Answer in B')
+    for (const n of [3, 4, 5]) expect(html).not.toContain('Answer number ' + n)
+    expect(h.chat._state.back.state).toBe('ready')
+  })
+
   it('a page left open past midnight does not read yesterday\'s conversation', async () => {
     const h = load({ [MSGS]: PAIRS, '/api/models': {} }, { session: null })
     // Yesterday's Ask set C.session in this page's memory (cos-chat.js doAsk); the day has since turned.
