@@ -32,7 +32,7 @@ import {
 const ANY_HOUR: ReadonlySet<PingSource> = new Set<PingSource>(['reminder', 'resolution'])
 /** Sources the engine polls; a held one of these that the next read no longer reports has expired. */
 const POLLED: ReadonlySet<PingSource> = new Set<PingSource>(['prep', 'followups', 'stale', 'checkin'])
-export const PING_STATE_LIMITS = { held: 200, consumed: 5_000, consumedDays: 30, fileBytes: 4_000_000 } as const
+export const PING_STATE_LIMITS = { held: 200, consumed: 5_000, consumedDays: 30, fileBytes: 4_000_000, replies: 256 } as const
 
 export interface PingSnapshot {
   nextEvent?: { title?: unknown; time?: unknown; occurrence?: unknown } | null
@@ -46,7 +46,22 @@ export interface PingState {
   held: PingCandidate[]
   /** Keys a digest carried, so they never post again on their own. */
   consumed: Array<{ key: string; at: number }>
+  /** 7.0.52 B: Reply ready items posted while mergeReplies is on, waiting for their merged banner. Absent when none. */
+  replies?: HeldReply[]
 }
+
+/**
+ * 7.0.52 B: is a held reply still news, from what the hooks last said about its session? Gone (no signal) or ended: no. A turn
+ * that started after the reply ended (he answered, here or at the desk): no. Otherwise yes. Waits, asks and failures never get
+ * this far: session-reply-pings.ts blocks them before a Reply ready is made.
+ */
+export function replyStillNewFromSignal(signal: { ended: unknown; turnStartedAt: number | null } | undefined, reply: Pick<HeldReply, 'at'>): boolean {
+  if (!signal || signal.ended) return false
+  return !(typeof signal.turnStartedAt === 'number' && signal.turnStartedAt > reply.at)
+}
+
+/** A Reply ready item waiting for the merged banner: its feed id, its session, the provider from the link, when it ended, its line. */
+export interface HeldReply { feedId: string; sessionId: string; provider?: SessionLinkProvider; at: number; line: string }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 
@@ -56,13 +71,22 @@ function parseState(raw: unknown): PingState {
   if (Array.isArray(raw.ledger)) for (const b of raw.ledger) {
     if (!isRecord(b) || typeof b.at !== 'number' || !Array.isArray(b.sources) || !Array.isArray(b.ids)) continue
     const sources = b.sources.filter((s): s is PingSource => (PING_SOURCES as readonly string[]).includes(s as string))
-    if (sources.length) state.ledger.push({ at: b.at, sources, ids: b.ids.filter((i): i is string => typeof i === 'string').slice(0, 50) })
+    if (sources.length) state.ledger.push({ at: b.at, sources, ids: b.ids.filter((i): i is string => typeof i === 'string').slice(0, 50), ...(b.replies === true ? { replies: true as const } : {}) })
   }
   if (Array.isArray(raw.held)) for (const h of raw.held.slice(0, PING_STATE_LIMITS.held)) {
     if (isRecord(h) && typeof h.key === 'string' && typeof h.line === 'string' && (PING_SOURCES as readonly string[]).includes(h.source as string)) state.held.push(h as unknown as PingCandidate)
   }
   if (Array.isArray(raw.consumed)) for (const c of raw.consumed) {
     if (isRecord(c) && typeof c.key === 'string' && typeof c.at === 'number') state.consumed.push({ key: c.key, at: c.at })
+  }
+  if (Array.isArray(raw.replies)) {
+    const replies: HeldReply[] = []
+    for (const r of raw.replies.slice(-PING_STATE_LIMITS.replies)) {
+      if (!isRecord(r) || typeof r.feedId !== 'string' || typeof r.sessionId !== 'string' || !r.sessionId || typeof r.at !== 'number' || !Number.isFinite(r.at) || typeof r.line !== 'string') continue
+      const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(r.provider) ? r.provider as SessionLinkProvider : undefined
+      replies.push({ feedId: r.feedId, sessionId: r.sessionId, ...(provider ? { provider } : {}), at: r.at, line: r.line })
+    }
+    if (replies.length) state.replies = replies
   }
   return state
 }
@@ -97,6 +121,8 @@ export class PingStateStore {
       ledger: trimLedger(next.ledger, nowMs),
       held: next.held.slice(-PING_STATE_LIMITS.held),
       consumed: next.consumed.filter(c => c.at >= cutoff).slice(-PING_STATE_LIMITS.consumed),
+      // Only when some wait, so the file is byte-identical to before while mergeReplies is off.
+      ...(next.replies?.length ? { replies: next.replies.slice(-PING_STATE_LIMITS.replies) } : {}),
     }
     durableAtomicWriteFileSync(this.path, JSON.stringify({ version: 1, ...state }) + '\n')
     this.state = state
@@ -130,13 +156,22 @@ export const isReplyReady = (c: PingCandidate): boolean => c.source === 'agent' 
  */
 export function bannerSessions(items: readonly PingCandidate[]): BannerSession[] | undefined {
   if (!items.length) return undefined
-  const out = new Map<string, { provider: SessionLinkProvider | undefined; conflict: boolean }>()
+  const entries: Array<{ id: string; provider?: unknown }> = []
   for (const item of items) {
     const link = item.source === 'agent' ? item.links.find(l => l.kind === 'session') : undefined
     if (!link || typeof link.id !== 'string' || !link.id) return undefined
-    const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(link.provider) ? link.provider : undefined
-    const seen = out.get(link.id)
-    if (!seen) out.set(link.id, { provider, conflict: false })
+    entries.push({ id: link.id, provider: link.provider })
+  }
+  return distinctSessions(entries)
+}
+
+/** One entry per session id, in order; its provider only when every entry for it names the same one the reader serves. */
+function distinctSessions(entries: ReadonlyArray<{ id: string; provider?: unknown }>): BannerSession[] {
+  const out = new Map<string, { provider: SessionLinkProvider | undefined; conflict: boolean }>()
+  for (const e of entries) {
+    const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(e.provider) ? e.provider as SessionLinkProvider : undefined
+    const seen = out.get(e.id)
+    if (!seen) out.set(e.id, { provider, conflict: false })
     else if (seen.provider !== provider) seen.conflict = true
   }
   return [...out].map(([id, s]) => (s.provider && !s.conflict ? { id, provider: s.provider } : { id }))
@@ -156,6 +191,11 @@ export interface PingEngineDeps {
   enabled?: () => readonly PingSource[]
   /** 6.99.11 settings. When given, they decide the budget, quiet hours, sources, check-in, steer and banners. */
   settings?: () => P2Settings
+  /**
+   * 7.0.52 B: at the merged banner's release, is this held reply still news? False drops it (the session ended or is gone, or
+   * a newer turn started there after the reply, so he has answered). Absent, or throwing: kept.
+   */
+  replyStillNew?: (reply: HeldReply) => boolean
 }
 
 export interface PingTickResult { posted: number; held: number; released: number; expired: number; banners: number }
@@ -205,6 +245,40 @@ export class PingEngine {
     try { return this.deps.settings?.() ?? null } catch { return null }
   }
 
+  /**
+   * 7.0.52 B: the merged Reply ready banner, or why not. Returns null when nothing changed (nothing waits, before the first banner
+   * of the day, or the gap since the last merged banner has not passed), false when what waited was dropped with no banner, or the
+   * banner (its ledger record is already pushed). Called on every delivery, so on the engine's 60 s tick at the latest: a release
+   * can be up to a minute after the gap ends.
+   * - Quiet hours (and weekends when quiet): no banner now or later; what waited is already in the chat. Replies that arrive in
+   *   quiet hours never get here: they are held for the "While you were off" item as before.
+   * - The gap is measured from the last merged reply banner only (a clock that went back waits for at most one gap).
+   * - At release each waiting reply is re-checked (replyStillNew): a session that ended or is gone, or where a newer turn started,
+   *   is dropped. Zero left: no banner.
+   * - Title and line, which the Mac banner shows: one session "Reply ready" and its own line ("Claude has a reply ready."); several
+   *   "N sessions replied" and "N sessions have a reply ready." Never a title or reply text.
+   */
+  private releaseReplies(state: PingState, nowMs: number, tz: string, budget: BudgetOptions): PingBanner | false | null {
+    const held = state.replies ?? []
+    if (!held.length) return null
+    if (isQuietHours(nowMs, tz, budget)) { delete state.replies; return false }
+    if (localClock(nowMs, tz).minutes < budget.firstBannerMinutes) return null
+    const last = state.ledger.reduce((m, b) => (b.replies === true ? Math.max(m, b.at) : m), -Infinity)
+    if (nowMs - last < budget.gapMs) return null
+    delete state.replies
+    const live = held.filter(r => { try { return this.deps.replyStillNew ? this.deps.replyStillNew(r) !== false : true } catch { return true } })
+    if (!live.length) return false
+    const sessions = distinctSessions(live.map(r => ({ id: r.sessionId, provider: r.provider })))
+    const n = sessions.length
+    const feedIds = live.map(r => r.feedId)
+    state.ledger.push({ at: nowMs, sources: ['agent'], ids: feedIds, replies: true })
+    return {
+      feedIds, sources: ['agent'], exempt: false, sessions, replies: true,
+      title: n === 1 ? 'Reply ready' : `${n} sessions replied`,
+      line: n === 1 ? live[live.length - 1].line : `${n} sessions have a reply ready.`,
+    }
+  }
+
   private deliver(incoming: PingCandidate[], nowMs: number, tz: string, current: { keys: Set<string>; sources: Set<PingSource> } | null): PingTickResult {
     const result: PingTickResult = { posted: 0, held: 0, released: 0, expired: 0, banners: 0 }
     const set = this.settingsNow()
@@ -250,13 +324,33 @@ export class PingEngine {
       state.held = []; changed = true
     }
 
-    if (posted.length) {
-      const enabled = set ? bannerSourcesFrom(set) : this.deps.enabled?.() ?? DEFAULT_BANNER_SOURCES
+    // 7.0.52 B: with mergeReplies on (and agent banners allowed), a Reply ready item never goes through the budget. It waits in
+    // state.replies for ONE merged banner, released at most once per gapMinutes (releaseReplies; ping-budget.ts counted: not
+    // counted against the daily or per-source caps). Off: everything goes to the budget exactly as before.
+    const enabled = set ? bannerSourcesFrom(set) : this.deps.enabled?.() ?? DEFAULT_BANNER_SOURCES
+    const mergeReplies = set?.pings.mergeReplies === true && enabled.includes('agent')
+    const waits = (p: { candidate: PingCandidate }) => isReplyReady(p.candidate) && p.candidate.links.some(l => l.kind === 'session' && !!l.id)
+    let forBudget = posted
+    if (mergeReplies) {
+      const replies = posted.filter(waits)
+      if (replies.length) {
+        forBudget = posted.filter(p => !waits(p))
+        const held = state.replies ?? []
+        for (const p of replies) {
+          const link = p.candidate.links.find(l => l.kind === 'session' && !!l.id)!
+          const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(link.provider) ? link.provider : undefined
+          held.push({ feedId: p.feedId, sessionId: link.id, ...(provider ? { provider } : {}), at: p.candidate.createdAt, line: p.candidate.line })
+        }
+        state.replies = held.slice(-PING_STATE_LIMITS.replies); changed = true
+      }
+    } else if (state.replies?.length) { delete state.replies; changed = true }   // switched off: what waited is in the chat
+    const banners: PingBanner[] = []
+    if (forBudget.length) {
       // "Ping me about": a ping whose words match may banner although its kind is silent. The caps still hold.
-      const promoted = new Set(about.length ? posted.filter(p => matchesSteer(words(p.candidate), about)).map(p => p.feedId) : [])
-      const plan = planBanners(posted.map(p => ({ id: p.feedId, source: p.candidate.source, createdAt: p.candidate.createdAt })), state.ledger, nowMs, tz, enabled, budget, promoted)
-      const banners: PingBanner[] = plan.banners.map(b => {
-        const items = b.ids.map(id => posted.find(p => p.feedId === id)!.candidate)
+      const promoted = new Set(about.length ? forBudget.filter(p => matchesSteer(words(p.candidate), about)).map(p => p.feedId) : [])
+      const plan = planBanners(forBudget.map(p => ({ id: p.feedId, source: p.candidate.source, createdAt: p.candidate.createdAt })), state.ledger, nowMs, tz, enabled, budget, promoted)
+      banners.push(...plan.banners.map(b => {
+        const items = b.ids.map(id => forBudget.find(p => p.feedId === id)!.candidate)
         return {
           feedIds: b.ids, sources: b.sources, exempt: b.exempt, title: bannerTitle(items.length, items[0].title ?? 'COS'),
           line: items.length === 1 ? items[0].line : items.map(i => i.title ?? i.line).join(', '),
@@ -264,14 +358,19 @@ export class PingEngine {
           ...((s => (s ? { sessions: s } : {}))(bannerSessions(items))),
           ...(items.every(isReplyReady) ? { replies: true as const } : {}),
         }
-      })
+      }))
       for (const b of plan.banners) state.ledger.push({ at: nowMs, sources: b.sources, ids: b.ids })
       if (plan.banners.length) changed = true
-      if (changed) { this.deps.state.write(state, nowMs); changed = false }
-      for (const b of banners) {
-        try { this.deps.banner(b); result.banners++ } catch { /* a notifier failure never fails delivery: the item is in the chat */ }
-        try { void Promise.resolve(this.deps.phoneBanner?.(structuredClone(b))).catch(() => {}) } catch { /* phone failure is independent of the Mac and feed */ }
-      }
+    }
+    if (mergeReplies) {
+      const merged = this.releaseReplies(state, nowMs, tz, budget)
+      if (merged !== null) { changed = true; if (merged) banners.push(merged) }
+    }
+    // The ledger is written before any banner is shown: a crash between them can lose a banner, never repeat one.
+    if (changed) { this.deps.state.write(state, nowMs); changed = false }
+    for (const b of banners) {
+      try { this.deps.banner(b); result.banners++ } catch { /* a notifier failure never fails delivery: the item is in the chat */ }
+      try { void Promise.resolve(this.deps.phoneBanner?.(structuredClone(b))).catch(() => {}) } catch { /* phone failure is independent of the Mac and feed */ }
     }
     if (changed) this.deps.state.write(state, nowMs)
     if (result.posted || result.held || result.released || result.banners) {

@@ -41,6 +41,11 @@ export interface P2Settings {
     weekendsQuiet: boolean
     firstBanner: string
     sources: Record<P2PingSource, boolean>
+    /**
+     * 7.0.52 B (Miles 16:08, 16:29): Reply ready pings banner as ONE merged banner at most once per gapMinutes, and those banners
+     * are not counted against dailyCap or perSource (ping-budget.ts counted). Off by default for everyone.
+     */
+    mergeReplies: boolean
   }
   followUps: { on: boolean; kinds: Record<P2FollowupKind, boolean> }
   checkin: { on: boolean; weekday: number; time: string }
@@ -55,7 +60,7 @@ export const P2_LIMITS = {
 
 export const P2_DEFAULTS: P2Settings = {
   pings: { on: true, dailyCap: 6, perSource: 2, gapMinutes: 45, quietStart: '18:00', quietEnd: '06:00', weekendsQuiet: true, firstBanner: '08:00',
-    sources: { prep: true, agent: true, followups: true, stale: true, signals: true } },
+    sources: { prep: true, agent: true, followups: true, stale: true, signals: true }, mergeReplies: false },
   followUps: { on: true, kinds: { card: true, handoff: true, session: true, thread: true } },
   checkin: { on: true, weekday: 1, time: '09:00' },
   reminders: { defaultTime: '09:00', snoozeMinutes: 60, banners: true, lensPush: true },
@@ -91,6 +96,7 @@ export function normalizeP2Settings(raw: unknown, base: P2Settings = P2_DEFAULTS
       weekendsQuiet: bool(p.weekendsQuiet, base.pings.weekendsQuiet),
       firstBanner: time(p.firstBanner, base.pings.firstBanner),
       sources: flags(p.sources, P2_PING_SOURCES, base.pings.sources),
+      mergeReplies: bool(p.mergeReplies, base.pings.mergeReplies),
     },
     followUps: { on: bool(f.on, base.followUps.on), kinds: flags(f.kinds, P2_FOLLOWUP_KINDS, base.followUps.kinds) },
     checkin: { on: bool(c.on, base.checkin.on), weekday: int(c.weekday, [0, 6], base.checkin.weekday), time: time(c.time, base.checkin.time) },

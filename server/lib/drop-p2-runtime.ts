@@ -16,7 +16,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { DropRecord, InboxFeedStore } from './drop-store.js'
-import { PingEngine, type PingBanner, type PingSnapshot, type PingStateStore } from './ping-engine.js'
+import { PingEngine, type HeldReply, type PingBanner, type PingSnapshot, type PingStateStore } from './ping-engine.js'
 import { DEFAULT_BANNER_SOURCES, type PingSource } from './ping-budget.js'
 import { P2_FOLLOWUP_KINDS, timeMinutes, type P2Settings } from './drop-p2-settings.js'
 import type { IntakeRow, ThreadRow, SignalRow, PingCandidate } from './ping-sources.js'
@@ -57,6 +57,8 @@ export interface DropP2Deps {
   paused?: () => boolean
   /** 6.99.11 settings (drop-p2-settings.ts). Absent: the defaults, exactly as before. */
   settings?: () => P2Settings
+  /** 7.0.52 B: the merged Reply ready banner's re-check at release (ping-engine.ts replyStillNew). */
+  replyStillNew?: (reply: HeldReply) => boolean
 }
 
 /** Follow-ups allowed by the settings: the switch, then the kind (the link kind in the key `dropId:kind:id:state`). */
@@ -122,6 +124,7 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     timezone: deps.timezone,
     enabled: deps.enabled ?? (() => DEFAULT_BANNER_SOURCES),
     ...(deps.settings ? { settings: deps.settings } : {}),
+    ...(deps.replyStillNew ? { replyStillNew: deps.replyStillNew } : {}),
     read: async (): Promise<PingSnapshot> => {
       const snap: PingSnapshot = {}
       try { const e = await deps.nextEvent?.(); if (e !== undefined) snap.nextEvent = e } catch { /* calendar unread */ }

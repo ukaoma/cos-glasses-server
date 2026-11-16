@@ -60,6 +60,8 @@ export interface BannerRecord {
   sources: PingSource[]
   /** The feed item ids it announced. */
   ids: string[]
+  /** 7.0.52 B: a merged Reply ready banner (mergeReplies on). Never counted: see `counted`. */
+  replies?: true
 }
 export interface BannerCandidate { id: string; source: PingSource; createdAt: number }
 export interface BannerPlan {
@@ -79,10 +81,15 @@ export function isQuietHours(nowMs: number, timezone: string, budget: BudgetOpti
   return start > end ? c.minutes >= start || c.minutes < end : c.minutes >= start && c.minutes < end
 }
 
-/** The local day's non-exempt banners in the ledger (reminders never count). */
+/**
+ * The local day's non-exempt banners in the ledger (reminders never count). 7.0.52 B: nor do merged Reply ready banners
+ * (`replies`). Miles chose that on 2026-11-16 (16:29, the lead's dialog; X1 had preferred keeping the 6-a-day total binding):
+ * with mergeReplies on, reply banners are paced by their own gap (once per gapMinutes) and leave the daily cap, the per-source
+ * cap and the other sources' gap exactly as they were. Quiet hours, weekends and the first banner still hold for them.
+ */
 function counted(ledger: readonly BannerRecord[], nowMs: number, timezone: string): BannerRecord[] {
   const today = localClock(nowMs, timezone).day
-  return ledger.filter(b => b.at <= nowMs && localClock(b.at, timezone).day === today && b.sources.some(s => s !== 'reminder'))
+  return ledger.filter(b => b.at <= nowMs && localClock(b.at, timezone).day === today && b.replies !== true && b.sources.some(s => s !== 'reminder'))
 }
 
 /**

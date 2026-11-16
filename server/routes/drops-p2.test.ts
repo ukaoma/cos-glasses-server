@@ -133,7 +133,7 @@ describe('P2 settings routes (6.99.11)', () => {
     const h = await setup({ settings: true })
     const full = {
       pings: { on: false, dailyCap: 9, perSource: 5, gapMinutes: 30, quietStart: '19:00', quietEnd: '07:00', weekendsQuiet: false, firstBanner: '09:15',
-        sources: { prep: false, agent: false, followups: false, stale: false, signals: false } },
+        sources: { prep: false, agent: false, followups: false, stale: false, signals: false }, mergeReplies: true },
       followUps: { on: false, kinds: { card: false, handoff: false, session: false, thread: false } },
       checkin: { on: false, weekday: 3, time: '10:30' },
       reminders: { defaultTime: '08:15', snoozeMinutes: 90, banners: false, lensPush: false },
