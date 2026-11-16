@@ -83,6 +83,11 @@ const mutations = [
   m('app-write-names-origin', SAPP, ["      if (method !== 'GET' && method !== 'HEAD' && (expected === null || origin !== expected)) {", '      if (false) {'], APT),
   m('app-api-allowlist', SAPP, ["      if (!signerApiAllowed(method === 'HEAD' ? 'GET' : method, pathname)) {", '      if (false) {'], APT),
   m('app-allowlist-anchored', SAPP, ["  { method: 'POST', path: /^\\/api\\/web-key\\/nonce$/ },", "  { method: 'POST', path: /^\\/api\\/web-key\\/nonce/ },"], APT),
+  // Fonts (7.0.51): font-src 'self' only, the ttf type, the size bound, and still no svg.
+  drop('fonts-csp-self', SAPP, "  \"font-src 'self'\",\n", APT),
+  m('fonts-ttf-type', SAPP, ["  '.ttf': 'font/ttf',", "  '.ttf': 'application/octet-stream',"], APT),
+  m('fonts-size-bound', SAPP, ["(!body || (ext === '.ttf' && body.length > SIGNER_FONT_MAX_BYTES))", '(!body)'], APT),
+  m('fonts-no-svg', SAPP, ["  '.ttf': 'font/ttf',", "  '.ttf': 'font/ttf',\n  '.svg': 'image/svg+xml',"], APT),
   m('app-verified-bytes-only', SAPP, ['    const snapshot = deps.integrity ? deps.integrity.snapshot() : null', '    const snapshot = deps.integrity ? deps.integrity.snapshot() ?? new Map() : null'], APT),
   m('app-page-types-only', SAPP, ['    const body = TYPES[ext] ? snapshot.get(file) : undefined', '    const body = snapshot.get(file)'], APT),
   m('app-combined-needs-signer', SAPP, ['  const signerOk = signer !== null && signer.state.ok === true', '  const signerOk = signer === null || signer.state.ok === true'], APT),

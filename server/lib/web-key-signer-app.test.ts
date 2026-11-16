@@ -10,9 +10,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { computeWebControlManifest, WEB_CONTROL_MANIFEST_FILE, WebControlIntegrity } from './web-control-integrity.js'
-import { combinedIntegrityReport, createWebKeySignerHandler, signerApiAllowed, SIGNER_PAUSED_PAGE, WEB_SIGNER_CSP } from './web-key-signer-app.js'
+import { combinedIntegrityReport, createWebKeySignerHandler, signerApiAllowed, SIGNER_FONT_MAX_BYTES, SIGNER_PAUSED_PAGE, WEB_SIGNER_CSP } from './web-key-signer-app.js'
 
 const SIGNER_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web-signer')
+const CONTROL_FONTS = join(dirname(fileURLToPath(import.meta.url)), '..', 'web-control', 'fonts')
+const FONTS = ['/fonts/DMSans.ttf', '/fonts/Fraunces.ttf']
 const ORIGIN = 'https://ukaoma-mac-studio.tail38457f.ts.net:3144'
 const BIG_APP = 'https://ukaoma-mac-studio.tail38457f.ts.net:3143'
 
@@ -25,7 +27,7 @@ const quiet = { log: () => {} }
 
 function copySigner(withManifest = true): string {
   const d = mkdtempSync(join(tmpdir(), 'web-signer-'))
-  for (const name of readdirSync(SIGNER_DIR)) if (!name.endsWith('.test.ts') && !name.startsWith('.')) cpSync(join(SIGNER_DIR, name), join(d, name))
+  for (const name of readdirSync(SIGNER_DIR)) if (!name.endsWith('.test.ts') && !name.startsWith('.')) cpSync(join(SIGNER_DIR, name), join(d, name), { recursive: true })
   if (withManifest) writeFileSync(join(d, WEB_CONTROL_MANIFEST_FILE), JSON.stringify(computeWebControlManifest(d)))
   return d
 }
@@ -69,6 +71,64 @@ describe('headers', () => {
   })
 })
 
+describe("fonts (7.0.51, Miles 07:08: Control Web's DM Sans and Fraunces on the approval page)", () => {
+  it('the CSP allows fonts from this origin only: no data:, no other host', () => {
+    expect(WEB_SIGNER_CSP).toContain("font-src 'self'")
+    expect(WEB_SIGNER_CSP.split('; ').filter(d => d.startsWith('font-src'))).toEqual(["font-src 'self'"])
+    expect(WEB_SIGNER_CSP).not.toMatch(/data:|blob:/)
+  })
+  it('exactly two font files ship, byte-identical to the ones Control Web already serves, each within the bound', () => {
+    const manifest = computeWebControlManifest(SIGNER_DIR)
+    expect(Object.keys(manifest.files).filter(p => p.startsWith('/fonts/')).sort()).toEqual(FONTS)
+    for (const f of FONTS) {
+      const mine = readFileSync(join(SIGNER_DIR, f))
+      expect(mine.equals(readFileSync(join(CONTROL_FONTS, f.slice('/fonts/'.length)))), f).toBe(true)
+      expect(mine.length, f).toBeLessThanOrEqual(SIGNER_FONT_MAX_BYTES)
+    }
+    expect(SIGNER_FONT_MAX_BYTES).toBe(512 * 1024)
+  })
+  it('serves each font byte for byte as font/ttf with the strict headers', async () => {
+    for (const f of FONTS) {
+      const res = await get(f)
+      expect(res.status, f).toBe(200)
+      expect(res.headers.get('content-type')).toBe('font/ttf')
+      expectStrictHeaders(res)
+      expect(Buffer.from(await res.arrayBuffer()).equals(readFileSync(join(SIGNER_DIR, f))), f).toBe(true)
+    }
+  })
+  it('a verified font over the bound is never served', async () => {
+    const d = copySigner(false)
+    try {
+      writeFileSync(join(d, 'fonts', 'Big.ttf'), Buffer.alloc(SIGNER_FONT_MAX_BYTES + 1, 1))
+      writeFileSync(join(d, 'fonts', 'Edge.ttf'), Buffer.alloc(SIGNER_FONT_MAX_BYTES, 1))
+      writeFileSync(join(d, WEB_CONTROL_MANIFEST_FILE), JSON.stringify(computeWebControlManifest(d)))
+      integrity = new WebControlIntegrity(d, quiet)
+      expect((await get('/fonts/Big.ttf')).status).toBe(404)
+      expect((await get('/fonts/Edge.ttf')).status).toBe(200)
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+  it('svg, woff, woff2, otf and a font with a changed byte are never served', async () => {
+    const d = copySigner(false)
+    try {
+      for (const n of ['x.svg', 'x.woff', 'x.woff2', 'x.otf']) writeFileSync(join(d, 'fonts', n), 'font-ish')
+      writeFileSync(join(d, 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')
+      writeFileSync(join(d, WEB_CONTROL_MANIFEST_FILE), JSON.stringify(computeWebControlManifest(d)))
+      integrity = new WebControlIntegrity(d, quiet)
+      for (const p of ['/fonts/x.svg', '/fonts/x.woff', '/fonts/x.woff2', '/fonts/x.otf', '/logo.svg']) expect((await get(p)).status, p).toBe(404)
+      expect((await get('/fonts/DMSans.ttf')).status).toBe(200)
+      const bytes = readFileSync(join(d, 'fonts', 'DMSans.ttf')); bytes[100] ^= 1
+      writeFileSync(join(d, 'fonts', 'DMSans.ttf'), bytes)
+      integrity.check()
+      expect((await get('/fonts/DMSans.ttf')).status).toBe(503)
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+  it('every url() in signer.css is one of the shipped fonts: no data:, no other origin, no other file', () => {
+    const css = readFileSync(join(SIGNER_DIR, 'signer.css'), 'utf8')
+    for (const m of css.matchAll(/url\(\s*(['"]?)([^'")]*)\1\s*\)/g)) expect(FONTS, m[2]).toContain(m[2])
+    expect(css).not.toMatch(/@import|data:/i)
+  })
+})
+
 describe('the page: verified bytes only', () => {
   it('serves index.html at / and its assets, byte for byte', async () => {
     const res = await get('/')
@@ -90,7 +150,7 @@ describe('the page: verified bytes only', () => {
     const manifest = computeWebControlManifest(SIGNER_DIR)
     for (const m of html.matchAll(/(?:src|href)="(\/[a-z.-]+)"/g)) expect(Object.keys(manifest.files)).toContain(m[1])
     // Nothing else in the signer directory is served from the page.
-    expect(Object.keys(manifest.files).sort()).toEqual(['/index.html', '/signer-proof.js', '/signer-store.js', '/signer.css', '/signer.js'])
+    expect(Object.keys(manifest.files).sort()).toEqual([...FONTS, '/index.html', '/signer-proof.js', '/signer-store.js', '/signer.css', '/signer.js'])
   })
   it('a shipped file of another type is never served, even when verified', async () => {
     const d = copySigner(false)

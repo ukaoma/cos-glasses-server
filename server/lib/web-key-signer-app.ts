@@ -4,7 +4,7 @@
 //
 // THE ORIGIN HOLDS THE KEY AND NOTHING ELSE. The big Control Web app (transcripts, previews, the
 // memories frame) stays on 3143. On 3144:
-//   - the page and its three scripts and one stylesheet (server/web-signer/), served ONLY from bytes
+//   - the page, its three scripts, one stylesheet and two fonts (server/web-signer/), served ONLY from bytes
 //     that matched their pack-time manifest (lib/web-control-integrity.ts, a second instance over
 //     web-signer/). No manifest, a changed file, an extra file: a plain error page, nothing signs.
 //   - a short allowlist of /api routes the page calls (key status, nonce, enrollment, revoke, the
@@ -24,6 +24,8 @@ export const WEB_SIGNER_CSP = [
   "script-src 'self'",
   "style-src 'self'",
   "img-src 'self'",
+  // 7.0.51 (Miles 07:08): Control Web's own DM Sans and Fraunces, served from this origin only. Never data:.
+  "font-src 'self'",
   "connect-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
@@ -70,7 +72,12 @@ const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  // The two TTFs Control Web already ships, byte for byte. No .svg (a script-capable document), no other font type.
+  '.ttf': 'font/ttf',
 }
+
+/** No font this page serves is larger than this; a verified one over it is refused (404). */
+export const SIGNER_FONT_MAX_BYTES = 512 * 1024
 
 export const SIGNER_PAUSED_PAGE = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>COS approval paused</title></head><body><h1>COS approval is paused</h1><p>The approval page on this Mac does not match the one that shipped with this version, so it is not being served. Nothing was signed.</p><p>Open COS Control on the Mac to repair or reinstall the server.</p></body></html>'
 
@@ -167,7 +174,7 @@ export function createWebKeySignerHandler(deps: WebKeySignerDeps): ((req: Incomi
     const file = pathname === '/' ? '/index.html' : pathname
     const ext = file.slice(file.lastIndexOf('.')).toLowerCase()
     const body = TYPES[ext] ? snapshot.get(file) : undefined
-    if (!body) { send(res, 404, 'text/plain; charset=utf-8', 'Not found', head); return }
+    if (!body || (ext === '.ttf' && body.length > SIGNER_FONT_MAX_BYTES)) { send(res, 404, 'text/plain; charset=utf-8', 'Not found', head); return }
     send(res, 200, TYPES[ext], body, head)
   }
   return Object.assign(handler, { stop: () => { if (timer) clearInterval(timer); timer = null } })
