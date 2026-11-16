@@ -31,6 +31,10 @@ export const FUNNEL_LOG_LIMITS = {
   maxNotes: 6,
   /** What the meeting assistant is given: at most this many characters of Salesforce text. */
   askChars: 3_000,
+  /** The disagreement line lists items up to this length, then "and N more": it always fits beside the head and coverage lines. */
+  disagreeChars: 700,
+  /** The industries named in the "Not in this log" line, then "and N more". */
+  industryChars: 300,
   /** The Salesforce clause added to a data cue. The judge reads only the first 300 characters of a note (the Tableau part, which is what
    *  makes it relevant); the writer reads all of it. */
   cueChars: 220,
@@ -235,6 +239,19 @@ function stageAskText(log: FunnelLog, s: FunnelStage, k: FunnelStageKey, todayLa
   return parts.join('; ')
 }
 
+/** `prefix` then the items, as many as fit in `max` characters, then "and N more" for the rest. Never cut inside an item. */
+function listLine(prefix: string, items: string[], max: number): string {
+  const kept: string[] = []
+  for (const it of items) {
+    const rest = items.length - kept.length - 1
+    const tail = rest > 0 ? `; and ${rest} more` : ''
+    if (kept.length && `${prefix}${[...kept, it].join('; ')}${tail}.`.length > max) break
+    kept.push(it)
+  }
+  const more = items.length - kept.length
+  return `${prefix}${kept.join('; ')}${more > 0 ? `; and ${more} more` : ''}.`
+}
+
 /** "opps 40/38 DISAGREE (84% to goal)": Salesforce over Tableau, for a line that lists several industries. */
 function stageCompactText(s: FunnelStage, k: FunnelStageKey): string {
   return `${k} ${s.salesforce}${s.tableau !== null ? `/${fmt(s.tableau)}` : ''}${s.disagree ? ' DISAGREE' : ''}${s.pctToGoal !== null ? ` (${Math.round(s.pctToGoal)}% to goal)` : ''}`
@@ -271,27 +288,36 @@ export function funnelLogForAsk(log: FunnelLog, question: string, facts: DataFac
   })
   // Detailed rows when they fit; else one compact line per industry, so no industry is cut for the detail of another.
   const detailed = rowLines(false)
-  lines.push(...(detailed.join('\n').length > FUNNEL_LOG_LIMITS.askChars / 2 ? rowLines(true) : detailed))
-  if (groups?.some(g => g.kind === 'bu')) lines.push('The log has no SBU or XBU total: its industries are listed, never added up.')
+  const rowText = detailed.join('\n').length > FUNNEL_LOG_LIMITS.askChars / 2 ? rowLines(true) : detailed
+  const bu = groups?.some(g => g.kind === 'bu') ? 'The log has no SBU or XBU total: its industries are listed, never added up.' : ''
   const shownDis = rows.flatMap(r => stages.filter(k => r.stages[k]?.disagree).map(k => disagreeText(r, k)))
   const allDis = log.rows.flatMap(r => FUNNEL_STAGES.filter(k => r.stages[k]?.disagree).map(k => disagreeText(r, k)))
-  lines.push(shownDis.length ? `Tableau and Salesforce disagree on: ${shownDis.join('; ')}.` : `Tableau and Salesforce agree within 1 on everything shown${log.tableau.sameWindow ? '' : ' (not compared: different windows)'}.`)
-  const elsewhere = allDis.length - shownDis.length
-  if (elsewhere > 0) lines.push(`Elsewhere in the log they disagree on ${elsewhere} more: ${allDis.filter(d => !shownDis.includes(d)).slice(0, 4).join('; ')}.`)
-  for (const n of log.notes) lines.push(`Note: ${n}`)
-  const industries = log.rows.map(r => r.industry).join(', ')
-  lines.push(`Not in this log: SQLs, lead-cohort splits (which month an opp's lead was created), lead source, campaign or rep detail, conversion rates, and industries other than ${industries}. `
-    + 'Ask cannot query Salesforce live, so a question that needs these is not answered from Salesforce.')
+  const disLine = shownDis.length ? listLine('Tableau and Salesforce disagree on: ', shownDis, FUNNEL_LOG_LIMITS.disagreeChars)
+    : `Tableau and Salesforce agree within 1 on everything shown${log.tableau.sameWindow ? '' : ' (not compared: different windows)'}.`
+  const others = allDis.filter(d => !shownDis.includes(d))
+  const elsewhere = others.length ? `Elsewhere in the log they disagree on ${others.length} more: ${others.slice(0, 4).join('; ')}.` : ''
+  // Bounded like the disagreement line, so the lines that must stay fit in askChars together. No final slice: it could only cut the
+  // coverage line. The worst-case test in funnel-log.test.ts pins that the bounded lines fit.
+  const industries = listLine('', log.rows.map(r => r.industry), FUNNEL_LOG_LIMITS.industryChars).replace(/\.$/, '').replace(/; /g, ', ')
+  const notIn = `Not in this log: SQLs, lead-cohort splits (which month an opp's lead was created), lead source, campaign or rep detail, conversion rates, and industries other than ${industries}. `
+    + 'Ask cannot query Salesforce live, so a question that needs these is not answered from Salesforce.'
   const missing = funnelUncovered(question)
-  if (missing.length) lines.push(`This question asks for ${missing.join(', ')}: the daily log does not carry it. Say so; do not answer it from these totals.`)
-  // The disagreements and the coverage lines are the last to go: keep the head and tail, cut rows from the middle.
-  let text = lines.join('\n')
-  if (text.length > FUNNEL_LOG_LIMITS.askChars) {
-    const head = lines.slice(0, 3).join('\n'), tail = lines.slice(-3).join('\n')
-    const middle = lines.slice(3, -3)
-    while (middle.length && `${head}\n${middle.join('\n')}\n${tail}`.length > FUNNEL_LOG_LIMITS.askChars) middle.pop()
-    text = `${head}\n${middle.join('\n')}\n${tail}`.slice(0, FUNNEL_LOG_LIMITS.askChars)
-  }
+  const asks = missing.length ? `This question asks for ${missing.join(', ')}: the daily log does not carry it. Say so; do not answer it from these totals.` : ''
+  // Over askChars, what goes is chosen by priority, not by position: the head (what and when), the disagreement line and the coverage lines
+  // always stay (Miles's rule: a disagreement is a finding); then rows, the elsewhere line, then the notes fill what is left, in that order.
+  // The lines keep their reading order either way.
+  const required = [...lines, bu, disLine, notIn, asks].filter(Boolean)
+  let budget = FUNNEL_LOG_LIMITS.askChars - required.join('\n').length
+  const take = (line: string): boolean => { if (line && line.length + 1 <= budget) { budget -= line.length + 1; return true } return false }
+  const keptRows: string[] = []
+  // When not every row fits, room is kept for the line that says how many were left out, so a cut list never reads as complete.
+  const allFit = rowText.join('\n').length + 1 <= budget
+  const reserve = allFit ? 0 : 60
+  for (const r of rowText) { if (r.length + 1 > budget - reserve) break; budget -= r.length + 1; keptRows.push(r) }
+  if (keptRows.length < rowText.length) { budget += reserve; const more = `${rowText.length - keptRows.length} more industries are not shown here.`; if (take(more)) keptRows.push(more) }
+  const keptElsewhere = take(elsewhere) ? [elsewhere] : []
+  const keptNotes = log.notes.map(n => `Note: ${n}`).filter(take)
+  const text = [...lines, ...keptRows, bu, disLine, ...keptElsewhere, ...keptNotes, notIn, asks].filter(Boolean).join('\n')
   // The query time rides in the title, so a cited figure always shows when Salesforce was read.
   return { title: `Salesforce via Coefficient, ${spanText(p)}, marketing sources, queried ${refreshText(log.queriedAtIso)}`, text }
 }

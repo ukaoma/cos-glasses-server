@@ -149,14 +149,30 @@ describe('the meeting assistant text at the parser limits (7.0.52, Q1 15:06)', (
     expect(l.notes).toHaveLength(FUNNEL_LOG_LIMITS.maxNotes)
     return l
   }
-  // Not pinned here, reported to sfdc-ask (S1, COORD 7.0.52): at these limits the head plus the tail lines (a 300-character note and a
-  // "Not in this log" line naming 40 industries) already pass askChars, so the disagreement line, every row and the "This question asks for"
-  // line are cut. The live log (7 rows, 3 short notes) is far from this.
-  it('stays within askChars and keeps the head', () => {
-    const { text } = funnelLogForAsk(maxed(), 'leads, opps, demos and customers by lead source and rep, SQLs and conversion', null, null)
-    expect(text.length).toBeLessThanOrEqual(FUNNEL_LOG_LIMITS.askChars)
-    expect(text).toMatch(/^Salesforce, queried live through Coefficient/)
-    expect(text).toContain('Not in this log:')
+  // What gives way at these limits, in order: rows (with a line saying how many are not shown), the elsewhere line, notes, the industry
+  // names in "Not in this log" (300 characters, then "and N more"). The head, the disagreement line (700 characters, then "and N more") and
+  // the "Not in this log" and "This question asks for" lines are never cut, and together they fit in askChars even at the parser's limits.
+  it('stays within askChars; rows and the industry list give way while the disagreement and "This question asks for" lines stay whole', () => {
+    // with a Tableau sheet for other days and SBU named, the mismatch and BU lines are in the head too: the most the kept lines can be
+    for (const [facts_, groups] of [[null, null], [facts(), [group('SBU')]]] as const) {
+      const { text } = funnelLogForAsk(maxed(), 'leads, opps, demos and customers by lead source and rep, SQLs and conversion', facts_, groups)
+      expect(text.length).toBeLessThanOrEqual(FUNNEL_LOG_LIMITS.askChars)
+      expect(text).toMatch(/^Salesforce, queried live through Coefficient/)
+      const lines = text.split('\n')
+      const dis = lines.findIndex(l => l.startsWith('Tableau and Salesforce disagree on: ind00'))
+      const notIn = lines.findIndex(l => l.startsWith('Not in this log: '))
+      expect(dis).toBeGreaterThan(0)
+      expect(lines[dis]).toMatch(/; and \d+ more\.$/)                       // bounded, never cut mid-item
+      expect(lines[notIn]).toMatch(/industries other than ind00q+, [^\n]*, and \d+ more\. Ask cannot query Salesforce live/)
+      expect(lines.at(-1)).toMatch(/^This question asks for [^\n]*: the daily log does not carry it\. Say so; do not answer it from these totals\.$/)
+      expect(dis).toBeLessThan(notIn)                                         // reading order kept
+      expect(text).toMatch(/\n\d+ more industries are not shown here\.\n/)  // rows gave way, and say so
+      expect(lines.filter(l => l.startsWith('ind'))).not.toHaveLength(FUNNEL_LOG_LIMITS.maxRows)
+    }
+    // Short rows can fill the budget to the last character: room is kept for the line that says rows were left out.
+    const short = rawFunnelLog({ notes: Array.from({ length: FUNNEL_LOG_LIMITS.maxNotes }, (_, i) => `${i}`.repeat(300)) })
+    short.rows = Array.from({ length: FUNNEL_LOG_LIMITS.maxRows }, (_, i) => ({ ...rawFunnelLog().rows[0], industry: `Industry${String(i).padStart(2, '0')}` }))
+    expect(funnelLogForAsk(log(short), 'how many opps came from leads created this month', null, null).text).toMatch(/\n\d+ more industries are not shown here\.\n/)
   })
 })
 
