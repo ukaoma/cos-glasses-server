@@ -154,11 +154,15 @@ describe('Ask COS (Drop it off): a reload keeps his earlier asks in the chat', (
 
   it('a malformed answer shows nothing rather than half a card', async () => {
     const h = load({ [MSGS]: { messages: [{ query: 'Question number 9' }, null, 'x', { query: 7, text: 'y', timestamp: now },
+      { query: 'Question number 6', timestamp: now - 2 * 60_000, no: 6 },
       { query: 'Question number 8', text: 'z', timestamp: 1e20 }, pair(4, now - 60_000)] }, '/api/models': {} })
     h.chat.mount(h.host, true); await flush()
     const html = h.feed.innerHTML
     expect(html).not.toContain('Question number 9')
     expect(html).not.toContain('Question number 8')
+    expect(html).not.toContain('Question number 6')
+    expect(html).not.toContain('This answer was not kept.')
+    expect(html).not.toContain('>7<')
     expect(count(html, 'class="cc-line cos"')).toBe(1)
     expect(html).toContain('Answer number 4')
   })
@@ -197,6 +201,27 @@ describe('Ask COS (Drop it off): a reload keeps his earlier asks in the chat', (
       expect(msgReads(h.calls), JSON.stringify(session)).toBe(0)
       expect(h.feed.innerHTML).toContain(EMPTY)
     }
+  })
+
+  it('a page left open past midnight does not read yesterday\'s conversation', async () => {
+    const h = load({ [MSGS]: PAIRS, '/api/models': {} }, { session: null })
+    // Yesterday's Ask set C.session in this page's memory (cos-chat.js doAsk); the day has since turned.
+    h.chat._state.session = { id: 'sweb0001', day: YESTERDAY }
+    h.chat.mount(h.host, true); await flush()
+    expect(msgReads(h.calls)).toBe(0)
+    expect(h.feed.innerHTML).toContain(EMPTY)
+  })
+
+  it('Drop it turned on after the read: the drop chat does not draw the earlier asks', async () => {
+    const h = load({ [MSGS]: PAIRS, '/api/models': {} })
+    h.chat.mount(h.host, true); await flush()
+    expect(h.feed.innerHTML).toContain('Answer number 3')
+    h.chat._setCaps({ features: { durableQueryJobs: true }, capabilities: { dropIt: { enabled: true } } })
+    h.chat._state.items = []; h.chat._state.feedState = 'ready'; h.chat._state.feedMode = 'drop'
+    h.chat._paintFeed(true)
+    expect(h.chat.dropOn()).toBe(true)
+    expect(h.feed.innerHTML).not.toContain('Answer number 3')
+    expect(h.feed.innerHTML).not.toContain('class="tl-day"')
   })
 
   it('Drop it on: the chat reads its inbox as before, not the web conversation', async () => {

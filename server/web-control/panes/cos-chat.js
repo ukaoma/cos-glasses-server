@@ -426,21 +426,21 @@
     var s = C.session;
     if (!s || typeof s.id !== 'string' || !s.id || s.day !== today()) return;
     if (C.back.sid === s.id && C.back.state !== 'idle') return;
+    // Each read fills its own box: one that Try again replaced is no longer C.back, so its late answer is never drawn.
     var mine = C.back = { sid: s.id, state: 'loading', entries: [] };
     api('/api/sessions/' + encodeURIComponent(s.id) + '/messages').then(function (d) {
-      if (C.back !== mine) return;
       histMerge(backEntries(d && d.messages), 'newer', mine);
       mine.state = 'ready'; paintFeed(false);
     }, function (err) {
-      if (C.back !== mine) return;
       mine.state = err && err.status === 404 ? 'ready' : 'error'; paintFeed(false);
     });
   }
-  /** The route's pairs as history chats (histHtml): a pair without its words or a time is left out, never half drawn. */
+  /** The route's pairs as history chats (histHtml): a pair without its answer or a time is left out here, and one
+   *  without its question by histMerge (histValid), so none is half drawn. */
   function backEntries(list) {
     var out = [];
     (Array.isArray(list) ? list : []).forEach(function (m, i) {
-      if (!m || typeof m.query !== 'string' || typeof m.text !== 'string' || typeof m.timestamp !== 'number') return;
+      if (!m || typeof m.text !== 'string' || typeof m.timestamp !== 'number') return;
       var at = new Date(m.timestamp);
       if (isNaN(at.getTime())) return;
       var no = Number.isInteger(m.no) && m.no > 0 ? m.no : 0;
