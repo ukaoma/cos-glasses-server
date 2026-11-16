@@ -45,7 +45,8 @@ button:disabled { opacity: 0.5; }
 /* The session: its first 8 characters beside "Sent to", so two sessions read apart at a glance (lead 07:36). One
    element: CSS clips it to 8ch, with no CSS ellipsis; the "…" after it is plain text in the page. A tap opens the same
    element to the full id in place. */
-.sid summary { display: inline-flex; align-items: baseline; padding: 4px 0; list-style: none; cursor: pointer; }
+/* A 44 px tap target: the padding grows the target and the negative margin gives the row its height back. */
+.sid summary { display: inline-flex; align-items: baseline; padding: 13px 0; margin: -9px 0; list-style: none; cursor: pointer; }
 .sid summary::-webkit-details-marker { display: none; }
 #sign-session { display: inline-block; max-width: 8ch; overflow: hidden; white-space: nowrap; vertical-align: bottom; text-overflow: clip; }
 .sid[open] #sign-session { max-width: none; white-space: normal; overflow-wrap: anywhere; }

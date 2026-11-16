@@ -385,6 +385,11 @@ describe('the page markup and stylesheet', () => {
     expect(list).toMatch(/<details class="sid"><summary><span class="mono" id="sign-session"><\/span><span class="sid-more" aria-hidden="true">…<\/span><\/summary><\/details>/)
     expect(at('sign-session')).toBeLessThan(at('sign-approve'))
     const rule = (sel: string) => (rules.find(r => r.sel === sel) || { body: '' }).body
+    expect(rule('#sign-session')).toMatch(/display:\s*inline-block;/)
+    // Q1 07:41: nothing may hide it (any rule naming #sign-session, open or not).
+    for (const r of rules.filter(r => r.sel.includes('#sign-session'))) {
+      expect(r.body, r.sel).not.toMatch(/display:\s*none|visibility:\s*hidden|opacity:\s*0(?![.\d])|font-size:\s*0(?![.\d])|(?:^|[;\s])(?:max-)?width:\s*0(?![.\d])|clip-path|transform/)
+    }
     expect(rule('#sign-session')).toMatch(/max-width:\s*8ch;/)
     expect(rule('#sign-session')).toMatch(/overflow:\s*hidden;/)
     expect(rule('#sign-session')).not.toMatch(/ellipsis/)
