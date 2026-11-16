@@ -5714,6 +5714,10 @@
     if (!webKeyCapable()) return;
     var view = phoneApprovalView(r, opts);
     if (!phoneApprovalViewLive(view)) return;
+    // 7.0.51 (W1, lead 06:5x): the host is decided before anything is asked or painted. The approval page and its
+    // passkey live only on the Mac's full ts.net name (webKeySetupUrl); anywhere else (a LAN address, 3141, a local
+    // name) there is no phone action at all, and Send is the composer exactly as before.
+    if (!webKeySetupUrl()) return;
     WEB_KEY.views = WEB_KEY.views.filter(function (entry) { return phoneApprovalViewLive(entry.view) && entry.view.form !== view.form; });
     WEB_KEY.views.push({ r: r, opts: opts, view: view });
     var generation = WEB_KEY.generation;
@@ -5773,6 +5777,8 @@
     opts = opts || {};
     var r = opts.r || state.reading; if (!r || r.sending) return Promise.resolve('busy');
     var view = phoneApprovalView(r, opts), say = view.status;
+    // 7.0.51: no attach and no server handoff off the Mac's ts.net name (the button is not painted there either).
+    if (!webKeySetupUrl()) { say('Approval on the phone works only when Control is open at your Mac’s Tailscale name. Send still works here.', 'error'); return Promise.resolve('host'); }
     if (!view.live()) return Promise.resolve('stale');
     var input = view.input, text = input ? input.value.trim() : '';
     if (!text) { say('Write a message first.', 'error'); return Promise.resolve('empty'); }

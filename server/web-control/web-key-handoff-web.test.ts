@@ -252,8 +252,37 @@ describe('first phone setup, using the real Sessions and Today offer block', () 
       const h = harness({ signer: 1, activeKeys: 0, hostname })
       h.paintWebKeyOffer(h.r); await flush()
       expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
-      expect(h.requests).toHaveLength(1)
+      // 7.0.51 (W1, lead 06:5x): the host is decided before anything is asked, so no status read either.
+      expect(h.requests).toHaveLength(0)
       expect(h.assigned).toEqual([])
+    })
+  }
+})
+
+describe('7.0.51: the host is decided before the phone action is painted or used (W1, lead 06:5x)', () => {
+  const HOSTS = ['localhost', '127.0.0.1', '192.168.1.20', '[::1]', 'ts.net', 'tail38457f.ts.net', 'mac.local', 'evil.example', '-bad.tail38457f.ts.net']
+  for (const prefix of ['session', 'ta'] as const) {
+    for (const hostname of HOSTS) {
+      it(`${prefix}: on ${hostname} with a key enrolled, no approval button and no request at all`, async () => {
+        const h = harness({ signer: 1, activeKeys: 1, hostname, prefix })
+        h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+        expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+        expect(h.requests).toEqual([])
+      })
+      it(`${prefix}: on ${hostname}, a tap that reaches approveOnPhone opens nothing and says why`, async () => {
+        const h = harness({ signer: 1, activeKeys: 1, hostname, prefix })
+        expect(await h.approveOnPhone(h.viewOpts)).toBe('host')
+        expect(h.requests).toEqual([])
+        expect(h.assigned).toEqual([])
+        expect(h.r.sending).toBe(false)
+        expect(h.statuses.at(-1)).toEqual(['Approval on the phone works only when Control is open at your Mac’s Tailscale name. Send still works here.', 'error'])
+      })
+    }
+    it(`${prefix}: on the Mac's ts.net name the button and the handoff work as before`, async () => {
+      const h = harness({ signer: 1, activeKeys: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
     })
   }
 })
