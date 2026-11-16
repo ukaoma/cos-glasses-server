@@ -122,6 +122,32 @@ describe("fonts (7.0.51, Miles 07:08: Control Web's DM Sans and Fraunces on the 
       expect((await get('/fonts/DMSans.ttf')).status).toBe(503)
     } finally { rmSync(d, { recursive: true, force: true }) }
   })
+  // Lead 07:25: a passkey page that shows nothing is worse than one in the wrong face. If a font fails to load, the text
+  // must still render at once in a system face: every @font-face swaps (never block), and every stack that names DM Sans
+  // or Fraunces ends in a generic family.
+  function fontFallbackProblems(css: string): string[] {
+    const problems: string[] = []
+    const faces = [...css.matchAll(/@font-face\s*\{([^}]*)\}/g)].map(m => m[1])
+    for (const f of faces) {
+      const display = /font-display\s*:\s*([a-z-]+)/.exec(f)?.[1]
+      if (display !== 'swap' && display !== 'fallback' && display !== 'optional') problems.push(`@font-face without swap: ${display ?? 'none'}`)
+    }
+    const rest = css.replace(/@font-face\s*\{[^}]*\}/g, '')
+    for (const m of rest.matchAll(/(?:font-family|font|--[a-z-]+)\s*:\s*([^;}]*(?:DM Sans|Fraunces)[^;}]*)/g)) {
+      const value = m[1].trim()
+      if (!/(?:^|,|\s)(?:sans-serif|serif|system-ui|ui-sans-serif|ui-serif|monospace)\s*(?:!important)?$/.test(value)) problems.push(`no generic fallback: ${value}`)
+    }
+    return problems
+  }
+  it('if a font fails to load, text still renders in a system face (swap, and a generic family ends every stack)', () => {
+    expect(fontFallbackProblems(readFileSync(join(SIGNER_DIR, 'signer.css'), 'utf8'))).toEqual([])
+    // The check itself can fail: each of these must be caught.
+    expect(fontFallbackProblems("@font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans.ttf'); font-display: block; }")).toHaveLength(1)
+    expect(fontFallbackProblems("@font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans.ttf'); }")).toHaveLength(1)
+    expect(fontFallbackProblems(":root { --body: 'DM Sans'; }")).toHaveLength(1)
+    expect(fontFallbackProblems("body { font: 400 16px/1.5 'DM Sans', Helvetica; }")).toHaveLength(1)
+    expect(fontFallbackProblems("h2 { font-family: 'Fraunces', Georgia, serif; } :root { --body: 'DM Sans', -apple-system, sans-serif; }")).toEqual([])
+  })
   it('every url() in signer.css is one of the shipped fonts: no data:, no other origin, no other file', () => {
     const css = readFileSync(join(SIGNER_DIR, 'signer.css'), 'utf8')
     for (const m of css.matchAll(/url\(\s*(['"]?)([^'")]*)\1\s*\)/g)) expect(FONTS, m[2]).toContain(m[2])
