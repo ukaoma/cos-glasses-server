@@ -17,7 +17,10 @@
 
 **Not covered, said plainly:**
 - Ask COS after a reload: earlier days and an ended conversation are not shown. While the read is in flight, "Ask COS anything." can show for a moment (W1's note 1, a visible change left for Miles). An ask with no message number answered during the read could be drawn twice (W1's note 2); web asks are numbered at admission.
-- This build's own type check, full suite and sweep have not run yet. They run in the lead's slot after the Control install; the lines below are each branch's evidence before the merge.
+- The layout sweep (F1) and Q1's mutants on the merged head have not run yet.
+
+**Tested on this build** (the full suite on its parent b1ff9b90; this commit adds only these lines):
+- **The pre-suite and the counted suite, alone, swift-slot lease held start to end (14:41 to 14:58):** the web set 2,210 of 2,210; the 12 server tests that read web source, the key-lane and spawn censuses, the Cursor spawn census, the hazard invariants and the route suites 3,181 of 3,181; type check exit 0; `npm test` 975 files passed, 2 skipped, 17,900 tests passed, 6 skipped, exit 0 (S1_evidence/7052/suite_b1ff9b90).
 
 **Tests (each branch, before the merge):**
 - **S1, claude/server-7052-ask-reload (38b7fc2b), focused files at one worker, Uncounted:** the reload test 15 of 15 (6 of 10 failed on 7.0.51 before the fix), 1,210 passed in the 30 web test files that read cos-chat.js, 17 of 17 web mutants killed; the Work test 19 of 19 (5 of 16 failed before), 722 passed in the 20 server neighbour files, 13 of 13 server mutants killed. W1 PASS on the web part; Q1 PASS 10:20 (17 of 17 of Q1's mutants killed).
