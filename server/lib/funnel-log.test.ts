@@ -113,6 +113,51 @@ describe('the reader', () => {
     writeFileSync(big, ' '.repeat(FUNNEL_LOG_LIMITS.maxBytes + 1))
     expect(funnelLogReader(big, () => SF_NOW)()).toEqual({ ok: false, reason: 'invalid' })
   })
+  // 7.0.52 (Q1 15:06): spaces are invalid JSON anyway, so the size cap needs a VALID log on each side of it.
+  it('a valid log of exactly maxBytes reads; one byte more is invalid', () => {
+    const sized = (bytes: number) => {
+      const base = JSON.stringify({ ...rawFunnelLog(), pad: '' })
+      const out = JSON.stringify({ ...rawFunnelLog(), pad: 'x'.repeat(bytes - base.length) })
+      expect(Buffer.byteLength(out)).toBe(bytes)
+      return out
+    }
+    const at = join(dir, 'at.json'), over = join(dir, 'over.json')
+    writeFileSync(at, sized(FUNNEL_LOG_LIMITS.maxBytes))
+    writeFileSync(over, sized(FUNNEL_LOG_LIMITS.maxBytes + 1))
+    expect(funnelLogReader(at, () => SF_NOW)().ok).toBe(true)
+    expect(funnelLogReader(over, () => SF_NOW)()).toEqual({ ok: false, reason: 'invalid' })
+  })
+})
+
+describe('the file notes', () => {
+  it('a note of 300 characters is kept; one of 301 is dropped', () => {
+    const keep = 'k'.repeat(300), drop = 'd'.repeat(301)
+    expect(log(rawFunnelLog({ notes: [keep, drop] })).notes).toEqual([keep])
+  })
+})
+
+describe('the meeting assistant text at the parser limits (7.0.52, Q1 15:06)', () => {
+  // Every field at the most the parser accepts: maxRows rows, a 60-character org and 40-character industry, all four stages disagreeing,
+  // maxNotes notes of 300 characters, a 160-character Tableau label. Without the cap this text runs to tens of thousands of characters.
+  const maxed = () => {
+    const raw = rawFunnelLog({ tableau: { ...rawFunnelLog().tableau, label: 'L'.repeat(160) }, notes: Array.from({ length: FUNNEL_LOG_LIMITS.maxNotes + 2 }, (_, i) => `${i}`.repeat(300)) })
+    const st = (n: number) => ({ tableau: n, salesforce: n + 7, today_salesforce: 3, prior_month_sp: n + 20, last_year_sp: n + 5, budget_to_date: 40.5, pct_to_goal: 99.5, disagree: true })
+    raw.rows = Array.from({ length: FUNNEL_LOG_LIMITS.maxRows }, (_, i) => ({ org: `org${i}`.padEnd(60, 'o'), industry: `ind${String(i).padStart(2, '0')}`.padEnd(40, 'q'),
+      stages: { leads: st(1000 + i), opps: st(500 + i), demos: st(300 + i), customers: st(100 + i) } }))
+    const l = log(raw)
+    expect(l.rows).toHaveLength(FUNNEL_LOG_LIMITS.maxRows)
+    expect(l.notes).toHaveLength(FUNNEL_LOG_LIMITS.maxNotes)
+    return l
+  }
+  // Not pinned here, reported to sfdc-ask (S1, COORD 7.0.52): at these limits the head plus the tail lines (a 300-character note and a
+  // "Not in this log" line naming 40 industries) already pass askChars, so the disagreement line, every row and the "This question asks for"
+  // line are cut. The live log (7 rows, 3 short notes) is far from this.
+  it('stays within askChars and keeps the head', () => {
+    const { text } = funnelLogForAsk(maxed(), 'leads, opps, demos and customers by lead source and rep, SQLs and conversion', null, null)
+    expect(text.length).toBeLessThanOrEqual(FUNNEL_LOG_LIMITS.askChars)
+    expect(text).toMatch(/^Salesforce, queried live through Coefficient/)
+    expect(text).toContain('Not in this log:')
+  })
 })
 
 describe('the meeting assistant text', () => {
