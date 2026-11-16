@@ -8,7 +8,7 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import express from 'express'
 import type { Server } from 'node:http'
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readWorkJournal, type WorkJournalRead } from '../lib/work-activity.js'
@@ -62,6 +62,17 @@ describe('readWorkJournal: nothing to read is not set up; anything else unavaila
     const x = home(); mkdirSync(join(handoffs(x.h), 'handoffs.json'), { recursive: true })
     expect(x.read()).toEqual({ available: false, reason: 'Native Work history is not safely readable.' })
   })
+  it('a symlinked folder on the way: unsafe, a failed read, no flag', () => {
+    const x = home(), real = join(root, 'elsewhere' + n)
+    mkdirSync(real, { recursive: true }); mkdirSync(join(x.h, 'Library', 'Application Support', 'COS Control'), { recursive: true })
+    symlinkSync(real, handoffs(x.h))
+    expect(x.read()).toEqual({ available: false, reason: 'Native Work history is not safely readable.' })
+  })
+  it('a file over the size limit: a failed read, no flag', () => {
+    const x = home(); mkdirSync(handoffs(x.h), { recursive: true })
+    writeFileSync(join(handoffs(x.h), 'handoffs.json'), Buffer.alloc(10_000_000, 0x20))
+    expect(x.read()).toEqual({ available: false, reason: 'Native Work history is not safely readable.' })
+  })
   it('an isolated runtime (tests, previews): unavailable, never "not set up"', () => {
     const r = readWorkJournal({ home: home().h, platform: 'darwin', env: { VITEST: 'true' } as NodeJS.ProcessEnv })
     expect(r).toEqual({ available: false, reason: 'This isolated runtime does not read the native Work history.' })
@@ -88,6 +99,16 @@ describe('GET /api/work-board/activity/open', () => {
   it('says not_set_up when there is nothing to read', async () => {
     const body = await open({ available: false, reason: 'No native Work history is available on this host.', notSetUp: true })
     expect(body).toMatchObject({ version: 1, available: false, state: 'not_set_up', reason: 'No native Work history is available on this host.', items: [], total: 0, truncated: false })
+  })
+  it('a journal that reads but a board that does not: a failure, no state', async () => {
+    const warn = console.warn; console.warn = () => {}
+    try {
+      const app = express(); app.use('/api', createWorkBoardRouter({ journal: () => ({ available: true, receipts: [], drafts: [] }), list: async () => { throw new Error('bridge down') } }))
+      const { port } = await listen(app)
+      const body = await (await fetch(`http://127.0.0.1:${port}/api/work-board/activity/open`)).json()
+      expect(body).toMatchObject({ available: false, items: [], total: 0 })
+      expect('state' in body).toBe(false)
+    } finally { console.warn = warn }
   })
   it('a failed read carries no state', async () => {
     const body = await open({ available: false, reason: 'Native Work history could not be read.' })
