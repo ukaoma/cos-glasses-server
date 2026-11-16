@@ -2563,10 +2563,11 @@
     var box = $('session-input');
     // 7.0.18: here a reply IS the answer (sent with the contract's attribution), so the box says so.
     if (box && box.setAttribute) {
+      box.phLong = te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…';
+      box.phShort = open && !te ? 'Message (not an answer)' : '';
       // 7.0.51 (F1 08:0x): with a release request waiting, an empty box sends the standard approval words, so it says so.
       var phNote = typeof phoneBoxPlaceholder === 'function' ? phoneBoxPlaceholder() : '';
-      box.phLong = phNote || (te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…');
-      box.phShort = phNote ? '' : open && !te ? 'Message (not an answer)' : '';
+      if (phNote) { box.phLong = phNote; box.phShort = ''; }
       if (typeof sxPlaceholderFit === 'function') sxPlaceholderFit(box); else box.setAttribute('placeholder', box.phLong);
     }
   }
@@ -5793,8 +5794,13 @@
         // The newest request is the one shown, in full, and the one Approve carries. It is still only a request: the
         // approval page shows it exactly and nothing is approved until the phone's passkey confirms it there.
         rows.sort(function (x, y) { return (Number(y.packet.createdAt) || 0) - (Number(x.packet.createdAt) || 0); });
-        r.phonePacketSha256 = rows[0].packetSha256;
-        var card = phoneRequestCard(view, rows[0].packet, rows.length - 1, phoneEngine(r));
+        // Lead 08:0x: the request Approve carries is the one shown, chosen when it is first shown in this opening of the
+        // session (r lives for one opening). A newer arrival only adds to the count; the carried one changes on his own
+        // reopen or reload, or when it expires (it is then gone from these rows).
+        var carried = r.phoneCarried && r.phonePackets[r.phoneCarried] ? r.phoneCarried : rows[0].packetSha256;
+        r.phoneCarried = carried; r.phonePacketSha256 = carried;
+        var newest = rows[0].packetSha256 === carried;
+        var card = phoneRequestCard(view, r.phonePackets[carried], rows.length, newest, phoneEngine(r));
         view.form.__paCard = card; phoneCardPlace(view, card); phoneFitTitle(card);
         phoneGoLabel(go, true);
         if (view.input) { view.input.setAttribute('placeholder', 'Add a note'); if (view.prefix === 'session') { view.input.phLong = 'Add a note'; view.input.phShort = ''; } }
@@ -5921,7 +5927,7 @@
   //   phone:  the title on one line; the channel line; "mac-local, expires 7:12 AM" (no "asked by").
   //   docked (600 px up, the reader under 560): the title with "expires 7:12 AM" at the right; "channel line · mac-local".
   //   beside (the reader 560 px up): the title may wrap; the channel line; "mac-local · asked by this Claude session · expires 7:12 AM".
-  function phoneRequestCard(view, p, more, engine) {
+  function phoneRequestCard(view, p, count, newest, engine) {
     var card = document.createElement('section'), l1 = document.createElement('div'), title = document.createElement('h3'), does = document.createElement('p'), facts = document.createElement('p');
     card.className = 'pa-card'; card.id = view.prefix + '-phone-card'; card.setAttribute('data-phone-card', '1');
     card.setAttribute('aria-label', 'Release request waiting for your approval');
@@ -5941,7 +5947,11 @@
     if (when) facts.appendChild(phoneSpan('pa-phone', ', expires ' + when));
     facts.appendChild(phoneSpan('pa-wide', ' · asked by this ' + engine + ' session' + (when ? ' · expires ' + when : '')));
     card.appendChild(l1); card.appendChild(does); card.appendChild(facts);
-    if (more > 0) { var m = document.createElement('p'); m.className = 'pa-more'; m.textContent = more === 1 ? 'One more request is waiting after this one.' : more + ' more requests are waiting after this one.'; card.appendChild(m); }
+    if (count > 1) {
+      var m = document.createElement('p'); m.className = 'pa-more';
+      m.textContent = newest ? '1 of ' + count + ' requests, newest shown.' : '1 of ' + count + ' requests. A newer one arrived; reopen this session to see it.';
+      card.appendChild(m);
+    }
     return card;
   }
   // The phone title stays on ONE line: the mono steps down 0.5 px at a time from 12.5 to 10.5, then only the artifact
