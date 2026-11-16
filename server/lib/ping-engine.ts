@@ -243,8 +243,9 @@ export class PingEngine {
    * can be up to a minute after the gap ends.
    * - Quiet hours (and weekends when quiet): no banner now or later; what waited is already in the chat. Replies that arrive in
    *   quiet hours never get here: they are held for the "While you were off" item as before.
-   * - The gap is measured from the last merged reply banner only, and is at least REPLY_MIN_GAP_MS (a clock that went back waits
-   *   for at most one gap).
+   * - The gap is measured from the last merged reply banner only, and is at least REPLY_MIN_GAP_MS. If the clock went back, the
+   *   wait lasts until the clock passes that banner's time plus the gap, which can be longer than one gap; the next state write
+   *   drops a ledger record more than a minute in the future (trimLedger), and the gap then counts from what is left (Q1 16:47).
    * - At release a reply whose item is no longer in the chat (purged) is dropped; several replies of one session count once.
    *   Zero left: no banner. Not tonight (the lead, 16:42; a named 7.0.53 follow-up): a re-check against the session's state, so a
    *   reply he has already answered at the desk can still be announced.
