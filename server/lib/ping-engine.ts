@@ -33,6 +33,12 @@ const ANY_HOUR: ReadonlySet<PingSource> = new Set<PingSource>(['reminder', 'reso
 /** Sources the engine polls; a held one of these that the next read no longer reports has expired. */
 const POLLED: ReadonlySet<PingSource> = new Set<PingSource>(['prep', 'followups', 'stale', 'checkin'])
 export const PING_STATE_LIMITS = { held: 200, consumed: 5_000, consumedDays: 30, fileBytes: 4_000_000, replies: 256 } as const
+/**
+ * 7.0.52 B (X1's must-fix, the lead's ruling 16:47): merged Reply ready banners are not counted against any cap, so their gap has a
+ * floor. Between two of them: max(gapMinutes, this). Never more often than once per 45 minutes, whatever the gap setting says,
+ * including 0 (Miles: "at most one per 45 minutes"). A longer gap he sets still wins.
+ */
+export const REPLY_MIN_GAP_MS = 45 * 60_000
 
 export interface PingSnapshot {
   nextEvent?: { title?: unknown; time?: unknown; occurrence?: unknown } | null
@@ -237,7 +243,8 @@ export class PingEngine {
    * can be up to a minute after the gap ends.
    * - Quiet hours (and weekends when quiet): no banner now or later; what waited is already in the chat. Replies that arrive in
    *   quiet hours never get here: they are held for the "While you were off" item as before.
-   * - The gap is measured from the last merged reply banner only (a clock that went back waits for at most one gap).
+   * - The gap is measured from the last merged reply banner only, and is at least REPLY_MIN_GAP_MS (a clock that went back waits
+   *   for at most one gap).
    * - At release a reply whose item is no longer in the chat (purged) is dropped; several replies of one session count once.
    *   Zero left: no banner. Not tonight (the lead, 16:42; a named 7.0.53 follow-up): a re-check against the session's state, so a
    *   reply he has already answered at the desk can still be announced.
@@ -250,7 +257,7 @@ export class PingEngine {
     if (isQuietHours(nowMs, tz, budget)) { delete state.replies; return false }
     if (localClock(nowMs, tz).minutes < budget.firstBannerMinutes) return null
     const last = state.ledger.reduce((m, b) => (b.replies === true ? Math.max(m, b.at) : m), -Infinity)
-    if (nowMs - last < budget.gapMs) return null
+    if (nowMs - last < Math.max(budget.gapMs, REPLY_MIN_GAP_MS)) return null
     delete state.replies
     const live = held.filter(r => this.deps.feed.hasKey(r.key))
     if (!live.length) return false

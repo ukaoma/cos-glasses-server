@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PING_STATE_LIMITS, PingEngine, PingStateStore, type HeldReply, type PingBanner, type PingFeedSink, type PingState } from './ping-engine.js'
+import { PING_STATE_LIMITS, PingEngine, PingStateStore, REPLY_MIN_GAP_MS, type HeldReply, type PingBanner, type PingFeedSink, type PingState } from './ping-engine.js'
 import { agentCandidate, type PingCandidate } from './ping-sources.js'
 import { normalizeP2Settings, P2_DEFAULTS, type P2Settings } from './drop-p2-settings.js'
 import { taskInstant } from './morning-brief-schedule.js'
@@ -71,6 +71,26 @@ describe('mergeReplies on', () => {
     expect(r.state().ledger.at(-1)).toMatchObject({ at: at('10:45'), replies: true, ids: ['f2', 'f3', 'f4'] })
     await r.tick('11:29')
     expect(r.shown).toHaveLength(2)
+  })
+  it('never more often than once per REPLY_MIN_GAP_MS, even with gapMinutes 0; a longer gap he sets still wins', async () => {
+    expect(REPLY_MIN_GAP_MS).toBe(45 * 60_000)
+    const floorMin = REPLY_MIN_GAP_MS / 60_000
+    const hhmm = (min: number) => `${String(10 + Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`
+    const zero = rig(on({ gapMinutes: 0 }))
+    zero.push('10:00', reply(A, at('10:00')))
+    zero.push('10:01', reply(B, at('10:01')))
+    await zero.tick(hhmm(floorMin - 1))
+    expect(zero.shown).toHaveLength(1)
+    await zero.tick(hhmm(floorMin))
+    expect(zero.shown).toHaveLength(2)
+    const long = rig(on({ gapMinutes: 240 }))
+    long.push('10:00', reply(A, at('10:00')))
+    long.push('10:01', reply(B, at('10:01')))
+    await long.tick(hhmm(floorMin))
+    await long.tick('13:59')
+    expect(long.shown).toHaveLength(1)
+    await long.tick('14:00')
+    expect(long.shown).toHaveLength(2)
   })
   it('one session replying twice in the gap: "Reply ready" with its newest line', async () => {
     const r = rig(on())
