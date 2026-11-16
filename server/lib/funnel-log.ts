@@ -11,8 +11,10 @@
 //     nothing is called a disagreement, whatever the file's flags say;
 //   - the log covers a fixed set of industries and four stages (no SQLs), as totals. What it does not cover is said every time, so an answer
 //     never claims Salesforce was "not provided" and never stretches the log to a question it cannot answer (lead cohorts, sources, reps);
-//   - the file is off when missing, unreadable, invalid, older than FUNNEL_LOG_LIMITS.maxAgeHours from `generatedAt` (the Salesforce query)
-//     or from the future.
+//   - the Salesforce as-of is `salesforce.queriedAt` (when Coefficient was asked), never `generatedAt`: the 10:45 job re-joins the morning
+//     reply to a newer Tableau sheet and rewrites the file, and citing that time would make the Salesforce figures look 3+ hours fresher;
+//     a file written before queriedAt existed falls back to generatedAt;
+//   - the file is off when missing, unreadable, invalid, older than FUNNEL_LOG_LIMITS.maxAgeHours from the Salesforce query or from the future.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { refreshText, type DataFacts, type DataGroup } from './live-cues-v2-data.js'
@@ -41,7 +43,7 @@ export interface FunnelStage {
   salesforce: number
   /** Tableau for the same window, or null (another window, or Tableau had no figure). */
   tableau: number | null
-  /** Salesforce on the log's "today" (the morning of the run, up to `generatedAt`). */
+  /** Salesforce on the log's "today" (the morning of the run, up to the query time). */
   todaySalesforce: number | null
   /** Salesforce for the prior month's and last year's same days. */
   priorMonthSp: number | null
@@ -56,6 +58,9 @@ export type DateSpan = [string, string]
 export interface FunnelLog {
   generatedAtIso: string
   generatedAt: number
+  /** When Salesforce was queried: `salesforce.queriedAt`, else `generatedAt` (files written before 2026-11-16 13:3x). */
+  queriedAtIso: string
+  queriedAt: number
   window: { period: DateSpan; today: DateSpan | null; priorMonthSp: DateSpan | null; lastYearSp: DateSpan | null }
   tableau: { label: string | null; asOfIso: string | null; sameWindow: boolean }
   salesforce: { method: string | null; job: string | null; orgs: Record<string, string> }
@@ -112,14 +117,17 @@ export function parseFunnelLog(raw: unknown, nowMs: number): FunnelLogRead {
     if (Object.keys(stages).length) rows.push({ org, industry, stages })
   }
   if (!rows.length) return { ok: false, reason: 'invalid' }
-  if (generatedAt - nowMs > FUNNEL_LOG_LIMITS.maxFutureMs) return { ok: false, reason: 'future' }
-  if (nowMs - generatedAt > FUNNEL_LOG_LIMITS.maxAgeHours * 3_600_000) return { ok: false, reason: 'stale' }
   const sf: Record<string, unknown> = isObj(raw.salesforce) ? raw.salesforce : {}
+  const q = str(sf.queriedAt, 40), qMs = q === null ? NaN : Date.parse(q)
+  const queriedAtIso = q !== null && !Number.isNaN(qMs) ? q : generatedAtIso as string
+  const queriedAt = Number.isNaN(qMs) ? generatedAt : qMs
+  if (queriedAt - nowMs > FUNNEL_LOG_LIMITS.maxFutureMs) return { ok: false, reason: 'future' }
+  if (nowMs - queriedAt > FUNNEL_LOG_LIMITS.maxAgeHours * 3_600_000) return { ok: false, reason: 'stale' }
   const orgs: Record<string, string> = {}
   if (isObj(sf.orgs)) for (const [k, v] of Object.entries(sf.orgs)) { const id = str(v, 20); if (id && k.length <= 60) orgs[k] = id }
   const notes = (Array.isArray(raw.notes) ? raw.notes : []).map(n => str(n, 300)).filter((n): n is string => n !== null).slice(0, FUNNEL_LOG_LIMITS.maxNotes)
   return { ok: true, log: {
-    generatedAtIso: generatedAtIso as string, generatedAt,
+    generatedAtIso: generatedAtIso as string, generatedAt, queriedAtIso, queriedAt,
     window: { period, today: span(w?.today), priorMonthSp: span(w?.prior_month_sp), lastYearSp: span(w?.last_year_sp) },
     tableau: { label: str(t.label, 160), asOfIso: str(t.asOf, 40), sameWindow },
     salesforce: { method: str(sf.method, 600), job: str(sf.coefficientJob, 120), orgs },
@@ -241,12 +249,12 @@ export function funnelLogForAsk(log: FunnelLog, question: string, facts: DataFac
   const rows = asked && asked.length ? asked : log.rows
   const named = funnelStagesNamed(question)
   const stages: FunnelStageKey[] = named.length ? named : [...FUNNEL_STAGES]
-  const todayLabel = log.window.today ? `on ${spanText(log.window.today)} through ${clockText(log.generatedAtIso)}` : null
+  const todayLabel = log.window.today ? `on ${spanText(log.window.today)} through ${clockText(log.queriedAtIso)}` : null
   const tableauLine = !log.tableau.sameWindow
     ? 'Tableau covered a different window when this log was written, so no Tableau figure is compared here.'
     : `Tableau side: ${log.tableau.label ?? 'Tableau marketing funnel'}${log.tableau.asOfIso ? `, extract refreshed ${refreshText(log.tableau.asOfIso)}` : ''}.`
   const lines = [
-    `Salesforce, queried live through Coefficient ${refreshText(log.generatedAtIso)}, ${log.tableau.sameWindow ? 'beside Tableau for the same window' : 'for the window'}: ${spanText(p)} (month to the day before the query). `
+    `Salesforce, queried live through Coefficient ${refreshText(log.queriedAtIso)}, ${log.tableau.sameWindow ? 'beside Tableau for the same window' : 'for the window'}: ${spanText(p)} (month to the day before the query). `
       + 'Marketing lead sources only, New opportunities only, Central days. Not company revenue, MRR, ARR or location counts.',
     tableauLine,
   ]
@@ -285,7 +293,7 @@ export function funnelLogForAsk(log: FunnelLog, question: string, facts: DataFac
     text = `${head}\n${middle.join('\n')}\n${tail}`.slice(0, FUNNEL_LOG_LIMITS.askChars)
   }
   // The query time rides in the title, so a cited figure always shows when Salesforce was read.
-  return { title: `Salesforce via Coefficient, ${spanText(p)}, marketing sources, queried ${refreshText(log.generatedAtIso)}`, text }
+  return { title: `Salesforce via Coefficient, ${spanText(p)}, marketing sources, queried ${refreshText(log.queriedAtIso)}`, text }
 }
 
 /** The clause a data cue adds after its Tableau text: Salesforce for the same stages and window, and any disagreement in words. Empty when the
@@ -297,7 +305,7 @@ export function funnelCueClause(log: FunnelLog, groups: DataGroup[], stages: rea
   if (!rows.length) return ''
   const wanted = FUNNEL_STAGES.filter(k => stages.includes(k))
   const shownFor = (r: FunnelRow) => (wanted.length ? wanted : (['leads', 'opps', 'customers'] as FunnelStageKey[])).filter(k => r.stages[k])
-  const head = `${SFDC_CUE_MARK}, ${spanText(log.window.period)}, queried ${refreshText(log.generatedAtIso)}:`
+  const head = `${SFDC_CUE_MARK}, ${spanText(log.window.period)}, queried ${refreshText(log.queriedAtIso)}:`
   const build = (rs: FunnelRow[], cut: number) => {
     const body = rs.map(r => {
       const shown = shownFor(r)

@@ -60,6 +60,23 @@ describe('parsing the blend', () => {
   ])('invalid: %s', (_why, over) => {
     expect(parseFunnelLog(rawFunnelLog(over), SF_NOW)).toEqual({ ok: false, reason: 'invalid' })
   })
+  it('the Salesforce as-of is salesforce.queriedAt, not the 10:45 re-join that rewrote the file; an older file falls back to generatedAt', () => {
+    const rejoined = rawFunnelLog({ generatedAt: '2026-11-16T10:45:08-06:00', salesforce: { ...rawFunnelLog().salesforce, queriedAt: '2026-11-16T07:07:01-06:00' } })
+    const l = log(rejoined)
+    expect(l.queriedAtIso).toBe('2026-11-16T07:07:01-06:00')
+    const { title, text } = funnelLogForAsk(l, 'liquor opps', null, null)
+    expect(title).toBe('Salesforce via Coefficient, Nov 1 to 15, marketing sources, queried Nov 16 07:07 CT')
+    expect(text).toContain('queried live through Coefficient Nov 16 07:07 CT')
+    expect(text).toContain('Salesforce on Nov 16 through 07:07 CT +0')
+    expect(text).not.toContain('10:45')
+    expect(funnelCueClause(l, [group('Liquor')], ['opps'])).toContain('queried Nov 16 07:07 CT:')
+    // staleness is counted from the query, so a re-join cannot keep an old Salesforce reply alive
+    const q = Date.parse('2026-11-16T07:07:01-06:00')
+    expect(parseFunnelLog(rejoined, q + (FUNNEL_LOG_LIMITS.maxAgeHours + 1) * HOUR)).toEqual({ ok: false, reason: 'stale' })
+    // no queriedAt, or one that does not parse: generatedAt, as before
+    expect(log(rawFunnelLog()).queriedAtIso).toBe('2026-11-16T07:08:23-06:00')
+    expect(log(rawFunnelLog({ salesforce: { ...rawFunnelLog().salesforce, queriedAt: 'this morning' } })).queriedAtIso).toBe('2026-11-16T07:08:23-06:00')
+  })
   it('stale past maxAgeHours from the Salesforce query, never from the file time; future past an hour ahead', () => {
     const gen = Date.parse('2026-11-16T07:08:23-06:00')
     expect(parseFunnelLog(rawFunnelLog(), gen + (FUNNEL_LOG_LIMITS.maxAgeHours - 1) * HOUR).ok).toBe(true)
