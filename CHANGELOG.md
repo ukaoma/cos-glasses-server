@@ -20,9 +20,19 @@
 - Not yet tried on his phone: the composer, the request card, the way back and the standalone-app case were checked in test browsers and fakes only.
 - A message tapped while the session is busy waits; it is not parked signed (a follow-up: signed park). A verified reply to an end-of-turn question goes as a plain verified turn, so the question card closes the way it does today when a session moves on, and reads answered at the Mac (a follow-up: the question id in the handoff).
 
-**Tested on this build:** <filled at the cut: full suite count, tsc, gates, FAST sweep failing keys>
+**Tested on this build** (the full suite on its parent 98d03087; this commit adds only these lines):
+- **The full server suite, alone (swift-slot held start to end):** 17,803 passed, 6 skipped, 972 files (TSC_EXIT=0, VITEST_EXIT=0; 08:54 to 09:12); type check clean. In the same lease, first: the web set 2,195 of 2,195, and the 12 server tests that read web source plus the key-lane census, hazard invariants and route suites 3,145 of 3,145.
+- **The web-key signer gate on 98d03087 (X1):** --check 87 of 87 targets match exactly once; baseline PASS 493 tests in 7 files; 87 of 87 mutants killed by name; gate exit 0 (clean detached worktree, lease held alone 09:12:45 to 09:14:45).
+- **The layout sweep in a test browser (WebKit), quick set, on 98d03087 (F1):** RESULT 0 defect keys over 625 states (14 known rail-pan keys, not failing), 0 new and 0 missing keys against 7.0.50; swipe negatives 51 of 51 (F1_evidence/sweep_gate_98d03087.log).
+- **F1's other WebKit checks on 98d03087:** served files 47 (digest a16c12c0935dbef3), only app.js and signer.js differ from 706bba04; 30 real composer pictures and the approval page 16 of 16 with 0 ids missing; hit areas 44 px or more at 382x557 and 449x798, light and dark (smallest 49x44.8); opens on the card at 382x557 with the question and first option in view; return checks 8 of 8 in both modes (Back and Done land on exactly :3143/control/#/phone-return with no history.back(); a fresh #/phone-return load restores the session; landed clears the box; unknown keeps the words).
+- **Not covered:** a real phone; the passkey and the approval page were exercised with fakes and a stub host only.
 
-**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+**Tests:**
+- **W1, claude/web-verified-send-7051 (b4087713):** web-key-handoff-web.test.ts 261 and the route test (5): one key and the landing check, host before paint, the bounded release, the default-on proof (Q1's 7.0.50 golden identical in all four default-off cases), the fresh-load return (a stayed trip keeps its record; only a #/phone-return load acts on it, once), the verified composer and request card, item 3, the short-window sign-in rule, and the return's line saying only what the turn record knows. Mutants on green baselines: composer 38 of 38, items 1, 2, 4, 5, 6 all killed, trip fix 6 of 6, landing split 8 of 8.
+- **X1, claude/server-signer-fonts-7051 (1e034cb8) and claude/server-signer-back-7051 (08459537):** the signer manifest hash in the integrity report and the proof, the approval page's way back (Back and Done always load Control's #/phone-return address), fonts served from the signer.
+- **F1, claude/signer-restyle-7051 (30cc507f):** the approval page restyle and the short session id.
+- **Q1:** PASS on every W1, X1 and F1 commit in this build (W1 through b4087713: 768 of 768 across 11 files, 10 of 10 mutants killed; the 7.0.50 default-off golden identical in all four cases and the plain Send body; X1 08459537 PASS 08:41).
+- **The cut:** merges on 33f8ab3e with no conflicts; every single-owner file byte-identical to its head (the gate script differs only by the three repointed targets); see merges.txt in the kit.
 
 ## 7.0.50 - Signed Mac activation for phone approvals
 
