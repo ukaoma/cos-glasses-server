@@ -2563,8 +2563,10 @@
     var box = $('session-input');
     // 7.0.18: here a reply IS the answer (sent with the contract's attribution), so the box says so.
     if (box && box.setAttribute) {
-      box.phLong = te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…';
-      box.phShort = open && !te ? 'Message (not an answer)' : '';
+      // 7.0.51 (F1 08:0x): with a release request waiting, an empty box sends the standard approval words, so it says so.
+      var phNote = typeof phoneBoxPlaceholder === 'function' ? phoneBoxPlaceholder() : '';
+      box.phLong = phNote || (te ? 'Or write your own answer' : open ? 'Message this session (not an answer)' : 'Continue this session…');
+      box.phShort = phNote ? '' : open && !te ? 'Message (not an answer)' : '';
       if (typeof sxPlaceholderFit === 'function') sxPlaceholderFit(box); else box.setAttribute('placeholder', box.phLong);
     }
   }
@@ -5660,7 +5662,7 @@
     if (form.classList && form.classList.contains('pa-on')) {
       form.classList.remove('pa-on');
       if (form.__paSendText != null) view.send.textContent = form.__paSendText;
-      if (view.input && form.__paPlaceholder != null) view.input.setAttribute('placeholder', form.__paPlaceholder);
+      if (view.input && form.__paPlaceholder != null) { view.input.setAttribute('placeholder', form.__paPlaceholder); if (view.input.phLong === 'Add a note') view.input.phLong = form.__paPlaceholder; }
     }
     var reader = view.prefix === 'session' ? $('session-reader') : null;
     if (reader && reader.classList) reader.classList.remove('pa-beside');
@@ -5795,7 +5797,7 @@
         var card = phoneRequestCard(view, rows[0].packet, rows.length - 1, phoneEngine(r));
         view.form.__paCard = card; phoneCardPlace(view, card); phoneFitTitle(card);
         phoneGoLabel(go, true);
-        if (view.input) view.input.setAttribute('placeholder', 'Add a note');
+        if (view.input) { view.input.setAttribute('placeholder', 'Add a note'); if (view.prefix === 'session') { view.input.phLong = 'Add a note'; view.input.phShort = ''; } }
         phoneBusyApply(r, view);
       }, function () { /* No request is shown, and none is carried, when this read fails. */ });
     });
@@ -5908,6 +5910,11 @@
       form.addEventListener('submit', form.__paSubmit);
     }
     return go;
+  }
+  /** The reader box's placeholder while a request card is up ("Add a note"), else '' (the reader's own words). */
+  function phoneBoxPlaceholder() {
+    var f = $('session-form');
+    return f && f.__paCard && f.classList && f.classList.contains('pa-on') ? 'Add a note' : '';
   }
   function phoneSpan(cls, text) { var e = document.createElement('span'); e.className = cls; e.textContent = text; return e; }
   // F1's final numbers (07:3x, Miles 07:14 "Build it"): one card, three forms chosen by CSS (cos-chat.css):

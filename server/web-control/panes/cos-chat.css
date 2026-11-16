@@ -352,6 +352,7 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .pa-go .pa-key { width: 15px; height: 15px; flex: none; }
 .pa-go:disabled { opacity: 0.45; cursor: default; }
 .pa-go .pa-long { display: none; }
+.composer.pa-on .composer-actions [data-action="fork-session"] { order: 1; }
 .composer.pa-on .composer-actions .btn { min-height: 36px; padding: 0 2px; border: 0; background: none; box-shadow: none; color: var(--sub); font: 500 14px/1.2 var(--body); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--hairline); position: relative; }
 @media (pointer: coarse) { .composer.pa-on .composer-actions .btn::before { content: ''; position: absolute; left: -6px; right: -6px; top: 50%; height: 44px; transform: translateY(-50%); } }
 .pa-note { margin: 2px 2px 6px; font: 400 13px/1.35 var(--body); color: var(--ink); }
@@ -380,7 +381,8 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 #session-reader.pa-beside #session-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; column-gap: 16px; align-content: start; }
 #session-reader.pa-beside #session-body > * { grid-column: 1; }
 #session-reader.pa-beside #session-body > .pa-card { grid-column: 2; grid-row: 1 / span 99; align-self: start; position: sticky; top: 8px; margin: 4px 0 0; padding: 10px 12px; }
-#session-reader.pa-beside .pa-card .pa-title { white-space: normal; display: block; }
+#session-reader.pa-beside .pa-card .pa-title { white-space: normal; flex-wrap: wrap; column-gap: 5px; }
+#session-reader.pa-beside .pa-card .pa-art { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 #session-reader.pa-beside .pa-card .pa-exp-r, #session-reader.pa-beside .pa-card .pa-ch-in, #session-reader.pa-beside .pa-card .pa-phone { display: none; }
 #session-reader.pa-beside .pa-card .pa-does { white-space: normal; }
 #session-reader.pa-beside .pa-card .pa-facts { display: block; }
