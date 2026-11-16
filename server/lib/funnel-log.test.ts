@@ -155,7 +155,7 @@ describe('the meeting assistant text at the parser limits (7.0.52, Q1 15:06)', (
   it('stays within askChars; rows and the industry list give way while the disagreement and "This question asks for" lines stay whole', () => {
     // with a Tableau sheet for other days and SBU named, the mismatch and BU lines are in the head too: the most the kept lines can be
     for (const [facts_, groups] of [[null, null], [facts(), [group('SBU')]]] as const) {
-      const { text } = funnelLogForAsk(maxed(), 'leads, opps, demos and customers by lead source and rep, SQLs and conversion', facts_, groups)
+      const { text } = funnelLogForAsk(maxed(), 'leads, opps, demos and customers by lead source and rep, SQLs and conversion', facts_, groups ? [...groups] : null)
       expect(text.length).toBeLessThanOrEqual(FUNNEL_LOG_LIMITS.askChars)
       expect(text).toMatch(/^Salesforce, queried live through Coefficient/)
       const lines = text.split('\n')

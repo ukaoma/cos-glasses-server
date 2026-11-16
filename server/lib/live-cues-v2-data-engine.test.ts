@@ -30,7 +30,7 @@ describe('the Tableau data arm in the engine', () => {
   let logged: Array<Record<string, unknown>>
   let judged: string[][]
   let judgedNotes: Array<Array<{ id: string; title: string; notes: string }>>
-  let sfKeys: string[]
+  let sfKeys: Array<string | undefined>
   let systems: string[]
   let prompts: string[]
   let factsCalls: number
