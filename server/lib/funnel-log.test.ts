@@ -174,6 +174,26 @@ describe('the meeting assistant text at the parser limits (7.0.52, Q1 15:06)', (
     short.rows = Array.from({ length: FUNNEL_LOG_LIMITS.maxRows }, (_, i) => ({ ...rawFunnelLog().rows[0], industry: `Industry${String(i).padStart(2, '0')}` }))
     expect(funnelLogForAsk(log(short), 'how many opps came from leads created this month', null, null).text).toMatch(/\n\d+ more industries are not shown here\.\n/)
   })
+  // Q1 15:32: the order among the lines that give way. Rows before notes; the elsewhere line before notes; reading order kept.
+  it('rows are kept before notes: an every-stage question at the limits keeps rows and no note', () => {
+    const lines = funnelLogForAsk(maxed(), 'leads, opps, demos and customers', null, null).text.split('\n')
+    expect(lines.filter(l => l.startsWith('ind')).length).toBeGreaterThan(0)
+    expect(lines.filter(l => l.startsWith('Note: '))).toHaveLength(0)
+  })
+  it('the elsewhere line is kept before notes: one industry asked at the limits keeps it', () => {
+    const ind = maxed().rows[0].industry
+    const lines = funnelLogForAsk(maxed(), `${ind} opps`, null, null).text.split('\n')
+    expect(lines.some(l => l.startsWith('Elsewhere in the log they disagree on '))).toBe(true)
+    expect(lines.filter(l => l.startsWith('Note: ')).length).toBeLessThan(FUNNEL_LOG_LIMITS.maxNotes)
+  })
+  it('reading order: the disagreement line, then the elsewhere line, then the notes', () => {
+    const lines = funnelLogForAsk(log(), 'liquor opps', null, null).text.split('\n')
+    const dis = lines.findIndex(l => l.startsWith('Tableau and Salesforce disagree on: ')), els = lines.findIndex(l => l.startsWith('Elsewhere in the log '))
+    const note = lines.findIndex(l => l.startsWith('Note: '))
+    expect(dis).toBeGreaterThan(0)
+    expect(els).toBeGreaterThan(dis)
+    expect(note).toBeGreaterThan(els)
+  })
 })
 
 describe('the meeting assistant text', () => {
