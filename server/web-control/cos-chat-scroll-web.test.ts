@@ -180,3 +180,122 @@ describe('COS chat scroll ownership', () => {
     expect(css).toMatch(/\.cc-latest[^}]*min-height:\s*44px/s)
   })
 })
+
+// 7.0.52 (Miles 14:52): Back from a reader that "Open result" opened returns to the COS chat where he tapped, not to
+// the newest line. Any other way back into the chat is as before: it follows the newest line.
+describe('Back from Open result keeps his place in the COS chat', () => {
+  const SID = '019a7b2c-3d4e-7f60-8a1b-2c3d4e5f6a7b'
+  const item = { id: 'fi_r', kind: 'ping', threadId: 'fi_r', createdAt: '2026-11-16T20:49:05.000Z', readAt: null, source: 'cos', title: 'Reply ready',
+    line: 'Codex has a reply ready.', links: [{ kind: 'session', id: SID, label: 'Fix the importer', provider: 'codex' }],
+    actions: [{ id: 'open_result', label: 'Open result' }], state: 'live', key: `agent:${SID}:turn:${'a'.repeat(64)}` }
+  function trip(wide: boolean) {
+    const h = fixture(wide), W = h.win.COSWeb, hooks: Function[] = [], went: unknown[] = []
+    W.onRoute = (fn: Function) => hooks.push(fn)
+    W.go = (pane: string, args: string[]) => went.push([pane, args])
+    // Every scroll position written, so a test can say the newest line was never visited on the way back.
+    const writes: number[] = []
+    const d = Object.getOwnPropertyDescriptor(h.scroll, 'scrollTop')!
+    Object.defineProperty(h.scroll, 'scrollTop', { get: d.get, set(y: number) { writes.push(y); d.set!.call(h.scroll, y) }, configurable: true })
+    // Which scroller moves: from 860 px the chat column, below it the page.
+    const pageBy: number[] = [], pageBy0 = h.win.scrollBy
+    h.win.scrollBy = (x: number, y: number) => { pageBy.push(y); pageBy0(x, y) }
+    // The card sits 900 px down the chat: its distance from the top of the view moves with the scroll.
+    const card = { getBoundingClientRect: () => ({ top: 900 - h.scroll.scrollTop }) }
+    const original = h.host.querySelector
+    h.host.querySelector = (s: string) => s === '[data-item-id="fi_r"]' ? card : original(s)
+    Object.assign(h.chat._state, { caps: { jobs: true, dropIt: true }, feedMode: 'drop', feedState: 'ready', items: [item] })
+    const target = wide ? h.feed : h.win
+    const to = (pane: string, args: string[]) => { h.route.pane = pane; h.route.args.splice(0, h.route.args.length, ...args); return { pane, args } }
+    const readBack = () => { h.emit(target, 'wheel', { deltaY: -200 }); h.scroll.scrollTop = 600; h.emit(target, 'scroll') }
+    const tapOpen = () => h.chat.onClick({ getAttribute: (k: string) => (({ 'data-cos': 'act', 'data-item': 'fi_r', 'data-act': 'open_result' }) as Record<string, string>)[k] ?? null })
+    // What app.js does on each address: the pane loads first (the chat mounts), then the route hooks run.
+    const arrive = async (pane: string, args: string[]) => {
+      const r = to(pane, args)
+      if (pane === 'messages') h.chat.mount(h.host, true)
+      hooks.forEach(fn => fn(r))
+      await flush(); h.layout()
+    }
+    return { h, card, went, readBack, tapOpen, arrive, pageBy, writes, bottom: () => h.scroll.scrollHeight - 500 }
+  }
+  for (const wide of [true, false]) {
+    const label = wide ? 'wide feed' : 'narrow page'
+    it(`${label}: Open result, then Back: the tapped card is where it was, not the newest line`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+      t.readBack()
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+      t.tapOpen()
+      expect(t.went).toEqual([['sessions', ['codex', SID]]])
+      await t.arrive('sessions', ['codex', SID])
+      t.h.scroll.scrollTop = 0   // the reader scrolled the page (narrow) or nothing moved (wide)
+      t.pageBy.length = 0; t.writes.length = 0
+      await t.arrive('messages', ['cos'])
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+      expect(t.writes.filter(y => y >= t.bottom()), 'never at the newest line on the way back').toEqual([])
+      if (wide) expect(t.pageBy, 'the wide chat scrolls its own column, never the page').toEqual([])
+      else expect(t.pageBy.length, 'the narrow chat scrolls the page').toBeGreaterThan(0)
+      // And it stays: a later paint does not pull him to the newest line.
+      t.h.chat._paintFeed(false); t.h.layout()
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+    })
+    it(`${label}: a reader reached any other way: back in the chat, it follows the newest line as before`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack()
+      await t.arrive('sessions', [])
+      await t.arrive('sessions', ['codex', SID])
+      await t.arrive('messages', ['cos'])
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+    })
+    it(`${label}: Open result, then somewhere else before the chat: the place is dropped`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      await t.arrive('today', [])
+      await t.arrive('messages', ['cos'])
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+    })
+    it(`${label}: Open result, then Back after more than 30 minutes: the newest line`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      t.h.chat._state.returnTo.at -= 30 * 60000 + 1
+      await t.arrive('messages', ['cos'])
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+    })
+    it(`${label}: the tapped card is gone by the time he is back: the newest line, quietly (no older questions, no notice)`, async () => {
+      const t = trip(wide), toasts: string[] = []
+      t.h.win.COSWeb.toast = (s: string) => toasts.push(s)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      t.h.host.querySelector = ((orig: Function) => (s: string) => s === '[data-item-id="fi_r"]' ? null : orig(s))(t.h.host.querySelector)
+      await t.arrive('messages', ['cos'])
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+      expect(t.h.chat._state.archiveOpen).toBe(false)
+      expect(toasts).toEqual([])
+    })
+    // Only from 860 px: below it #/messages is the list and the chat is not shown there (messages.js chatShown).
+    if (wide) it(`${label}: back at another address of the chat than the one he tapped from: the newest line`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      t.h.route.pane = 'messages'; t.h.route.args.splice(0, t.h.route.args.length)
+      t.h.chat.mount(t.h.host, true); await flush(); t.h.layout()
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+    })
+    it(`${label}: tapped from a card's own address (a notification link): Back keeps his place, not that card centred`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos', 'fi_r'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      t.h.scroll.scrollTop = 0
+      await t.arrive('messages', ['cos', 'fi_r'])
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+    })
+  }
+})

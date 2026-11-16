@@ -132,8 +132,8 @@ describe('Open result on an item stored before 7.0.52 (no provider field)', () =
     expect(h.tap(oldItem('Claude has a reply ready.', IDS.claude))).toEqual(['sessions', ['claude', IDS.claude]])
     expect(h.tap(oldItem('Codex has a reply ready.', IDS.codex))).toEqual(['sessions', ['codex', IDS.codex]])
     expect(h.tap(oldItem('Cursor has a reply ready.', IDS.cursor))).toEqual(['sessions', ['cursor', IDS.cursor]])
-    expect(h.tap(oldItem('Codex finished the import.', IDS.codex))).toEqual(['sessions', ['codex', IDS.codex]])
-    expect(h.tap(oldItem('Cursor stopped on the import. It needs a look.', IDS.cursor))).toEqual(['sessions', ['cursor', IDS.cursor]])
+    expect(h.tap(oldItem('Codex finished the import.', IDS.codex, { title: 'the import' }))).toEqual(['sessions', ['codex', IDS.codex]])
+    expect(h.tap(oldItem('Cursor stopped on the import. It needs a look.', IDS.cursor, { title: 'the import' }))).toEqual(['sessions', ['cursor', IDS.cursor]])
   })
 })
 
@@ -149,6 +149,17 @@ describe('Open result never guesses a provider: it keeps the old tap (the Sessio
     expect(h.tap(oldItem('Claude has a reply ready. And more.'))).toEqual(LIST)
     expect(h.tap(oldItem('claude has a reply ready.'))).toEqual(LIST)
     expect(h.tap(oldItem('I think Claude has a reply ready.'))).toEqual(LIST)
+  })
+  it('by kind (the Mac\'s rule too): a Reply ready item takes only its exact sentence; any other only finished or stopped', () => {
+    const h = load()
+    // A Reply ready item whose line reads like a finished one, and a finished item whose line reads like Reply ready.
+    expect(h.tap(oldItem('Claude finished the migration.'))).toEqual(LIST)
+    expect(h.tap(oldItem('Claude stopped on it. It needs a look.'))).toEqual(LIST)
+    expect(h.tap(oldItem('Claude has a reply ready.', IDS.claude, { title: 'the import' }))).toEqual(LIST)
+    expect(h.tap(oldItem('Claude finished the import.', IDS.claude, { title: 'the import' }))).toEqual(['sessions', ['claude', IDS.claude]])
+    // A finished or stopped item names its provider first, and only one the reader serves.
+    for (const line of ['Grok finished the import.', 'Your agent stopped on the import. It needs a look.', 'I think Claude finished the import.', 'Then Codex stopped on it.'])
+      expect(h.tap(oldItem(line, IDS.claude, { title: 'the import' }))).toEqual(LIST)
   })
   it('an item whose key names another session, or that is not a COS item', () => {
     const h = load()

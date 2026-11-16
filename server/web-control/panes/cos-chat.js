@@ -399,9 +399,13 @@
     }
     if (!visible) { stopFollowing(); return; }
     var feed = host.querySelector('[data-cos-feed]');
-    if (!TAIL || TAIL.feed !== feed || !TAIL.active) { watchTail(feed); followLatest(); }
     var route = W.parseRoute(), routeItem = route.args[0] === 'cos' ? route.args[1] || '' : '';
-    if (TAIL && TAIL.routeItem !== routeItem) {
+    // 7.0.52: back from a reader Open result opened, the chat goes to where he tapped. It never scrolls to the newest
+    // line on the way, not even for a moment: the tapped card is put back where it was by showFocusItem.
+    var back = takeReturn(route);
+    if (!TAIL || TAIL.feed !== feed || !TAIL.active) { watchTail(feed); if (back) { TAIL.active = true; TAIL.following = false; } else followLatest(); }
+    if (back) TAIL.routeItem = routeItem;
+    else if (TAIL && TAIL.routeItem !== routeItem) {
       TAIL.routeItem = routeItem;
       // Notification links name a feed card, never HTML or a selector. The normal feed/archive reads resolve it.
       if (/^[A-Za-z0-9_.:-]{1,160}$/.test(routeItem)) { C.focusItem = routeItem; TAIL.following = false; }
@@ -577,13 +581,39 @@
   // word in the server's own fixed line stands in, only on a COS agent item whose key names that session. Anything else
   // keeps the old tap (the list). Never a guessed provider: a wrong one opens the wrong session or none.
   var RESULT_PROVIDERS = { claude: 'claude', codex: 'codex', cursor: 'cursor' };
-  var RESULT_LINE = /^(Claude|Codex|Cursor) (?:has a reply ready\.$|finished |stopped on )/;
+  // A Reply ready item falls back only on its exact sentence; any other agent item only on "finished" or "stopped on"
+  // (D4 15:2x: the Mac's rule is the same, so the two can never open different sessions for one item).
+  var RESULT_READY = /^(Claude|Codex|Cursor) has a reply ready\.$/, RESULT_DONE = /^(Claude|Codex|Cursor) (?:finished |stopped on )/;
   function resultSession(item, link) {
     if (!link || typeof link.id !== 'string' || !link.id) return null;
     if (link.provider !== undefined) return Object.prototype.hasOwnProperty.call(RESULT_PROVIDERS, link.provider) ? [RESULT_PROVIDERS[link.provider], link.id] : null;
     if (item.source !== 'cos' || String(item.key || '').indexOf('agent:' + link.id + ':') !== 0) return null;
-    var m = RESULT_LINE.exec(String(item.line || ''));
+    var m = (item.title === 'Reply ready' ? RESULT_READY : RESULT_DONE).exec(String(item.line || ''));
     return m ? [m[1].toLowerCase(), link.id] : null;
+  }
+  // 7.0.52 (Miles 14:52): Back from a reader that Open result opened returns to this chat where he tapped, not to the
+  // newest line (the chat follows the newest line whenever it is opened). Page memory for that one trip: the tapped
+  // card and its distance from the top of the view. It is used by the next opening of this chat at this same address,
+  // and dropped when he goes anywhere but that reader first, or after 30 minutes. Any other way into a reader is as
+  // before.
+  var RETURN_MS = 30 * 60000, RETURN_LISTENED = false;
+  function routeKey(r) { return r ? r.pane + '/' + (r.args || []).join('/') : ''; }
+  function rememberReturn(item, reader) {
+    var el = C.host && C.host.querySelector('[data-item-id="' + String(item.id).replace(/["\\]/g, '') + '"]');
+    var top = el && el.getBoundingClientRect ? el.getBoundingClientRect().top : null;
+    C.returnTo = { key: routeKey(W.parseRoute()), reader: routeKey({ pane: 'sessions', args: reader }), item: item.id,
+      top: typeof top === 'number' && isFinite(top) ? top : null, at: Date.now() };
+    if (W.onRoute && !RETURN_LISTENED) {
+      RETURN_LISTENED = true;
+      W.onRoute(function (r) { var R = C.returnTo, k = routeKey(r); if (R && k !== R.key && k !== R.reader) C.returnTo = null; });
+    }
+  }
+  function takeReturn(route) {
+    var R = C.returnTo;
+    C.returnTo = null;
+    if (!R || routeKey(route) !== R.key || Date.now() - R.at > RETURN_MS) return false;
+    C.focusItem = R.item; C.focusTop = R.top; C.focusQuiet = true;
+    return true;
   }
   // 7.0.52 (Miles 14:52): a Reply ready card is headed by its session's name, the provider staying in the line under it
   // ("Claude has a reply ready."). The name is read on this page from the session list the shell already keeps
@@ -876,7 +906,8 @@
     observeTail();
     // A note's link asked for a notification card that was filed under the older questions: once they are read, go to it.
     if (C.focusItem && !showFocusItem() && C.feedState === 'ready') {
-      if (!C.archiveOpen) toggleArchive();
+      if (C.focusQuiet) { C.focusItem = ''; C.focusTop = null; C.focusQuiet = false; followLatest(); }
+      else if (!C.archiveOpen) toggleArchive();
       else if (C.archive !== null) { C.focusItem = ''; W.toast('That notification is no longer kept in this chat.'); followLatest(); }
     }
   }
@@ -1673,6 +1704,14 @@
     if (!el) return false;
     C.focusItem = '';
     if (TAIL) TAIL.following = false;
+    // Back from Open result: the card goes back to the same distance from the top of the view it had when he tapped.
+    var top = C.focusTop; C.focusTop = null; C.focusQuiet = false;
+    if (typeof top === 'number' && el.getBoundingClientRect) {
+      var by = el.getBoundingClientRect().top - top;
+      if (wide()) { var feed = C.host.querySelector('[data-cos-feed]'); if (feed) feed.scrollTop += by; }
+      else window.scrollBy(0, by);
+      return true;
+    }
     if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
     return true;
   }
@@ -2240,7 +2279,7 @@
     var linkOf = function (kind) { return (item.links || []).filter(function (l) { return l.kind === kind; })[0]; };
     if (action === 'open_result') {
       var reader = resultSession(item, linkOf('session'));
-      if (reader) return W.go('sessions', reader);
+      if (reader) { rememberReturn(item, reader); return W.go('sessions', reader); }
       return W.go(linkOf('session') ? 'sessions' : linkOf('card') ? 'work' : 'messages');
     }
     if (action === 'open') { if (linkOf('thread')) return W.go('threads'); if (linkOf('meeting')) return W.go('meetings'); return; }
