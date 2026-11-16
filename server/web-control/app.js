@@ -441,7 +441,9 @@
   // The build after 7.0.43 (folded reader item 3, F1's scope): on a folded phone's session reader the conversation area is
   // about 110 px, so the sign-in line (56 px plus its gap) shows there only in the last 2 hours before the end; Today and
   // the other panes keep the 24-hour notice. The Mac-not-answering line is not affected: Submit waits on it.
-  var SIGNIN_WARN_READER_MS = 2 * 3600000, SIGNIN_FOLDED_MQ = '(max-width: 599px)';
+  // 7.0.51 (lead 07:3x, Miles 07:08 "usable on unfolded duo"): any window under 620 px tall too, so the open Duo's reader
+  // (951 x 539, conversation about 59 px) gets those 58 px back. A media list: either condition.
+  var SIGNIN_WARN_READER_MS = 2 * 3600000, SIGNIN_FOLDED_MQ = '(max-width: 599px), (max-height: 619px)';
   function signinWarnMs() {
     try {
       var r = typeof parseRoute === 'function' ? parseRoute() : null;
@@ -4307,8 +4309,8 @@
       if (act === 'copy-session') return copySessionBrief();
       if (act === 'full') { if (SX_SPLIT) SX_SPLIT.toggleFull(); return; }
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
-      if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
-      if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; renderVerdict(rd); return; }
+      if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); if (rd.cautionVia === 'phone') { rd.cautionVia = null; return approveOnPhone(); } return sendSessionTurn(false); }
+      if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; rd.cautionVia = null; renderVerdict(rd); return; }
       if (act === 'turnend' && rd) return sendTurnEndChoice(rd, Number(t.getAttribute('data-i')));
       if (act === 'usage-clear') { SX.uTool = 'All tools'; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
       if (act === 'usage-range') return uOpenRange(t, true);
@@ -4879,6 +4881,7 @@
     r.live.working = working;
     r.live.waiting = !!(t && t.word === 'Waiting');
     if (!working) { r.live.step = null; r.live.prose = null; }
+    if (was !== working && typeof phoneBusyPaint === 'function') phoneBusyPaint(r);   // 7.0.51: the phone action waits while working
     return was !== working;
   }
   /** What the server's write gate said, and when. A free answer clears an earlier busy one. */
@@ -5446,7 +5449,7 @@
     if (fileIds.length && !fork) opts = Object.assign({}, opts || {}, { attachmentIds: fileIds });
     // Control's caution (SessionChatVerdict.caution): another app holds this session and looks
     // idle, so the first send asks before it writes. A fork writes to a copy and never asks.
-    if (!fork && r.verdict && r.verdict.caution && !r.cautionAck) { r.cautionAsk = true; renderVerdict(r); return; }
+    if (!fork && r.verdict && r.verdict.caution && !r.cautionAck) { r.cautionAsk = true; r.cautionVia = 'plain'; renderVerdict(r); return; }
     // One send at a time: Enter submits the form even while Send is disabled, and a second send
     // during the first attach could park the same text in the queue while the first lands.
     if (r.sending) return;
@@ -5647,10 +5650,22 @@
     return view.live() && view.form && view.send && view.form === $(view.prefix + '-form') && view.send === $(view.prefix + '-send');
   }
   function clearPhoneOffer(r, view) {
-    var offer = view.form.querySelector('[data-phone-offer]'), packets = view.form.querySelector('[data-phone-packets]');
+    var form = view.form, offer = form.querySelector('[data-phone-offer]'), packets = form.querySelector('[data-phone-packets]');
     if (offer && offer.parentNode) offer.parentNode.removeChild(offer);
     if (packets && packets.parentNode) packets.parentNode.removeChild(packets);
-    r.phonePackets = {}; r.phonePacketSha256 = ''; r.phoneDraft = null;
+    // 7.0.51: the verified composer and its request card go too, and the form is 7.0.50's again.
+    var card = form.__paCard || $(view.prefix + '-phone-card'), busy = form.querySelector('[data-phone-busy]');
+    if (card && card.parentNode) card.parentNode.removeChild(card);
+    if (busy && busy.parentNode) busy.parentNode.removeChild(busy);
+    if (form.classList && form.classList.contains('pa-on')) {
+      form.classList.remove('pa-on');
+      if (form.__paSendText != null) view.send.textContent = form.__paSendText;
+      if (view.input && form.__paPlaceholder != null) view.input.setAttribute('placeholder', form.__paPlaceholder);
+    }
+    var reader = view.prefix === 'session' ? $('session-reader') : null;
+    if (reader && reader.classList) reader.classList.remove('pa-beside');
+    form.__paCard = null;
+    r.phonePackets = {}; r.phonePacketSha256 = '';
   }
   function refreshWebKeyOffers() {
     if (!webKeyCapable() || WEB_KEY.refreshing) return;
@@ -5669,21 +5684,83 @@
   if (window.addEventListener) window.addEventListener('pageshow', function (e) {
     if (!e || !e.persisted) return;
     var nav = WEB_KEY.navigation; WEB_KEY.navigation = null;
+    if (nav && nav.token.completed) phoneTripDrop();   // this page handles its own trip; a fresh-load record is not needed
     if (nav && nav.token.completed && nav.r.phoneNavigation === nav.token) {
       if (nav.r.sending === nav.token) nav.r.sending = false;
       nav.r.phoneNavigation = null;
     }
     refreshWebKeyOffers();
+    if (nav && nav.token.completed && nav.trip) { phoneCrumb('bfcache', nav); phoneLanded(nav.r, nav.trip); }
   });
-  function phonePacketDetails(p, sha) {
-    return 'Requested ' + p.action + ': ' + p.artifact + ' ' + p.version + '\nChannel: ' + p.channel + '\nDigest: ' + p.digest +
-      '\nReceiver: ' + p.provider + ' / ' + p.sessionId + '\nExpires: ' + new Date(p.exp).toISOString() + '\nPacket: ' + sha +
-      '\nThis request approves nothing until you review it and confirm on the phone.';
+  // 7.0.51 item 6 (W1, lead 06:5x): a Home Screen app may open the approval page OUTSIDE itself, so this page never
+  // leaves and no pageshow ever releases the send. One bounded check: if no pagehide came within PHONE_STAY_MS of the
+  // navigation, release this trip's own busy state (never a newer owner), send one numbers-only row, and read the
+  // turn when the page is next visible. A page that did leave (pagehide, then BFCache or a fresh load) is not touched.
+  var PHONE_STAY_MS = 4000;
+  function phoneCrumb(kind, nav) {
+    if (typeof layoutCrumb !== 'function') return;
+    var standalone = false;
+    try { standalone = (typeof navigator === 'object' && !!navigator && navigator.standalone === true) || !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); } catch (_e) { standalone = false; }
+    layoutCrumb('phone-trip', { case: kind, standalone: standalone, ms: Math.max(0, Date.now() - nav.at), vis: document.visibilityState === 'visible' ? 'v' : 'h' });
+  }
+  function phoneTripWatch(nav) {
+    var left = false;
+    var onHide = function () { left = true; };
+    if (window.addEventListener) window.addEventListener('pagehide', onHide);
+    setTimeout(function () {
+      if (window.removeEventListener) window.removeEventListener('pagehide', onHide);
+      if (left || WEB_KEY.navigation !== nav) return;
+      WEB_KEY.navigation = null;
+      phoneTripDrop();
+      if (nav.r.phoneNavigation === nav.token) { if (nav.r.sending === nav.token) nav.r.sending = false; nav.r.phoneNavigation = null; }
+      phoneCrumb('stayed', nav);
+      var back = function () {
+        if (document.visibilityState !== 'visible') return;
+        document.removeEventListener('visibilitychange', back);
+        phoneLanded(nav.r, nav.trip);
+      };
+      if (document.addEventListener) document.addEventListener('visibilitychange', back);
+    }, PHONE_STAY_MS);
+  }
+  // 7.0.51 (W1, lead 06:5x): back from the approval page, ask the Mac whether that turn landed, by its key.
+  // Landed: its words leave the box (only those words, as a plain Send does). Anything else: the words stay, and
+  // sending again is safe because the phone and Send share one turn key (draftFor), so the Mac takes it once.
+  var PHONE_LANDED = {
+    landed: 'Sent from your phone.',
+    unknown: 'The Mac has no record of that message yet. Your words are still here; sending again will not post twice.',
+    pending: 'Your message from the phone is still on its way. Your words are still here; sending again will not post twice.',
+    refused: 'The Mac did not take the message from your phone. Your words are still here.',
+    unread: 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'
+  };
+  function phoneLanded(r, trip) {
+    var say = trip.view.status;
+    return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(trip.bindingId) + '/turns/' + encodeURIComponent(trip.key), { timeoutMs: 15000 }).then(function (a) {
+      var out = a.body && a.body.outcome;
+      if (a.status === 200 && (out === 'queued' || out === 'completed')) {
+        if (trip.view.prefix === 'session') clearBoxOf(trip.text, r);
+        else {
+          var box = trip.view.input;
+          if (box && box.value.trim() === trip.text) box.value = '';
+          if (r.draft && r.draft.text === trip.text) r.draft = null;
+        }
+        say(PHONE_LANDED.landed); return 'landed';
+      }
+      if (a.status === 404) { say(PHONE_LANDED.unknown); return 'unknown'; }
+      if (a.status === 200 && out === 'pending') { say(PHONE_LANDED.pending); return 'pending'; }
+      if (a.status === 200) { say(PHONE_LANDED.refused, 'error'); return 'refused'; }
+      say(PHONE_LANDED.unread, 'error'); return 'unread';
+    }, function () { say(PHONE_LANDED.unread, 'error'); return 'unread'; });
   }
   function paintWebKeyOffer(r, opts) {
-    if (!webKeyCapable()) return;
     var view = phoneApprovalView(r, opts);
     if (!phoneApprovalViewLive(view)) return;
+    // Before the capability check: his words come back even if phone approval was turned off while he was away.
+    phoneTripRestore(r, opts);
+    if (!webKeyCapable()) return;
+    // 7.0.51 (W1, lead 06:5x): the host is decided before anything is asked or painted. The approval page and its
+    // passkey live only on the Mac's full ts.net name (webKeySetupUrl); anywhere else (a LAN address, 3141, a local
+    // name) there is no phone action at all, and Send is the composer exactly as before.
+    if (!webKeySetupUrl()) return;
     WEB_KEY.views = WEB_KEY.views.filter(function (entry) { return phoneApprovalViewLive(entry.view) && entry.view.form !== view.form; });
     WEB_KEY.views.push({ r: r, opts: opts, view: view });
     var generation = WEB_KEY.generation;
@@ -5702,35 +5779,190 @@
         view.send.parentNode.insertBefore(setup, view.send);
         return;
       }
-      var b = document.createElement('button');
-      b.type = 'button'; b.className = 'btn small'; b.setAttribute('data-phone-offer', '1');
-      b.setAttribute(view.prefix === 'ta' ? 'data-ta' : 'data-action', view.prefix === 'ta' ? 'approve-phone' : 'approve-on-phone');
-      b.title = 'Review an exact request on the approval page, then confirm with your phone passkey';
-      b.textContent = 'Approve on this phone';
-      view.send.parentNode.insertBefore(b, view.send);
+      var go = phoneComposerOn(r, view, opts);
+      phoneBusyApply(r, view);
       return apiAnswer('/api/web-key/packets?provider=' + encodeURIComponent(r.provider) + '&sessionId=' + encodeURIComponent(r.id)).then(function (a) {
-        if (generation !== WEB_KEY.generation || !phoneApprovalViewLive(view) || view.form.querySelector('[data-phone-offer]') !== b) return;
+        if (generation !== WEB_KEY.generation || !phoneApprovalViewLive(view) || view.form.querySelector('[data-phone-offer]') !== go) return;
         var rows = a.status === 200 && a.body && a.body.ok === true && Array.isArray(a.body.packets) ? a.body.packets : [];
         rows = rows.filter(function (row) { var p = row && row.packet; return p && p.provider === r.provider && p.sessionId === r.id &&
           (p.action === 'install' || p.action === 'publish') && Number.isSafeInteger(p.exp) && p.exp >= Date.now() && /^[0-9a-f]{64}$/.test(row.packetSha256 || ''); });
         r.phonePackets = {}; rows.forEach(function (row) { r.phonePackets[row.packetSha256] = row.packet; });
         if (!rows.length) return;
-        var box = document.createElement('div'), label = document.createElement('label'), select = document.createElement('select'), disclosure = document.createElement('details'), summary = document.createElement('summary'), detail = document.createElement('pre');
-        box.className = 'phone-approval-packet'; box.setAttribute('data-phone-packets', '1'); select.id = view.prefix + '-phone-packet'; detail.id = view.prefix + '-phone-details';
-        label.textContent = 'What to approve'; label.setAttribute('for', select.id);
-        var message = document.createElement('option'); message.value = ''; message.textContent = 'Message only — no release approval'; select.appendChild(message);
-        rows.forEach(function (row) { var option = document.createElement('option'), p = row.packet; option.value = row.packetSha256;
-          option.textContent = p.action + ' ' + p.artifact + ' ' + p.version + ' / ' + p.channel; select.appendChild(option); });
-        select.value = r.phonePacketSha256 || '';
-        var update = function () { r.phonePacketSha256 = select.value; var p = r.phonePackets[select.value];
-          detail.textContent = p ? phonePacketDetails(p, select.value) : 'Message only. This authorizes no install, publish or push.';
-          if (p && view.input && !view.input.value.trim()) view.input.value = 'Approve ' + p.action + ' ' + p.artifact + ' ' + p.version + ' on ' + p.channel + '.';
-        };
-        select.addEventListener('change', update); update();
-        summary.textContent = 'Review release request'; disclosure.appendChild(summary); disclosure.appendChild(detail);
-        box.appendChild(label); box.appendChild(select); box.appendChild(disclosure); view.form.insertBefore(box, view.form.firstChild);
-      }, function () { /* No packet is selected implicitly when this read fails. */ });
+        // The newest request is the one shown, in full, and the one Approve carries. It is still only a request: the
+        // approval page shows it exactly and nothing is approved until the phone's passkey confirms it there.
+        rows.sort(function (x, y) { return (Number(y.packet.createdAt) || 0) - (Number(x.packet.createdAt) || 0); });
+        r.phonePacketSha256 = rows[0].packetSha256;
+        var card = phoneRequestCard(view, rows[0].packet, rows.length - 1, phoneEngine(r));
+        view.form.__paCard = card; phoneCardPlace(view, card); phoneFitTitle(card);
+        phoneGoLabel(go, true);
+        if (view.input) view.input.setAttribute('placeholder', 'Add a note');
+        phoneBusyApply(r, view);
+      }, function () { /* No request is shown, and none is carried, when this read fails. */ });
     });
+  }
+  // 7.0.51 item 4 (W1, lead 06:5x): the trip, kept per tab (sessionStorage: gone with the tab, never shared with
+  // another tab) so a FRESH load back from the approval page still has it. One record: the session, the turn key,
+  // the binding and the words. Restored only into that same session (paintWebKeyOffer), never another; dropped
+  // once used, when the BFCache return or the stayed bound handles the trip itself, or past PHONE_TRIP_MAX_MS.
+  var PHONE_TRIP_STORE = 'cos.phoneTrip', PHONE_TRIP_MAX_MS = 30 * 60000;
+  function phoneTripSave(t) { try { sessionStorage.setItem(PHONE_TRIP_STORE, JSON.stringify(t)); } catch (_e) { /* no storage: the BFCache return still works */ } }
+  function phoneTripDrop() { try { sessionStorage.removeItem(PHONE_TRIP_STORE); } catch (_e) { /* nothing kept */ } }
+  function phoneTripRead() {
+    var raw = null, t = null;
+    try { raw = sessionStorage.getItem(PHONE_TRIP_STORE); } catch (_e) { return null; }
+    if (raw == null) return null;
+    try { t = JSON.parse(raw); } catch (_e) { t = null; }
+    var age = t && typeof t.at === 'number' ? Date.now() - t.at : -1;
+    if (!t || t.v !== 1 || typeof t.provider !== 'string' || typeof t.id !== 'string' || typeof t.key !== 'string' || typeof t.bindingId !== 'string'
+      || typeof t.text !== 'string' || !t.text || !(age >= 0 && age <= PHONE_TRIP_MAX_MS)) { phoneTripDrop(); return null; }
+    return t;
+  }
+  // The approval page's Back (X1's contract): history.back() when it can, else this fixed address. It carries
+  // nothing; the session comes from this tab's own record. Rewritten before the first route() (showShell), with
+  // replaceState, so there is no extra history entry and no hashchange.
+  // (Guarded: it runs at load, and the web-control vm harnesses load this file with no location.)
+  if (typeof location === 'object' && location && location.hash === '#/phone-return') {
+    var phoneBack = phoneTripRead();
+    try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/') : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
+  }
+  function phoneTripRestore(r, opts) {
+    var t = phoneTripRead();
+    if (!t || t.provider !== r.provider || t.id !== r.id) return;
+    phoneTripDrop();
+    var view = phoneApprovalView(r, opts);
+    if (!view.input) return;
+    if (!view.input.value.trim()) view.input.value = t.text;
+    if (!r.draft || r.draft.text !== t.text) r.draft = { text: t.text, key: t.key, ids: [] };
+    phoneCrumb('fresh', t);
+    phoneLanded(r, { key: t.key, bindingId: t.bindingId, text: t.text, view: view });
+  }
+  // ── 7.0.51 composer (W1; Miles's go 07:08 on F1's pictures; the lead's choices 07:09) ──
+  // With an enrolled phone key, on the Mac's ts.net name: ONE primary action beside the words, confirmed with the
+  // phone's passkey ("Send" with the key mark; with a request waiting "Approve", "Approve and send" from 600 px), and
+  // the form's own Send becomes the quiet "Send as message only" (the unsigned send: 7.0.50's own path, unchanged).
+  // Enter takes the primary. No key, approvals off or another host: nothing here runs and the composer is 7.0.50's.
+  var PHONE_KEY_SVG = '<svg class="pa-key" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="5" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.2 8h6.3M12.5 8v2.6M14.5 8v1.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  // The approval page's own fixed line per channel: a copy of web-signer/signer-proof.js CHANNEL_EFFECT, never built
+  // from packet text (web-key-handoff-web.test.ts pins the two copies equal).
+  var PHONE_CHANNEL_EFFECT = { 'mac-local': 'Installs on this Mac. No git push.', 'npm-next': 'Publishes to npm under the next tag, from the tested package. No git push.', 'npm-latest': 'Publishes to npm under the latest tag, from the tested package. No git push.', 'control-appcast': 'Pushes ukaoma/cos-starter main (control/appcast.json): the COS Control update feed on gotcos.com.', 'hub-alias': 'Pushes ukaoma/evenhub-g2-cos main: moves the Even Hub alias to this package.', 'gotcos-site': 'Pushes ukaoma/cos-starter main: republishes www.gotcos.com.', 'control-downloads': 'Creates a GitHub Release on ukaoma/cos-starter (a tag, no branch push) with the ZIP and its SHA-256 file.', 'release-docs': 'Pushes ukaoma/cos-starter main (docs/): republishes the public COS docs.' };
+  var PHONE_BESIDE_MIN = 560;
+  function phoneChannelEffect(c) { return typeof c === 'string' && Object.prototype.hasOwnProperty.call(PHONE_CHANNEL_EFFECT, c) ? PHONE_CHANNEL_EFFECT[c] : ''; }
+  function phoneStandardWords(p) { return 'Approve ' + p.action + ' ' + p.artifact + ' ' + p.version + ' on ' + p.channel + '.'; }
+  function phoneEngine(r) { return r.provider === 'codex' ? 'Codex' : r.provider === 'cursor' ? 'Cursor' : 'Claude'; }
+  // 7.0.51 item 3 (W1; lead 06:5x and 07:3x, option A in F1's 2b picture): what the plain Send would park or hold, the
+  // phone path cannot carry yet, so it is decided HERE, before he leaves for the approval page: the primary waits and
+  // says why, and the quiet Send (7.0.50's path) does what it always did. An open end-of-turn question with the
+  // session idle does NOT hold it (lead 07:3x): that is this feature's main use ("install this?"), and a plain turn
+  // to that session is delivered (server/routes/turn-verified-key-route.test.ts, test B). It goes as his exact words,
+  // with no question id and no contract words; the card closes as it does today when the session moves on.
+  function phoneBusyWhy(r, view) {
+    var what = view.form.__paCard ? 'Approve' : 'Send';
+    if ((r.live && r.live.working) || (r.gate && r.gate.busy)) return { copy: phoneEngine(r) + ' is working. ' + what + ' opens when it stops, so your passkey is not spent on a refusal.', queue: true };
+    if (r.held && r.held.some(function (h) { return h && !h.cancelled; })) return { copy: 'A message is waiting to go after this reply. ' + what + ' opens once it has gone.', queue: false };
+    return null;
+  }
+  function phoneBusyApply(r, view) {
+    var go = view.form.querySelector('[data-phone-offer]'); if (!go || !go.classList || !go.classList.contains('pa-go')) return;
+    var why = phoneBusyWhy(r, view), note = view.form.querySelector('[data-phone-busy]');
+    go.disabled = !!why;
+    if (why) {
+      if (!note) {
+        note = document.createElement('p'); note.className = 'pa-note'; note.id = view.prefix + '-phone-busy';
+        note.setAttribute('data-phone-busy', '1'); note.setAttribute('role', 'status');
+        view.form.insertBefore(note, view.form.firstChild);
+      }
+      note.textContent = why.copy; go.setAttribute('aria-describedby', note.id);
+    } else {
+      if (note && note.parentNode) note.parentNode.removeChild(note);
+      go.removeAttribute('aria-describedby');
+    }
+    view.send.textContent = why && why.queue ? 'Queue as message only' : 'Send as message only';
+  }
+  /** Called when a session's working flag changes (sxSettle): repaint its phone action wherever it is shown. */
+  function phoneBusyPaint(r) {
+    WEB_KEY.views.forEach(function (e) { if (e.r === r && phoneApprovalViewLive(e.view) && e.view.form.classList && e.view.form.classList.contains('pa-on')) phoneBusyApply(r, e.view); });
+  }
+  function phoneGoLabel(go, withReq) {
+    go.innerHTML = PHONE_KEY_SVG + (withReq ? '<span class="pa-short">Approve</span><span class="pa-long">Approve and send</span>' : '<span>Send</span>');
+    go.setAttribute('aria-label', withReq ? 'Approve the request and send, confirmed with this phone' : 'Send, confirmed with this phone');
+  }
+  function phoneComposerOn(r, view, opts) {
+    var form = view.form;
+    if (form.__paSendText == null) { form.__paSendText = view.send.textContent; form.__paPlaceholder = view.input ? view.input.getAttribute('placeholder') : null; }
+    form.classList.add('pa-on');
+    var go = document.createElement('button');
+    go.type = 'button'; go.className = 'pa-go'; go.setAttribute('data-phone-offer', '1');
+    go.setAttribute(view.prefix === 'ta' ? 'data-ta' : 'data-action', view.prefix === 'ta' ? 'approve-phone' : 'approve-on-phone');
+    phoneGoLabel(go, false);
+    if (view.input && view.input.parentNode === form) form.insertBefore(go, view.input.nextSibling); else form.appendChild(go);
+    form.__paEntry = { r: r, opts: opts };   // the quiet label and the reason come from phoneBusyApply, called right after
+    if (!form.__paSubmit) {
+      // Enter (requestSubmit with no submitter) takes the primary; the quiet Send as message only is the form's own
+      // submit button and goes to 7.0.50's handler untouched.
+      form.__paSubmit = function (e) {
+        if (!form.classList.contains('pa-on')) return;
+        if (e.submitter && e.submitter.id === view.prefix + '-send') return;
+        e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        var cur = form.__paEntry; if (cur) approveOnPhone(Object.assign({}, cur.opts || {}, { r: cur.r }));
+      };
+      form.addEventListener('submit', form.__paSubmit);
+    }
+    return go;
+  }
+  function phoneSpan(cls, text) { var e = document.createElement('span'); e.className = cls; e.textContent = text; return e; }
+  // F1's final numbers (07:3x, Miles 07:14 "Build it"): one card, three forms chosen by CSS (cos-chat.css):
+  //   phone:  the title on one line; the channel line; "mac-local, expires 7:12 AM" (no "asked by").
+  //   docked (600 px up, the reader under 560): the title with "expires 7:12 AM" at the right; "channel line · mac-local".
+  //   beside (the reader 560 px up): the title may wrap; the channel line; "mac-local · asked by this Claude session · expires 7:12 AM".
+  function phoneRequestCard(view, p, more, engine) {
+    var card = document.createElement('section'), l1 = document.createElement('div'), title = document.createElement('h3'), does = document.createElement('p'), facts = document.createElement('p');
+    card.className = 'pa-card'; card.id = view.prefix + '-phone-card'; card.setAttribute('data-phone-card', '1');
+    card.setAttribute('aria-label', 'Release request waiting for your approval');
+    var when = '';
+    try { when = new Date(p.exp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (_e) { when = ''; }
+    l1.className = 'pa-l1'; title.className = 'pa-title';
+    title.appendChild(phoneSpan('pa-act', p.action.charAt(0).toUpperCase() + p.action.slice(1)));
+    title.appendChild(phoneSpan('pa-mono pa-art', p.artifact));
+    title.appendChild(phoneSpan('pa-mono pa-ver', p.version));
+    l1.appendChild(title);
+    if (when) l1.appendChild(phoneSpan('pa-exp-r', 'expires ' + when));
+    does.className = 'pa-does';
+    does.appendChild(phoneSpan('pa-does-t', phoneChannelEffect(p.channel) || 'Channel ' + p.channel + '.'));
+    does.appendChild(phoneSpan('pa-ch-in', ' · ' + p.channel));
+    facts.className = 'pa-facts';
+    facts.appendChild(phoneSpan('pa-ch', p.channel));
+    if (when) facts.appendChild(phoneSpan('pa-phone', ', expires ' + when));
+    facts.appendChild(phoneSpan('pa-wide', ' · asked by this ' + engine + ' session' + (when ? ' · expires ' + when : '')));
+    card.appendChild(l1); card.appendChild(does); card.appendChild(facts);
+    if (more > 0) { var m = document.createElement('p'); m.className = 'pa-more'; m.textContent = more === 1 ? 'One more request is waiting after this one.' : more + ' more requests are waiting after this one.'; card.appendChild(m); }
+    return card;
+  }
+  // The phone title stays on ONE line: the mono steps down 0.5 px at a time from 12.5 to 10.5, then only the artifact
+  // takes an ellipsis (CSS), never the version. A layout read, at paint and when the reader's width changes.
+  function phoneFitTitle(card) {
+    var t = card && card.querySelector ? card.querySelector('.pa-title') : null;
+    if (!t || !t.style || typeof t.scrollWidth !== 'number') return;
+    t.style.removeProperty('--pa-mono');
+    for (var fs = 12.5; fs >= 10.5 && t.scrollWidth > t.clientWidth + 0.5; fs -= 0.5) t.style.setProperty('--pa-mono', fs + 'px');
+  }
+  // Phones and narrow readers: above the words, in the dock, always in view. A reader at least PHONE_BESIDE_MIN wide
+  // (desktop, the open Duo with the list hidden): beside the conversation, and the words keep the full width.
+  // The page never hides the list by itself.
+  function phoneCardPlace(view, card) {
+    if (view.prefix !== 'session') { if (view.form.parentNode && card.parentNode !== view.form.parentNode) view.form.parentNode.insertBefore(card, view.form); return; }
+    var reader = $('session-reader'), body = $('session-body'), chat = view.form.parentNode;
+    var wide = !!(reader && body && reader.clientWidth >= PHONE_BESIDE_MIN);
+    if (reader && reader.classList) reader.classList.toggle('pa-beside', wide);
+    if (wide) { if (card.parentNode !== body) body.insertBefore(card, body.firstChild); }
+    else if (chat && card.parentNode !== chat) chat.insertBefore(card, chat.firstChild);
+    if (reader && !reader.__paRo && typeof ResizeObserver === 'function') {
+      // Fold, unfold, Hide list: the reader's own width decides again. No timer; the observer lives with the reader.
+      reader.__paRo = new ResizeObserver(function () {
+        var c = $('session-phone-card'), f = $('session-form');
+        if (c && f && f.classList.contains('pa-on')) { phoneCardPlace({ prefix: 'session', form: f }, c); phoneFitTitle(c); }
+      });
+      reader.__paRo.observe(reader);
+    }
   }
   // Only the signer on this same host, port 3144, path /, with nothing but the handoff id in the fragment.
   function webKeySignerUrlOk(u) {
@@ -5741,17 +5973,34 @@
   }
   function approveOnPhone(opts) {
     opts = opts || {};
-    var r = opts.r || state.reading; if (!r || r.sending) return Promise.resolve('busy');
+    var r = opts.r || state.reading; if (!r) return Promise.resolve('busy');
     var view = phoneApprovalView(r, opts), say = view.status;
+    if (r.sending) { if (view.live()) say('A send is already on its way. Wait for it to land, then try again.'); return Promise.resolve('busy'); }
+    // 7.0.51: no attach and no server handoff off the Mac's ts.net name (the button is not painted there either).
+    if (!webKeySetupUrl()) { say('Approval on the phone works only when Control is open at your Mac’s Tailscale name. Send still works here.', 'error'); return Promise.resolve('host'); }
     if (!view.live()) return Promise.resolve('stale');
     var input = view.input, text = input ? input.value.trim() : '';
-    if (!text) { say('Write a message first.', 'error'); return Promise.resolve('empty'); }
-    if (view.files() !== 'none') { say(WEB_KEY_COPY.attachments_not_signable, 'error'); return Promise.resolve('files'); }
     var provider = r.provider, id = r.id, packetSha = r.phonePacketSha256 || '';
     var packet = packetSha && r.phonePackets && r.phonePackets[packetSha];
     if (packetSha && (!packet || packet.exp < Date.now() || packet.provider !== provider || packet.sessionId !== id)) { say('That release request expired or changed. Reopen this session to load its current request.', 'error'); return Promise.resolve('packet'); }
-    var draft = r.phoneDraft;
-    if (!draft || draft.text !== text || draft.packetSha256 !== packetSha) draft = r.phoneDraft = { text: text, key: newTurnKey(), packetSha256: packetSha };
+    // 7.0.51 (lead 07:09, choice 2): with a request, an empty box sends the standard words, which the approval page
+    // shows exactly before he signs; anything he types is his own note instead.
+    if (!text && packet) text = phoneStandardWords(packet);
+    if (!text) { say('Write a message first.', 'error'); return Promise.resolve('empty'); }
+    if (view.files() !== 'none') { say(WEB_KEY_COPY.attachments_not_signable, 'error'); return Promise.resolve('files'); }
+    // 7.0.51 item 3: decided before he leaves; nothing is attached, opened or spent.
+    var why = view.form ? phoneBusyWhy(r, view) : null;
+    if (why) { say(why.copy, 'error'); if (view.form.querySelector) phoneBusyApply(r, view); return Promise.resolve('waits'); }
+    // The caution (another app holds this session and looks idle) is ASKED first, exactly as Send asks it; its own
+    // Send anyway then continues here (cautionVia), and Cancel sends nothing.
+    if (r.verdict && r.verdict.caution && !r.cautionAck) {
+      if (typeof opts.askCaution === 'function') opts.askCaution();
+      else { r.cautionAsk = true; r.cautionVia = 'phone'; if (typeof renderVerdict === 'function') renderVerdict(r); }
+      return Promise.resolve('caution');
+    }
+    // 7.0.51 (W1): the SAME draft and turn key a plain Send of these words uses (no files: the phone path refuses
+    // them above). A phone-only key let a verified message and a Send of the same words both land.
+    var draft = draftFor(text, r, []);
     var bound = bindingFor(provider, id);
     // Other senders assign boolean true. This unique truthy owner lets late callbacks and a BFCache return
     // release only this phone operation, never a newer ordinary send or another phone operation.
@@ -5773,14 +6022,19 @@
       if (!b) { say('COS cannot write to this session right now.', 'error'); return 'refused'; }
       var request = { bindingId: b.bindingId, epoch: b.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key, prompt: draft.text };
       if (packetSha) request.packetSha256 = packetSha;
+      // A changed session's box is up: approving now is his Send anyway, so its revision goes with it (lead 07:3x).
+      if (r.sendAnyway) request.acknowledgedRevision = r.sendAnyway;
       return apiAnswer('/api/web-key/handoff', { method: 'POST', timeoutMs: 15000, body: request }).then(function (h) {
         if (!ownsSending() || !phoneApprovalViewLive(view)) return 'stale';
         var body = h.body || {};
         if (h.status === 201 && body.ok === true && webKeySignerUrlOk(body.signerUrl)) {
           say('Opening the approval page.');
           location.assign(body.signerUrl);
+          // After the call: a navigation that throws keeps no record. Script runs on after assign, so this lands first.
+          phoneTripSave({ v: 1, provider: provider, id: id, key: draft.key, bindingId: b.bindingId, text: draft.text, at: Date.now() });
           operation.completed = true;
-          WEB_KEY.navigation = { r: r, token: operation };
+          WEB_KEY.navigation = { r: r, token: operation, at: Date.now(), trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
+          phoneTripWatch(WEB_KEY.navigation);
           return 'opened';
         }
         if (h.status === 201) { say('Open Control from your Mac’s Tailscale name to approve on this phone.', 'error'); return 'refused'; }

@@ -336,10 +336,55 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
   .att-composer > textarea { flex: 1 1 100%; }
 }
 .att-composer .att-files.hidden { display: none; }
-.phone-approval-packet { flex: 1 1 100%; min-width: 0; }
-.phone-approval-packet label { display: block; font-size: 13px; margin-bottom: 4px; }
-.phone-approval-packet select { width: 100%; max-width: 100%; font: inherit; color: inherit; background: var(--card, transparent); }
-.phone-approval-packet pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.4 ui-monospace, monospace; max-height: 11rem; overflow-y: auto; margin: 6px 0; }
+/* 7.0.51 (W1, F1's design, Miles's go 07:08): the verified composer. Only with an enrolled phone key on the Mac's
+   ts.net name (app.js adds .pa-on); without it every rule below matches nothing and the composer is 7.0.50's.
+   One primary beside the words; the quiet row holds Send as message only (the form's own Send) and Fork. */
+/* A wrapping flex row (never a grid that pins buttons beside the box: duo-composer-layout.test.ts). Row one is the
+   words and the primary (F1: the box flex 1 1 0, width 0; the primary beside it); the files, the reason line and the
+   quiet row each take a full line. */
+.composer.pa-on { flex-wrap: wrap; align-items: flex-end; column-gap: 8px; }
+.composer.pa-on > .att-files, .composer.pa-on > .ta-files, .composer.pa-on > .pa-note { flex: 1 1 100%; }
+.composer.pa-on > .pa-note { order: -1; }
+.composer.pa-on > textarea { flex: 1 1 0; width: 0; min-width: 0; min-height: 44px; max-height: 120px; }
+.composer.pa-on > .pa-go { flex: none; }
+.composer.pa-on > .composer-actions { flex: 1 1 100%; justify-content: flex-start; align-items: center; gap: 18px; margin-left: 0; flex-wrap: wrap; min-height: 36px; }
+.pa-go { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--accent); color: var(--on-accent); font: 600 15px/1 var(--body); cursor: pointer; }
+.pa-go .pa-key { width: 15px; height: 15px; flex: none; }
+.pa-go:disabled { opacity: 0.45; cursor: default; }
+.pa-go .pa-long { display: none; }
+.composer.pa-on .composer-actions .btn { min-height: 36px; padding: 0 2px; border: 0; background: none; box-shadow: none; color: var(--sub); font: 500 14px/1.2 var(--body); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--hairline); position: relative; }
+@media (pointer: coarse) { .composer.pa-on .composer-actions .btn::before { content: ''; position: absolute; left: -6px; right: -6px; top: 50%; height: 44px; transform: translateY(-50%); } }
+.pa-note { margin: 2px 2px 6px; font: 400 13px/1.35 var(--body); color: var(--ink); }
+/* The request: fully readable, never behind a disclosure. F1's final numbers (07:3x). Phones (under 600 px): three
+   lines above the words, about 72 px. Docked (600 px up, the reader under 560): two lines, about 53 px. Beside (the
+   reader 560 px up): 300 px wide next to the conversation. */
+.pa-card { box-sizing: border-box; border: 1px solid var(--accent); border-radius: 10px; padding: 7px 10px; margin: 0 0 6px; background: var(--panel); color: var(--ink); }
+.pa-card .pa-l1 { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.pa-card .pa-title { margin: 0; flex: 1 1 auto; display: flex; align-items: baseline; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; font: 600 14px/1.35 var(--body); }
+.pa-card .pa-act, .pa-card .pa-ver { flex: none; }
+.pa-card .pa-mono { font: 600 var(--pa-mono, 12.5px)/1.35 var(--mono); }
+.pa-card .pa-art { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pa-card .pa-exp-r { flex: none; font: 400 12.5px/1.35 var(--body); color: var(--sub); }
+.pa-card .pa-does { margin: 1px 0 0; font: 400 13.5px/1.35 var(--body); }
+.pa-card .pa-facts, .pa-card .pa-more { margin: 1px 0 0; font: 400 12.5px/1.35 var(--body); color: var(--sub); overflow-wrap: anywhere; }
+.pa-card .pa-exp-r, .pa-card .pa-ch-in, .pa-card .pa-wide { display: none; }
+@media (min-width: 600px) {
+  .pa-go .pa-short { display: none; }
+  .pa-go .pa-long { display: inline; }
+  .pa-card .pa-exp-r { display: inline; }
+  .pa-card .pa-does { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pa-card .pa-ch-in { display: inline; color: var(--sub); }
+  .pa-card .pa-facts { display: none; }
+}
+/* Beside the conversation when the reader is at least 560 px wide; the words keep the full width. */
+#session-reader.pa-beside #session-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; column-gap: 16px; align-content: start; }
+#session-reader.pa-beside #session-body > * { grid-column: 1; }
+#session-reader.pa-beside #session-body > .pa-card { grid-column: 2; grid-row: 1 / span 99; align-self: start; position: sticky; top: 8px; margin: 4px 0 0; padding: 10px 12px; }
+#session-reader.pa-beside .pa-card .pa-title { white-space: normal; display: block; }
+#session-reader.pa-beside .pa-card .pa-exp-r, #session-reader.pa-beside .pa-card .pa-ch-in, #session-reader.pa-beside .pa-card .pa-phone { display: none; }
+#session-reader.pa-beside .pa-card .pa-does { white-space: normal; }
+#session-reader.pa-beside .pa-card .pa-facts { display: block; }
+#session-reader.pa-beside .pa-card .pa-wide { display: inline; }
 .composer-actions:has([data-phone-offer]) { flex-wrap: wrap; }
 .att-clip, .ta-clip { display: inline-flex; gap: 6px; }
 .att-clip:empty { display: none; }
