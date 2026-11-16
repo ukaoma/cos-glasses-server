@@ -33,7 +33,7 @@ export const ORIGIN = `https://${SELF_DNS}:3144`
 /** An anchor registered 25 hours before the fixed test clock (1_786_000_000_000): past its 24 h maturity. */
 export const MATURE_ANCHOR_SET_AT = 1_786_000_000_000 - 25 * 3_600_000
 /** Integrity on and passing (review W1). */
-export const INTEGRITY_OK: IntegrityReport = Object.freeze({ enabled: true, lastCheckOk: true, checkedAt: 1_786_000_000_000, manifestSha256: 'a'.repeat(64) }) as IntegrityReport
+export const INTEGRITY_OK: IntegrityReport = Object.freeze({ enabled: true, lastCheckOk: true, checkedAt: 1_786_000_000_000, manifestSha256: 'a'.repeat(64), signerManifestSha256: 'b'.repeat(64) }) as IntegrityReport
 
 // Every phone key gets one companion passkey key (the WebAuthn credential bound in its approval).
 const passkeys = new WeakMap<TestKey, TestKey>()

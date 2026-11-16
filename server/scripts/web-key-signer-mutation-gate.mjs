@@ -25,8 +25,9 @@ const APT = ['server/lib/web-key-signer-app.test.ts']
 const HOT = ['server/lib/web-key-handoff.test.ts']
 const CMT = ['server/web-control/web-key-handoff-web.test.ts']
 const HLT = ['server/routes/health-web-key-signer.test.ts']
-const ALL = [...PRT, ...PGT, ...APT, ...HOT, ...CMT, ...HLT]
-const PROOF = 'server/web-signer/signer-proof.js', PAGE = 'server/web-signer/signer.js', SAPP = 'server/lib/web-key-signer-app.ts'
+const AUT = ['server/lib/web-key-authority.test.ts']
+const ALL = [...PRT, ...PGT, ...APT, ...HOT, ...CMT, ...HLT, ...AUT]
+const PROOF = 'server/web-signer/signer-proof.js', PAGE = 'server/web-signer/signer.js', SAPP = 'server/lib/web-key-signer-app.ts', AUTH = 'server/lib/web-key-authority.ts'
 const HAND = 'server/lib/web-key-handoff.ts', WKR = 'server/routes/web-key.ts', HEALTH = 'server/routes/health.ts', APP = 'server/web-control/app.js'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 const drop = (name, file, line, tests) => m(name, file, [line, ''], tests)
@@ -109,6 +110,11 @@ const mutations = [
   m('composer-url-no-query', APP, ["&& !x.search && /^#h=", '&& /^#h='], CMT),
   m('composer-url-fragment-id', APP, ["/^#h=[A-Za-z0-9_-]{16,64}$/.test(x.hash);", 'true;'], CMT),
   m('composer-files-refused', APP, ["    if (view.files() !== 'none') { say(WEB_KEY_COPY.attachments_not_signable, 'error'); return Promise.resolve('files'); }", "    if (false) { say(WEB_KEY_COPY.attachments_not_signable, 'error'); return Promise.resolve('files'); }"], CMT),
+  // X1 G1 (lead 06:5x): the approval page's manifest hash in the report and the proof.
+  m("g1-signer-hash-omitted", SAPP, [", signerManifestSha256: signer ? signer.manifestSha256 : null }", " }"], APT),  // G1: carries the SIGNER tree
+  m("g1-control-hash-in-place", SAPP, [", signerManifestSha256: signer ? signer.manifestSha256 : null }", ", signerManifestSha256: webControl.manifestSha256 }"], APT),  // G1: carries the SIGNER tree
+  m("g1-disk-at-report", SAPP, [", signerManifestSha256: signer ? signer.manifestSha256 : null }", ", signerManifestSha256: signer ? (process as any).getBuiltinModule('node:crypto').createHash('sha256').update((process as any).getBuiltinModule('node:fs').readFileSync((signer as any).dir + '/.manifest.json')).digest('hex') : null }"], APT),  // G1: the hash is the one the served bytes were checked against
+  m("g1-integritynow-drops", AUTH, [", signerManifestSha256: report.signerManifestSha256 ?? null } }", " } }"], AUT),  // G1: the signer manifest hash is in the proof
 ]
 
 const args = process.argv.slice(2)

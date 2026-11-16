@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 // 6.99.31 Phase 3: what the 3144 signer listener serves (lib/web-key-signer-app.ts), over a real HTTP
 // listener: the strict headers on every answer, only manifest-verified signer bytes, and an /api
 // allowlist that keeps every other app route (transcripts, meetings, memories) off this origin.
@@ -166,10 +167,37 @@ describe('the /api allowlist', () => {
 describe('combinedIntegrityReport (review W1 with the signer)', () => {
   const st = (ok: boolean) => ({ state: { ok, error: null, mismatches: [], checkedAt: 5 }, manifestSha256: 'a'.repeat(64) })
   it('passes only when both trees pass; Control Web integrity off is null as before', () => {
-    expect(combinedIntegrityReport(st(true), st(true))).toEqual({ enabled: true, lastCheckOk: true, checkedAt: 5, manifestSha256: 'a'.repeat(64) })
+    expect(combinedIntegrityReport(st(true), st(true))).toEqual({ enabled: true, lastCheckOk: true, checkedAt: 5, manifestSha256: 'a'.repeat(64), signerManifestSha256: 'a'.repeat(64) })
     expect(combinedIntegrityReport(st(true), st(false))?.lastCheckOk).toBe(false)
     expect(combinedIntegrityReport(st(false), st(true))?.lastCheckOk).toBe(false)
     expect(combinedIntegrityReport(st(true), null)?.lastCheckOk).toBe(false)
     expect(combinedIntegrityReport(null, st(true))).toBeNull()
+  })
+
+  // X1 G1 (lead 06:5x): the approval page's own manifest hash travels in the report, so a verifier can hold it against
+  // the signed Control app's pin. Additive: an older verifier ignores the field.
+  it('G1: carries the SIGNER tree\'s manifest hash, never the Control Web one; no signer tree is null', () => {
+    const control = { state: { ok: true, error: null, mismatches: [], checkedAt: 5 }, manifestSha256: 'c'.repeat(64) }
+    const signer = { state: { ok: true, error: null, mismatches: [], checkedAt: 5 }, manifestSha256: 'e'.repeat(64) }
+    const report = combinedIntegrityReport(control, signer)!
+    expect(report.manifestSha256).toBe('c'.repeat(64))
+    expect(report.signerManifestSha256).toBe('e'.repeat(64))
+    expect(combinedIntegrityReport(control, null)!.signerManifestSha256).toBeNull()
+    expect(combinedIntegrityReport(control, { ...signer, manifestSha256: null })!.signerManifestSha256).toBeNull()
+  })
+
+  it('G1: the hash is the one the served bytes were checked against (read at boot), not the manifest file on disk now', () => {
+    const d = copySigner()
+    try {
+      const signerIntegrity = new WebControlIntegrity(d, quiet)
+      signerIntegrity.check()
+      const atBoot = createHash('sha256').update(readFileSync(join(d, WEB_CONTROL_MANIFEST_FILE))).digest('hex')
+      const control = { state: { ok: true, error: null, mismatches: [], checkedAt: 5 }, manifestSha256: 'c'.repeat(64) }
+      expect(combinedIntegrityReport(control, signerIntegrity)!.signerManifestSha256).toBe(atBoot)
+      // A manifest rewritten on disk after boot changes nothing that is served (the bytes were checked against the boot
+      // manifest), so the report must keep naming the boot manifest, never the file as it is now.
+      writeFileSync(join(d, WEB_CONTROL_MANIFEST_FILE), JSON.stringify({ v: 1, algorithm: 'sha256', files: {} }))
+      expect(combinedIntegrityReport(control, signerIntegrity)!.signerManifestSha256).toBe(atBoot)
+    } finally { rmSync(d, { recursive: true, force: true }) }
   })
 })

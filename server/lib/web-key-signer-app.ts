@@ -79,10 +79,13 @@ export const SIGNER_PAUSED_PAGE = '<!doctype html><html lang="en"><head><meta ch
  * vouched only while BOTH the Control Web tree and the signer tree match their manifests. Null while
  * Control Web integrity is off (`integrity_off`, as before). The shape is the contract's, unchanged.
  */
-export function combinedIntegrityReport(webControl: Pick<WebControlIntegrity, 'state' | 'manifestSha256'> | null, signer: Pick<WebControlIntegrity, 'state'> | null): IntegrityReport | null {
+export function combinedIntegrityReport(webControl: Pick<WebControlIntegrity, 'state' | 'manifestSha256'> | null, signer: Pick<WebControlIntegrity, 'state' | 'manifestSha256'> | null): IntegrityReport | null {
   if (!webControl) return null
   const signerOk = signer !== null && signer.state.ok === true
-  return { enabled: true, lastCheckOk: webControl.state.ok === true && signerOk, checkedAt: webControl.state.checkedAt || null, manifestSha256: webControl.manifestSha256 }
+  // X1 G1: the signer tree's manifest hash as read at boot (WebControlIntegrity.manifestSha256), the manifest its served
+  // bytes were checked against. Never re-read from disk here: a manifest file rewritten after boot changes nothing that
+  // is served, so naming it would describe bytes the phone never got.
+  return { enabled: true, lastCheckOk: webControl.state.ok === true && signerOk, checkedAt: webControl.state.checkedAt || null, manifestSha256: webControl.manifestSha256, signerManifestSha256: signer ? signer.manifestSha256 : null }
 }
 
 export interface WebKeySignerDeps {

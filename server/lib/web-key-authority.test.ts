@@ -485,6 +485,25 @@ describe('W1 integrity: authority on with integrity off or failing vouches nothi
     expect(authority.recheck(r.proof, WORDS, '')).toBe('integrity_failed')
     expect(authority.review(r.proof, REC).reason).toBe('integrity_failed')
   })
+  // X1 G1 (lead 06:5x): the approval page's manifest hash is recorded at accept and reported now, so the verifier can
+  // hold both against the signed Control app's pin for the installed server version.
+  it('G1: the signer manifest hash is in the proof at accept and in the review facts (now and at accept)', () => {
+    const r = authority.accept(candidate(good()), ctx())
+    if (!r.ok) throw new Error(r.reason)
+    expect(r.proof.integrity.signerManifestSha256).toBe('b'.repeat(64))
+    integrity = { ...INTEGRITY_OK, signerManifestSha256: 'd'.repeat(64) }
+    const facts = authority.review(r.proof, REC).facts!
+    expect((facts.integrity as IntegrityReport).signerManifestSha256).toBe('d'.repeat(64))
+    expect((facts.integrityAtAccept as IntegrityReport).signerManifestSha256).toBe('b'.repeat(64))
+  })
+  it('G1: a report without the field (an older wiring) records null, never a value from elsewhere', () => {
+    const { signerManifestSha256: _omit, ...older } = INTEGRITY_OK
+    integrity = older as IntegrityReport
+    const r = authority.accept(candidate(good()), ctx())
+    if (!r.ok) throw new Error(r.reason)
+    expect(r.proof.integrity.signerManifestSha256).toBeNull()
+    expect(r.proof.integrity.manifestSha256).toBe('a'.repeat(64))
+  })
 })
 
 describe('B3 the turn answer compares the ledger record with the envelope (record relabelling)', () => {
