@@ -1113,6 +1113,20 @@ describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about i
     expect(TA).toContain("askCaution: function () { if (O.r !== r) return; O.cautionAsk = true; O.cautionVia = 'phone';")
     expect(TA).toContain("if (what === 'caution-cancel') { O.cautionAsk = false; O.cautionVia = null; return paintVerdict(); }")
   })
+  it('F1 08:0x: with a request card up, the reader\'s own placeholder logic says Add a note; the beside title keeps its gaps; Send as message only comes first', async () => {
+    // The reader's placeholder painter (app.js, at the Mac's prompt) yields to the card.
+    expect(APP).toContain("var phNote = typeof phoneBoxPlaceholder === 'function' ? phoneBoxPlaceholder() : '';")
+    expect(APP).toContain("box.phLong = phNote || (te ? 'Or write your own answer'")
+    expect(APP).toContain("box.phShort = phNote ? '' : open && !te ? 'Message (not an answer)' : '';")
+    const h = harness({ signer: 1, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
+    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+    expect((h.input as any).phLong).toBe('Add a note')
+    h.pageShow(); await flush()                  // revoked or re-read: the reader's own words come back
+    const CSS = readFileSync(join(HERE, 'panes', 'cos-chat.css'), 'utf8')
+    expect(CSS).toContain('#session-reader.pa-beside .pa-card .pa-title { white-space: normal; flex-wrap: wrap; column-gap: 5px; }')
+    expect(CSS).not.toMatch(/pa-beside \.pa-card \.pa-title \{[^}]*display: block/)
+    expect(CSS).toContain('.composer.pa-on .composer-actions [data-action="fork-session"] { order: 1; }')
+  })
   it('the reader repaints the phone action when working changes: one call, in sxSettle, after the flag is set', () => {
     const settle = APP.slice(APP.indexOf('  function sxSettle(r) {'), APP.indexOf('  function sxNoteGate(r, busy)'))
     expect(settle.split('phoneBusyPaint(r)').length - 1).toBe(1)
