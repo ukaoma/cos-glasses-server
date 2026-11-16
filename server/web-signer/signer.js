@@ -52,13 +52,15 @@
   // The way back (W1's return contract, 7.0.51): one fixed address on this page's own host, Control's port. It names
   // nothing (no handoff, words, session, turn or outcome); Control finds its place from its own per-tab record.
   function controlUrl() { return 'https://' + W.location.hostname + ':3143/control/#/phone-return' }
-  /** A real tap only, never a timer or a redirect: back in history (Control's page as he left it), else REPLACE this page. */
+  /**
+   * A real tap only, never a timer or a redirect. Always REPLACE this page with Control's return address, never
+   * history.back(): Control Web sends Referrer-Policy: no-referrer on /control (server/index.ts), so this page can never
+   * show the previous history entry is Control, and back could land anywhere (a Safari tab's history, a Home Screen
+   * sheet). Control's per-tab trip record restores the session and the words on that load (W1, #/phone-return).
+   */
   function goBack(ev) {
     if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()
     if (!ev || ev.isTrusted !== true) return undefined
-    try {
-      if (W.history && W.history.length > 1) { W.history.back(); return undefined }
-    } catch (_e) { /* fall through to the fixed address */ }
     W.location.replace(controlUrl())
     return undefined
   }
