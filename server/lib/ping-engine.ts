@@ -50,18 +50,8 @@ export interface PingState {
   replies?: HeldReply[]
 }
 
-/**
- * 7.0.52 B: is a held reply still news, from what the hooks last said about its session? Gone (no signal) or ended: no. A turn
- * that started after the reply ended (he answered, here or at the desk): no. Otherwise yes. Waits, asks and failures never get
- * this far: session-reply-pings.ts blocks them before a Reply ready is made.
- */
-export function replyStillNewFromSignal(signal: { ended: unknown; turnStartedAt: number | null } | undefined, reply: Pick<HeldReply, 'at'>): boolean {
-  if (!signal || signal.ended) return false
-  return !(typeof signal.turnStartedAt === 'number' && signal.turnStartedAt > reply.at)
-}
-
-/** A Reply ready item waiting for the merged banner: its feed id, its session, the provider from the link, when it ended, its line. */
-export interface HeldReply { feedId: string; sessionId: string; provider?: SessionLinkProvider; at: number; line: string }
+/** A Reply ready item waiting for the merged banner: its feed id and key, its session, the provider from the link, when it ended, its line. */
+export interface HeldReply { feedId: string; key: string; sessionId: string; provider?: SessionLinkProvider; at: number; line: string }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 
@@ -82,9 +72,9 @@ function parseState(raw: unknown): PingState {
   if (Array.isArray(raw.replies)) {
     const replies: HeldReply[] = []
     for (const r of raw.replies.slice(-PING_STATE_LIMITS.replies)) {
-      if (!isRecord(r) || typeof r.feedId !== 'string' || typeof r.sessionId !== 'string' || !r.sessionId || typeof r.at !== 'number' || !Number.isFinite(r.at) || typeof r.line !== 'string') continue
+      if (!isRecord(r) || typeof r.feedId !== 'string' || typeof r.key !== 'string' || typeof r.sessionId !== 'string' || !r.sessionId || typeof r.at !== 'number' || !Number.isFinite(r.at) || typeof r.line !== 'string') continue
       const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(r.provider) ? r.provider as SessionLinkProvider : undefined
-      replies.push({ feedId: r.feedId, sessionId: r.sessionId, ...(provider ? { provider } : {}), at: r.at, line: r.line })
+      replies.push({ feedId: r.feedId, key: r.key, sessionId: r.sessionId, ...(provider ? { provider } : {}), at: r.at, line: r.line })
     }
     if (replies.length) state.replies = replies
   }
@@ -191,11 +181,6 @@ export interface PingEngineDeps {
   enabled?: () => readonly PingSource[]
   /** 6.99.11 settings. When given, they decide the budget, quiet hours, sources, check-in, steer and banners. */
   settings?: () => P2Settings
-  /**
-   * 7.0.52 B: at the merged banner's release, is this held reply still news? False drops it (the session ended or is gone, or
-   * a newer turn started there after the reply, so he has answered). Absent, or throwing: kept.
-   */
-  replyStillNew?: (reply: HeldReply) => boolean
 }
 
 export interface PingTickResult { posted: number; held: number; released: number; expired: number; banners: number }
@@ -253,8 +238,9 @@ export class PingEngine {
    * - Quiet hours (and weekends when quiet): no banner now or later; what waited is already in the chat. Replies that arrive in
    *   quiet hours never get here: they are held for the "While you were off" item as before.
    * - The gap is measured from the last merged reply banner only (a clock that went back waits for at most one gap).
-   * - At release each waiting reply is re-checked (replyStillNew): a session that ended or is gone, or where a newer turn started,
-   *   is dropped. Zero left: no banner.
+   * - At release a reply whose item is no longer in the chat (purged) is dropped; several replies of one session count once.
+   *   Zero left: no banner. Not tonight (the lead, 16:42; a named 7.0.53 follow-up): a re-check against the session's state, so a
+   *   reply he has already answered at the desk can still be announced.
    * - Title and line, which the Mac banner shows: one session "Reply ready" and its own line ("Claude has a reply ready."); several
    *   "N sessions replied" and "N sessions have a reply ready." Never a title or reply text.
    */
@@ -266,7 +252,7 @@ export class PingEngine {
     const last = state.ledger.reduce((m, b) => (b.replies === true ? Math.max(m, b.at) : m), -Infinity)
     if (nowMs - last < budget.gapMs) return null
     delete state.replies
-    const live = held.filter(r => { try { return this.deps.replyStillNew ? this.deps.replyStillNew(r) !== false : true } catch { return true } })
+    const live = held.filter(r => this.deps.feed.hasKey(r.key))
     if (!live.length) return false
     const sessions = distinctSessions(live.map(r => ({ id: r.sessionId, provider: r.provider })))
     const n = sessions.length
@@ -339,7 +325,7 @@ export class PingEngine {
         for (const p of replies) {
           const link = p.candidate.links.find(l => l.kind === 'session' && !!l.id)!
           const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(link.provider) ? link.provider : undefined
-          held.push({ feedId: p.feedId, sessionId: link.id, ...(provider ? { provider } : {}), at: p.candidate.createdAt, line: p.candidate.line })
+          held.push({ feedId: p.feedId, key: p.candidate.key, sessionId: link.id, ...(provider ? { provider } : {}), at: p.candidate.createdAt, line: p.candidate.line })
         }
         state.replies = held.slice(-PING_STATE_LIMITS.replies); changed = true
       }

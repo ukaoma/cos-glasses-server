@@ -15,7 +15,7 @@ import { request } from 'node:https'
 import { createHash } from 'node:crypto'
 import { b64u, encryptPushMessage, vapidAuthorization } from './web-push-crypto.js'
 import type { BannerSession, PingBanner } from './ping-engine.js'
-import { sessionTitleFor } from './session-title-cache.js'
+import { sessionTitleExact } from './session-title-cache.js'
 import { isAllowedPushEndpoint, type WebPushStore } from './web-push-store.js'
 import { SESSION_LINK_PROVIDERS } from './drop-store.js'
 
@@ -132,15 +132,16 @@ export const REPLY_TITLE_CHARS = 60
 const PROVIDER_WORD: Record<string, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' }
 /**
  * A session title as the lock screen may show it. The title is session-written text (a first prompt or a title a session set),
- * so: C0 and C1 controls, line and paragraph separators become spaces; bidi controls and zero-width characters are removed (they
- * can reorder or hide text); ** and backticks are dropped; whitespace collapses; then at most REPLY_TITLE_CHARS code points,
+ * so: C0 and C1 controls, line and paragraph separators become spaces; bidi controls (with U+061C), zero-width and other invisible
+ * characters (soft hyphen, U+180E, U+2060 to U+2064, U+FFF9 to U+FFFB, the tag block U+E0000 to U+E007F) are removed (they can
+ * reorder or hide text; X1 16:4x); ** and backticks are dropped; whitespace collapses; then at most REPLY_TITLE_CHARS code points,
  * the last one an ellipsis when cut, so no surrogate pair is split. Empty means no title.
  */
 function lockScreenTitle(raw: string | null): string {
   if (typeof raw !== 'string') return ''
   const clean = raw
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu, '')
     .replace(/\*\*|`/g, '')
     .replace(/\s+/g, ' ').trim()
   const points = Array.from(clean)
@@ -177,7 +178,8 @@ export function bannerPayload(banner: PingBanner, origin: string, showWords = fa
 export async function sendBannerPush(store: WebPushStore, banner: PingBanner, deps: { post?: PushPost; nowSeconds?: () => number; titleFor?: (sessionId: string) => string | null } = {}): Promise<void> {
   try {
     const devices = store.devices().filter(d => d.production === true)
-    const titleFor = deps.titleFor ?? sessionTitleFor
+    // X1 16:4x: the exact id only. sessionTitleFor also matches an id prefix, which could name another session.
+    const titleFor = deps.titleFor ?? sessionTitleExact
     await Promise.all(devices.map(d => sendPayload(store, d.id, bannerPayload(banner, d.origin, d.showWords === true, titleFor),
       banner.sources.join(':'), deps)))
   } catch { /* store, crypto and network failures never fail the original ping */ }

@@ -12,6 +12,7 @@ import { isAllowedPushEndpoint, MAX_PUSH_DEVICES, PUSH_DIR_MODE, PUSH_FILE_MODE,
 import { applePushReason, bannerPayload, sendBannerPush, PING_TTL_SECONDS, pingTopic, sendOnePing, VAPID_SUBJECT, type PushPost } from '../lib/web-push-sender.js'
 import { createWebPushRouter, TEST_PING_REFUSED_COPY, webPushEnabled, webPushProductionEnabled } from './web-push.js'
 import { requireApiToken } from '../lib/api-auth.js'
+import { __resetSessionTitlesForTests, noteSessionTitle } from '../lib/session-title-cache.js'
 import { isPublicApiRequest } from '../lib/api-auth.js'
 
 const ORIGIN = 'https://mac-x1.example-tailnet.ts.net:3143'
@@ -205,6 +206,24 @@ describe('X1 web push: one ping', () => {
     expect(r.store.devices()).toHaveLength(1)
     const failing: PushPost = async () => { throw new Error('private URL must not escape') }
     await expect(sendBannerPush(r.store, { ...b, sources: [...b.sources] }, { post: failing })).resolves.toBeUndefined()
+  })
+
+  // 7.0.52 C (X1 16:4x): the phone takes a session's title by its exact id only. The cache's prefix match (for the registry's
+  // 8-character form) would name another session whose longer id starts with this one.
+  it('a Reply ready on a words-on phone names the session by its exact id only, never by a prefix match', async () => {
+    const r = rig()
+    r.store.add({ ...r.p.subscription, origin: ORIGIN, production: true, showWords: true })
+    __resetSessionTitlesForTests()
+    try {
+      noteSessionTitle('cursor-session-ab12cd34-full', 'Another session')
+      const b = { feedIds: ['fi_1'], title: 'Reply ready', line: 'Cursor has a reply ready.', sources: ['agent' as const], exempt: false,
+        replies: true as const, sessions: [{ id: 'cursor-session-ab12', provider: 'cursor' as const }] }
+      await sendBannerPush(r.store, b, { post: r.post })
+      expect(JSON.parse(decrypt(r.sent[0].body, r.p)).notification.body).toBe('Reply ready: session cursor-s (Cursor)')
+      noteSessionTitle('cursor-session-ab12', 'Its own title')
+      await sendBannerPush(r.store, b, { post: r.post })
+      expect(JSON.parse(decrypt(r.sent[1].body, r.p)).notification.body).toBe('Reply ready: Its own title (Cursor)')
+    } finally { __resetSessionTitlesForTests() }
   })
 
   it('opens the relevant pane for session updates and message digests, keeping item IDs inside the route', () => {

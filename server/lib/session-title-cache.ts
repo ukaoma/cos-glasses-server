@@ -35,6 +35,11 @@ export function sessionTitleFor(sessionId: string): string | null {
   return null
 }
 
+/** 7.0.52 C (X1): the title for exactly this session id, or null. Never a prefix match, so it cannot name another session. */
+export function sessionTitleExact(sessionId: string): string | null {
+  return titles.get(sessionId.toLowerCase()) ?? null
+}
+
 export function __resetSessionTitlesForTests(): void {
   titles.clear()
 }

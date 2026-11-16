@@ -1,12 +1,13 @@
 // 7.0.52 B (Miles 16:08 and 16:29, "Everything tonight"; the lead's 16:33 rulings on X1's read): with mergeReplies on, Reply ready
 // pings banner as ONE merged banner at most once per gapMinutes, not counted against the daily or per-source caps (Miles's call);
-// quiet hours and the first banner hold; held replies are persisted, counted by distinct session and re-checked at release (zero
-// left: no banner); "stopped on", finished and reminders are never held. Off by default; off is today's behaviour.
+// quiet hours and the first banner hold; held replies are persisted and counted by distinct session; an item purged from the chat is
+// dropped at release (zero left: no banner); "stopped on", finished and reminders are never held. Off by default; off is today's
+// behaviour. Not tonight (the lead, 16:42): a re-check against the session's state; a named 7.0.53 follow-up.
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PING_STATE_LIMITS, PingEngine, PingStateStore, replyStillNewFromSignal, type HeldReply, type PingBanner, type PingFeedSink, type PingState } from './ping-engine.js'
+import { PING_STATE_LIMITS, PingEngine, PingStateStore, type HeldReply, type PingBanner, type PingFeedSink, type PingState } from './ping-engine.js'
 import { agentCandidate, type PingCandidate } from './ping-sources.js'
 import { normalizeP2Settings, P2_DEFAULTS, type P2Settings } from './drop-p2-settings.js'
 import { taskInstant } from './morning-brief-schedule.js'
@@ -17,22 +18,22 @@ const A = 'aa000000-0000-0000-0000-00000000000a', B = 'bb000000-0000-0000-0000-0
 const reply = (sessionId: string, when: number, provider = 'claude') => agentCandidate({ provider, sessionId, turnEndedAt: when, replyReady: true })!
 const on = (over: Record<string, unknown> = {}) => normalizeP2Settings({ pings: { mergeReplies: true, gapMinutes: 45, ...over }, banners: { agent: true } })
 
-function rig(settings: P2Settings, stillNew?: (r: HeldReply) => boolean) {
+function rig(settings: P2Settings) {
   let state: PingState = { ledger: [], held: [], consumed: [] }
   let n = 0
   const keys = new Set<string>()
   const feed: PingFeedSink = { hasKey: k => keys.has(k), post: c => { keys.add(c.key); return `f${++n}` } }
+  const purge = (c: PingCandidate) => { keys.delete(c.key) }
   const clock = { now: at('10:00') }
   const shown: PingBanner[] = [], phone: PingBanner[] = []
   let set = settings
   const engine = new PingEngine({
     state: { read: () => structuredClone(state), write: s => { state = structuredClone(s) } }, feed, read: async () => ({}),
     banner: b => { shown.push(b) }, phoneBanner: b => { phone.push(b) }, now: () => clock.now, timezone: () => TZ, settings: () => set,
-    ...(stillNew ? { replyStillNew: stillNew } : {}),
   })
   const push = (when: string, ...cs: PingCandidate[]) => { clock.now = at(when); return engine.push(cs) }
   const tick = async (when: string) => { clock.now = at(when); return engine.tick() }
-  return { engine, push, tick, shown, phone, state: () => state, setSettings: (s: P2Settings) => { set = s } }
+  return { engine, push, tick, shown, phone, purge, state: () => state, setSettings: (s: P2Settings) => { set = s } }
 }
 
 describe('mergeReplies off (the default): today\'s behaviour', () => {
@@ -130,23 +131,21 @@ describe('mergeReplies on', () => {
     expect(r.shown).toHaveLength(1)
     expect(r.shown[0]).toMatchObject({ title: 'Reply ready', sessions: [{ id: A, provider: 'claude' }] })
   })
-  it('re-check at release: a dropped session leaves the others; none left means no banner; a throwing check keeps them', async () => {
-    let gone = new Set<string>([B])
-    const r = rig(on(), h => !gone.has(h.sessionId))
+  it('at release an item purged from the chat is dropped; none left means no banner and no ledger record', async () => {
+    const r = rig(on())
+    const b1 = reply(B, at('10:10')), c1 = reply(C, at('10:20')), a2 = reply(A, at('11:00'))
     r.push('10:00', reply(A, at('10:00')))
-    r.push('10:10', reply(B, at('10:10')))
-    r.push('10:20', reply(C, at('10:20')))
+    r.push('10:10', b1)
+    r.push('10:20', c1)
+    r.purge(b1)
     await r.tick('10:45')
     expect(r.shown[1]).toMatchObject({ title: 'Reply ready', sessions: [{ id: C, provider: 'claude' }], feedIds: ['f3'] })
-    r.push('11:00', reply(A, at('11:00')))
-    gone = new Set([A])
+    r.push('11:00', a2)
+    r.purge(a2)
     await r.tick('11:30')
     expect(r.shown).toHaveLength(2)
     expect(r.state().replies).toBeUndefined()
     expect(r.state().ledger.filter(b => b.replies)).toHaveLength(2)   // no record for a banner that was not shown
-    const t = rig(on(), () => { throw new Error('signal store unreadable') })
-    t.push('10:00', reply(A, at('10:00')))
-    expect(t.shown).toHaveLength(1)
   })
   it('switched off while replies wait: they are dropped (they are in the chat), and no merged banner follows', async () => {
     const r = rig(on())
@@ -165,7 +164,7 @@ describe('what is kept on disk', () => {
   const store = () => { const d = mkdtempSync(join(tmpdir(), 'ping-replies-')); roots.push(d); return { d, s: new PingStateStore(join(d, 'pings')) } }
   it('held replies and the merged ledger mark survive a restart; at most PING_STATE_LIMITS.replies, the newest', () => {
     const { d, s } = store()
-    const replies: HeldReply[] = Array.from({ length: PING_STATE_LIMITS.replies + 44 }, (_, i) => ({ feedId: `f${i}`, sessionId: `s${i}`, provider: 'codex', at: at('10:00') + i, line: 'Codex has a reply ready.' }))
+    const replies: HeldReply[] = Array.from({ length: PING_STATE_LIMITS.replies + 44 }, (_, i) => ({ feedId: `f${i}`, key: `agent:s${i}:${i}`, sessionId: `s${i}`, provider: 'codex', at: at('10:00') + i, line: 'Codex has a reply ready.' }))
     s.write({ ledger: [{ at: at('10:00'), sources: ['agent'], ids: ['f0'], replies: true }], held: [], consumed: [], replies }, at('10:00'))
     s.close()
     const again = new PingStateStore(join(d, 'pings'))
@@ -182,17 +181,5 @@ describe('what is kept on disk', () => {
     s.close()
     const files = ['state.json']
     expect(JSON.parse(readFileSync(join(d, 'pings', files[0]), 'utf8'))).toEqual({ version: 1, ledger: [], held: [], consumed: [] })
-  })
-})
-
-describe('the re-check, from the session\'s last hook signal', () => {
-  const r = { at: 1_000 }
-  it('gone or ended: no; a turn that started after the reply: no; otherwise yes', () => {
-    expect(replyStillNewFromSignal(undefined, r)).toBe(false)
-    expect(replyStillNewFromSignal({ ended: { at: 900, reason: 'x' }, turnStartedAt: null }, r)).toBe(false)
-    expect(replyStillNewFromSignal({ ended: null, turnStartedAt: 1_001 }, r)).toBe(false)
-    expect(replyStillNewFromSignal({ ended: null, turnStartedAt: 1_000 }, r)).toBe(true)
-    expect(replyStillNewFromSignal({ ended: null, turnStartedAt: 999 }, r)).toBe(true)
-    expect(replyStillNewFromSignal({ ended: null, turnStartedAt: null }, r)).toBe(true)
   })
 })

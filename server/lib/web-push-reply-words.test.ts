@@ -71,6 +71,11 @@ describe('cleaning the title', () => {
     expect(body('line\none\u2028two\u2029three\r\nfour')).toBe('Reply ready: line one two three four (Claude)')
     expect(body('**Bold** and `code`  ``x``')).toBe('Reply ready: Bold and code x (Claude)')
   })
+  it('other invisible characters (X1 16:4x) are removed too; a title made only of them falls back to the id', () => {
+    expect(body('a\u00adb\u061cc\u180ed\u2060e\u2064f\ufff9g\ufffbh')).toBe('Reply ready: abcdefgh (Claude)')
+    expect(body('ta\u{e0041}\u{e007f}g')).toBe('Reply ready: tag (Claude)')
+    expect(body('\u{e0041}\u{e0042}\u{e007f}')).toBe('Reply ready: session ab12cd34 (Claude)')
+  })
 })
 
 describe('the engine marks a banner whose items are all Reply ready', () => {
