@@ -18,29 +18,44 @@ const flush = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(
 const HOST = 'ukaoma-mac-studio.tail38457f.ts.net'
 
 class El {
-  children: El[] = []; attrs: Record<string, string> = {}; textContent = ''; title = ''; className = ''; type = ''; value = ''
+  children: El[] = []; attrs: Record<string, string> = {}; textContent = ''; title = ''; className = ''; type = ''; value = ''; innerHTML = ''; disabled = false; clientWidth = 0
   parentNode: El | null = null
-  listeners: Record<string, () => void> = {}
+  listeners: Record<string, (e?: any) => void> = {}
   get firstChild() { return this.children[0] ?? null }
-  appendChild(n: El) { n.parentNode = this; this.children.push(n) }
-  addEventListener(k: string, fn: () => void) { this.listeners[k] = fn }
-  constructor(readonly tag: string, readonly id = '') {}
+  get nextSibling() { const p = this.parentNode; if (!p) return null; const i = p.children.indexOf(this); return p.children[i + 1] ?? null }
+  get classList() { const el = this; const list = () => el.className.split(/\s+/).filter(Boolean)
+    return { contains: (c: string) => list().includes(c), add: (c: string) => { if (!list().includes(c)) el.className = [...list(), c].join(' ') },
+      remove: (c: string) => { el.className = list().filter(x => x !== c).join(' ') }, toggle: (c: string, on?: boolean) => { const has = list().includes(c); const want = on === undefined ? !has : on; if (want && !has) el.className = [...list(), c].join(' '); if (!want && has) el.className = list().filter(x => x !== c).join(' '); return want } } }
+  appendChild(n: El) { if (n.parentNode) n.parentNode.children.splice(n.parentNode.children.indexOf(n), 1); n.parentNode = this; this.children.push(n) }
+  addEventListener(k: string, fn: (e?: any) => void) { this.listeners[k] = fn }
+  constructor(readonly tag: string, public id = '') {}
   setAttribute(k: string, v: string) { this.attrs[k] = v }
+  getAttribute(k: string) { return k in this.attrs ? this.attrs[k] : null }
+  removeAttribute(k: string) { delete this.attrs[k] }
   querySelector(sel: string): El | null {
     const m = /^\[([^=\]]+)(?:="([^"]+)")?\]$/.exec(sel)
     const walk = (e: El): El | null => { for (const c of e.children) { if (m && (m[2] === undefined ? m[1] in c.attrs : c.attrs[m[1]] === m[2])) return c; const d = walk(c); if (d) return d } return null }
     return walk(this)
   }
-  insertBefore(n: El, ref: El) { n.parentNode = this; this.children.splice(Math.max(0, this.children.indexOf(ref)), 0, n) }
+  insertBefore(n: El, ref: El | null) {
+    if (n.parentNode) n.parentNode.children.splice(n.parentNode.children.indexOf(n), 1)
+    n.parentNode = this
+    if (ref === null) { this.children.push(n); return }
+    this.children.splice(Math.max(0, this.children.indexOf(ref)), 0, n)
+  }
   removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; hash?: string; trip?: Record<string, unknown> | string; storageThrows?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; readerWidth?: number; hash?: string; trip?: Record<string, unknown> | string; storageThrows?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
-  form.children.push(actions); actions.children.push(send); send.parentNode = actions
+  form.children.push(input, actions); input.parentNode = form; actions.parentNode = form; actions.children.push(send); send.parentNode = actions
+  input.attrs.placeholder = 'Continue this session…'; send.textContent = 'Send'
+  const chat = new El('div', 'chat'); chat.appendChild(form)
   input.value = opts.text ?? 'Yes, go ahead.  '
   const ids: Record<string, El> = { [prefix + '-form']: form, [prefix + '-send']: send, [prefix + '-input']: input }
+  const reader = new El('div', 'session-reader'), body = new El('div', 'session-body')
+  if (opts.readerWidth !== undefined) { reader.clientWidth = opts.readerWidth; ids['session-reader'] = reader; ids['session-body'] = body }
   const requests: Array<{ path: string; body?: any }> = []
   const assigned: string[] = []
   const statuses: Array<[string, string | undefined]> = []
@@ -85,8 +100,8 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   // app.js clearBoxOf: only the very words that were sent leave the box.
   const clearBoxOf = (text: string, rr: any) => { if (rr === state.reading && input.value.trim() === String(text).trim()) input.value = ''; if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null }
   const fns = new Function(
-    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf', 'setTimeout', 'layoutCrumb', 'navigator', 'sessionStorage', 'history',
-    BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
+    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf', 'setTimeout', 'layoutCrumb', 'navigator', 'sessionStorage', 'history', 'turnEndOf', 'readerRowOf',
+    BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, phoneBusyPaint: phoneBusyPaint, CHANNEL: PHONE_CHANNEL_EFFECT, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
   )(
     () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, doc,
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
@@ -94,11 +109,12 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
     (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, hash: opts.hash ?? '', pathname: '/control/', search: '', assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) }, replace: (u: string) => { replaced.push(u) } }, URL, nextKey, window, Clock, clearBoxOf,
     (fn: () => void, ms: number) => { tripTimers.push({ fn, ms, done: false }); return tripTimers.length }, (what: string, data: Record<string, unknown>) => { crumbs.push([what, data]); return true }, { standalone: !!opts.standalone }, sessionStorage, { state: { keep: 1 }, replaceState: (st: unknown, _t: string, u: string) => { expect(st).toEqual({ keep: 1 }); replaced.push(u) } },
-  ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string }
+    (row: any) => (row && row.ask ? row.ask : null), (rr: any) => (rr && rr.row ? rr.row : null),
+  ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string; phoneBusyPaint: (r: unknown) => void; CHANNEL: Record<string, string> }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
   const plainKey = () => fns.draftForPlain(input.value.trim(), r)
-  return { ...fns, r, state, form, input, plainKey, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
+  return { ...fns, r, state, form, input, chat, send, reader, body, plainKey, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
     pageShow: (persisted = true) => { for (const fn of windowListeners.pageshow ?? []) fn({ persisted }) }, advance: (ms: number) => { now += ms },
     pageHide: () => { for (const fn of [...(windowListeners.pagehide ?? [])]) fn({ persisted: true }) },
     tripTimers, crumbs, store, replaced, runTripTimers: () => { for (const t of tripTimers) if (!t.done) { t.done = true; t.fn() } }, runTripTimer: (i: number) => { const t = tripTimers[i]; if (t && !t.done) { t.done = true; t.fn() } },
@@ -140,14 +156,18 @@ describe('flag off: the composer is exactly as before', () => {
 })
 
 describe('flag on with an enrolled phone key', () => {
-  it('adds "Approve on this phone" before Send, once', async () => {
+  // 7.0.51 (Miles's go 07:08 on F1's design): one verified primary beside the words, once; the form's own Send is
+  // the quiet Send as message only. Was: "Approve on this phone" beside Send.
+  it('puts the verified Send beside the words, once, and the form\'s Send becomes Send as message only', async () => {
     const h = harness({ signer: 1 })
     h.paintWebKeyOffer(h.r)
     h.paintWebKeyOffer(h.r)
     await flush()
     const b = h.form.querySelector('[data-action="approve-on-phone"]')
-    expect(b?.textContent).toBe('Approve on this phone')
-    expect(h.form.children[0].children.map(c => c.attrs['data-action'] ?? c.id)).toEqual(['approve-on-phone', 'session-send'])
+    expect(b?.className).toBe('pa-go')
+    expect(h.form.children.map(c => c.attrs['data-action'] ?? c.id ?? c.tag)).toEqual(['session-input', 'approve-on-phone', ''])
+    expect(h.send.textContent).toBe('Send as message only')
+    expect(h.form.classList.contains('pa-on')).toBe(true)
     expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(1)
   })
   it('no enrolled key: setup link instead of an approval button', async () => {
@@ -210,7 +230,8 @@ describe('first phone setup, using the real Sessions and Today offer block', () 
       expect(link).not.toBeNull()
       expect(link.tag).toBe('a')
       expect(link.attrs).toMatchObject({ href: `https://${HOST}:3144/`, target: '_top' })
-      expect(h.form.children[0].children.map(c => c.attrs['data-phone-setup'] ?? c.id)).toEqual(['1', prefix + '-send'])
+      expect(h.form.children[1].children.map(c => c.attrs['data-phone-setup'] ?? c.id)).toEqual(['1', prefix + '-send'])
+      expect(h.form.classList.contains('pa-on')).toBe(false)
       expect(h.form.querySelector('[data-action="approve-on-phone"]')).toBeNull()
       expect(h.form.querySelector('[data-ta="approve-phone"]')).toBeNull()
       expect(h.requests).toEqual([{ path: '/api/web-key/status', body: undefined }])
@@ -225,7 +246,7 @@ describe('first phone setup, using the real Sessions and Today offer block', () 
     it(`${prefix}: an enrolled key offers approval and no setup link`, async () => {
       const h = harness({ signer: 1, activeKeys: 1, prefix })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
       expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
       expect(h.requests.some(q => q.path.startsWith('/api/web-key/packets?'))).toBe(true)
     })
@@ -301,28 +322,74 @@ describe('7.0.51: the host is decided before the phone action is painted or used
     it(`${prefix}: on the Mac's ts.net name the button and the handoff work as before`, async () => {
       const h = harness({ signer: 1, activeKeys: 1, prefix })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
     })
   }
 })
 
 const PACKET = { v: 'cos-web-packet/1', packetId: 'AAECAwQFBgcICQoL', action: 'publish', artifact: '@gotcos/glasses-server', version: '7.0.6', digest: 'sha256:' + 'a'.repeat(64), channel: 'npm-latest', provider: 'claude', sessionId: 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d', createdAt: Date.now(), exp: Date.now() + 1800000 }
-describe('explicit release packet selection', () => {
-  it('lists only this receiving session, shows exact fields and sends the selected hash', async () => {
-    const sha = 'b'.repeat(64)
-    const h = harness({ signer: 1, text: '', packets: [{ packet: PACKET, packetSha256: sha }, { packet: { ...PACKET, sessionId: 'other' }, packetSha256: 'c'.repeat(64) }] })
-    h.paintWebKeyOffer(h.r); await flush()
-    const box = h.form.children.find(c => c.className === 'phone-approval-packet')!
-    const select = box.children.find(c => c.tag === 'select')!
-    expect(select.children).toHaveLength(2)
-    select.value = sha; select.listeners.change()
-    const details = box.children.find(c => c.tag === 'details')!.children.find(c => c.tag === 'pre')!.textContent
-    for (const field of [PACKET.artifact, PACKET.version, PACKET.digest, PACKET.channel, PACKET.sessionId, sha]) expect(details).toContain(field)
-    expect(h.input.value).toContain('Approve publish')
-    expect(await h.approveOnPhone()).toBe('opened')
-    expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body.packetSha256).toBe(sha)
-  })
+describe('the request card (7.0.51; was the explicit packet selection)', () => {
+  const card = (h: any) => [...h.chat.children].find((c: any) => c.attrs['data-phone-card'] === '1')
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: shows only this receiving session's newest request, in full, and Approve carries exactly its hash`, async () => {
+      const sha = 'b'.repeat(64), older = { ...PACKET, version: '7.0.5', createdAt: PACKET.createdAt - 60000 }
+      const h = harness({ signer: 1, prefix, text: '', packets: [{ packet: older, packetSha256: 'e'.repeat(64) }, { packet: PACKET, packetSha256: sha }, { packet: { ...PACKET, sessionId: 'other' }, packetSha256: 'c'.repeat(64) }] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      const c = card(h)
+      expect(c).toBeDefined()
+      expect(h.chat.children.indexOf(c)).toBe(h.chat.children.indexOf(h.form) - 1)
+      const text = (e: any): string => e.textContent + e.children.map(text).join('')
+      const [l1, does, facts, more] = c.children
+      expect(text(l1.children[0])).toBe('Publish' + PACKET.artifact + PACKET.version)
+      expect(l1.children[1].className).toBe('pa-exp-r')
+      expect(l1.children[1].textContent).toMatch(/^expires \d/)
+      expect(does.children.map((e: any) => [e.className, e.textContent])).toEqual([['pa-does-t', h.CHANNEL['npm-latest']], ['pa-ch-in', ' · npm-latest']])
+      expect(facts.children.map((e: any) => e.className)).toEqual(['pa-ch', 'pa-phone', 'pa-wide'])
+      expect(facts.children[1].textContent).toMatch(/^, expires \d/)
+      expect(facts.children[2].textContent).toMatch(/^ · asked by this Claude session · expires \d/)
+      expect(more.textContent).toBe('One more request is waiting after this one.')
+      const go = h.form.querySelector('[data-phone-offer]')!
+      expect(go.innerHTML).toContain('<span class="pa-short">Approve</span><span class="pa-long">Approve and send</span>')
+      expect(go.getAttribute('aria-label')).toBe('Approve the request and send, confirmed with this phone')
+      expect(h.input.getAttribute('placeholder')).toBe('Add a note')
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const post = h.requests.find(q => q.path === '/api/web-key/handoff')!.body
+      expect(post).toMatchObject({ packetSha256: sha, bindingId: 'b-1', targetKey: '6:claude:36:' + PACKET.sessionId })
+      // An empty box sends the standard words, which the approval page shows exactly before he signs.
+      expect(post.prompt).toBe('Approve publish @gotcos/glasses-server 7.0.6 on npm-latest.')
+    })
+    it(`${prefix}: words he types go as his own note, with the same request`, async () => {
+      const sha = 'b'.repeat(64), h = harness({ signer: 1, prefix, text: 'Ship it after the 7:00 check.', packets: [{ packet: PACKET, packetSha256: sha }] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).toMatchObject({ prompt: 'Ship it after the 7:00 check.', packetSha256: sha })
+    })
+    it(`${prefix}: with no request waiting, the verified Send carries no packet and stays message scope`, async () => {
+      const h = harness({ signer: 1, prefix, packets: [] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(card(h)).toBeUndefined()
+      expect(h.form.querySelector('[data-phone-offer]')!.getAttribute('aria-label')).toBe('Send, confirmed with this phone')
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).not.toHaveProperty('packetSha256')
+    })
+    it(`${prefix}: Send as message only is the form's own submit, never taken by the phone path`, async () => {
+      const h = harness({ signer: 1, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      let prevented = 0, stopped = 0
+      h.form.listeners.submit({ submitter: h.send, preventDefault: () => { prevented++ }, stopImmediatePropagation: () => { stopped++ } }); await flush()
+      expect([prevented, stopped]).toEqual([0, 0])
+      expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
+    })
+    it(`${prefix}: Enter (a submit with no submitter) takes the verified primary`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      let prevented = 0, stopped = 0
+      h.form.listeners.submit({ submitter: null, preventDefault: () => { prevented++ }, stopImmediatePropagation: () => { stopped++ } }); await flush()
+      expect([prevented, stopped]).toEqual([1, 1])
+      expect(h.requests.filter(q => q.path === '/api/web-key/handoff')).toHaveLength(1)
+    })
+  }
   it('a stale selected packet fails rather than silently falling back to message authority', async () => {
     const h = harness({ signer: 1 })
     h.r.phonePacketSha256 = 'd'.repeat(64); h.r.phonePackets = {}
@@ -330,27 +397,10 @@ describe('explicit release packet selection', () => {
     expect(h.requests).toEqual([])
     expect(h.assigned).toEqual([])
   })
-  it('a normal note has no packet hash and remains message scope', async () => {
-    const h = harness({ signer: 1, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
-    h.paintWebKeyOffer(h.r); await flush()
-    expect(await h.approveOnPhone()).toBe('opened')
-    expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).not.toHaveProperty('packetSha256')
-  })
-  it('Today-prefix picker sends an explicitly selected publish packet to the same bound receiver', async () => {
-    const sha = 'b'.repeat(64), h = harness({ signer: 1, prefix: 'ta', text: '', packets: [{ packet: PACKET, packetSha256: sha }] })
-    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
-    expect(h.form.querySelector('[data-ta="approve-phone"]')?.textContent).toBe('Approve on this phone')
-    const select = h.form.children.find(c => c.className === 'phone-approval-packet')!.children.find(c => c.tag === 'select')!
-    expect(select.id).toBe('ta-phone-packet')
-    select.value = sha; select.listeners.change()
-    expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
-    expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).toMatchObject({ packetSha256: sha, bindingId: 'b-1', targetKey: '6:claude:36:' + PACKET.sessionId })
-  })
-  it('Today-prefix ordinary note includes no approval packet, even when requests are available', async () => {
-    const h = harness({ signer: 1, prefix: 'ta', packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
-    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
-    expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
-    expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).not.toHaveProperty('packetSha256')
+  it('the channel lines are the approval page\'s own fixed table, copied exactly (web-signer/signer-proof.js)', () => {
+    const SP = readFileSync(join(HERE, '..', 'web-signer', 'signer-proof.js'), 'utf8')
+    const m = /var CHANNEL_EFFECT = (\{[^\n]*\})\n/.exec(SP)!
+    expect(new Function('return ' + m[1])()).toEqual(harness({ signer: 1 }).CHANNEL)
   })
   it('Today-prefix late packet list cannot paint into a closed or replaced overlay', async () => {
     let finish!: (value: any) => void
@@ -358,7 +408,7 @@ describe('explicit release packet selection', () => {
     h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
     h.liveView.active = false
     finish({ status: 200, body: { ok: true, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] } }); await flush()
-    expect(h.form.children.find(c => c.className === 'phone-approval-packet')).toBeUndefined()
+    expect([...h.chat.children].find((c: any) => c.attrs['data-phone-card'])).toBeUndefined()
     expect(await h.approveOnPhone(h.viewOpts)).toBe('stale')
     expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
     expect(h.assigned).toEqual([])
@@ -381,16 +431,18 @@ describe('phone setup and revocation after Safari persisted return', () => {
       opts.activeKeys = 1
       h.pageShow(); await flush()
       expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
-      const box = h.form.querySelector('[data-phone-packets]')!
-      expect(box).not.toBeNull()
-      const select = box.children.find(c => c.tag === 'select')!
-      select.value = 'b'.repeat(64); select.listeners.change()
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
+      // 7.0.51: the request card, not a picker; the newest request is the one shown and carried.
+      expect([...h.chat.children].find((c: any) => c.attrs['data-phone-card'])).toBeDefined()
       expect(h.r.phonePacketSha256).toBe('b'.repeat(64))
       opts.activeKeys = 0
       h.pageShow(); await flush()
       expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
-      expect(h.form.querySelector('[data-phone-packets]')).toBeNull()
+      // Revoked: the card goes and the composer is 7.0.50's again (its Send, its placeholder).
+      expect([...h.chat.children].find((c: any) => c.attrs['data-phone-card'])).toBeUndefined()
+      expect(h.form.classList.contains('pa-on')).toBe(false)
+      expect(h.send.textContent).toBe('Send')
+      expect(h.input.getAttribute('placeholder')).toBe('Continue this session…')
       expect(h.r.phonePacketSha256).toBe('')
       expect(h.r.phonePackets).toEqual({})
       expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(3)
@@ -413,11 +465,11 @@ describe('phone setup and revocation after Safari persisted return', () => {
       const h = harness({ signer: 1, prefix, statusRead: () => ++reads === 1 ? new Promise(resolve => { old = resolve }) : Promise.resolve({ status: 200, body: { ok: true, activeKeys: 1 } }) })
       h.paintWebKeyOffer(h.r, h.viewOpts)
       h.pageShow(); await flush()
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
       old({ status: 200, body: { ok: true, activeKeys: 0 } }); await flush()
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
       expect(reads).toBe(2)
     })
     it(`${prefix}: a late old packet list cannot reappear after revocation`, async () => {
@@ -425,7 +477,7 @@ describe('phone setup and revocation after Safari persisted return', () => {
       const opts = { signer: 1, activeKeys: 1, prefix, packetRead: new Promise(resolve => { old = resolve }) }
       const h = harness(opts)
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
       opts.activeKeys = 0; h.pageShow(); await flush()
       expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
       old({ status: 200, body: { ok: true, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] } }); await flush()
@@ -465,8 +517,8 @@ describe('phone setup and revocation after Safari persisted return', () => {
     h.pageShow(); h.pageShow(); h.pageShow()
     expect(reads).toBe(2)
     finish({ status: 200, body: { ok: true, activeKeys: 1 } }); await flush()
-    expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
-    expect(today.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+    expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
+    expect(today.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
     expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
     expect(today.form.querySelector('[data-phone-setup]')).toBeNull()
     expect(reads).toBe(2)
@@ -481,7 +533,7 @@ describe('phone setup and revocation after Safari persisted return', () => {
     expect(h.requests).toHaveLength(1)
     h.advance(2); h.paintWebKeyOffer(h.r); await flush()
     expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
-    expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+    expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
     expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(2)
   })
 })
@@ -604,7 +656,7 @@ describe('bounded status refresh uses the real apiAnswer transport', () => {
       expect(h.downMarks).not.toContain(false)
       h.pageShow(); await flush()
       expect(reads).toBe(3)
-      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-offer]')?.className).toBe('pa-go')
       expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
       expect(h.timerCount()).toBe(0)
       expect(h.statusTimeouts).toEqual([15000, 15000, 15000])
@@ -935,6 +987,147 @@ describe('7.0.51 item 4: the draft survives the trip, and the return lands in th
     for (const hash of ['', '#/sessions', '#/today', '#/phone-return/x', '#phone-return']) {
       const h = harness({ signer: 1, hash, trip: trip() })
       expect(h.replaced).toEqual([])
+    }
+  })
+})
+
+describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about is decided before he leaves (W1, option A)', () => {
+  const PK = (sha = 'b'.repeat(64)) => [{ packet: PACKET, packetSha256: sha }]
+  const go = (h: any) => h.form.querySelector('[data-phone-offer]')
+  const note = (h: any) => h.form.querySelector('[data-phone-busy]')
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: while the session works, Approve waits and says why, the quiet send queues, and nothing is opened or spent`, async () => {
+      const h = harness({ signer: 1, prefix, packets: PK() })
+      h.r.live = { working: true }
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(go(h).disabled).toBe(true)
+      expect(note(h).textContent).toBe('Claude is working. Approve opens when it stops, so your passkey is not spent on a refusal.')
+      expect(go(h).getAttribute('aria-describedby')).toBe(prefix + '-phone-busy')
+      expect(h.send.textContent).toBe('Queue as message only')
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('waits')
+      expect(h.requests.some(q => /\/attach|\/web-key\/handoff/.test(q.path))).toBe(false)
+      expect(h.assigned).toEqual([])
+      expect(h.r.sending).toBe(false)
+      // It stops working: the repaint (sxSettle) opens it again.
+      h.r.live.working = false; h.phoneBusyPaint(h.r)
+      expect(go(h).disabled).toBe(false)
+      expect(note(h)).toBeNull()
+      expect(go(h).getAttribute('aria-describedby')).toBe(null)
+      expect(h.send.textContent).toBe('Send as message only')
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+    })
+    it(`${prefix}: with no request it is Send that waits, and Codex is named as Codex`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.r.provider = 'codex'; h.r.live = { working: true }
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(note(h).textContent).toBe('Codex is working. Send opens when it stops, so your passkey is not spent on a refusal.')
+    })
+    for (const [name, set, line] of [
+      ['a message held for after the reply', (r: any) => { r.held = [{ text: 'x', key: 'k1' }] }, 'A message is waiting to go after this reply. Send opens once it has gone.'],
+      ['the write gate busy (the server said so)', (r: any) => { r.gate = { busy: true, at: Date.now() } }, 'Claude is working. Send opens when it stops, so your passkey is not spent on a refusal.'],
+    ] as const) {
+      it(`${prefix}: ${name}: the phone send waits with its reason, the quiet send is unchanged`, async () => {
+        const h = harness({ signer: 1, prefix })
+        set(h.r)
+        h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+        expect(go(h).disabled).toBe(true)
+        expect(note(h).textContent).toBe(line)
+        // Working (the gate busy) can wait in line; a hold or a question cannot.
+        expect(h.send.textContent).toBe(name.startsWith('the write gate') ? 'Queue as message only' : 'Send as message only')
+        expect(await h.approveOnPhone(h.viewOpts)).toBe('waits')
+        expect(h.requests.some(q => /\/attach|\/web-key\/handoff/.test(q.path))).toBe(false)
+      })
+    }
+    it(`${prefix}: an open end-of-turn question with the session idle does not hold it: his exact words go, with no question id (lead 07:3x)`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Yes, install it.' })
+      h.r.turnEnd = true; h.r.row = { ask: { q: 'Install @gotcos/glasses-server 7.0.51?' } }
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(go(h).disabled).toBe(false)
+      expect(note(h)).toBeNull()
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const body = h.requests.find(q => q.path === '/api/web-key/handoff')!.body
+      expect(body.prompt).toBe('Yes, install it.')
+      expect(body).not.toHaveProperty('turnEndAskId')
+    })
+    it(`${prefix}: a send already on its way says so in one plain line and opens nothing`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      h.r.sending = true
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('busy')
+      expect(h.statuses.at(-1)?.[0]).toBe('A send is already on its way. Wait for it to land, then try again.')
+      expect(h.requests.some(q => /\/attach|\/web-key\/handoff/.test(q.path))).toBe(false)
+    })
+    it(`${prefix}: the caution is ASKED first (lead 07:3x), nothing is opened until he answers it`, async () => {
+      let asked = 0
+      const h = harness({ signer: 1, prefix })
+      h.r.verdict = { caution: true }
+      const opts = prefix === 'ta' ? { ...h.viewOpts, askCaution: () => { asked++ } } : h.viewOpts
+      h.paintWebKeyOffer(h.r, opts); await flush()
+      expect(go(h).disabled).toBe(false)
+      expect(await h.approveOnPhone(opts)).toBe('caution')
+      if (prefix === 'ta') expect(asked).toBe(1)
+      else expect([h.r.cautionAsk, h.r.cautionVia]).toEqual([true, 'phone'])
+      expect(h.requests.some(q => /\/attach|\/web-key\/handoff/.test(q.path))).toBe(false)
+      h.r.cautionAck = true
+      expect(await h.approveOnPhone(opts)).toBe('opened')
+    })
+    it(`${prefix}: with the changed box up, approving carries its Send anyway revision (lead 07:3x)`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.r.refusal = { changed: true, fork: true }; h.r.sendAnyway = 'rev-0123abcd'
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(go(h).disabled).toBe(false)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body.acknowledgedRevision).toBe('rev-0123abcd')
+    })
+    it(`${prefix}: with no changed box, no revision is carried`, async () => {
+      const h = harness({ signer: 1, prefix })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).not.toHaveProperty('acknowledgedRevision')
+    })
+    it(`${prefix}: a cancelled held message, a closed question and an acknowledged caution do not hold it`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.r.held = [{ text: 'x', key: 'k1', cancelled: true }]; h.r.turnEnd = true; h.r.row = {}; h.r.verdict = { caution: true }; h.r.cautionAck = true
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(go(h).disabled).toBe(false)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+    })
+  }
+  it('one session going busy never greys out another session\'s composer', async () => {
+    const h = harness({ signer: 1 })
+    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+    const other = h.addView('ta'), r2: any = { provider: 'claude', id: 'b5c3c5ee-0000-4000-8000-000000000002', sending: false, draft: null }
+    other.form.children.unshift(Object.assign(new El('textarea', 'ta-input'), { parentNode: other.form }))
+    h.paintWebKeyOffer(r2, other.opts); await flush()
+    h.r.live = { working: true }; h.phoneBusyPaint(h.r)
+    expect(h.form.querySelector('[data-phone-offer]')!.disabled).toBe(true)
+    expect(other.form.querySelector('[data-phone-offer]')!.disabled).toBe(false)
+    expect(other.form.querySelector('[data-phone-busy]')).toBeNull()
+  })
+  it('the caution box continues the send that asked it: the phone path on the phone, the plain Send plain (reader and Today)', () => {
+    expect(APP).toContain("if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); if (rd.cautionVia === 'phone') { rd.cautionVia = null; return approveOnPhone(); } return sendSessionTurn(false); }")
+    expect(APP).toContain("if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; rd.cautionVia = null; renderVerdict(rd); return; }")
+    expect(APP).toContain("r.cautionAsk = true; r.cautionVia = 'plain'; renderVerdict(r); return; }")
+    const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
+    expect(TA).toContain("if (O.cautionVia === 'phone' && O.r && K.approvePhone) { O.cautionVia = null; return K.approvePhone(phoneApprovalOptions(O.r)); }")
+    expect(TA).toContain("O.cautionAsk = true; O.cautionVia = 'plain'; O.armedAt = { caution: Date.now() }; paintVerdict(); return; }")
+    expect(TA).toContain("askCaution: function () { if (O.r !== r) return; O.cautionAsk = true; O.cautionVia = 'phone';")
+    expect(TA).toContain("if (what === 'caution-cancel') { O.cautionAsk = false; O.cautionVia = null; return paintVerdict(); }")
+  })
+  it('the reader repaints the phone action when working changes: one call, in sxSettle, after the flag is set', () => {
+    const settle = APP.slice(APP.indexOf('  function sxSettle(r) {'), APP.indexOf('  function sxNoteGate(r, busy)'))
+    expect(settle.split('phoneBusyPaint(r)').length - 1).toBe(1)
+    expect(settle.indexOf('r.live.working = working;')).toBeLessThan(settle.indexOf('phoneBusyPaint(r)'))
+    expect(settle).toContain("if (was !== working && typeof phoneBusyPaint === 'function') phoneBusyPaint(r);")
+    expect(APP.split('phoneBusyPaint(').length - 1).toBe(2)   // the definition and that one call
+  })
+  it('a reader at least 560 px wide puts the request beside the conversation; a narrower one keeps it above the words', async () => {
+    for (const [w, beside] of [[560, true], [1000, true], [559, false], [470, false]] as const) {
+      const h = harness({ signer: 1, packets: PK(), readerWidth: w })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      const c = (h.form as any).__paCard
+      expect(h.reader.classList.contains('pa-beside')).toBe(beside)
+      expect(c.parentNode === h.body).toBe(beside)
+      expect(c.parentNode === h.chat).toBe(!beside)
     }
   })
 })

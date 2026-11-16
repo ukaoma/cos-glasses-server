@@ -19,18 +19,24 @@ function block(startMark: string, endMark: string): string {
 const CONN = block('  // ── Mac reachability and sign-in lifetime (W1', '  // ── end Mac reachability and sign-in lifetime')
 const H = 3600000
 
-function conn(o: { pane: string; args?: string[]; folded: boolean; up?: boolean; endsIn: number }) {
+// 7.0.51: the window's size, not a flag. folded = the folded Duo (382 x 557); not folded = a tall desktop (1280 x 800),
+// unless a size is given (the open Duo, 951 x 539). The fake evaluates the media list the way the browser does.
+const SIZES = { folded: { w: 382, h: 557 }, tall: { w: 1280, h: 800 }, openDuo: { w: 951, h: 539 } }
+function mq(q: string, s: { w: number; h: number }): boolean {
+  return q.split(',').some(part => { const m = /^\s*\(max-(width|height): (\d+)px\)\s*$/.exec(part); if (!m) throw new Error('unexpected media query: ' + q); return (m[1] === 'width' ? s.w : s.h) <= Number(m[2]) })
+}
+function conn(o: { pane: string; args?: string[]; folded: boolean; size?: { w: number; h: number }; up?: boolean; endsIn: number }) {
   const box = { innerHTML: '', hidden: true }
   const m = new Map<string, string>()
   const route = { pane: o.pane, args: o.args ?? [] }
-  const media = { folded: o.folded }
+  const media: { folded: boolean; size?: { w: number; h: number } } = { folded: o.folded, size: o.size }
   const deps = {
     api: () => Promise.resolve({}), esc, clock: () => 'T', $: (id: string) => (id === 'conn-notice' ? box : null),
     SERVER: { up: o.up ?? true, hooks: [], lastUpAt: 0 }, noteServer() {}, route() {}, document: { hidden: false },
     localStorage: { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, String(v)) }, removeItem: (k: string) => { m.delete(k) } },
     navigator: { onLine: true }, setTimeout: () => 0, clearTimeout() {},
     parseRoute: () => route,
-    matchMedia: (q: string) => ({ matches: q === '(max-width: 599px)' ? media.folded : false }),
+    matchMedia: (q: string) => ({ matches: mq(q, media.size ?? (media.folded ? SIZES.folded : SIZES.tall)) }),
   }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', `with (deps) {\n${CONN}\nreturn { connPaint, signinRemember, signinWarnMs, READER: SIGNIN_WARN_READER_MS, DAY: SIGNIN_WARN_MS };\n}`)(deps)
@@ -54,6 +60,17 @@ describe('the sign-in line on a folded session reader: the last 2 hours only', (
     h.media.folded = false; expect(h.fns.signinWarnMs()).toBe(24 * H)
     h.media.folded = true; h.route.args = []; expect(h.fns.signinWarnMs()).toBe(24 * H)
     h.route.pane = 'today'; h.route.args = READER; expect(h.fns.signinWarnMs()).toBe(24 * H)
+  })
+  it('7.0.51: the open Duo (951 x 539, under 620 px tall) is treated like the folded phone: 2 hours in the reader', () => {
+    expect(conn({ pane: 'sessions', args: READER, folded: false, size: SIZES.openDuo, endsIn: 5 * H }).line()).toBe(false)
+    expect(conn({ pane: 'sessions', args: READER, folded: false, size: SIZES.openDuo, endsIn: 1.5 * H }).line()).toBe(true)
+    // Exactly at the edges: 619 tall counts, 620 does not; 599 wide counts, 600 (tall) does not.
+    expect(conn({ pane: 'sessions', args: READER, folded: false, size: { w: 1280, h: 619 }, endsIn: 5 * H }).line()).toBe(false)
+    expect(conn({ pane: 'sessions', args: READER, folded: false, size: { w: 1280, h: 620 }, endsIn: 5 * H }).line()).toBe(true)
+    expect(conn({ pane: 'sessions', args: READER, folded: false, size: { w: 599, h: 900 }, endsIn: 5 * H }).line()).toBe(false)
+    expect(conn({ pane: 'sessions', args: READER, folded: false, size: { w: 600, h: 900 }, endsIn: 5 * H }).line()).toBe(true)
+    // Today on the open Duo keeps the 24-hour notice: the rule is the reader's only.
+    expect(conn({ pane: 'today', folded: false, size: SIZES.openDuo, endsIn: 5 * H }).line()).toBe(true)
   })
   it('unfolded, the reader keeps the 24-hour notice', () => {
     expect(conn({ pane: 'sessions', args: READER, folded: false, endsIn: 5 * H }).line()).toBe(true)

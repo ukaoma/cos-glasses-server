@@ -602,9 +602,12 @@
     if (what === 'caution-send') {
       // Shown by the Send tap: the same tap twice must not answer it.
       if (!confirmReadyAt(O.armedAt.caution)) return;
-      if (O.r) O.r.cautionAck = true; O.cautionAsk = false; O.armedAt = {}; return sendReply();
+      if (O.r) O.r.cautionAck = true; O.cautionAsk = false; O.armedAt = {};
+      // 7.0.51: the phone path asked it; its Send anyway continues on the phone.
+      if (O.cautionVia === 'phone' && O.r && K.approvePhone) { O.cautionVia = null; return K.approvePhone(phoneApprovalOptions(O.r)); }
+      return sendReply();
     }
-    if (what === 'caution-cancel') { O.cautionAsk = false; return paintVerdict(); }
+    if (what === 'caution-cancel') { O.cautionAsk = false; O.cautionVia = null; return paintVerdict(); }
     if (what === 'send-anyway') { var rev = O.r && O.r.sendAnyway; if (O.r) O.r.sendAnyway = null; return sendReply({ acknowledgedRevision: rev }); }
     if (what === 'more') { var box = $('ta-last-text'); if (box) box.classList.remove('clamped'); b.remove(); }
   }
@@ -965,6 +968,8 @@
   // The same exact packet picker and handoff as Sessions. This does not upgrade an ordinary Send.
   function phoneApprovalOptions(r) {
     return { r: r, prefix: 'ta', live: function () { return O.r === r && !!O.open; },
+      // 7.0.51: the caution is asked in this sheet's own box, and its Send anyway continues on the phone.
+      askCaution: function () { if (O.r !== r) return; O.cautionAsk = true; O.cautionVia = 'phone'; O.armedAt = { caution: Date.now() }; paintVerdict(); },
       status: function (text, kind) { if (O.r === r) { O.note = { text: text, kind: kind || '' }; paintNote(); } },
       files: function () { return filesState(filesBox(r)); } };
   }
@@ -1523,7 +1528,7 @@
     if (!ids.length && r.draft && r.draft.restored && r.draft.text === text && r.draft.ids && r.draft.ids.length) ids = r.draft.ids.slice();
     if (ids.length) opts = Object.assign({}, opts || {}, { attachmentIds: ids });
     // Control's caution: another app holds this session and looks idle, so the first send asks.
-    if (r.verdict && r.verdict.caution && !r.cautionAck) { O.cautionAsk = true; O.armedAt = { caution: Date.now() }; paintVerdict(); return; }
+    if (r.verdict && r.verdict.caution && !r.cautionAck) { O.cautionAsk = true; O.cautionVia = 'plain'; O.armedAt = { caution: Date.now() }; paintVerdict(); return; }
     if (r.sending) return;
     if (r.refusal || O.cautionAsk) { r.refusal = null; O.cautionAsk = false; paintVerdict(); }
     r.sending = true; setSending(true);
