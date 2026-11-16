@@ -22,7 +22,8 @@ import { createClientInstanceRouter, isMeetingChunkPost, pairedInstanceFrom } fr
 import type { ClientInstanceOwner } from './lib/client-instance-claim.js'
 import { G2TurnLedger, G2TurnProvenance, G2_TURN_LEDGER_FILE, type OriginRequest } from './lib/g2-turn-provenance.js'
 import { createG2TurnsRouter } from './routes/g2-turns.js'
-import { WebKeyAuthority, webKeyAuthorityEnabled } from './lib/web-key-authority.js'
+import { WebKeyActivation, registerWebKeyActivation } from './lib/web-key-activation.js'
+import { WebKeyAuthority } from './lib/web-key-authority.js'
 import { deviceAllowlistFrom, WEB_KEY_AUDIT_FILE, WEB_KEY_NONCES_FILE, WEB_KEYS_FILE, WebKeyEnrollments, WebKeyNonces, WebKeyPackets, WebKeyRegistry } from './lib/web-key-registry.js'
 import { WEB_KEY_SIGNER_PORT, webKeySignerOrigin } from './lib/web-key-origin.js'
 import { createWebKeyRouter } from './routes/web-key.js'
@@ -253,7 +254,7 @@ import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_CERT_FILE, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
-import { guardSignerConnections, keepSignerBind, planSignerBind, readCertDisclosure, SIGNER_BIND_FIX_VERSION, signerBindStatus, type SignerBindPlan } from './lib/web-key-signer-bind.js'
+import { guardSignerConnections, signerConnectionAllowed, keepSignerBind, planSignerBind, readCertDisclosure, SIGNER_BIND_FIX_VERSION, signerBindStatus, type SignerBindPlan } from './lib/web-key-signer-bind.js'
 import { controlHttpsOptions, controlTsnetHttpsEnabled, controlTsnetSelfDnsName, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
 import { trustedControlPhoneHttpsPort } from './lib/control-phone-url.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
@@ -430,7 +431,18 @@ const webKeySelfDnsName = (): string | null => {
   return typeof name === 'string' && name.trim() ? name.trim().toLowerCase().replace(/\.$/, '') : null
 }
 const webKeyRegistry = new WebKeyRegistry(dataPath(WEB_KEYS_FILE), dataPath(WEB_KEY_AUDIT_FILE))
+let stopWebKeyAuthoritySurface = (): void => {}
+const webKeyActivation = new WebKeyActivation({ registry: webKeyRegistry, selfDnsName: webKeySelfDnsName, onOff: () => {
+  webKeyEnrollments.invalidatePending()
+  webKeyAuthority.deps.packets.clear()
+  const noncesInvalidated = webKeyAuthority.nonces.invalidateOutstanding()
+  stopWebKeyAuthoritySurface()
+  return noncesInvalidated
+} })
+registerWebKeyActivation(webKeyActivation)
+const webKeyAuthorityEffective = (): boolean => webKeyActivation.enabled()
 const webKeyAuthority = new WebKeyAuthority({
+  enabled: webKeyAuthorityEffective,
   registry: webKeyRegistry,
   nonces: new WebKeyNonces(dataPath(WEB_KEY_NONCES_FILE)),
   packets: new WebKeyPackets(),
@@ -449,9 +461,7 @@ const webKeyAuthority = new WebKeyAuthority({
 const webKeySignHandoffs = new WebKeySignHandoffs()
 // Phase 3: the signer page's own integrity check (server/web-signer/.manifest.json). Built only with the
 // flag on at boot, as the 3144 listener is (listenerPlan); off, the directory is never read.
-const webKeySignerIntegrity: WebControlIntegrity | null = webKeyAuthorityEnabled()
-  ? new WebControlIntegrity(path.join(path.dirname(fileURLToPath(import.meta.url)), 'web-signer'), { log: line => console.error(line.replace('[web-control-integrity]', '[web-signer-integrity]').replace('/control is', 'the 3144 signer is')) })
-  : null
+let webKeySignerIntegrity: WebControlIntegrity | null = null
 // B2 (QA 2026-11-09): the 3144 signer's trusted Tailscale certificate (lib/web-key-signer-tls.ts). Built in the
 // listener loop below ONLY when the 3144 listener is (flag on at boot, HTTPS available); otherwise null, and no
 // Tailscale call, file or listener change happens. 3143 is never given SNI selection.
@@ -477,7 +487,7 @@ let controlTsnetTls: ControlTsnetTls | null = null
 // Review W6: enrollment starts only from a device on COS_WEB_KEY_DEVICES (empty: none).
 const webKeyEnrollments = new WebKeyEnrollments(webKeyRegistry, { deviceAllowed: deviceAllowlistFrom() })
 // The ports a COS Control Web cookie is honoured on. Flag off: exactly 6.99.29's [3141, 3143].
-const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() ? [PORT, HTTPS_PORT, WEB_KEY_SIGNER_PORT] : [PORT, HTTPS_PORT])
+const webCookiePorts = (): number[] => (webKeyAuthorityEffective() ? [PORT, HTTPS_PORT, WEB_KEY_SIGNER_PORT] : [PORT, HTTPS_PORT])
 const g2Provenance = new G2TurnProvenance({
   ledger: new G2TurnLedger(dataPath(G2_TURN_LEDGER_FILE)),
   pairedInstance: (device, now, freshMs) => pairedInstanceFrom(clientInstanceOwners, device, now, freshMs),
@@ -1048,6 +1058,7 @@ app.use('/api', createG2TurnsRouter({ provenance: g2Provenance, apiToken: () => 
 // except (7.0.9) the anchor status and registration routes with COS_WEB_KEY_ANCHOR_BOOTSTRAP on (routes/web-key.ts).
 // Nothing else in this file reads that switch: the 3144 listener, its integrity and the cookie ports stay on the authority.
 app.use('/api', createWebKeyRouter({
+  activation: webKeyActivation,
   authority: webKeyAuthority,
   enrollments: webKeyEnrollments,
   isWebRequest: req => g2Provenance.originOf(req).origin.client === 'web',
@@ -1750,6 +1761,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // 6.99.31 (Phase 6): served-asset integrity, OFF by default (lib/web-control-integrity.ts). On, /control
 // serves only bytes that matched the pack-time manifest, from memory, re-checked every 60 s, with no
 // disk server behind it. Read once at boot.
+// Resolve the disclosed name before planning any authority surface. Unknown: closed until managed restart.
+await tailnetSelf.refreshIfMissing()
+// An env-Off restart is also a durable Off for old accepted grants/pending challenges. Legacy registries are untouched.
+webKeyActivation.reconcileOffAtBoot()
+webKeyActivation.armAtBoot()
+if (webKeyAuthorityEffective()) {
+  webKeySignerIntegrity = new WebControlIntegrity(path.join(__dirname, 'web-signer'), { log: line => console.error(line.replace('[web-control-integrity]', '[web-signer-integrity]').replace('/control is', 'the 3144 signer is')) })
+}
 const webControlIntegrity = webControlEnabled() && webControlIntegrityEnabled()
   ? new WebControlIntegrity(path.join(path.dirname(fileURLToPath(import.meta.url)), 'web-control'))
   : null
@@ -1830,7 +1849,7 @@ controlTsnetTls = createControlTsnetTlsForBoot({ enabled: controlTsnetHttpsEnabl
 registerControlTsnetTls(controlTsnetTls)
 // 6.99.31: with COS_WEB_KEY_AUTHORITY on, the phone key's signer origin (https on 3144, same cert)
 // joins the REQUIRED set like 3143 (lib/listener-startup.ts listenerPlan). Flag off: 6.99.29's set.
-for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT, httpsPort: HTTPS_PORT, signerPort: WEB_KEY_SIGNER_PORT })) {
+for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEffective(), httpPort: PORT, httpsPort: HTTPS_PORT, signerPort: WEB_KEY_SIGNER_PORT })) {
   // Phase 3: 3144 serves the signer page (verified bytes only) and an allowlist of /api routes,
   // never the big app (lib/web-key-signer-app.ts). It exists only with the flag on.
   const signer = entry.label === 'HTTPS signer'
@@ -1839,8 +1858,10 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
     : app
   // B2: on 3144 only, the trusted Tailscale pair for exactly this Mac's tailnet name (SNI), mkcert for anything else.
   if (signer) {
-    webKeySignerTls = createSignerTlsForBoot({ authorityEnabled: webKeyAuthorityEnabled(), signerListener: true }, {
+    webKeySignerTls = createSignerTlsForBoot({ authorityEnabled: webKeyAuthorityEffective(), signerListener: true }, {
       dir: dataPath(SIGNER_TLS_DIR),
+      permit: name => webKeyActivation.enabled(name),
+      onPermitRefused: () => stopWebKeyAuthoritySurface(),
       selfDnsName: () => tailnetSelf.refresh(),
     })
   }
@@ -1863,7 +1884,7 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
   const signerNets = () => networkInterfaces()
   const signerListeners = (plan: SignerBindPlan): RequiredListener[] => plan.addresses.map(address => {
     const server = makeServer()
-    guardSignerConnections(server, plan.addresses, { nets: signerNets, log: line => console.warn(line) })
+    guardSignerConnections(server, plan.addresses, { nets: signerNets, allowed: (local, remote) => webKeyAuthorityEffective() && signerConnectionAllowed(local, remote, plan.addresses, signerNets()), log: line => console.warn(line) })
     webKeySignerServers.push(server)
     return { server, port: entry.port, host: address, label: entry.label }
   })
@@ -1882,13 +1903,35 @@ for (const entry of listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthor
       server.close(() => resolve())
     })))
   }
+  stopWebKeyAuthoritySurface = () => {
+    webKeyActivation.disarm()
+    webKeySignerTls?.stop()
+    webKeySignerTls = null
+    webKeySignerKeeper?.stop()
+    void closeSigner()
+    // 3143 has separate, pre-existing consent; it resumes its own certificate manager on Off.
+    controlTsnetTls?.start()
+  }
   webKeySignerKeeper = keepSignerBind({
     initial: signerBootPlan,
-    plan: () => planSignerBind({ nets: signerNets(), bindHost: process.env.BIND_HOST, httpsAvailable }),
+    plan: () => {
+      const enabled = webKeyAuthorityEffective()
+      if (!enabled) stopWebKeyAuthoritySurface()
+      return planSignerBind({ nets: signerNets(), bindHost: process.env.BIND_HOST, httpsAvailable: httpsAvailable && enabled })
+    },
     open: async plan => {
       const late = signerListeners(plan)
       try {
         await listenRequiredServers(late)
+        if (!webKeyAuthorityEffective()) {
+          for (const item of late) {
+            const at = webKeySignerServers.indexOf(item.server)
+            if (at >= 0) webKeySignerServers.splice(at, 1)
+            if ('closeAllConnections' in item.server && typeof item.server.closeAllConnections === 'function') item.server.closeAllConnections()
+            await new Promise<void>(resolve => item.server.close(() => resolve()))
+          }
+          return false
+        }
         return true
       } catch (error) {
         for (const item of late) { const at = webKeySignerServers.indexOf(item.server); if (at >= 0) webKeySignerServers.splice(at, 1) }

@@ -1,0 +1,39 @@
+// index.ts is the process entry point, so import would start real listeners. Pin its production
+// wiring; runtime acceptance/late-name/TLS race behavior is covered in the adjacent fixture tests.
+import { readFileSync } from 'node:fs'
+import { expect, it } from 'vitest'
+const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+it('one boot-latched effective predicate owns authority, health, cookie origin, listener and TLS', () => {
+  expect(index).toContain('const webKeyAuthorityEffective = (): boolean => webKeyActivation.enabled()')
+  expect(index).toContain('  enabled: webKeyAuthorityEffective,')
+  expect(index).toContain('registerWebKeyActivation(webKeyActivation)')
+  expect(index).toContain('const webCookiePorts = (): number[] => (webKeyAuthorityEffective() ? [PORT, HTTPS_PORT, WEB_KEY_SIGNER_PORT] : [PORT, HTTPS_PORT])')
+  expect(index).toContain('webKeyAuthority: webKeyAuthorityEffective(), httpPort: PORT')
+  expect(index).toContain('authorityEnabled: webKeyAuthorityEffective(), signerListener: true')
+  expect(index).toContain('permit: name => webKeyActivation.enabled(name),')
+  expect(index).toContain('webKeyAuthorityEffective() && signerConnectionAllowed(local, remote, plan.addresses, signerNets())')
+  expect(index).not.toContain('webKeyAuthorityEnabled(')
+  const health = readFileSync(new URL('../routes/health.ts', import.meta.url), 'utf8')
+  expect(health).toContain('...webKeyActivationHealthField(),'); expect(health).not.toContain('webKeyAuthorityEnabled(')
+})
+it('bounded name lookup and Off reconciliation precede one boot decision and every signer surface', () => {
+  const lookup = index.indexOf('await tailnetSelf.refreshIfMissing()')
+  const off = index.indexOf('webKeyActivation.reconcileOffAtBoot()')
+  const arm = index.indexOf('webKeyActivation.armAtBoot()')
+  const integrity = index.indexOf('if (webKeyAuthorityEffective()) {')
+  const listeners = index.indexOf('for (const entry of listenerPlan(')
+  expect(lookup).toBeGreaterThan(index.indexOf('const tailnetSelf ='))
+  expect(off).toBeGreaterThan(lookup); expect(arm).toBeGreaterThan(off); expect(integrity).toBeGreaterThan(arm); expect(listeners).toBeGreaterThan(integrity)
+  expect(index.split('webKeyActivation.armAtBoot()')).toHaveLength(2)
+})
+it('Off/invalidated name closes authority, cancels pending requests and hands independently enabled3143 back to its own manager', () => {
+  expect(index).toContain('webKeyEnrollments.invalidatePending()')
+  expect(index).toContain('webKeyAuthority.deps.packets.clear()')
+  expect(index).toContain('webKeyAuthority.nonces.invalidateOutstanding()')
+  expect(index).toContain('onPermitRefused: () => stopWebKeyAuthoritySurface(),')
+  expect(index).toContain('    webKeySignerTls?.stop()\n    webKeySignerTls = null\n    webKeySignerKeeper?.stop()\n    void closeSigner()')
+  expect(index).toContain('    controlTsnetTls?.start()')
+  expect(index).toContain('if (!enabled) stopWebKeyAuthoritySurface()')
+  expect(index).toContain('if (!webKeyAuthorityEffective()) {\n          for (const item of late)')
+  expect(index).toContain('enabled: controlTsnetHttpsEnabled(), httpsAvailable')
+})

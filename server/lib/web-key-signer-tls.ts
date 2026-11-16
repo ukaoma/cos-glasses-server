@@ -157,6 +157,7 @@ const CLI_GUI_UNAVAILABLE = /Tailscale GUI failed to start|Tailscale\.CLIError e
 export const SIGNER_TLS_REASONS = Object.freeze([
   'ok',
   'pending',
+  'authority_activation_required',
   'tailnet_name_unknown',
   'tailnet_https_certs_off',
   'cert_domain_mismatch',
@@ -218,6 +219,10 @@ export interface SignerTlsPair {
 export type Timer = { cancel: () => void }
 
 export interface SignerTlsDeps {
+  /** Authority-owned instances must recheck the signed grant after awaits and before every certificate request. Ordinary 3143 instances omit this. */
+  permit?: (name: string | null) => boolean
+  /** Reconcile a revoked/renamed authority manager with independently enabled Control HTTPS. Never called for an unrecognized client SNI. */
+  onPermitRefused?: () => void
   /** <data dir>/web-key-tls. Created only when a pair is first stored. */
   dir: string
   /** This Mac's tailnet name (index.ts: tailnetSelf.refresh()). Null: unknown. */
@@ -503,6 +508,7 @@ export class SignerTls {
 
   /** For `https.createServer({ SNICallback })` on 3144. Unmatched: the server's default (mkcert) context. */
   readonly sniCallback = (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void): void => {
+    if (!this.permitted(servername)) { cb(null, undefined); return }
     if (!this.sniMatches(this.current, servername)) this.pickUpStored()
     // Read again after the pickup: a pair stored just now serves in this same handshake.
     const pair = this.current
@@ -564,9 +570,9 @@ export class SignerTls {
     this.pickUpStored()
     const pair = this.current
     const at = this.now()
-    const live = this.live(at)
+    const live = this.live(at) && this.permitted(this.name ?? pair?.host ?? null)
     let reason: SignerTlsReason = 'ok'
-    if (!live) reason = this.lastError ?? (pair && at >= pair.notAfterMs ? 'cert_expired' : 'pending')
+    if (!live) reason = !this.permitted(this.name ?? pair?.host ?? null) ? 'authority_activation_required' : this.lastError ?? (pair && at >= pair.notAfterMs ? 'cert_expired' : 'pending')
     return {
       trusted: live,
       reason,
@@ -650,6 +656,10 @@ export class SignerTls {
     this.log(`[signer-tls] no trusted certificate: ${reason}${facts ? ` (${facts})` : ''}; next try in ${Math.round(signerTlsRetryMs(this.failures) / 1000)}s`)
   }
 
+  private permitted(name: string | null): boolean {
+    try { return !this.deps.permit || this.deps.permit(name) === true } catch { return false }
+  }
+
   private async runCheck(): Promise<void> {
     // SR-04: a re-check a status read started may skip the cooldown, once.
     const bypass = this.bypassCooldown
@@ -657,6 +667,7 @@ export class SignerTls {
     let name: string | null = null
     try { name = normalizeTailscaleDnsName(await this.deps.selfDnsName()) } catch { name = null }
     if (!name) { this.fail('tailnet_name_unknown'); return }
+    if (!this.permitted(name)) { this.deps.onPermitRefused?.(); this.fail('authority_activation_required'); return }
     this.name = name
     // A pair stored by another process (e.g. COS Control's helper, if this LaunchAgent's CLI cannot
     // answer) is picked up here, validated, without a restart and without a CLI call.
@@ -693,12 +704,14 @@ export class SignerTls {
     this.fetchState = { ...this.fetchState, certCalls: this.fetchState.certCalls + 1, lastCertAt: this.now() }
     if (!this.saveFetchState()) { this.fail('cert_store_failed', 'fetch state not saved; no cert call'); return }
 
+    if (!this.permitted(name)) { this.deps.onPermitRefused?.(); this.fail('authority_activation_required'); return }
     const r = await this.runner(bin, SIGNER_TLS_CERT_ARGS(name), SIGNER_TLS_CERT_TIMEOUT_MS, cliEnv)
     if (r.spawnError || r.killed || r.signal || r.code !== 0) {
       this.fail(classifyCertFailure(r), `cert code=${r.code} killed=${r.killed} signal=${r.signal ?? ''} ${r.elapsedMs}ms ${firstLine(r.stderr)}`)
       this.recordCertOutcome()
       return
     }
+    if (!this.permitted(name)) { this.deps.onPermitRefused?.(); this.fail('authority_activation_required'); return }
     // SR-01: the same checks as a stored pair, including the public-root chain; the refusal names why.
     const checked = checkSignerTlsPair(r.stdout, name, this.now(), this.roots)
     if (!checked.ok) { this.fail(checked.reason); this.recordCertOutcome(); return }

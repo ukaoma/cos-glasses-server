@@ -1,3 +1,9 @@
+## 7.0.50 - Signed Mac activation for phone approvals
+
+- Require a fresh Touch ID signature from the registered Mac anchor before phone authority can open its signer listener or request its certificate.
+- Bind activation to the disclosed tailnet name and one phone address. Turning approvals off invalidates pending activations and revokes enrolled keys durably.
+- Keep ordinary Control HTTPS and phone notifications independent of phone authority. Phone authority remains off by default.
+
 ## 7.0.49 - Session replies ready on your phone
 
 - Connect finished Claude and Codex reply turns, and Cursor's explicit completed-turn hook, to the existing session ping category and Sessions destination.

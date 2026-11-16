@@ -70,17 +70,17 @@ const mutations = [
   m('cert-any-name', BIND, ['issued = publicName ? leaf.checkHost(publicName) !== undefined :', 'issued = publicName ? true :'], BT),
   m('cert-size-uncapped', BIND, ['st.size <= STORED_CERT_MAX_BYTES', 'true'], BT),
   // ── The status route ──
-  m('route-off-door-no-token', WKR, ["if (deps.authority.mode() === 'off' && !(deps.signerFacts && hasToken(req)))", "if (deps.authority.mode() === 'off' && !deps.signerFacts)"], RT),
-  m('route-off-door-no-facts', WKR, ["if (deps.authority.mode() === 'off' && !(deps.signerFacts && hasToken(req)))", "if (deps.authority.mode() === 'off' && !hasToken(req))"], RT),
-  m('route-off-body-no-facts', WKR, ["mode: 'off', ...signerFactsField() })", "mode: 'off' })"], RT),
-  m('route-bootstrap-no-facts', WKR, ['        epoch: registry.epoch(),\n        ...signerFactsField(),\n', '        epoch: registry.epoch(),\n'], RT),
+  m('route-off-door-no-token', WKR, ["if (deps.authority.mode() === 'off' && !((deps.signerFacts || deps.activation) && hasToken(req)))", "if (deps.authority.mode() === 'off' && !deps.signerFacts)"], RT),
+  m('route-off-door-no-facts', WKR, ["if (deps.authority.mode() === 'off' && !((deps.signerFacts || deps.activation) && hasToken(req)))", "if (deps.authority.mode() === 'off' && !hasToken(req))"], RT),
+  m('route-off-body-no-facts', WKR, ["...deps.activation.status() } : {}), ...signerFactsField() })", "...deps.activation.status() } : {}) })"], RT),
+  m('route-bootstrap-no-facts', WKR, ['        ...deps.activation?.status(),\n        ...signerFactsField(),\n', '        ...deps.activation?.status(),\n'], RT),
   m('route-authority-no-facts', WKR, ['      ...signerTlsField(),\n      ...signerFactsField(),\n', '      ...signerTlsField(),\n'], RT),
   m('route-facts-throw-escapes', WKR, ['try { facts = deps.signerFacts?.() ?? null } catch { facts = null }', 'facts = deps.signerFacts?.() ?? null'], RT),
   // ── index.ts wiring (source pins) ──
   m('index-signer-binds-bind-host', IDX, ['    return { server, port: entry.port, host: address, label: entry.label }', '    return { server, port: entry.port, host: BIND_HOST, label: entry.label }'], BT),
-  drop('index-signer-unguarded', IDX, '    guardSignerConnections(server, plan.addresses, { nets: signerNets, log: line => console.warn(line) })\n', BT),
+  drop('index-signer-unguarded', IDX, '    guardSignerConnections(server, plan.addresses, { nets: signerNets, allowed: (local, remote) => webKeyAuthorityEffective() && signerConnectionAllowed(local, remote, plan.addresses, signerNets()), log: line => console.warn(line) })\n', BT),
   drop('index-status-unwired', IDX, '  signerFacts: webKeySignerFacts,\n', BT),
-  drop('index-keeper-not-stopped', IDX, '  webKeySignerKeeper?.stop()\n', BT),
+  drop('index-keeper-not-stopped', IDX, '\n  webKeySignerKeeper?.stop()\n', BT),
   m('index-close-keeps-servers', IDX, ['    const closing = webKeySignerServers.splice(0, webKeySignerServers.length)\n', '    const closing = [...webKeySignerServers]\n'], BT),
 ]
 

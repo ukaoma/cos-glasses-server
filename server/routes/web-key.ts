@@ -26,6 +26,7 @@
 //     GET status (X-Cos-Token only, reply `enabled: false, mode: 'bootstrap'`) and POST anchor (as
 //     above) answer. Every other route falls through exactly as with both switches off.
 
+import type { WebKeyActivation } from '../lib/web-key-activation.js'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { hasProxyForwardedHeaders, isLoopbackAddress, normalizeRemoteIp } from '../lib/network-policy.js'
@@ -37,6 +38,7 @@ import type { WebApprovalPacket, WebTurnScope } from '../../shared/web-turn-enve
 export const ANCHOR_REGISTRATION_LOOPBACK_COPY = 'The COS Control anchor key can only be registered by COS Control on this Mac.'
 
 export interface WebKeyRouterDeps {
+  activation?: WebKeyActivation
   authority: WebKeyAuthority
   enrollments: WebKeyEnrollments
   /** The web path in full: cookie, no token, a socket that is not this Mac (G2TurnProvenance.originOf). */
@@ -139,7 +141,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
   // SR-15: like anchorRoutes, plus one more door with both switches off: a token-bearing read when the
   // deployment reports the signer facts. Anything else with both switches off falls through as before.
   const statusRoutes = (req: Request, res: Response, next: NextFunction): void => {
-    if (deps.authority.mode() === 'off' && !(deps.signerFacts && hasToken(req))) { next('router'); return }
+    if (deps.authority.mode() === 'off' && !((deps.signerFacts || deps.activation) && hasToken(req))) { next('router'); return }
     res.set('Cache-Control', 'private, no-store')
     next()
   }
@@ -148,8 +150,9 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     const registry = deps.authority.registry
     if (deps.authority.mode() === 'off') {
       // SR-15: both switches off. Only a token-bearing read gets here (statusRoutes). The signer facts and
-      // nothing else: no origin, aud or anchor field, so a Control that reads a missing origin as "off" stays hidden.
-      return void res.json({ ok: true, enabled: false, mode: 'off', ...signerFactsField() })
+      // no origin: old Controls stay hidden. Protocol1 adds token-only anchor/aud readiness for signed On.
+      await learnSelfName()
+      return void res.json({ ok: true, enabled: false, mode: 'off', ...(deps.activation ? { anchorRegistered: registry.anchor() !== null, anchorMature: registry.anchorMature(), aud: registry.aud(deps.selfDnsName()), epoch: registry.epoch(), ...deps.activation.status() } : {}), ...signerFactsField() })
     }
     if (deps.authority.mode() !== 'authority') {
       // Bootstrap only: COS Control's anchor state, nothing that suggests approvals. Token only:
@@ -168,6 +171,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
         aud: registry.aud(selfDns),
         origin: deps.expectedOrigin(),
         epoch: registry.epoch(),
+        ...deps.activation?.status(),
         ...signerFactsField(),
       })
     }
@@ -187,6 +191,7 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
       epoch: registry.epoch(),
       activeKeys: registry.activeCount(selfDns),
       ...(deps.integrityStatus ? { integrity: deps.integrityStatus() } : {}),
+      ...deps.activation?.status(),
       ...signerTlsField(),
       ...signerFactsField(),
     })
@@ -201,6 +206,33 @@ export function createWebKeyRouter(deps: WebKeyRouterDeps): Router {
     const result = deps.authority.registry.registerAnchor({ anchorPub: b.anchorPub, statement: b.statement, signature: b.signature }, 'control')
     if (!result.ok) return refuse(res, result.reason === 'registry_write_failed' || result.reason === 'registry_unreadable' ? 503 : result.reason === 'anchor_signature_invalid' ? 403 : 400, result.reason)
     res.status(201).json({ ...result, maturesAt: result.setAt + WEB_ANCHOR_MATURITY_MS })
+  })
+
+  // Signed On and unsigned Off are bootstrap operations, never phone-cookie authority.
+  const activationLocal = (req: Request, res: Response, next: NextFunction): void => {
+    if (!deps.activation) { next('router'); return }
+    res.set('Cache-Control', 'private, no-store')
+    if (!isLoopbackAddress(normalizeRemoteIp(req.socket?.remoteAddress ?? '') ?? '') || hasProxyForwardedHeaders(req.headers)) return refuse(res, 403, 'loopback_required')
+    if (!hasToken(req)) return refuse(res, 401, 'token_required')
+    next()
+  }
+  const exactBody = (req: Request, keys: string): boolean => !!req.body && !Array.isArray(req.body) && typeof req.body === 'object' && Object.keys(req.body).sort().join(',') === keys
+  const activationReply = (res: Response, result: { ok: boolean; reason?: string }): void => {
+    if (!result.ok) return refuse(res, result.reason?.startsWith('registry_') ? 503 : 400, result.reason ?? 'activation_refused')
+    res.json({ ...result, ...deps.activation!.status(), enabled: deps.authority.enabled() })
+  }
+  router.post('/web-key/activation/challenge', activationLocal, async (req, res) => {
+    if (!exactBody(req, 'device')) return refuse(res, 400, 'invalid_body')
+    await learnSelfName()
+    activationReply(res, deps.activation!.challenge(body(req).device))
+  })
+  router.post('/web-key/activation', activationLocal, (req, res) => {
+    if (!exactBody(req, 'signature,statement')) return refuse(res, 400, 'invalid_body')
+    activationReply(res, deps.activation!.accept(body(req).statement, body(req).signature))
+  })
+  router.delete('/web-key/activation', activationLocal, (req, res) => {
+    if (!exactBody(req, '')) return refuse(res, 400, 'invalid_body')
+    activationReply(res, deps.activation!.off())
   })
 
   // Everything below: the authority only (bootstrap mode falls through here, as with both off).

@@ -21,7 +21,7 @@
 // that is denial of service, logged, not forgery). Revocations in memory are never undone by a
 // later read of the file: the registry is read once at boot.
 
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, lstatSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import {
@@ -135,7 +135,19 @@ export interface WebKeyEntry {
 /** The anchor's bootstrap record (review B1): its self-signed statement and when it was registered. */
 export interface AnchorRegistration { statement: string; signature: string; setAt: number }
 
-interface RegistryFile { v: 1; anchorPub: string | null; anchorRegistration: AnchorRegistration | null; epoch: number; entries: WebKeyEntry[] }
+export interface AuthorityActivationRecord { statement: string; signature: string; acceptedAt: number; consumedNonce: string }
+export interface AuthorityActivationState { v: 1; epoch: number; pending: string | null; grant: AuthorityActivationRecord | null }
+
+function validActivationState(value: unknown): value is AuthorityActivationState {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const a = value as AuthorityActivationState
+  if (Object.keys(a).sort().join(',') !== 'epoch,grant,pending,v' || a.v !== 1 || !Number.isSafeInteger(a.epoch) || a.epoch < 0 || (a.pending !== null && typeof a.pending !== 'string')) return false
+  if (a.grant === null) return true
+  const g = a.grant
+  return typeof g === 'object' && Object.keys(g).sort().join(',') === 'acceptedAt,consumedNonce,signature,statement' && typeof g.statement === 'string' && typeof g.signature === 'string' && typeof g.consumedNonce === 'string' && Number.isSafeInteger(g.acceptedAt) && g.acceptedAt >= 0
+}
+
+interface RegistryFile { activation?: AuthorityActivationState; v: 1; anchorPub: string | null; anchorRegistration: AnchorRegistration | null; epoch: number; entries: WebKeyEntry[] }
 
 export type EntryState =
   | { ok: true; entry: WebKeyEntry; key: KeyObject; passkeyKey: KeyObject }
@@ -167,6 +179,7 @@ export class WebKeyRegistry {
   private data: RegistryFile = { v: 1, anchorPub: null, anchorRegistration: null, epoch: 0, entries: [] }
   /** The file could not be read as a registry: everything refuses and nothing is written over it. */
   readonly unreadable: boolean
+  private activationWriteFailed = false
   private anchorCache: { key: string; anchor: RegisteredAnchor | null } | null = null
 
   constructor(private readonly file: string, private readonly auditFile: string, private readonly now: () => number = Date.now) {
@@ -179,10 +192,12 @@ export class WebKeyRegistry {
       try {
         const parsed = JSON.parse(raw) as Partial<RegistryFile>
         if (parsed && parsed.v === 1 && Array.isArray(parsed.entries) && Number.isSafeInteger(parsed.epoch) && (parsed.anchorPub === null || typeof parsed.anchorPub === 'string')) {
+          if (parsed.activation !== undefined && (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink())) throw new Error('activation registry must be a regular file')
+          if (parsed.activation !== undefined && !validActivationState(parsed.activation)) throw new Error('activation state invalid')
           const reg = parsed.anchorRegistration
           const anchorRegistration = reg && typeof reg === 'object' && typeof reg.statement === 'string' && typeof reg.signature === 'string' && Number.isSafeInteger(reg.setAt)
             ? { statement: reg.statement, signature: reg.signature, setAt: reg.setAt } : null
-          this.data = { v: 1, anchorPub: parsed.anchorPub ?? null, anchorRegistration, epoch: parsed.epoch as number, entries: parsed.entries.filter(e => e && typeof e.kid === 'string') }
+          this.data = { ...(parsed.activation ? { activation: parsed.activation } : {}), v: 1, anchorPub: parsed.anchorPub ?? null, anchorRegistration, epoch: parsed.epoch as number, entries: parsed.entries.filter(e => e && typeof e.kid === 'string') }
         } else unreadable = true
       } catch { unreadable = true }
     }
@@ -255,10 +270,42 @@ export class WebKeyRegistry {
     if (replaced) {
       for (const e of this.data.entries) if (typeof e.revokedAt !== 'number') { e.revokedAt = setAt; e.revokeReason = 'anchor_replaced'; e.revokedBy = by }
       this.data.epoch += 1
+      this.data.activation = { v: 1, epoch: this.activationEpoch() + 1, pending: null, grant: null }
     }
     if (!this.persist()) { this.data = JSON.parse(before) as RegistryFile; return { ok: false, reason: 'registry_write_failed' } }
     this.audit('anchor_registered', { spkiSha256, fingerprint, setAt, replaced, by, epoch: this.data.epoch })
     return { ok: true, spkiSha256, fingerprint, setAt, replaced }
+  }
+
+  /** A missing field is the old, inactive registry. Reading status never writes migration bytes. */
+  activationEpoch(): number { return this.data.activation?.epoch ?? 0 }
+
+  activationState(): AuthorityActivationState | null {
+    if (this.unreadable || this.activationWriteFailed) return null
+    return structuredClone(this.data.activation ?? { v: 1, epoch: 0, pending: null, grant: null })
+  }
+
+  /** Only the activation protocol calls this after verifying a live server challenge. */
+  saveActivation(state: AuthorityActivationState): boolean {
+    if (this.unreadable || this.activationWriteFailed || !validActivationState(state)) return false
+    this.data.activation = structuredClone(state)
+    if (this.persist()) return true
+    // Never keep granting from memory after a failed durable transition. No success acknowledgment.
+    this.activationWriteFailed = true
+    return false
+  }
+
+  /** One durable transaction: invalidate On challenges/grant, advance both epochs, revoke phones. */
+  disableActivation(): boolean {
+    if (this.unreadable || this.activationWriteFailed || this.activationEpoch() >= Number.MAX_SAFE_INTEGER || this.data.epoch >= Number.MAX_SAFE_INTEGER) return false
+    this.data.activation = { v: 1, epoch: this.activationEpoch() + 1, pending: null, grant: null }
+    this.data.epoch += 1
+    for (const entry of this.data.entries) if (typeof entry.revokedAt !== 'number') {
+      entry.revokedAt = this.now(); entry.revokeReason = 'authority_off'; entry.revokedBy = 'control'
+    }
+    if (!this.persist()) { this.activationWriteFailed = true; return false }
+    this.audit('authority_off', { epoch: this.data.epoch, activationEpoch: this.activationEpoch() })
+    return true
   }
 
   /** The revoked keys, sorted by kid (review W5: the verifier compares with a Control-held list). */
@@ -458,6 +505,9 @@ export class WebKeyEnrollments {
     while (this.outcomes.size > 32) this.outcomes.delete(this.outcomes.keys().next().value as string)
     this.pending = null
   }
+
+  /** Off cancels pending ceremony state in addition to the durable epoch fence. */
+  invalidatePending(): void { if (this.pending) this.settle('refused') }
 
   /** The pending request, or null; an expired one is settled here. */
   private live(): PendingEnrollment | null {
@@ -713,6 +763,14 @@ export class WebKeyNonces {
     }
   }
 
+  /** Burn outstanding nonces on Off; retain every consumed authorization tombstone. */
+  invalidateOutstanding(): boolean {
+    if (this.unavailable) return false
+    const at = this.now()
+    for (const row of Object.values(this.data.nonces)) if (row.spentAt === undefined) { row.spentAt = at; row.authId = 'authority-off' }
+    return this.persist()
+  }
+
   issue(): { ok: true; nonce: string; exp: number } | { ok: false; reason: 'nonce_store_unavailable' | 'nonce_cap_reached' } {
     if (this.unavailable) return { ok: false, reason: 'nonce_store_unavailable' }
     const at = this.now()
@@ -815,6 +873,8 @@ export class WebKeyPackets {
     this.prune()
     return this.open.get(packetSha256) ?? null
   }
+
+  clear(): void { this.open.clear() }
 
   close(packetSha256: string): void { this.open.delete(packetSha256) }
 

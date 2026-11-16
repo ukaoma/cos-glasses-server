@@ -432,8 +432,10 @@ describe('X1: index.ts and health wire it, and only on 3143', () => {
     expect(index.split('selfDnsName: () => tailnetSelf.refresh(),').length - 1).toBe(1)
     expect(index).toContain("const mkcertPair = mkcertFiles && entry.label === 'HTTPS' ? controlHttpsOptions(mkcertFiles, controlTsnetTls)")
     expect(index).toContain('registerControlTsnetTls(controlTsnetTls)')
-    expect(index.indexOf('controlTsnetTls?.start()')).toBeGreaterThan(index.indexOf('webKeySignerTls?.start()'))
+    expect(index.lastIndexOf('controlTsnetTls?.start()')).toBeGreaterThan(index.indexOf('webKeySignerTls?.start()'))
     expect(index).toContain('  controlTsnetTls?.stop()\n')
+    expect(index).toContain('    webKeySignerTls = null\n')
+    expect(index).toContain('    controlTsnetTls?.start()\n')
     // The signer's own lines are unchanged.
     expect(index).toContain('withRequestTimeout(createHttpsServer(signer ? signerHttpsOptions(mkcertPair, webKeySignerTls) : mkcertPair, handler))')
   })

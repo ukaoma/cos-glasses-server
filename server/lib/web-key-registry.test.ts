@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto'
-import { audOf, deviceAllowlistFrom, sasOf, WEB_ANCHOR_MATURITY_MS, WEB_ENROLL_MAX_PROOF_ATTEMPTS, WEB_ENROLL_TTL_MS, WebKeyEnrollments, WebKeyNonces, WebKeyRegistry, WEB_NONCE_MAX_OUTSTANDING } from './web-key-registry.js'
+import { audOf, deviceAllowlistFrom, sasOf, WEB_ANCHOR_MATURITY_MS, WEB_ENROLL_MAX_PROOF_ATTEMPTS, WEB_ENROLL_TTL_MS, WebKeyEnrollments, WebKeyNonces, WebKeyRegistry, WEB_NONCE_MAX_OUTSTANDING, WebKeyPackets } from './web-key-registry.js'
 import { anchoredEntry, anchorRegistrationBody, coseOf, credentialIdOf, ORIGIN, p256, passkeyAssertion, passkeyOf, seedRegistry, SELF_DNS, signB64, signJcs, type TestKey } from './__fixtures__/web-key-kit.js'
 import { canonicalBytes, fingerprintOfSpki, sha256Hex } from './web-key-envelope.js'
 import { coseP256ToSpki } from './web-key-passkey.js'
@@ -184,6 +184,15 @@ describe('enrollment ceremony', () => {
     const view = enroll.pendingView()!
     registry.revokeAll('token')
     expect(enroll.approve(s.enrollId, signB64(anchor, Buffer.from(view.approvalJcs as string, 'base64url')), SELF_DNS)).toEqual({ ok: false, reason: 'epoch_changed' })
+  })
+
+  it('authority Off during a proven enrollment cannot revive its frozen approval after reactivation', () => {
+    const phone = p256(); const started = startFor(phone)
+    if (!started.ok) throw new Error(started.reason)
+    proveFor(phone, started); const view = enroll.pendingView()!
+    expect(registry.disableActivation()).toBe(true)
+    expect(enroll.approve(started.enrollId, signB64(anchor, Buffer.from(view.approvalJcs as string, 'base64url')), SELF_DNS)).toEqual({ ok: false, reason: 'epoch_changed' })
+    expect(registry.activeCount(SELF_DNS)).toBe(0)
   })
 
   it('refusals: no anchor, unknown MagicDNS name, bad key, bad label', () => {
@@ -496,4 +505,18 @@ describe('B1 the registration record must be the anchor speaking about itself', 
     seedRegistry(file(), anchor, [{ ...e, approval, anchorSig: signJcs(anchor, approval) }]); open()
     expect(registry.entryState(phone.kid, SELF_DNS)).toEqual({ ok: false, reason: 'key_unanchored' })
   })
+})
+
+it('Off cleanup burns outstanding nonces without deleting spend tombstones and clears pending packets', () => {
+  const nonces = new WebKeyNonces(join(dir, 'off-nonces.json'), () => clock)
+  const issued = nonces.issue(); if (!issued.ok) throw new Error(issued.reason)
+  expect(nonces.spend(['web:test:already-used'], 's', 'codex').ok).toBe(true)
+  expect(nonces.invalidateOutstanding()).toBe(true)
+  expect(new WebKeyNonces(join(dir, 'off-nonces.json'), () => clock).consume(issued.nonce, 'later')).toBe('nonce_spent')
+  expect(nonces.spend(['web:test:already-used'], 's', 'codex')).toMatchObject({ reason: 'already_consumed' })
+  const packets = new WebKeyPackets(() => clock)
+  const p = packets.create({ action: 'install', artifact: 'cos-control', version: '0.5.398', digest: 'sha256:' + 'a'.repeat(64), channel: 'mac-local' }, { provider: 'codex', sessionId: 's' })
+  if (!p.ok) throw new Error(p.reason)
+  expect(packets.get(p.packetSha256)).not.toBeNull()
+  packets.clear(); expect(packets.list()).toEqual([])
 })

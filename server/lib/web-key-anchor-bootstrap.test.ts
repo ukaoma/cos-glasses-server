@@ -27,9 +27,9 @@ describe('7.0.9 bootstrap only: no signer listener, no integrity default, no ext
   })
 
   it('index.ts builds the 3144 listener, the signer integrity and the cookie ports from the authority switch alone', () => {
-    expect(count(INDEX, 'listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT')).toBe(1)
-    expect(count(INDEX, 'const webKeySignerIntegrity: WebControlIntegrity | null = webKeyAuthorityEnabled()\n')).toBe(1)
-    expect(count(INDEX, 'const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() ? [PORT, HTTPS_PORT, WEB_KEY_SIGNER_PORT] : [PORT, HTTPS_PORT])')).toBe(1)
+    expect(count(INDEX, 'listenerPlan({ httpsAvailable, webKeyAuthority: webKeyAuthorityEffective(), httpPort: PORT')).toBe(1)
+    expect(count(INDEX, 'if (webKeyAuthorityEffective()) {\n  webKeySignerIntegrity = new WebControlIntegrity')).toBe(1)
+    expect(count(INDEX, 'const webCookiePorts = (): number[] => (webKeyAuthorityEffective() ? [PORT, HTTPS_PORT, WEB_KEY_SIGNER_PORT] : [PORT, HTTPS_PORT])')).toBe(1)
     // The bootstrap switch and the routes' mode are read only by routes/web-key.ts, never at boot.
     expect(INDEX).not.toMatch(/webKeyAnchorBootstrapEnabled|\.mode\(\)|process\.env\.COS_WEB_KEY_ANCHOR_BOOTSTRAP/)
   })

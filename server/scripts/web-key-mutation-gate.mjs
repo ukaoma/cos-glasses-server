@@ -207,7 +207,7 @@ const mutations = [
   m('router-approve-token', WKR, ["  router.post('/web-key/enroll/approve', (req, res) => {\n    if (!hasToken(req)) return refuse(res, 401, 'token_required')", "  router.post('/web-key/enroll/approve', (req, res) => {"], INTT),
   m('router-nonce-web-only', WKR, ["  router.post('/web-key/nonce', (req, res) => {\n    if (!web(req)) return refuse(res, 403, 'web_origin_required')", "  router.post('/web-key/nonce', (req, res) => {"], INTT),
   m('router-anchor-loopback', WKR, ['    if (!addr || !isLoopbackAddress(addr) || hasProxyForwardedHeaders(req.headers))', '    if (!addr || hasProxyForwardedHeaders(req.headers))'], INTT),
-  m('router-anchor-proxy', WKR, [" || hasProxyForwardedHeaders(req.headers)) return refuse(res, 403, 'loopback_required'", ") return refuse(res, 403, 'loopback_required'"], INTT),
+  m('router-anchor-proxy', WKR, ["!addr || !isLoopbackAddress(addr) || hasProxyForwardedHeaders(req.headers)) return refuse(res, 403, 'loopback_required'", "!addr || !isLoopbackAddress(addr)) return refuse(res, 403, 'loopback_required'"], INTT),
   m('router-anchor-token', WKR, ["    if (!hasToken(req)) return refuse(res, 401, 'token_required')\n    const b = body(req)\n    const result = deps.authority.registry.registerAnchor", '    const b = body(req)\n    const result = deps.authority.registry.registerAnchor'], INTT),
   m('router-packet-context', WKR, ["{ provider: header('x-cos-provider'), sessionId: header('x-cos-session-id') }", '{ provider: body(req).provider, sessionId: body(req).sessionId }'], INTT),
   m('consume-both-keys', G2R, ['      const spent = authority.nonces.spend(keys, b.session, b.provider)', '      const spent = authority.nonces.spend([keys[0]], b.session, b.provider)'], INTT),
@@ -262,8 +262,8 @@ const mutations = [
   m('bootstrap-status-token-only', WKR, ["      if (!hasToken(req)) return refuse(res, 401, 'unauthorized')\n      await learnSelfName()", '      await learnSelfName()'], INTT),
   m('bootstrap-status-enabled-false', WKR, ["        enabled: false,\n        mode: 'bootstrap',", "        enabled: true,\n        mode: 'bootstrap',"], INTT),
   m('bootstrap-status-setat', WKR, ['        anchorSetAt: anchor ? anchor.setAt : null,', '        anchorSetAt: null,'], INTT),
-  m('bootstrap-no-signer-listener', IDX, ['webKeyAuthority: webKeyAuthorityEnabled(), httpPort: PORT', "webKeyAuthority: webKeyAuthorityEnabled() || process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP === '1', httpPort: PORT"], BOOTT),
-  m('bootstrap-no-cookie-port', IDX, ['const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() ?', "const webCookiePorts = (): number[] => (webKeyAuthorityEnabled() || webKeyAuthority.mode() !== 'off' ?"], BOOTT),
+  m('bootstrap-no-signer-listener', IDX, ['webKeyAuthority: webKeyAuthorityEffective(), httpPort: PORT', "webKeyAuthority: webKeyAuthorityEffective() || process.env.COS_WEB_KEY_ANCHOR_BOOTSTRAP === '1', httpPort: PORT"], BOOTT),
+  m('bootstrap-no-cookie-port', IDX, ['const webCookiePorts = (): number[] => (webKeyAuthorityEffective() ?', "const webCookiePorts = (): number[] => (webKeyAuthorityEffective() || webKeyAuthority.mode() !== 'off' ?"], BOOTT),
   m('bootstrap-no-integrity-default', INTEG, ['  return readSwitch(env.COS_WEB_CONTROL_INTEGRITY, readSwitch(env.COS_WEB_KEY_AUTHORITY, false))', '  return readSwitch(env.COS_WEB_CONTROL_INTEGRITY, readSwitch(env.COS_WEB_KEY_AUTHORITY, readSwitch(env.COS_WEB_KEY_ANCHOR_BOOTSTRAP, false)))'], BOOTT),
 ]
 
