@@ -37,7 +37,8 @@ const mutations = [
   m('proof-approval-packet-sha', PROOF, ["if (hex(d) !== scope.packetSha256) throw fail('packet_mismatch');", ''], [...PRT, ...PGT]),
   m('page-shown-packet-unchanged', PAGE, ["    if (($('sign-packet') ? $('sign-packet').textContent : '') !== state.shownPacket) { problem('The release request on screen changed. Nothing was signed.'); return undefined }\n", ''], PGT),
   m('composer-selected-packet-hash', APP, ['      if (packetSha) request.packetSha256 = packetSha;\n', ''], CMT),
-  m('composer-late-handoff-live', APP, ["        if (!view.live()) return 'stale';\n        var body = h.body || {};", '        var body = h.body || {};'], CMT),
+  // 7.0.51 (W1, X1's leave): repointed onto the rewritten composer block; the old target no longer existed.
+  m('composer-late-handoff-live', APP, ["        if (!ownsSending() || !phoneApprovalViewLive(view)) return 'stale';\n        var body = h.body || {};", '        var body = h.body || {};'], CMT),
   // ── The proof seam (server/web-signer/signer-proof.js) ──
   m('proof-trim-trailing-ws', PROOF, ["return String(words == null ? '' : words).replace(TRAILING_WS, '')", "return String(words == null ? '' : words)"], [...PRT, ...PGT]),
   m('proof-challenge-is-sha256-envelope', PROOF, ['function passkeyChallenge(envelopeBytes) { return sha256(envelopeBytes) }', 'function passkeyChallenge(envelopeBytes) { return sha256(concat(envelopeBytes, [0])) }'], [...PRT, ...PGT]),
@@ -118,7 +119,8 @@ const mutations = [
   // Repointed 11/16 (X1, Q1): health reads webKeyActivationHealthField() now; the gate moved into web-key-activation.ts.
   m('health-flag-gated', ACT, ['  return registeredActivation?.enabled() ? { webKeySigner: 1 } : {}', '  return registeredActivation ? { webKeySigner: 1 } : {}'], HLT),
   m('composer-offer-gated', APP, ['  function paintWebKeyOffer(r, opts) {\n    if (!webKeyCapable()) return;\n', '  function paintWebKeyOffer(r, opts) {\n'], CMT),
-  m('composer-needs-active-key', APP, ["      if (!st || st.activeKeys < 1 || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;", "      if (!st || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;"], CMT),
+  // 7.0.51 (W1, X1's leave): no enrolled key must give the setup link, never the verified composer.
+  m('composer-needs-active-key', APP, ["      if (st.activeKeys === 0) {\n        var setupUrl = webKeySetupUrl(); if (!setupUrl) return;", "      if (false) {\n        var setupUrl = webKeySetupUrl(); if (!setupUrl) return;"], CMT),
   m('composer-url-https', APP, ["      return x.protocol === 'https:' && x.hostname", '      return x.hostname'], CMT),
   m('composer-url-host', APP, ["x.hostname === location.hostname && x.port === '3144'", "x.port === '3144'"], CMT),
   m('composer-url-port', APP, ["x.port === '3144' && x.pathname === '/'", "x.pathname === '/'"], CMT),
