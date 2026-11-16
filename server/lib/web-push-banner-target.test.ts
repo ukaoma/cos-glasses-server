@@ -51,6 +51,9 @@ describe('the sessions a banner announces', () => {
   })
   it('a provider outside the reader\'s three is left off; two providers for one session leave it off', () => {
     expect(bannerSessions([reply(A, 'grok')])).toEqual([{ id: A }])
+    // agentCandidate already drops an unknown provider; bannerSessions' own guard, given one directly (Q1's A3)
+    const raw = { ...reply(A, 'claude'), links: [{ kind: 'session' as const, id: A, label: 'x', provider: 'grok' as never }] }
+    expect(bannerSessions([raw])).toEqual([{ id: A }])
     expect(bannerSessions([reply(A, 'claude'), reply(A, 'codex', WORK + 1)])).toEqual([{ id: A }])
   })
   it('any item that is not a session ping: no sessions named', () => {
