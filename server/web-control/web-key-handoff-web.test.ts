@@ -35,7 +35,7 @@ class El {
   removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any> }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
   form.children.push(actions); actions.children.push(send); send.parentNode = actions
@@ -62,22 +62,27 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     if (path === '/api/web-key/status') { statusTimeouts.push(o.timeoutMs); return actualStatus ? actualStatus(path, o) : opts.statusRead ? opts.statusRead() : Promise.resolve({ status: 200, body: { ok: true, activeKeys: opts.activeKeys ?? 1 } }) }
     if (path.startsWith('/api/web-key/packets?')) return opts.packetRead ?? Promise.resolve({ status: 200, body: { ok: true, packets: opts.packets ?? [] } })
     if (path.endsWith('/attach')) return Promise.resolve({ status: 201, body: { attached: true, bindingId: 'b-1', epoch: 2 } })
+    if (/^\/api\/agent-sessions\/bindings\/[^/]+\/turns\/[^/]+$/.test(path)) return Promise.resolve(opts.turnStatus ? opts.turnStatus(path) : { status: 404, body: { outcome: 'unknown' } })
     if (path === '/api/web-key/handoff') return Promise.resolve(opts.handoff ? opts.handoff(o.body) : { status: 201, body: { ok: true, handoffId: 'h'.repeat(24), signerUrl: `https://${HOST}:3144/#h=${'h'.repeat(24)}` } })
     return Promise.resolve({ status: 404, body: {} })
   }
+  const nextKey = () => 'ct-key-' + String(++turnCounter).padStart(6, '0')
+  // app.js clearBoxOf: only the very words that were sent leave the box.
+  const clearBoxOf = (text: string, rr: any) => { if (rr === state.reading && input.value.trim() === String(text).trim()) input.value = ''; if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null }
   const fns = new Function(
-    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date',
-    BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk };',
+    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf',
+    BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
   )(
     () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, { createElement: (t: string) => new El(t) },
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
-    (text: string, rr: any) => { rr.draft = rr.draft && rr.draft.text === text ? rr.draft : { text, key: 'ct-key-000001', ids: [] }; return rr.draft },
+    (text: string, rr: any, ids?: string[]) => { const f = Array.isArray(ids) ? ids.slice() : []; rr.draft = rr.draft && rr.draft.text === text && (rr.draft.ids || []).join(',') === f.join(',') ? rr.draft : { text, key: nextKey(), ids: f }; return rr.draft },
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
-    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) } }, URL, () => 'ct-key-' + String(++turnCounter).padStart(6, '0'), window, Clock,
-  ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean }
+    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) } }, URL, nextKey, window, Clock, clearBoxOf,
+  ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
-  return { ...fns, r, state, form, input, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
+  const plainKey = () => fns.draftForPlain(input.value.trim(), r)
+  return { ...fns, r, state, form, input, plainKey, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
     pageShow: (persisted = true) => { for (const fn of windowListeners.pageshow ?? []) fn({ persisted }) }, advance: (ms: number) => { now += ms },
     statusTimeouts, timeoutDelays, downMarks, timerCount: () => timers.size, expireTimers: () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn() },
     addView: (other: 'session' | 'ta') => {
@@ -434,7 +439,11 @@ describe('phone setup and revocation after Safari persisted return', () => {
 
 describe('phone navigation owns only its own busy state', () => {
   for (const prefix of ['session', 'ta'] as const) {
-    it(`${prefix}: opened approval returns from BFCache and can open a fresh second approval`, async () => {
+    // 7.0.51 (W1, lead 06:5x): this test used to pin a NEW turn key for the second approval. That encoded the
+    // fault, not a need: a second approval of the same words is either a retry of one that never landed (the same
+    // key delivers it once) or a repeat of one that did (the same key is answered as already sent, as a plain Send
+    // of the same words is). A deliberately repeated message is typed again after the box clears, like Send.
+    it(`${prefix}: opened approval returns from BFCache and a second approval of the same words keeps its turn key`, async () => {
       const h = harness({ signer: 1, prefix })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
@@ -444,7 +453,7 @@ describe('phone navigation owns only its own busy state', () => {
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
       const posts = h.requests.filter(q => q.path === '/api/web-key/handoff')
       expect(posts).toHaveLength(2)
-      expect(posts[1].body.clientTurnId).not.toBe(posts[0].body.clientTurnId)
+      expect(posts[1].body.clientTurnId).toBe(posts[0].body.clientTurnId)
       expect(h.assigned).toHaveLength(2)
     })
     it(`${prefix}: ordinary-send busy is preserved on persisted return`, async () => {
@@ -550,6 +559,90 @@ describe('bounded status refresh uses the real apiAnswer transport', () => {
       expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
       expect(h.timerCount()).toBe(0)
       expect(h.statusTimeouts).toEqual([15000, 15000, 15000])
+    })
+  }
+})
+
+describe('7.0.51: one turn key for the phone and Send, and a landing check on return (W1, lead 06:5x)', () => {
+  const landed = (outcome: string) => () => ({ status: 200, body: { outcome, recordedStatus: 202, polled: true } })
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: after a verified send and the return, Send and a re-tap carry the phone's turn key, so the Mac takes it once`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.' })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const phoneKey = h.requests.filter(q => q.path === '/api/web-key/handoff')[0].body.clientTurnId
+      h.pageShow(); await flush()
+      // Words still in the box (the Mac has no record yet): the plain Send would post this key.
+      expect(h.input.value.trim()).toBe('Ship it.')
+      expect(h.plainKey()).toBe(phoneKey)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const posts = h.requests.filter(q => q.path === '/api/web-key/handoff')
+      expect(posts.map(q => q.body.clientTurnId)).toEqual([phoneKey, phoneKey])
+    })
+    it(`${prefix}: a plain Send first, then the phone with the same words, also share one key`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.' })
+      const plain = h.plainKey()
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.requests.filter(q => q.path === '/api/web-key/handoff')[0].body.clientTurnId).toBe(plain)
+    })
+    it(`${prefix}: the return reads that turn by its key, and a landed turn leaves the box and says so`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed('completed') })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const key = h.requests.filter(q => q.path === '/api/web-key/handoff')[0].body.clientTurnId
+      h.pageShow(); await flush()
+      expect(h.requests.map(q => q.path)).toContain('/api/agent-sessions/bindings/b-1/turns/' + key)
+      expect(h.input.value).toBe('')
+      expect(h.statuses.at(-1)?.[0]).toBe('Sent from your phone.')
+    })
+    it(`${prefix}: queued counts as landed too`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed('queued') })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.pageShow(); await flush()
+      expect(h.input.value).toBe('')
+    })
+    for (const [name, reply, line] of [
+      ['no record (404)', () => ({ status: 404, body: { outcome: 'unknown' } }), 'The Mac has no record of that message yet. Your words are still here; sending again will not post twice.'],
+      ['still pending', () => ({ status: 200, body: { outcome: 'pending' } }), 'Your message from the phone is still on its way. Your words are still here; sending again will not post twice.'],
+      ['a refusal the Mac recorded', () => ({ status: 200, body: { outcome: 'refused', reasonCopy: 'The session is working.' } }), 'The Mac did not take the message from your phone. Your words are still here.'],
+      ['an unreadable answer', () => ({ status: 503, body: { outcome: 'unavailable' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'],
+      // Only a 200 (the turn ledger's own record) is evidence; any other status is not, whatever its body says.
+      ['a non-200 whose body claims it landed', () => ({ status: 409, body: { outcome: 'completed' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'],
+    ] as const) {
+      it(`${prefix}: ${name} keeps the words and says so`, async () => {
+        const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: reply })
+        expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+        h.pageShow(); await flush()
+        expect(h.input.value.trim()).toBe('Ship it.')
+        expect(h.statuses.at(-1)?.[0]).toBe(line)
+      })
+    }
+    it(`${prefix}: a status read that fails keeps the words and says so`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: () => Promise.reject(new Error('offline')) as any })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.pageShow(); await flush()
+      expect(h.input.value.trim()).toBe('Ship it.')
+      expect(h.statuses.at(-1)?.[0]).toBe('COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.')
+    })
+    it(`${prefix}: after a landed phone send, the same words typed again are a new message with a new key, as after Send`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed('completed') })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const key = h.requests.filter(q => q.path === '/api/web-key/handoff')[0].body.clientTurnId
+      h.pageShow(); await flush()
+      expect(h.input.value).toBe('')
+      h.input.value = 'Ship it.'
+      expect(h.plainKey()).not.toBe(key)
+    })
+    it(`${prefix}: words typed after the trip are never cleared by the landing check`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed('completed') })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.input.value = 'Ship it. And the docs.'
+      h.pageShow(); await flush()
+      expect(h.input.value).toBe('Ship it. And the docs.')
+    })
+    it(`${prefix}: a return with no phone trip makes no turn read`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      h.pageShow(); await flush()
+      expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
     })
   }
 })

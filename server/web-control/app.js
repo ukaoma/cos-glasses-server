@@ -5650,7 +5650,7 @@
     var offer = view.form.querySelector('[data-phone-offer]'), packets = view.form.querySelector('[data-phone-packets]');
     if (offer && offer.parentNode) offer.parentNode.removeChild(offer);
     if (packets && packets.parentNode) packets.parentNode.removeChild(packets);
-    r.phonePackets = {}; r.phonePacketSha256 = ''; r.phoneDraft = null;
+    r.phonePackets = {}; r.phonePacketSha256 = '';
   }
   function refreshWebKeyOffers() {
     if (!webKeyCapable() || WEB_KEY.refreshing) return;
@@ -5674,7 +5674,37 @@
       nav.r.phoneNavigation = null;
     }
     refreshWebKeyOffers();
+    if (nav && nav.token.completed && nav.trip) phoneLanded(nav.r, nav.trip);
   });
+  // 7.0.51 (W1, lead 06:5x): back from the approval page, ask the Mac whether that turn landed, by its key.
+  // Landed: its words leave the box (only those words, as a plain Send does). Anything else: the words stay, and
+  // sending again is safe because the phone and Send share one turn key (draftFor), so the Mac takes it once.
+  var PHONE_LANDED = {
+    landed: 'Sent from your phone.',
+    unknown: 'The Mac has no record of that message yet. Your words are still here; sending again will not post twice.',
+    pending: 'Your message from the phone is still on its way. Your words are still here; sending again will not post twice.',
+    refused: 'The Mac did not take the message from your phone. Your words are still here.',
+    unread: 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'
+  };
+  function phoneLanded(r, trip) {
+    var say = trip.view.status;
+    return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(trip.bindingId) + '/turns/' + encodeURIComponent(trip.key), { timeoutMs: 15000 }).then(function (a) {
+      var out = a.body && a.body.outcome;
+      if (a.status === 200 && (out === 'queued' || out === 'completed')) {
+        if (trip.view.prefix === 'session') clearBoxOf(trip.text, r);
+        else {
+          var box = trip.view.input;
+          if (box && box.value.trim() === trip.text) box.value = '';
+          if (r.draft && r.draft.text === trip.text) r.draft = null;
+        }
+        say(PHONE_LANDED.landed); return 'landed';
+      }
+      if (a.status === 404) { say(PHONE_LANDED.unknown); return 'unknown'; }
+      if (a.status === 200 && out === 'pending') { say(PHONE_LANDED.pending); return 'pending'; }
+      if (a.status === 200) { say(PHONE_LANDED.refused, 'error'); return 'refused'; }
+      say(PHONE_LANDED.unread, 'error'); return 'unread';
+    }, function () { say(PHONE_LANDED.unread, 'error'); return 'unread'; });
+  }
   function phonePacketDetails(p, sha) {
     return 'Requested ' + p.action + ': ' + p.artifact + ' ' + p.version + '\nChannel: ' + p.channel + '\nDigest: ' + p.digest +
       '\nReceiver: ' + p.provider + ' / ' + p.sessionId + '\nExpires: ' + new Date(p.exp).toISOString() + '\nPacket: ' + sha +
@@ -5750,8 +5780,9 @@
     var provider = r.provider, id = r.id, packetSha = r.phonePacketSha256 || '';
     var packet = packetSha && r.phonePackets && r.phonePackets[packetSha];
     if (packetSha && (!packet || packet.exp < Date.now() || packet.provider !== provider || packet.sessionId !== id)) { say('That release request expired or changed. Reopen this session to load its current request.', 'error'); return Promise.resolve('packet'); }
-    var draft = r.phoneDraft;
-    if (!draft || draft.text !== text || draft.packetSha256 !== packetSha) draft = r.phoneDraft = { text: text, key: newTurnKey(), packetSha256: packetSha };
+    // 7.0.51 (W1): the SAME draft and turn key a plain Send of these words uses (no files: the phone path refuses
+    // them above). A phone-only key let a verified message and a Send of the same words both land.
+    var draft = draftFor(text, r, []);
     var bound = bindingFor(provider, id);
     // Other senders assign boolean true. This unique truthy owner lets late callbacks and a BFCache return
     // release only this phone operation, never a newer ordinary send or another phone operation.
@@ -5780,7 +5811,7 @@
           say('Opening the approval page.');
           location.assign(body.signerUrl);
           operation.completed = true;
-          WEB_KEY.navigation = { r: r, token: operation };
+          WEB_KEY.navigation = { r: r, token: operation, trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
           return 'opened';
         }
         if (h.status === 201) { say('Open Control from your Mac’s Tailscale name to approve on this phone.', 'error'); return 'refused'; }
