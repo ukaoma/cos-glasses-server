@@ -73,7 +73,10 @@
     threadCarried: '',      // the thread's newest session started fresh: 'summary' (it carried a digest) or 'plain'
     threadBusy: false,
     threadSession: '',      // 7.0.2: the session the COS thread's next Ask continues ('' when it starts fresh)
-    defaultGen: 0           // 7.0.2: the newest /api/models read for the Default label; older answers are dropped
+    defaultGen: 0,          // 7.0.2: the newest /api/models read for the Default label; older answers are dropped
+    // 7.0.52 (Anand): Ask mode's earlier asks in today's web conversation, read once a page from GET
+    // /api/sessions/:id/messages, in the history's entry shape. sid: the conversation read; state idle | loading | ready | error.
+    back: { sid: '', state: 'idle', entries: [] }
   };
   var saved = W.readStore(STORE);
   C.model = typeof saved.model === 'string' ? saved.model : '';
@@ -408,10 +411,53 @@
     if (threadOn()) loadThread();
     if (historyOn() && C.hist.state !== 'ready') loadHistory();
     // Ask only: no inbox to read; the chat holds this page's Asks. Inbox lines from a Drop it session are not shown.
-    if (!dropOn()) { if (C.feedMode !== 'ask') { C.items = []; C.feedState = 'ready'; C.feedMode = 'ask'; } paintFeed(false); return; }
+    // 7.0.52: the chat's own memory ends with the page, so a reload reads back today's earlier asks once (loadBack).
+    if (!dropOn()) { if (C.feedMode !== 'ask') { C.items = []; C.feedState = 'ready'; C.feedMode = 'ask'; } loadBack(); paintFeed(false); return; }
     if (C.items === null || C.feedState === 'error' || C.feedMode !== 'drop') loadFeed(); else paintFeed(false);
   }
   function chatVisible() { var el = C.host && C.host.querySelector('[data-cos-chat]'); return !!(el && el.offsetParent !== null); }
+
+  // ── 7.0.52: Ask mode's earlier asks after a reload (Anand; lead 09:5x, option 1) ──
+  // C.asks lives in page memory, so a reload showed "Ask COS anything." over today's asks. Today's web conversation
+  // (C.session, kept per day in the page's store) is read once a page with GET /api/sessions/:id/messages, the paired
+  // questions and answers. 404 is a conversation the Mac no longer holds or that is empty: nothing to show. Any other
+  // failure is one quiet line with Try again (asks-retry). Earlier days are not here (option 2, a server route).
+  function loadBack() {
+    var s = C.session;
+    if (!s || typeof s.id !== 'string' || !s.id || s.day !== today()) return;
+    if (C.back.sid === s.id && C.back.state !== 'idle') return;
+    var mine = C.back = { sid: s.id, state: 'loading', entries: [] };
+    api('/api/sessions/' + encodeURIComponent(s.id) + '/messages').then(function (d) {
+      if (C.back !== mine) return;
+      histMerge(backEntries(d && d.messages), 'newer', mine);
+      mine.state = 'ready'; paintFeed(false);
+    }, function (err) {
+      if (C.back !== mine) return;
+      mine.state = err && err.status === 404 ? 'ready' : 'error'; paintFeed(false);
+    });
+  }
+  /** The route's pairs as history chats (histHtml): a pair without its words or a time is left out, never half drawn. */
+  function backEntries(list) {
+    var out = [];
+    (Array.isArray(list) ? list : []).forEach(function (m, i) {
+      if (!m || typeof m.query !== 'string' || typeof m.text !== 'string' || typeof m.timestamp !== 'number') return;
+      var at = new Date(m.timestamp);
+      if (isNaN(at.getTime())) return;
+      var no = Number.isInteger(m.no) && m.no > 0 ? m.no : 0;
+      out.push({ id: 't:web:' + (no ? 'n' + no : 'i' + i), kind: 'chat', at: at.toISOString(), question: m.query, answer: m.text,
+        status: 'completed', full: true, messageNo: no || undefined });
+    });
+    return out;
+  }
+  /** The earlier asks to draw: one whose number an Ask on this page already shows is that Ask's card. */
+  function backShown() {
+    var shown = {};
+    C.asks.forEach(function (a) { if (a.no) shown[a.no] = 1; });
+    return C.back.entries.filter(function (e) { return !(e.messageNo && shown[e.messageNo]); });
+  }
+  function backTopLine() {
+    return C.back.state === 'error' ? '<p class="tl-start" data-asks-top>Couldn’t load your earlier asks. <button type="button" class="link-btn" data-cos="asks-retry">Try again</button></p>' : '';
+  }
 
   function loadFeed() {
     if (C.feedState === 'loading') return;
@@ -761,9 +807,14 @@
           rows.push({ at: e.at, html: histHtml(e) });
         });
       }
+      // 7.0.52: Ask mode's earlier asks from today's web conversation, as history cards; a number an Ask on this page
+      // shows is that Ask. With any drawn, the chat takes the history's day lines.
+      var back = !hist && !dropOn() ? backShown() : [];
+      back.forEach(function (e) { rows.push({ at: e.at, html: histHtml(e) }); });
+      var backTop = !hist && !dropOn() ? backTopLine() : '', days = hist || back.length > 0;
       rows.sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
       var older = archiveHtml();
-      html = rows.length || older || (hist && (C.hist.older || C.hist.state === 'error')) ? (hist ? histTopHtml() : '') + older + (hist ? withDays(rows) : rows.map(function (r) { return r.html; }).join(''))
+      html = rows.length || older || backTop || (hist && (C.hist.older || C.hist.state === 'error')) ? (hist ? histTopHtml() : backTop) + older + (days ? withDays(rows) : rows.map(function (r) { return r.html; }).join(''))
         : dropOn() ? '<p class="cc-empty">Nothing here yet. Ask COS something, or drop a thought and COS files it.</p>'
           : '<p class="cc-empty">Ask COS anything. Attach photos or files with the clip.</p>';
     }
@@ -1343,15 +1394,17 @@
     C.hist = { entries: [], older: null, newest: '', state: 'idle', olderState: 'idle', newerBusy: false, full: {}, fullState: {},
       attach: h.attach, retrying: h.retrying, retryErr: h.retryErr, listening: h.listening, trim: 0 };
   }
-  /** Entries into the list, by id: 'older' before, 'newer' after; one already held is replaced where it is. */
-  function histMerge(list, where) {
-    var have = {}, cur = C.hist.entries;
+  /** Entries into the list, by id: 'older' before, 'newer' after; one already held is replaced where it is. `box` is the
+   *  thread's history (C.hist) unless named: 7.0.52's Ask-mode earlier asks (C.back) use the same merge. */
+  function histMerge(list, where, box) {
+    box = box || C.hist;
+    var have = {}, cur = box.entries;
     cur.forEach(function (e, i) { have[e.id] = i; });
     var fresh = [];
     (Array.isArray(list) ? list : []).filter(histValid).forEach(function (e) {
       if (Object.prototype.hasOwnProperty.call(have, e.id)) cur[have[e.id]] = e; else { have[e.id] = -1; fresh.push(e); }
     });
-    C.hist.entries = where === 'older' ? fresh.concat(cur) : cur.concat(fresh);
+    box.entries = where === 'older' ? fresh.concat(cur) : cur.concat(fresh);
   }
   function histUrl(q) { return '/api/cos-thread/history?limit=' + HIST_PAGE + (timelineOn() ? '&timeline=1' : '') + (q || ''); }
   // Installed once, the first time the history is read (a server without it never gets these): the newer entries every
@@ -2820,6 +2873,7 @@
     if (what === 'hist-full') return loadFull(t.getAttribute('data-id'));
     if (what === 'hist-older') { C.hist.olderState = 'idle'; return loadOlder(); }
     if (what === 'hist-retry') { C.hist.state = 'idle'; return loadHistory(); }
+    if (what === 'asks-retry') { C.back.state = 'idle'; loadBack(); return paintFeed(false); }
     if (what === 'hist-again') return retryEntry(t.getAttribute('data-id'));
     if (what === 'tl-open') return openNote(t);
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
