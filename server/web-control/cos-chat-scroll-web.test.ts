@@ -239,6 +239,22 @@ describe('Back from Open result keeps his place in the COS chat', () => {
       t.h.chat._paintFeed(false); t.h.layout()
       expect(t.card.getBoundingClientRect().top).toBe(300)
     })
+    it(`${label}: the place is used once: after Back and a scroll to the newest line, the chat opening again moves nothing (Q1 Q17)`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      await t.arrive('messages', ['cos'])
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+      // He reads down to the newest line himself.
+      t.h.emit(wide ? t.h.feed : t.h.win, 'wheel', { deltaY: 200 }); t.h.scroll.scrollTop = t.bottom(); t.h.emit(wide ? t.h.feed : t.h.win, 'scroll')
+      t.writes.length = 0
+      // A list refresh opens the chat again at the same address.
+      t.h.chat.mount(t.h.host, true); await flush(); t.h.layout()
+      expect(t.writes, 'no scroll at all').toEqual([])
+      expect(t.h.scroll.scrollTop).toBe(t.bottom())
+      expect(t.h.chat._state.returnTo).toBe(null)
+    })
     it(`${label}: a reader reached any other way: back in the chat, it follows the newest line as before`, async () => {
       const t = trip(wide)
       await t.arrive('messages', ['cos'])
