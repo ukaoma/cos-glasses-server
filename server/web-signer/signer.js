@@ -49,7 +49,19 @@
   function problem(copy) { setText('problem-text', copy); show('problem') }
   function framed() { try { return W.top !== W.self } catch (_e) { return true } }
   function spacedCode(code) { return String(code).slice(0, 3) + ' ' + String(code).slice(3) }
-  function controlUrl() { return 'https://' + W.location.hostname + ':3143/control/' }
+  // The way back (W1's return contract, 7.0.51): one fixed address on this page's own host, Control's port. It names
+  // nothing (no handoff, words, session, turn or outcome); Control finds its place from its own per-tab record.
+  function controlUrl() { return 'https://' + W.location.hostname + ':3143/control/#/phone-return' }
+  /** A real tap only, never a timer or a redirect: back in history (Control's page as he left it), else REPLACE this page. */
+  function goBack(ev) {
+    if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()
+    if (!ev || ev.isTrusted !== true) return undefined
+    try {
+      if (W.history && W.history.length > 1) { W.history.back(); return undefined }
+    } catch (_e) { /* fall through to the fixed address */ }
+    W.location.replace(controlUrl())
+    return undefined
+  }
 
   function api(path, opts) {
     var o = opts || {}
@@ -339,5 +351,7 @@
   on('key-revoke', onRevoke)
   var back = $('back'); if (back) back.href = controlUrl()
   var back2 = $('done-back'); if (back2) back2.href = controlUrl()
+  on('back', goBack)
+  on('done-back', goBack)
   W.COSSigner = { ready: boot() }
 })(window)

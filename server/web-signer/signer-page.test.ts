@@ -31,7 +31,8 @@ class El {
   private listeners: Array<(ev: unknown) => unknown> = []
   constructor(readonly id: string) {}
   addEventListener(_type: string, fn: (ev: unknown) => unknown) { this.listeners.push(fn) }
-  tap(isTrusted = true): unknown { let out: unknown; for (const fn of this.listeners) out = fn({ isTrusted }); return out }
+  prevented = 0
+  tap(isTrusted = true): unknown { let out: unknown; const ev = { isTrusted, preventDefault: () => { this.prevented += 1 } }; for (const fn of this.listeners) out = fn(ev); return out }
 }
 
 interface Rig {
@@ -43,6 +44,8 @@ interface Rig {
   creates: any[]
   gets: any[]
   visible: () => string[]
+  /** Every navigation the page asked for: history.back(), location.replace(url), location.assign(url). */
+  navs: string[]
 }
 
 function rig(opts: { record?: any; hash?: string; framed?: boolean; route: (path: string, method: string, body: any, headers: Record<string, string>) => { status: number; body: unknown }; passkey: TestKey; credentialId: string; cancelPasskey?: boolean }): Rig {
@@ -53,12 +56,14 @@ function rig(opts: { record?: any; hash?: string; framed?: boolean; route: (path
   const fetches: Rig['fetches'] = []
   const store = { record: opts.record ?? null, gets: 0 }
   const creates: any[] = [], gets: any[] = []
-  const location = { hostname: SELF_DNS, origin: ORIGIN, pathname: '/', hash: opts.hash ?? '' }
+  const navs: string[] = []
+  const location = { hostname: SELF_DNS, origin: ORIGIN, pathname: '/', hash: opts.hash ?? '',
+    replace: (url: string) => { navs.push('replace ' + url) }, assign: (url: string) => { navs.push('assign ' + url) } }
   const W: Record<string, any> = {
     crypto: webcrypto, TextEncoder, TextDecoder, btoa, atob,
     setTimeout: (fn: () => void) => setImmediate(fn),
     location,
-    history: { replaceState: (_s: unknown, _t: string, url: string) => { location.hash = ''; location.pathname = url } },
+    history: { length: 2, back: () => { navs.push('back') }, replaceState: (_s: unknown, _t: string, url: string) => { location.hash = ''; location.pathname = url } },
     document: { getElementById: (id: string) => els.get(id) ?? null },
     COSSignerStore: {
       get: async () => { store.gets += 1; return store.record },
@@ -94,7 +99,7 @@ function rig(opts: { record?: any; hash?: string; framed?: boolean; route: (path
   new Function('window', PROOF_SRC)(W)
   new Function('window', PAGE_SRC)(W)
   const el = (id: string) => els.get(id)!
-  return { W, els, el, fetches, store, creates, gets, visible: () => ['loading', 'framed', 'enroll', 'pending', 'sign', 'done', 'idle', 'problem'].filter(id => !el(id).hidden) }
+  return { W, els, el, fetches, store, creates, gets, navs, visible: () => ['loading', 'framed', 'enroll', 'pending', 'sign', 'done', 'idle', 'problem'].filter(id => !el(id).hidden) }
 }
 
 let dir: string
@@ -339,6 +344,55 @@ describe('per-turn signing', () => {
     expect(r.visible()).toEqual(['problem'])
     expect(r.gets).toEqual([])
     expect(turnsSeen).toEqual([])
+  })
+  // ── The way back to Control (W1's return contract for 7.0.51, X1 11/16) ──
+  const RETURN = `https://${SELF_DNS}:3143/control/#/phone-return`
+  it('return: both links point at the one fixed address, and it names nothing (no handoff, words, session or turn)', async () => {
+    const { r, handoffId } = await enrolledRig()
+    expect(r.el('back').href).toBe(RETURN)
+    expect(r.el('done-back').href).toBe(RETURN)
+    for (const leak of [handoffId, SID, 'turn-web-key-0001', 'b-1', 'install']) expect(RETURN).not.toContain(leak)
+  })
+  it('return: after signing, nothing navigates on its own (no timer, no redirect)', async () => {
+    const { r } = await enrolledRig()
+    await r.el('sign-approve').tap(true)
+    await flush()
+    expect(r.visible()).toEqual(['done'])
+    expect(r.navs).toEqual([])
+  })
+  it('return: a real tap on Done goes back in history when there is history, and only that', async () => {
+    const { r } = await enrolledRig()
+    await r.el('sign-approve').tap(true)
+    r.el('done-back').tap(true)
+    expect(r.navs).toEqual(['back'])
+    expect(r.el('done-back').prevented).toBe(1)
+  })
+  it('return: with no history (a new tab) a real tap REPLACES this page with the fixed address, never assign', async () => {
+    const { r } = await enrolledRig()
+    r.W.history.length = 1
+    r.el('back').tap(true)
+    expect(r.navs).toEqual(['replace ' + RETURN])
+  })
+  it('return: history.back() throwing still lands on the fixed address', async () => {
+    const { r } = await enrolledRig()
+    r.W.history.back = () => { throw new Error('SecurityError') }
+    r.el('back').tap(true)
+    expect(r.navs).toEqual(['replace ' + RETURN])
+  })
+  it('return: a script-made click on either link navigates nowhere and stops the link', async () => {
+    const { r } = await enrolledRig()
+    r.el('back').tap(false)
+    r.el('done-back').tap(false)
+    expect(r.navs).toEqual([])
+    expect(r.el('back').prevented).toBe(1)
+    expect(r.el('done-back').prevented).toBe(1)
+  })
+  it('return: the address is built from this page\'s own host, never from the handoff', async () => {
+    const { r } = await enrolledRig()
+    r.W.location.hostname = 'other.tail00000a.ts.net'
+    r.W.history.length = 0
+    r.el('back').tap(true)
+    expect(r.navs).toEqual(['replace https://other.tail00000a.ts.net:3143/control/#/phone-return'])
   })
   it('a claimed handoff cannot be claimed again (a reload shows the problem, not the words)', async () => {
     const { handoffId } = await enrolledRig()
