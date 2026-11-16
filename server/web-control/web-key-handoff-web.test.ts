@@ -748,22 +748,43 @@ describe('7.0.51: one turn key for the phone and Send, and a landing check on re
       h.pageShow(); await flush()
       expect(h.input.value).toBe('')
     })
-    for (const [name, reply, line] of [
-      ['no record (404)', () => ({ status: 404, body: { outcome: 'unknown' } }), 'The Mac has no record of that message yet. Your words are still here; sending again will not post twice.'],
-      ['still pending', () => ({ status: 200, body: { outcome: 'pending' } }), 'Your message from the phone is still on its way. Your words are still here; sending again will not post twice.'],
-      ['a refusal the Mac recorded', () => ({ status: 200, body: { outcome: 'refused', reasonCopy: 'The session is working.' } }), 'The Mac did not take the message from your phone. Your words are still here.'],
-      ['an unreadable answer', () => ({ status: 503, body: { outcome: 'unavailable' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'],
+    // 7.0.51 (lead 08:4x): the words follow what the turn ledger actually KNOWS. It stores only completed, ambiguous and
+    // a post-202 refused; a 404 also covers a turn admitted and still running, so it never reads as "did not take".
+    // `sameKey`: the words are kept under the trip's key (a resend replays, never posts twice), or get a fresh one.
+    for (const [name, reply, line, sameKey] of [
+      ['no record (404)', () => ({ status: 404, body: { outcome: 'unknown' } }), 'The Mac has no record of that message yet. Your words are still here; sending again will not post twice.', true],
+      ['still pending', () => ({ status: 200, body: { outcome: 'pending' } }), 'Your message from the phone is still on its way. Your words are still here; sending again will not post twice.', true],
+      ['a refusal the Mac recorded', () => ({ status: 200, body: { outcome: 'refused', reasonCopy: 'The session is working.' } }), 'The Mac did not take the message from your phone. Your words are still here to send again.', false],
+      ['an ambiguous delivery', () => ({ status: 200, body: { outcome: 'ambiguous', retryable: false } }), 'COS cannot tell whether your message from the phone reached the session. Your words are still here; look at the session before sending them again.', true],
+      ['an unreadable answer', () => ({ status: 503, body: { outcome: 'unavailable' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.', true],
       // Only a 200 (the turn ledger's own record) is evidence; any other status is not, whatever its body says.
-      ['a non-200 whose body claims it landed', () => ({ status: 409, body: { outcome: 'completed' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'],
+      ['a non-200 whose body claims it landed', () => ({ status: 409, body: { outcome: 'completed' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.', true],
+      ['a non-200 whose body claims a refusal', () => ({ status: 409, body: { outcome: 'refused' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.', true],
+      ['a non-200 whose body claims ambiguity', () => ({ status: 409, body: { outcome: 'ambiguous' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.', true],
+      // A 200 the ledger never sends (F1's mock: no outcome) is not a refusal: it is "could not check".
+      ['a bare 200 with no outcome', () => ({ status: 200, body: {} }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.', true],
+      ['a 200 with an outcome this page does not know', () => ({ status: 200, body: { outcome: 'surprise' } }), 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.', true],
     ] as const) {
       it(`${prefix}: ${name} keeps the words and says so`, async () => {
         const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: reply })
         expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+        const key = h.requests.filter(q => q.path === '/api/web-key/handoff')[0].body.clientTurnId
         h.pageShow(); await flush()
         expect(h.input.value.trim()).toBe('Ship it.')
         expect(h.statuses.at(-1)?.[0]).toBe(line)
+        if (sameKey) expect(h.plainKey()).toBe(key)
+        else expect(h.plainKey()).not.toBe(key)
       })
     }
+    it(`${prefix}: a refusal re-keys only the refused words; other words typed since keep their own key`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: () => ({ status: 200, body: { outcome: 'refused' } }) })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.input.value = 'Other words.'
+      const other = h.plainKey()
+      h.pageShow(); await flush()
+      expect(h.input.value).toBe('Other words.')
+      expect(h.plainKey()).toBe(other)
+    })
     it(`${prefix}: a status read that fails keeps the words and says so`, async () => {
       const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: () => Promise.reject(new Error('offline')) as any })
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
