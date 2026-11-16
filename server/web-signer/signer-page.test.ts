@@ -399,3 +399,61 @@ describe('per-turn signing', () => {
     expect(handoffs.claim(handoffId)).toEqual({ ok: false, reason: 'handoff_claimed' })
   })
 })
+
+// 7.0.51 restyle (F1; Q1 07:19 survivors): the markup and stylesheet rules the page's safety leans on. CSS can move,
+// hide or relabel what he reads before he signs, so these are pinned, not left to the pictures.
+describe('the page markup and stylesheet', () => {
+  const CSS = readFileSync(join(HERE, 'signer.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  const at = (id: string) => { const i = HTML.indexOf(`id="${id}"`); expect(i, id).toBeGreaterThan(-1); return i }
+  const rules = [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(m => ({ sel: m[1]!.trim(), body: m[2]! }))
+
+  it('the words and the exact request come before Approve and Cancel in the document, so a phone reads them first', () => {
+    for (const before of ['sign-words', 'sign-scope', 'sign-packet']) for (const after of ['sign-approve', 'sign-cancel']) {
+      expect(at(before), `${before} before ${after}`).toBeLessThan(at(after))
+    }
+  })
+
+  it('[hidden] always wins: display none with !important', () => {
+    expect(CSS).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/)
+  })
+
+  it('every screen but loading starts hidden, and loading starts shown', () => {
+    const sections = [...HTML.matchAll(/<section id="([a-z-]+)"( hidden)?>/g)].map(m => ({ id: m[1]!, hidden: !!m[2] }))
+    expect(sections.map(s => s.id).sort()).toEqual(['done', 'enroll', 'framed', 'idle', 'loading', 'pending', 'problem', 'sign'])
+    for (const s of sections) expect(s.hidden, s.id).toBe(s.id !== 'loading')
+  })
+
+  it('the only generated text near the words is the packet\'s "Exact request" label; nothing is drawn on the words', () => {
+    const drawn = rules.filter(r => /::?(before|after)/.test(r.sel) && /#sign-(words|packet)/.test(r.sel))
+    expect(drawn.map(r => r.sel)).toEqual(['#sign-packet::before'])
+    expect(drawn[0]!.body).toMatch(/content:\s*'Exact request';/)
+    // No content: anywhere else in the sheet, so no other rule can draw text over or around what is signed.
+    // (A declaration named content, not justify-content and the like.)
+    expect(rules.filter(r => /(?:^|[;{\s])content\s*:/.test(r.body)).map(r => r.sel)).toEqual(['#sign-packet::before'])
+  })
+
+  it('the session shows short in the main list before Approve: one element, clipped by CSS to 8 characters, a plain … after it, full when opened (lead 07:36)', () => {
+    expect(HTML.match(/id="sign-session"/g)).toHaveLength(1)
+    const list = HTML.slice(HTML.indexOf('<dl>', HTML.indexOf('id="sign"')), HTML.indexOf('</dl>', HTML.indexOf('id="sign"')))
+    expect(list).toContain('id="sign-provider"')
+    expect(list).toMatch(/<details class="sid"><summary><span class="mono" id="sign-session"><\/span><span class="sid-more" aria-hidden="true">…<\/span><\/summary><\/details>/)
+    expect(at('sign-session')).toBeLessThan(at('sign-approve'))
+    const rule = (sel: string) => (rules.find(r => r.sel === sel) || { body: '' }).body
+    expect(rule('#sign-session')).toMatch(/display:\s*inline-block;/)
+    // Q1 07:41: nothing may hide it (any rule naming #sign-session, open or not).
+    for (const r of rules.filter(r => r.sel.includes('#sign-session'))) {
+      expect(r.body, r.sel).not.toMatch(/display:\s*none|visibility:\s*hidden|opacity:\s*0(?![.\d])|font-size:\s*0(?![.\d])|(?:^|[;\s])(?:max-)?width:\s*0(?![.\d])|clip-path|transform/)
+    }
+    expect(rule('#sign-session')).toMatch(/max-width:\s*8ch;/)
+    expect(rule('#sign-session')).toMatch(/overflow:\s*hidden;/)
+    expect(rule('#sign-session')).not.toMatch(/ellipsis/)
+    expect(rule('.sid[open] #sign-session')).toMatch(/max-width:\s*none;/)
+    expect(rule('.sid[open] .sid-more')).toMatch(/display:\s*none;/)
+  })
+
+  it('fonts load only from this origin, at the two fixed paths; no data:, no @import', () => {
+    const urls = [...CSS.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)].map(m => m[1])
+    expect(urls.sort()).toEqual(['/fonts/DMSans.ttf', '/fonts/Fraunces.ttf'])
+    expect(CSS).not.toMatch(/@import|data:|https?:|\/\//)
+  })
+})

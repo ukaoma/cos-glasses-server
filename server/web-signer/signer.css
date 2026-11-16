@@ -1,23 +1,74 @@
-:root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #ffffff; --panel: #f5f5f7; --accent: #0a66d8; --line: #d2d2d7; }
-@media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #a1a1a6; --bg: #000000; --panel: #1c1c1e; --accent: #4c9bff; --line: #3a3a3c; } }
+/* COS approval page (7.0.51 restyle, F1 2026-11-16, Miles's go 07:08): Control's own look. The cream and espresso
+   pages, the gold accent and the type are Control Web's tokens (web-control/app.css). DM Sans and Fraunces load from
+   this origin at /fonts/ (X1's claude/server-signer-fonts-7051: TTF, font-src 'self'); until then the system faces below stand in. No inline style
+   and no script: the page's words, its #sign-words and #sign-packet, are written by signer.js and are never styled
+   into a different text. */
+@font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans.ttf') format('truetype'); font-weight: 100 1000; font-display: swap; }
+@font-face { font-family: 'Fraunces'; src: url('/fonts/Fraunces.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
+:root {
+  color-scheme: light dark;
+  --page: #f5f0e6; --ink: #1f1712; --sub: #66635e; --panel: #ffffff; --panel-border: #e3d9c6; --row: #efe7d8; --soft: #fbf7ef;
+  --accent: #89662d; --on-accent: #ffffff; --hot: #8a4b1c;
+  --display: 'Fraunces', ui-serif, 'Iowan Old Style', Georgia, serif;
+  --body: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page: #17120e; --ink: #efe7dc; --sub: #b3a796; --panel: #221b15; --panel-border: #3a2f25; --row: #2e251d; --soft: #2a2119;
+    --accent: #d9b06a; --on-accent: #17120e; --hot: #e8a46c; }
+}
 [hidden] { display: none !important; }
-html, body { margin: 0; background: var(--bg); color: var(--fg); }
-body { font: 17px/1.45 -apple-system, system-ui, sans-serif; }
-main { max-width: 32rem; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 1.1rem; margin: 0 0 20px; color: var(--muted); font-weight: 600; }
-h2 { font-size: 1.3rem; margin: 0 0 12px; }
-pre { white-space: pre-wrap; word-break: break-word; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; font: inherit; margin: 0 0 16px; }
-dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 0 0 20px; }
-dt { color: var(--muted); }
-dd { margin: 0; word-break: break-all; }
-.label { color: var(--muted); margin: 0 0 6px; }
-.mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; }
-.code { font: 600 2.4rem/1.2 ui-monospace, Menlo, monospace; letter-spacing: 0.08em; margin: 8px 0 16px; }
-.status { color: var(--muted); min-height: 1.4em; }
-.foot { margin-top: 32px; }
-label { display: block; color: var(--muted); margin: 12px 0 6px; }
-input { width: 100%; box-sizing: border-box; font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--fg); }
-button { display: block; width: 100%; margin: 16px 0 0; padding: 14px; font: inherit; font-weight: 600; border: 0; border-radius: 12px; background: var(--accent); color: #ffffff; }
-button.quiet { background: var(--panel); color: var(--fg); border: 1px solid var(--line); }
+html, body { margin: 0; background: var(--page); color: var(--ink); }
+body { font: 400 16px/1.5 var(--body); -webkit-text-size-adjust: 100%; }
+main { box-sizing: border-box; width: 100%; padding: 8px 16px 32px; }
+.head { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 0 0 12px; border-bottom: 1px solid var(--row); }
+.mark { width: 18px; height: 20px; flex: none; color: var(--ink); }
+h1 { margin: 0; font: 600 15px/1.2 var(--body); color: var(--ink); }
+h2 { margin: 0 0 12px; font: 500 22px/1.2 var(--display); color: var(--ink); }
+p { margin: 0 0 12px; }
+.label { margin: 0 0 6px; font: 500 14px/1.3 var(--body); color: var(--sub); }
+pre { box-sizing: border-box; white-space: pre-wrap; word-break: break-word; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--panel-border); border-radius: 12px; background: var(--panel); font: 400 16px/1.5 var(--body); color: var(--ink); }
+/* The exact release request: the packet, its SHA-256, its expiry and the page's own line for what it approves.
+   Shown in the main view, never folded away; the label is drawn by CSS so the element's text stays the page's. */
+#sign-packet { background: var(--soft); border-color: var(--accent); font: 400 12.5px/1.5 var(--mono); }
+#sign-packet::before { content: 'Exact request'; display: block; margin: 0 0 6px; font: 600 14px/1.3 var(--body); color: var(--ink); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0 0 16px; font-size: 15px; }
+dt { color: var(--sub); }
+dd { margin: 0; overflow-wrap: anywhere; }
+.mono { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.acts { display: flex; flex-direction: column; gap: 6px; }
+button, .btn { box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; margin: 0; padding: 0 18px;
+  border: 0; border-radius: 12px; background: var(--accent); color: var(--on-accent); font: 600 16px/1.2 var(--body); text-decoration: none; cursor: pointer; }
+button.quiet { min-height: 44px; background: none; color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--panel-border); }
 button:disabled { opacity: 0.5; }
+.status { min-height: 1.4em; margin: 8px 0 0; color: var(--sub); font-size: 15px; }
+/* The session: its first 8 characters beside "Sent to", so two sessions read apart at a glance (lead 07:36). One
+   element: CSS clips it to 8ch, with no CSS ellipsis; the "…" after it is plain text in the page. A tap opens the same
+   element to the full id in place. */
+/* A 44 px tap target: the padding grows the target and the negative margin gives the row its height back. */
+.sid summary { display: inline-flex; align-items: baseline; padding: 13px 0; margin: -9px 0; list-style: none; cursor: pointer; }
+.sid summary::-webkit-details-marker { display: none; }
+#sign-session { display: inline-block; max-width: 8ch; overflow: hidden; white-space: nowrap; vertical-align: bottom; text-overflow: clip; }
+.sid[open] #sign-session { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+.sid[open] .sid-more { display: none; }
+.sid-more { color: var(--sub); }
+#problem-text, #done-text { margin: 8px 0 16px; font: 400 17px/1.45 var(--body); }
+#problem-text { color: var(--hot); }
+.code { margin: 8px 0 16px; font: 600 2.2rem/1.2 var(--mono); letter-spacing: 0.08em; }
+label { display: block; margin: 12px 0 6px; color: var(--sub); }
+input { box-sizing: border-box; width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--panel-border); border-radius: 10px; background: var(--panel); color: var(--ink); font: inherit; }
+#enroll button, #idle button { margin-top: 12px; }
+.foot { margin: 20px 0 0; }
 a { color: var(--accent); }
+/* Phones read top to bottom: the message, the exact request (with what it approves), then the buttons.
+   760 px up (the open Duo, web, desktop): the request beside the message, the buttons under the message. */
+@media (min-width: 760px) {
+  main { padding: 12px 32px 40px; }
+  #sign:not([hidden]) { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); grid-template-areas: 'main side' 'acts side'; column-gap: 32px; align-items: start; }
+  .main-col { grid-area: main; }
+  .side-col { grid-area: side; }
+  .act-col { grid-area: acts; }
+  .acts { flex-direction: row; align-items: center; gap: 16px; }
+  button, .btn { display: inline-flex; width: auto; }
+  h2 { font-size: 26px; }
+}
