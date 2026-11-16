@@ -698,6 +698,9 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     if (!open || open.status !== 200) {
       return res.json({ available: false, total: 0, items: [] })
     }
+    // 7.0.52 (Anand): Work not set up on this host is an answer, nothing open, not a failed read. Today, the rail and
+    // the action recheck already read available:true with no items as "nothing waiting".
+    if (open.body.state === 'not_set_up') return res.json({ available: true, state: 'not_set_up', total: 0, items: [] })
     const rawItems = Array.isArray(open.body.items) ? open.body.items : []
     return res.json({
       available: open.body.available !== false,

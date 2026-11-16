@@ -82,7 +82,8 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
   router.get('/work-board/activity/open', async (req, res) => {
     if (Object.keys(req.query).length) return res.status(400).json({ error: { code: 'invalid_open_activity_request', message: 'This list takes no parameters.' } })
     const capabilities = activityCapabilities(), journal = deps.journal()
-    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, items: [], total: 0, truncated: false })
+    // 7.0.52: a journal with nothing to read says so (state not_set_up), so Today does not report Work as unreadable.
+    if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, ...(journal.notSetUp ? { state: 'not_set_up' } : {}), capabilities, items: [], total: 0, truncated: false })
     const rows = await glanceBoard('open work')
     if (!rows) return res.json({ version: 1, available: false, reason: 'Work board is unavailable. Refresh before trying again.', capabilities, items: [], total: 0, truncated: false })
     // 7.0.1: a waiting item whose session moved on since its report is not waiting. Only those sessions are read; a

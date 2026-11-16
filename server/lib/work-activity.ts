@@ -73,7 +73,9 @@ export interface WorkActivityOptions {
 type JournalRecord = Record<string, unknown>
 /** A native journal that passed every safety and format check. Its receipts and drafts are the validated raw records. */
 export interface WorkJournal { available: true; receipts: JournalRecord[]; drafts: JournalRecord[] }
-export type WorkJournalRead = WorkJournal | { available: false; reason: string }
+/** 7.0.52: `notSetUp` marks a read with nothing to read (no handoffs file on this Mac, or no Mac host), which a public
+ *  install without COS Control's Work has. Every other unavailable read is a failure and carries no flag. */
+export type WorkJournalRead = WorkJournal | { available: false; reason: string; notSetUp?: true }
 
 export const WORK_ACTIVITY_LIMITS = { evidence: 280, evidenceUnits: 1_200, openItems: 50, trackedDays: 14, progressEvents: 1_000, sendingSeconds: 600,
   /** 7.0.1: session activity this long after a needs-input or blocked report supersedes it (the reply that carried it is not). */
@@ -81,6 +83,7 @@ export const WORK_ACTIVITY_LIMITS = { evidence: 280, evidenceUnits: 1_200, openI
 /** Control's `TaskRow.workStages` (and task-store WORK_STAGES). A move naming anything else is not projected. */
 export const WORK_ACTIVITY_STAGES: readonly string[] = ['mentioned', 'planned', 'draft', 'built', 'qa', 'complete']
 const unavailableJournal = (reason: string): WorkJournalRead => ({ available: false, reason })
+const notSetUpJournal = (reason: string): WorkJournalRead => ({ available: false, reason, notSetUp: true })
 const statuses = new Set(['preparing', 'sending', 'queued', 'running', 'delivered', 'completed', 'failed', 'refused', 'reviewed', 'canceled', 'unknown'])
 /** Control's `WorkHandoffReceipt.terminalStatuses`: never block another handoff. */
 const terminal = new Set(['completed', 'failed', 'refused', 'canceled', 'reviewed'])
@@ -264,7 +267,7 @@ function projectReceipt(receipt: JournalRecord, domain: string, all: readonly Jo
 export function readWorkJournal(options: WorkActivityOptions = {}): WorkJournalRead {
   const env = options.env ?? process.env, home = options.home ?? homedir()
   if (!options.journalPath) {
-    if ((options.platform ?? process.platform) !== 'darwin') return unavailableJournal('Native Work history is available only on its Mac host.')
+    if ((options.platform ?? process.platform) !== 'darwin') return notSetUpJournal('Native Work history is available only on its Mac host.')
     if (env.NODE_ENV === 'test' || env.VITEST || env.COS_CONTROL_TEST_HOME || env.COS_CONTROL2_ISOLATED_PREVIEW === '1'
       || env.COS_WORK_CONNECTED_TEST === '1'
       || (env.COS_DATA_DIR && resolve(env.COS_DATA_DIR) !== join(home, '.cos-glasses', 'data'))) {
@@ -324,7 +327,8 @@ export function readWorkJournal(options: WorkActivityOptions = {}): WorkJournalR
     }
     return { available: true, receipts, drafts }
   } catch (error) {
-    return unavailableJournal((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'No native Work history is available on this host.' : 'Native Work history could not be read.')
+    // 7.0.52: no file (or no folder above it) is Work never set up on this Mac, not a failed read.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? notSetUpJournal('No native Work history is available on this host.') : unavailableJournal('Native Work history could not be read.')
   } finally { if (fd !== undefined) closeSync(fd) }
 }
 
