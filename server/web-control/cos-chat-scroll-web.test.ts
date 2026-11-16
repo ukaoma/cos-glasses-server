@@ -199,23 +199,41 @@ describe('Back from Open result keeps his place in the COS chat', () => {
     // Which scroller moves: from 860 px the chat column, below it the page.
     const pageBy: number[] = [], pageBy0 = h.win.scrollBy
     h.win.scrollBy = (x: number, y: number) => { pageBy.push(y); pageBy0(x, y) }
-    // The card sits 900 px down the chat: its distance from the top of the view moves with the scroll.
-    const card = { getBoundingClientRect: () => ({ top: 900 - h.scroll.scrollTop }) }
-    const original = h.host.querySelector
-    h.host.querySelector = (s: string) => s === '[data-item-id="fi_r"]' ? card : original(s)
+    // The chat's cards as the page has them: an earlier one near the top and the tapped one 900 px down. Their distance
+    // from the top of the view moves with the scroll. keepPlace (which holds the first visible card through a repaint)
+    // finds them in the feed, as it does in the browser (F1 16:3x: WebKit undid the restore through it).
+    let gone = false, shift = 0, pendingShift = 0
+    // A repaint can add content above the cards (older history read in): it lands when the feed is drawn again.
+    let html = ''
+    Object.defineProperty(h.feed, 'innerHTML', { get: () => html, set(v: string) { html = v; shift += pendingShift; pendingShift = 0 }, configurable: true })
+    const centred: string[] = []
+    const mk = (id: string, off: number) => ({ getBoundingClientRect: () => ({ top: off + shift - h.scroll.scrollTop, bottom: off + shift + 80 - h.scroll.scrollTop }),
+      scrollIntoView: () => { centred.push(id) },
+      hasAttribute: (a: string) => a === 'data-item-id', getAttribute: (a: string) => a === 'data-item-id' ? id : null })
+    const card = mk('fi_r', 900), early = mk('fi_a', 100)
+    const cards = () => gone ? [early] : [early, card]
+    const byId = (s: string) => cards().find(c => s === `[data-item-id="${c.getAttribute('data-item-id')}"]`) ?? null
+    const hostQ = h.host.querySelector, feedQ = h.feed.querySelector
+    h.host.querySelector = (s: string) => byId(s) ?? hostQ(s)
+    h.feed.querySelector = (s: string) => byId(s) ?? feedQ(s)
+    h.feed.querySelectorAll = (s: string) => /data-item-id/.test(s) ? cards() : []
     Object.assign(h.chat._state, { caps: { jobs: true, dropIt: true }, feedMode: 'drop', feedState: 'ready', items: [item] })
     const target = wide ? h.feed : h.win
     const to = (pane: string, args: string[]) => { h.route.pane = pane; h.route.args.splice(0, h.route.args.length, ...args); return { pane, args } }
     const readBack = () => { h.emit(target, 'wheel', { deltaY: -200 }); h.scroll.scrollTop = 600; h.emit(target, 'scroll') }
     const tapOpen = () => h.chat.onClick({ getAttribute: (k: string) => (({ 'data-cos': 'act', 'data-item': 'fi_r', 'data-act': 'open_result' }) as Record<string, string>)[k] ?? null })
-    // What app.js does on each address: the pane loads first (the chat mounts), then the route hooks run.
+    // What app.js does on each address: a new pane starts at the top of the page (route's changedPane scrollTo(0, 0),
+    // the page being the scroller below 860 px), the pane loads (the chat mounts), then the route hooks run.
+    let paneNow = h.route.pane
     const arrive = async (pane: string, args: string[]) => {
+      const changed = pane !== paneNow; paneNow = pane
       const r = to(pane, args)
+      if (changed && !wide) h.win.scrollTo(0, 0)
       if (pane === 'messages') h.chat.mount(h.host, true)
       hooks.forEach(fn => fn(r))
       await flush(); h.layout()
     }
-    return { h, card, went, readBack, tapOpen, arrive, pageBy, writes, bottom: () => h.scroll.scrollHeight - 500 }
+    return { h, card, went, readBack, tapOpen, arrive, pageBy, writes, setGone: () => { gone = true }, addAbove: (px: number) => { pendingShift = px }, draw: () => { gone = false }, centred, bottom: () => h.scroll.scrollHeight - 500 }
   }
   for (const wide of [true, false]) {
     const label = wide ? 'wide feed' : 'narrow page'
@@ -228,7 +246,7 @@ describe('Back from Open result keeps his place in the COS chat', () => {
       t.tapOpen()
       expect(t.went).toEqual([['sessions', ['codex', SID]]])
       await t.arrive('sessions', ['codex', SID])
-      t.h.scroll.scrollTop = 0   // the reader scrolled the page (narrow) or nothing moved (wide)
+      if (!wide) t.h.scroll.scrollTop = 0   // the reader scrolled the page (narrow); wide, the chat column keeps its own
       t.pageBy.length = 0; t.writes.length = 0
       await t.arrive('messages', ['cos'])
       expect(t.card.getBoundingClientRect().top).toBe(300)
@@ -254,6 +272,92 @@ describe('Back from Open result keeps his place in the COS chat', () => {
       expect(t.writes, 'no scroll at all').toEqual([])
       expect(t.h.scroll.scrollTop).toBe(t.bottom())
       expect(t.h.chat._state.returnTo).toBe(null)
+    })
+    it(`${label}: the restore is one placement: a later repaint that adds content above still holds his place (Q1 16:4x)`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      await t.arrive('messages', ['cos'])
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+      expect(t.h.chat._state.focusTop).toBe(null)
+      // A poll repaints with 200 px of older history read in above: keepPlace holds the card he is reading.
+      t.addAbove(200)
+      t.h.chat._paintFeed(false); t.h.layout()
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+    })
+    it(`${label}: the kept offset belongs to the tapped card: asked for another card first, neither the skip nor the offset applies`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack()
+      // A return is pending for fi_r, but the chat is asked for fi_a first (a notification link names it).
+      Object.assign(t.h.chat._state, { focusItem: 'fi_a', focusTop: { item: 'fi_r', top: 300, at: Date.now() }, focusQuiet: true })
+      const before = t.card.getBoundingClientRect().top
+      t.addAbove(200)
+      t.h.chat._paintFeed(false); t.h.layout()
+      // keepPlace held the card on screen through the repaint, and fi_r's offset was not applied to fi_a; fi_a is still
+      // shown, as that link asked.
+      expect(t.card.getBoundingClientRect().top).toBe(before)
+      expect(t.h.chat._state.focusTop).toBe(null)
+      expect(t.centred).toEqual(['fi_a'])
+    })
+    // A Back placement still pending: the tapped card is not drawn yet (the chat is reading its lines again).
+    const pendingReturn = async (wide: boolean, at: number) => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.setGone()
+      Object.assign(t.h.chat._state, { feedState: 'loading', focusItem: 'fi_r', focusTop: { item: 'fi_r', top: 300, at }, focusQuiet: true })
+      return t
+    }
+    it(`${label}: his own scroll always wins: a pending placement is dropped, and the card arriving later moves nothing`, async () => {
+      const t = await pendingReturn(wide, Date.now())
+      t.h.emit(wide ? t.h.feed : t.h.win, 'wheel', { deltaY: 200 }); t.h.scroll.scrollTop = 1000; t.h.emit(wide ? t.h.feed : t.h.win, 'scroll')
+      expect(t.h.chat._state.focusTop).toBe(null)
+      expect(t.h.chat._state.focusItem).toBe('')
+      t.writes.length = 0
+      t.draw(); t.h.chat._state.feedState = 'ready'
+      t.h.chat._paintFeed(false); t.h.layout()
+      expect(t.writes, 'nothing moved him').toEqual([])
+      expect(t.h.scroll.scrollTop).toBe(1000)
+      expect(t.centred).toEqual([])
+    })
+    it(`${label}: a placement not made within 10 seconds is dropped whole: no restore, no centring later, keepPlace back on`, async () => {
+      const t = await pendingReturn(wide, Date.now() - 10001)
+      t.h.scroll.scrollTop = 1000
+      t.writes.length = 0
+      t.draw(); t.h.chat._state.feedState = 'ready'
+      t.h.chat._paintFeed(false); t.h.layout()
+      expect(t.writes).toEqual([])
+      expect(t.centred).toEqual([])
+      expect(t.h.chat._state.focusItem).toBe('')
+      expect(t.h.chat._state.focusTop).toBe(null)
+    })
+    it(`${label}: an expired placement found on a sticky paint opens nothing (no older questions)`, async () => {
+      const t = await pendingReturn(wide, Date.now() - 10001)
+      t.h.chat._state.feedState = 'ready'
+      t.h.chat._paintFeed(true); t.h.layout()
+      expect(t.h.chat._state.archiveOpen).toBe(false)
+      expect(t.centred).toEqual([])
+    })
+    it(`${label}: an expired placement with its card drawn, on a sticky paint, is not restored first`, async () => {
+      const t = await pendingReturn(wide, Date.now() - 10001)
+      t.draw(); t.h.chat._state.feedState = 'ready'
+      t.writes.length = 0
+      t.h.chat._paintFeed(true); t.h.layout()
+      // A sticky paint follows the newest line; the expired offset never gets a scroll of its own on the way.
+      expect(t.writes.filter(y => y < t.bottom())).toEqual([])
+      expect(t.centred).toEqual([])
+    })
+    it(`${label}: once placed, the offset is spent: the same card asked for again (a notification link) is centred`, async () => {
+      const t = trip(wide)
+      await t.arrive('messages', ['cos'])
+      t.readBack(); t.tapOpen()
+      await t.arrive('sessions', ['codex', SID])
+      await t.arrive('messages', ['cos'])
+      expect(t.card.getBoundingClientRect().top).toBe(300)
+      t.h.chat._state.focusItem = 'fi_r'
+      t.h.chat._paintFeed(false); t.h.layout()
+      expect(t.centred).toEqual(['fi_r'])
     })
     it(`${label}: a reader reached any other way: back in the chat, it follows the newest line as before`, async () => {
       const t = trip(wide)
@@ -288,7 +392,7 @@ describe('Back from Open result keeps his place in the COS chat', () => {
       await t.arrive('messages', ['cos'])
       t.readBack(); t.tapOpen()
       await t.arrive('sessions', ['codex', SID])
-      t.h.host.querySelector = ((orig: Function) => (s: string) => s === '[data-item-id="fi_r"]' ? null : orig(s))(t.h.host.querySelector)
+      t.setGone()
       await t.arrive('messages', ['cos'])
       expect(t.h.scroll.scrollTop).toBe(t.bottom())
       expect(t.h.chat._state.archiveOpen).toBe(false)
@@ -309,7 +413,7 @@ describe('Back from Open result keeps his place in the COS chat', () => {
       await t.arrive('messages', ['cos', 'fi_r'])
       t.readBack(); t.tapOpen()
       await t.arrive('sessions', ['codex', SID])
-      t.h.scroll.scrollTop = 0
+      if (!wide) t.h.scroll.scrollTop = 0
       await t.arrive('messages', ['cos', 'fi_r'])
       expect(t.card.getBoundingClientRect().top).toBe(300)
     })

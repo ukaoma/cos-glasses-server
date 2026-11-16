@@ -608,11 +608,24 @@
       W.onRoute(function (r) { var R = C.returnTo, k = routeKey(r); if (R && k !== R.key && k !== R.reader) C.returnTo = null; });
     }
   }
+  // The placement is pending until one of these, whichever comes first: the card is put back (showFocusItem); the card
+  // is gone (paintFeed: the newest line, quietly); the chat is asked for another card; his own scroll, touch or key
+  // (watchTail intent: his scroll always wins); or RETURN_PLACE_MS without the card drawn. The last three drop the whole
+  // return, so nothing moves the page later by itself.
+  var RETURN_PLACE_MS = 10000;
+  function dropReturn() { C.focusTop = null; if (C.focusQuiet) { C.focusItem = ''; C.focusQuiet = false; } }
+  function returnPending() {
+    var f = C.focusTop;
+    // Asked for another card: only the return's own state goes; that card stays asked for.
+    if (f && f.item !== C.focusItem) { C.focusTop = null; C.focusQuiet = false; f = null; }
+    else if (f && Date.now() - f.at > RETURN_PLACE_MS) { dropReturn(); f = null; }
+    return !!f;
+  }
   function takeReturn(route) {
     var R = C.returnTo;
     C.returnTo = null;
     if (!R || routeKey(route) !== R.key || Date.now() - R.at > RETURN_MS) return false;
-    C.focusItem = R.item; C.focusTop = R.top; C.focusQuiet = true;
+    C.focusItem = R.item; C.focusTop = typeof R.top === 'number' ? { item: R.item, top: R.top, at: Date.now() } : null; C.focusQuiet = true;
     return true;
   }
   // 7.0.52 (Miles 14:52): a Reply ready card is headed by its session's name, the provider staying in the line under it
@@ -894,7 +907,11 @@
     var scroller = scrollerOf(feed);
     var atBottom = scroller ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80 : true;
     // A poll can replace an earlier answer with a longer one. Hold the visible card, just as older pagination does.
-    if (!stick && (TAIL ? !TAIL.following : !atBottom) && !PLACING) {
+    // Not while Back from Open result is putting the tapped card back (C.focusTop): keepPlace would hold whatever card
+    // was first on screen and scroll the restore straight back out (F1 16:3x, WebKit: folded Duo 742 px to 0). Only for
+    // that one placement of that one card: showFocusItem clears C.focusTop when it places it, and the offset names its
+    // card, so if the chat is asked for another card first, neither the skip nor the offset applies (Q1 16:4x).
+    if (!stick && (TAIL ? !TAIL.following : !atBottom) && !PLACING && !returnPending()) {
       keepPlace(function () { paintFeed(false); }, true);
       return;
     }
@@ -905,7 +922,7 @@
     else if (TAIL && TAIL.following && !PLACING) { scrollToEnd(feed); queueTail(); }
     observeTail();
     // A note's link asked for a notification card that was filed under the older questions: once they are read, go to it.
-    if (C.focusItem && !showFocusItem() && C.feedState === 'ready') {
+    if (C.focusItem && !showFocusItem() && C.focusItem && C.feedState === 'ready') {
       if (C.focusQuiet) { C.focusItem = ''; C.focusTop = null; C.focusQuiet = false; followLatest(); }
       else if (!C.archiveOpen) toggleArchive();
       else if (C.archive !== null) { C.focusItem = ''; W.toast('That notification is no longer kept in this chat.'); followLatest(); }
@@ -964,6 +981,7 @@
       if (!tailShown(t)) return;
       if (e.type === 'keydown' && (!/^(ArrowUp|ArrowDown|PageUp|PageDown|Home|End| )$/.test(e.key) || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target && e.target.tagName))) return;
       t.following = false;
+      if (C.focusTop) dropReturn();   // 7.0.52: a pending Back placement never moves him after he has moved himself
     }
     function scrolled() {
       if (!tailShown(t)) return;
@@ -1699,15 +1717,19 @@
   }
   /** Scroll to the card C.focusItem names, if it is drawn (his tap asked for it). True when it was. */
   function showFocusItem() {
+    // First: an expired or overtaken Back placement is dropped (returnPending), so C.focusTop is only ever this card's,
+    // still in time.
+    returnPending();
     var id = C.focusItem;
     var el = id && C.host && C.host.querySelector('[data-item-id="' + String(id).replace(/["\\]/g, '') + '"]');
     if (!el) return false;
+    var ft = C.focusTop;
     C.focusItem = '';
     if (TAIL) TAIL.following = false;
     // Back from Open result: the card goes back to the same distance from the top of the view it had when he tapped.
-    var top = C.focusTop; C.focusTop = null; C.focusQuiet = false;
-    if (typeof top === 'number' && el.getBoundingClientRect) {
-      var by = el.getBoundingClientRect().top - top;
+    C.focusTop = null; C.focusQuiet = false;
+    if (ft && el.getBoundingClientRect) {
+      var by = el.getBoundingClientRect().top - ft.top;
       if (wide()) { var feed = C.host.querySelector('[data-cos-feed]'); if (feed) feed.scrollTop += by; }
       else window.scrollBy(0, by);
       return true;
