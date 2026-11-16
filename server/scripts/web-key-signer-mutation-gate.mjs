@@ -25,9 +25,11 @@ const APT = ['server/lib/web-key-signer-app.test.ts']
 const HOT = ['server/lib/web-key-handoff.test.ts']
 const CMT = ['server/web-control/web-key-handoff-web.test.ts']
 const HLT = ['server/routes/health-web-key-signer.test.ts']
-const ALL = [...PRT, ...PGT, ...APT, ...HOT, ...CMT, ...HLT]
-const PROOF = 'server/web-signer/signer-proof.js', PAGE = 'server/web-signer/signer.js', SAPP = 'server/lib/web-key-signer-app.ts'
-const HAND = 'server/lib/web-key-handoff.ts', WKR = 'server/routes/web-key.ts', HEALTH = 'server/routes/health.ts', APP = 'server/web-control/app.js'
+const AUT = ['server/lib/web-key-authority.test.ts']
+const ALL = [...PRT, ...PGT, ...APT, ...HOT, ...CMT, ...HLT, ...AUT]
+const PROOF = 'server/web-signer/signer-proof.js', PAGE = 'server/web-signer/signer.js', SAPP = 'server/lib/web-key-signer-app.ts', AUTH = 'server/lib/web-key-authority.ts'
+const ACT = 'server/lib/web-key-activation.ts'
+const HAND = 'server/lib/web-key-handoff.ts', WKR = 'server/routes/web-key.ts', APP = 'server/web-control/app.js'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 const drop = (name, file, line, tests) => m(name, file, [line, ''], tests)
 
@@ -48,9 +50,18 @@ const mutations = [
   m('proof-never-fork', PROOF, ['          fork: false, wordsSha256: d.sha256,', '          fork: true, wordsSha256: d.sha256,'], PRT),
   m('proof-sas-includes-r', PROOF, ['return sha256(concat(challenge, spkiDer, r)).then', 'return sha256(concat(challenge, spkiDer)).then'], [...PRT, ...PGT]),
   m('proof-enroll-message-nonce', PROOF, ['      phoneNonce: p.phoneNonce, passkey_credential_id: p.passkeyCredentialId,', '      passkey_credential_id: p.passkeyCredentialId,'], PRT),
-  m('proof-scope-closed', PROOF, ["    throw fail('scope_not_allowed')\n  }\n\n  /**", "    return { kind: 'message' }\n  }\n\n  /**"], PRT),
+  // Repointed 11/16 (X1, Q1): the comment after scopeOf became a line comment, so the old target matched nothing.
+  m('proof-scope-closed', PROOF, ["    throw fail('scope_not_allowed')\n  }\n\n  // What an approval", "    return { kind: 'message' }\n  }\n\n  // What an approval"], PRT),
   m('proof-jcs-lone-surrogate', PROOF, ["      if (hasLoneSurrogate(value)) throw fail('not_signable')\n      return JSON.stringify(value)", '      return JSON.stringify(value)'], PRT),
   // ── The page (server/web-signer/signer.js) ──
+  // The way back (W1 return contract, 7.0.51): real taps only, history first, replace never assign, a fixed address.
+  m('page-return-trusted-only', PAGE, ['    if (!ev || ev.isTrusted !== true) return undefined\n    try {', '    try {'], PGT),
+  m('page-return-link-stopped', PAGE, ["    if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()\n", ''], PGT),
+  m('page-return-history-first', PAGE, ['      if (W.history && W.history.length > 1) { W.history.back(); return undefined }', '      if (false) { W.history.back(); return undefined }'], PGT),
+  m('page-return-replace-not-assign', PAGE, ['    W.location.replace(controlUrl())', '    W.location.assign(controlUrl())'], PGT),
+  m('page-return-fixed-fragment', PAGE, [":3143/control/#/phone-return' }", ":3143/control/' }"], PGT),
+  m('page-return-done-wired', PAGE, ["  on('done-back', goBack)\n", ''], PGT),
+  m('page-return-back-wired', PAGE, ["  on('back', goBack)\n", ''], PGT),
   drop('page-never-framed', PAGE, "    if (framed()) { show('framed'); return Promise.resolve() }\n", PGT),
   m('page-approve-trusted-tap', PAGE, ['    if (!ev || ev.isTrusted !== true) return undefined\n    if (state.busy || !state.handoff', '    if (state.busy || !state.handoff'], PGT),
   m('page-enroll-trusted-tap', PAGE, ['    if (!ev || ev.isTrusted !== true || state.busy) return undefined', '    if (!ev || state.busy) return undefined'], PGT),
@@ -72,6 +83,11 @@ const mutations = [
   m('app-write-names-origin', SAPP, ["      if (method !== 'GET' && method !== 'HEAD' && (expected === null || origin !== expected)) {", '      if (false) {'], APT),
   m('app-api-allowlist', SAPP, ["      if (!signerApiAllowed(method === 'HEAD' ? 'GET' : method, pathname)) {", '      if (false) {'], APT),
   m('app-allowlist-anchored', SAPP, ["  { method: 'POST', path: /^\\/api\\/web-key\\/nonce$/ },", "  { method: 'POST', path: /^\\/api\\/web-key\\/nonce/ },"], APT),
+  // Fonts (7.0.51): font-src 'self' only, the ttf type, the size bound, and still no svg.
+  drop('fonts-csp-self', SAPP, "  \"font-src 'self'\",\n", APT),
+  m('fonts-ttf-type', SAPP, ["  '.ttf': 'font/ttf',", "  '.ttf': 'application/octet-stream',"], APT),
+  m('fonts-size-bound', SAPP, ["(!body || (ext === '.ttf' && body.length > SIGNER_FONT_MAX_BYTES))", '(!body)'], APT),
+  m('fonts-no-svg', SAPP, ["  '.ttf': 'font/ttf',", "  '.ttf': 'font/ttf',\n  '.svg': 'image/svg+xml',"], APT),
   m('app-verified-bytes-only', SAPP, ['    const snapshot = deps.integrity ? deps.integrity.snapshot() : null', '    const snapshot = deps.integrity ? deps.integrity.snapshot() ?? new Map() : null'], APT),
   m('app-page-types-only', SAPP, ['    const body = TYPES[ext] ? snapshot.get(file) : undefined', '    const body = snapshot.get(file)'], APT),
   m('app-combined-needs-signer', SAPP, ['  const signerOk = signer !== null && signer.state.ok === true', '  const signerOk = signer === null || signer.state.ok === true'], APT),
@@ -99,7 +115,8 @@ const mutations = [
   m('route-enroll-prove-on-signer', WKR, ["  router.post('/web-key/enroll/prove', (req, res) => {\n    if (!web(req)) return refuse(res, 403, 'web_origin_required')\n    if (!onSigner(req)) return refuse(res, 403, SIGNER_ORIGIN_REQUIRED)\n", "  router.post('/web-key/enroll/prove', (req, res) => {\n    if (!web(req)) return refuse(res, 403, 'web_origin_required')\n"], HOT),
   m('route-onsigner-absent-is-old-behaviour', WKR, ['    if (!deps.isSignerRequest) return true', '    if (!deps.isSignerRequest) return false'], HOT),
   // ── Health and the composer ──
-  m('health-flag-gated', HEALTH, ['    ...(webKeyAuthorityEnabled() ? { webKeySigner: 1 } : {}),', '    ...({ webKeySigner: 1 }),'], HLT),
+  // Repointed 11/16 (X1, Q1): health reads webKeyActivationHealthField() now; the gate moved into web-key-activation.ts.
+  m('health-flag-gated', ACT, ['  return registeredActivation?.enabled() ? { webKeySigner: 1 } : {}', '  return registeredActivation ? { webKeySigner: 1 } : {}'], HLT),
   m('composer-offer-gated', APP, ['  function paintWebKeyOffer(r, opts) {\n    if (!webKeyCapable()) return;\n', '  function paintWebKeyOffer(r, opts) {\n'], CMT),
   m('composer-needs-active-key', APP, ["      if (!st || st.activeKeys < 1 || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;", "      if (!st || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;"], CMT),
   m('composer-url-https', APP, ["      return x.protocol === 'https:' && x.hostname", '      return x.hostname'], CMT),
@@ -109,6 +126,11 @@ const mutations = [
   m('composer-url-no-query', APP, ["&& !x.search && /^#h=", '&& /^#h='], CMT),
   m('composer-url-fragment-id', APP, ["/^#h=[A-Za-z0-9_-]{16,64}$/.test(x.hash);", 'true;'], CMT),
   m('composer-files-refused', APP, ["    if (view.files() !== 'none') { say(WEB_KEY_COPY.attachments_not_signable, 'error'); return Promise.resolve('files'); }", "    if (false) { say(WEB_KEY_COPY.attachments_not_signable, 'error'); return Promise.resolve('files'); }"], CMT),
+  // X1 G1 (lead 06:5x): the approval page's manifest hash in the report and the proof.
+  m("g1-signer-hash-omitted", SAPP, [", signerManifestSha256: signer ? signer.manifestSha256 : null }", " }"], APT),  // G1: carries the SIGNER tree
+  m("g1-control-hash-in-place", SAPP, [", signerManifestSha256: signer ? signer.manifestSha256 : null }", ", signerManifestSha256: webControl.manifestSha256 }"], APT),  // G1: carries the SIGNER tree
+  m("g1-disk-at-report", SAPP, [", signerManifestSha256: signer ? signer.manifestSha256 : null }", ", signerManifestSha256: signer ? (process as any).getBuiltinModule('node:crypto').createHash('sha256').update((process as any).getBuiltinModule('node:fs').readFileSync((signer as any).dir + '/.manifest.json')).digest('hex') : null }"], APT),  // G1: the hash is the one the served bytes were checked against
+  m("g1-integritynow-drops", AUTH, [", signerManifestSha256: report.signerManifestSha256 ?? null } }", " } }"], AUT),  // G1: the signer manifest hash is in the proof
 ]
 
 const args = process.argv.slice(2)

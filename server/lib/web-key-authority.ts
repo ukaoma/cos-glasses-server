@@ -38,8 +38,13 @@ export const WEB_SIGNATURE_HEADER = 'x-cos-web-sig'
 /** Exact scoped install/publish only. Push-main is not expressible at all (APPROVE_ACTIONS, Miles 2026-11-12). */
 export const WEB_KEY_ENABLED_APPROVE_ACTIONS: ReadonlySet<string> = new Set(['install', 'publish'])
 
-/** The served-asset integrity state the authority reads (review W1). Null: integrity is not running. */
-export interface IntegrityReport { enabled: boolean; lastCheckOk: boolean; checkedAt: number | null; manifestSha256: string | null }
+/**
+ * The served-asset integrity state the authority reads (review W1). Null: integrity is not running.
+ * `manifestSha256` is the Control Web tree's manifest. `signerManifestSha256` (X1 G1, additive) is the approval page's
+ * (web-signer) manifest as read at boot, the one its served bytes were checked against: a verifier holds it against the
+ * signed Control app's pin for the installed server version. Absent or null on an older wiring.
+ */
+export interface IntegrityReport { enabled: boolean; lastCheckOk: boolean; checkedAt: number | null; manifestSha256: string | null; signerManifestSha256?: string | null }
 
 /** The ordered attachment manifest's digest, the same function the queue seal uses (g2-turn-provenance attachmentsDigest). */
 export function manifestDigest(manifest: ReadonlyArray<{ id: string; sha256: string }>): string {
@@ -172,7 +177,7 @@ export class WebKeyAuthority {
     try { report = this.deps.integrity ? this.deps.integrity() : null } catch { report = null }
     if (!report || report.enabled !== true) return { ok: false, reason: 'integrity_off', report }
     if (report.lastCheckOk !== true) return { ok: false, reason: 'integrity_failed', report }
-    return { ok: true, report: { enabled: true, lastCheckOk: true, checkedAt: report.checkedAt ?? null, manifestSha256: report.manifestSha256 ?? null } }
+    return { ok: true, report: { enabled: true, lastCheckOk: true, checkedAt: report.checkedAt ?? null, manifestSha256: report.manifestSha256 ?? null, signerManifestSha256: report.signerManifestSha256 ?? null } }
   }
 
   /** Judge one candidate against the route's real target. Never throws (a throw reads as a refusal). */
@@ -328,7 +333,7 @@ export class WebKeyAuthority {
         epoch: registry.epoch(),
         revoked: registry.revocations(),
         revocationDigest: registry.revocationDigest(),
-        integrity: integrity.report ?? { enabled: false, lastCheckOk: false, checkedAt: null, manifestSha256: null },
+        integrity: integrity.report ?? { enabled: false, lastCheckOk: false, checkedAt: null, manifestSha256: null, signerManifestSha256: null },
         integrityAtAccept: proof.integrity ?? null,
         consumeKeys: [`turn:${env.turnId}`, `web:${env.aud}:${proof.authId}`],
       }

@@ -317,7 +317,7 @@ verifiedOrigin, reason, sealed, target, via`) are unchanged. A web-key record ad
   "epoch": <int>,
   "revoked": [ { "kid", "revokedAt" } ],
   "revocationDigest": "<hex64 = sha256(JCS(revoked sorted by kid))>",
-  "integrity": { "enabled": true, "lastCheckOk": true, "checkedAt": <ms>, "manifestSha256": "<hex64>" | null },
+  "integrity": { "enabled": true, "lastCheckOk": true, "checkedAt": <ms>, "manifestSha256": "<hex64>" | null, "signerManifestSha256": "<hex64>" | null },
   "integrityAtAccept": { same shape, frozen when the turn was accepted },
   "consumeKeys": [ "turn:<turnId>", "web:<aud>:<authId>" ]
 }
@@ -340,6 +340,14 @@ provider and turn id with the ENVELOPE, never the record.
 is still the Control Web manifest's (shape unchanged). `/api/web-key/status` reports the signer's own
 check under `integrity.signer`. The verifier refuses unless `integrity.enabled`, `integrity.lastCheckOk`,
 `integrityAtAccept.enabled` and `integrityAtAccept.lastCheckOk` are all `true`.
+
+**The approval page's own hash (X1 G1, additive).** `signerManifestSha256` is the sha256 of the signer tree's
+`.manifest.json` as the server read it at boot: the manifest its served bytes were checked against, never the file
+as it is on disk later. It is in `integrity` (now) and `integrityAtAccept` (frozen in the proof). It lets a verifier
+hold the page that showed the words against the signed COS Control app's pin for the installed server version
+(`Resources/web-key-assets.json`, `webSignerManifestSha256`), which `lastCheckOk` alone cannot: that check compares
+the page with a manifest in the same writable folder. A server older than this field omits it, and a proof accepted
+by such a server has no value: a verifier that requires the pin must then refuse (fail closed), not assume a match.
 
 **Epoch and revocation (W5):** the server reads them from `web-keys.json`, which a same-user process
 can roll back (remove a `revokedAt`, restore an older file). The server alone cannot see that. The
