@@ -21,8 +21,9 @@ import { clockLabel } from './drop-when.js'
 import { PING_RANK, type PingSource } from './ping-budget.js'
 import { parsePrepOccurrence } from './prep-store.js'
 import type { PrepOccurrence } from '../../shared/prep.js'
+import { SESSION_LINK_PROVIDERS, type SessionLinkProvider } from './drop-store.js'
 
-export interface PingLink { kind: 'card' | 'session' | 'handoff' | 'thread' | 'memory' | 'meeting' | 'file' | 'reminder' | 'ask'; id: string; label: string; domain?: string }
+export interface PingLink { kind: 'card' | 'session' | 'handoff' | 'thread' | 'memory' | 'meeting' | 'file' | 'reminder' | 'ask'; id: string; label: string; domain?: string; provider?: SessionLinkProvider }
 export interface PingCandidate {
   source: PingSource
   /** Exactly-once key (plan section 4). */
@@ -177,10 +178,13 @@ export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; tu
   if (typeof ev.sessionId !== 'string' || !ID_SAFE.test(ev.sessionId) || typeof ev.turnEndedAt !== 'number' || !Number.isFinite(ev.turnEndedAt)) return null
   const who = PROVIDER_NAME[typeof ev.provider === 'string' ? ev.provider : ''] ?? 'Your agent'
   const label = clip(ev.label, PING_TEXT.title) || (ev.replyReady ? 'Session' : 'its task')
+  // 7.0.52: the session link carries its provider, so "Open result" opens this session's reader, not the list.
+  // Only a provider the reader route serves; anything else leaves the field off and the page keeps the old tap.
+  const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(ev.provider) ? ev.provider as SessionLinkProvider : undefined
   return {
     source: 'agent', key: ev.turnId && /^[a-f0-9]{64}$/.test(ev.turnId) ? `agent:${ev.sessionId}:turn:${ev.turnId}` : `agent:${ev.sessionId}:${Math.floor(ev.turnEndedAt)}`, title: ev.replyReady ? 'Reply ready' : label,
     line: ev.replyReady ? `${who} has a reply ready.` : ev.failed === true ? `${who} stopped on ${label}. It needs a look.` : `${who} finished ${label}.`,
-    links: [{ kind: 'session', id: ev.sessionId, label }], actions: [{ id: 'open_result', label: 'Open result' }],
+    links: [{ kind: 'session', id: ev.sessionId, label, ...(provider ? { provider } : {}) }], actions: [{ id: 'open_result', label: 'Open result' }],
     createdAt: ev.turnEndedAt, needsReply: ev.failed === true,
   }
 }

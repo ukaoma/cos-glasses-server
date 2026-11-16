@@ -324,3 +324,21 @@ describe('a step left out of the trail takes no keyboard focus (Q1 L1)', () => {
     expect(more.hidden).toBe(false)
   })
 })
+
+describe('7.0.52 (Miles 14:52): Back from a reader opened by Open result returns to the COS thread', () => {
+  // cos-chat.js's open_result calls W.go('sessions', [provider, id]): the same go as here, so the reader's entry is
+  // marked with the thread as where Back goes. Folded Duo: the thread is #/messages/cos; from 860 px it sits in #/messages.
+  for (const thread of ['#/messages/cos', '#/messages']) {
+    it(`from ${thread}: Back lands on the thread, not the Sessions list, and adds no entry`, () => {
+      const b = browser('#/today')
+      b.link(thread)
+      b.k.go('sessions', ['codex', '019a7b2c-3d4e-7f60-8a1b-2c3d4e5f6a7b'])
+      expect(b.location.hash).toBe('#/sessions/codex/019a7b2c-3d4e-7f60-8a1b-2c3d4e5f6a7b')
+      expect(b.k.navBackTo()).toEqual({ pane: 'messages', path: true })
+      const len = b.entries.length
+      b.k.goBack()
+      expect(b.location.hash).toBe(thread)
+      expect(b.entries.length).toBe(len)
+    })
+  }
+})

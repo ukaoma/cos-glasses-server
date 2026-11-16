@@ -572,6 +572,48 @@
         '<span class="cc-dfile-name">' + esc(f.label) + '</span>' + (mine ? '' : '<span class="cc-dfile-open">Open</span>') + '</a>';
     }).join('') + '</div>';
   }
+  // 7.0.52 (Miles 14:49): "Open result" opens the reader of the session that replied, #/sessions/<provider>/<id>, not
+  // the Sessions list. The session link names its provider. An item stored before 7.0.52 has none: then the provider
+  // word in the server's own fixed line stands in, only on a COS agent item whose key names that session. Anything else
+  // keeps the old tap (the list). Never a guessed provider: a wrong one opens the wrong session or none.
+  var RESULT_PROVIDERS = { claude: 'claude', codex: 'codex', cursor: 'cursor' };
+  var RESULT_LINE = /^(Claude|Codex|Cursor) (?:has a reply ready\.$|finished |stopped on )/;
+  function resultSession(item, link) {
+    if (!link || typeof link.id !== 'string' || !link.id) return null;
+    if (link.provider !== undefined) return Object.prototype.hasOwnProperty.call(RESULT_PROVIDERS, link.provider) ? [RESULT_PROVIDERS[link.provider], link.id] : null;
+    if (item.source !== 'cos' || String(item.key || '').indexOf('agent:' + link.id + ':') !== 0) return null;
+    var m = RESULT_LINE.exec(String(item.line || ''));
+    return m ? [m[1].toLowerCase(), link.id] : null;
+  }
+  // 7.0.52 (Miles 14:52): a Reply ready card is headed by its session's name, the provider staying in the line under it
+  // ("Claude has a reply ready."). The name is read on this page from the session list the shell already keeps
+  // (W.sessionList, the same rows the Sessions pane shows), the session found by the provider and id Open result opens.
+  // The stored item keeps "Reply ready": the name never enters the feed journal or the timeline COS reads. Plain text.
+  // No name known (not in the list, or the list not read yet): the card says "Reply ready" as before.
+  var REPLY_READY = 'Reply ready';
+  function replySessionName(item) {
+    if (item.title !== REPLY_READY || !Array.isArray(C.sessionRows)) return '';
+    var at = resultSession(item, (item.links || []).filter(function (l) { return l && l.kind === 'session'; })[0]);
+    if (!at) return '';
+    for (var i = 0; i < C.sessionRows.length; i++) {
+      var r = C.sessionRows[i] || {}, id = String(r.session_id || r.id || '').replace(/^(claude|codex|cursor):/, '').toLowerCase();
+      // The Sessions list's own title rule (app.js sxTitle): a COS rename, else the agent's label, else its custom title.
+      if (r.provider === at[0] && id === at[1].toLowerCase()) return clip(String(r.title_override || r.display_label || r.custom_title || '').replace(/\*\*|`/g, ''), 80);
+    }
+    return '';
+  }
+  // One read of the list when a Reply ready card is in the chat, at most once a minute (a cached list is reused).
+  var namesReadAt = 0;
+  function wantReplyNames() {
+    if (!W.sessionList || Date.now() - namesReadAt < 60000) return;
+    if (!(C.items || []).some(function (it) { return it && it.title === REPLY_READY; })) return;
+    namesReadAt = Date.now();
+    W.sessionList(60000).then(function (d) {
+      if (!d || !Array.isArray(d.sessions)) return;
+      C.sessionRows = d.sessions;
+      paintFeed(false);
+    }, function () {});
+  }
   function itemHtml(item) {
     if (item.kind === 'drop' || item.kind === 'answer') {
       return '<div class="cc-line you' + (item.kind === 'answer' ? ' answer' : '') + '"' + (item.kind === 'drop' ? ' data-drop-thread="' + esc(item.threadId) + '"' : '') + '><div class="cc-bubble">' + esc(item.line) + '</div>' +
@@ -580,7 +622,7 @@
     var quote = item.kind === 'followup' ? (function () { var d = dropOf(item); return d ? '<button type="button" class="cc-quote" data-cos="quote" data-thread="' + esc(item.threadId) + '">Re: ' + esc(clip(d.line, 70)) + '</button>' : ''; })() : '';
     return '<div class="cc-line cos' + (item.state !== 'live' ? ' done' : '') + (item.needsReply && item.state === 'live' ? ' waits' : '') + '" data-item-id="' + esc(item.id) + '">' +
       '<span class="cc-avatar">' + MARK + '</span><div class="cc-card">' + quote +
-      (item.title ? '<p class="cc-card-title">' + esc(item.title) + '</p>' : '') +
+      (item.title ? '<p class="cc-card-title">' + esc(replySessionName(item) || item.title) + '</p>' : '') +
       '<p class="cc-card-line">' + esc(item.line) + '</p>' + fileLinksHtml(item, false) + actionsHtml(item) + '</div></div>';
   }
   // The finished answer as Markdown, its lens-plain inline lists on their own lines first (structureLensAnswer); while it
@@ -783,6 +825,7 @@
   function paintFeed(stick) {
     var feed = C.host && C.host.querySelector('[data-cos-feed]');
     if (!feed) return;
+    wantReplyNames();
     // Never rebuild under the finger: a focused steer box or an open Move list keeps the lines as they are.
     if (document.activeElement && feed.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
     var html;
@@ -2195,7 +2238,11 @@
     if (action === 'open_messages') return W.go('messages');
     // P2 (6.99.11): pings and follow-ups. Opens go where the item's link lives; Prep asks COS; Reply starts a reminder.
     var linkOf = function (kind) { return (item.links || []).filter(function (l) { return l.kind === kind; })[0]; };
-    if (action === 'open_result') return W.go(linkOf('session') ? 'sessions' : linkOf('card') ? 'work' : 'messages');
+    if (action === 'open_result') {
+      var reader = resultSession(item, linkOf('session'));
+      if (reader) return W.go('sessions', reader);
+      return W.go(linkOf('session') ? 'sessions' : linkOf('card') ? 'work' : 'messages');
+    }
     if (action === 'open') { if (linkOf('thread')) return W.go('threads'); if (linkOf('meeting')) return W.go('meetings'); return; }
     if (action === 'review') return W.go('work');
     // 6.99.19: with Prep on the Mac, Prep me opens the Prep composer (notes and files first); without it, the plain Ask.

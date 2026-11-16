@@ -33,6 +33,12 @@ export const DROP_STATES = ['routing', 'filed', 'asking', 'held', 'asked', 'undo
 export type DropState = typeof DROP_STATES[number]
 export const LINK_KINDS = ['card', 'session', 'handoff', 'thread', 'memory', 'meeting', 'file', 'reminder', 'ask'] as const
 export type LinkKind = typeof LINK_KINDS[number]
+/**
+ * 7.0.52: a session link names the session's provider, so "Open result" opens that session's reader
+ * (#/sessions/<provider>/<id>) instead of the Sessions list. Only the providers the reader route serves.
+ */
+export const SESSION_LINK_PROVIDERS = ['claude', 'codex', 'cursor'] as const
+export type SessionLinkProvider = typeof SESSION_LINK_PROVIDERS[number]
 
 export interface DropLink {
   kind: LinkKind
@@ -43,6 +49,8 @@ export interface DropLink {
   sourceId?: string
   /** false when the destination answered with something that was already there: Undo then only unlinks it. */
   created?: boolean
+  /** session links only (7.0.52): the provider whose reader opens this session. Metadata, never shown as text. */
+  provider?: SessionLinkProvider
 }
 export interface DropChoice { id: string; dest: DropDest; label: string; detail: string; target?: { id: string; domain?: string; label: string } }
 export interface DropRoute { by: 'rule' | 'jev' | 'user' | 'fallback'; p?: number; reason?: string; tokens?: number; provider?: string }
@@ -145,6 +153,11 @@ export function parseLink(raw: unknown): DropLink {
   if (raw.domain !== undefined) { const d = str(raw.domain, 64); if (!d) throw new DropStoreError('invalid_link', 400); link.domain = d }
   if (raw.sourceId !== undefined) { const s = str(raw.sourceId, 200); if (!s || !LINK_ID.test(s)) throw new DropStoreError('invalid_link', 400); link.sourceId = s }
   if (raw.created !== undefined) { if (typeof raw.created !== 'boolean') throw new DropStoreError('invalid_link', 400); link.created = raw.created }
+  if (raw.provider !== undefined) {
+    const provider = oneOf(SESSION_LINK_PROVIDERS, raw.provider)
+    if (kind !== 'session' || !provider) throw new DropStoreError('invalid_link', 400)
+    link.provider = provider
+  }
   return link
 }
 
