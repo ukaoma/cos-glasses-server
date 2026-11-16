@@ -9,7 +9,7 @@
 </head>
 <body>
 <main>
-<h1>COS approval</h1>
+<header class="head"><svg class="mark" viewBox="0 0 693 760" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="348" cy="100" r="100"/><circle cx="100" cy="240" r="100"/><circle cx="100" cy="520" r="100"/><path d="M 29.3 310.7 C 78.3 359.7 78.3 400.3 29.3 449.3 A 100 100 0 1 0 170.7 449.3 C 121.7 400.3 121.7 359.7 170.7 310.7 A 100 100 0 1 0 29.3 310.7 Z"/><circle cx="593" cy="240" r="100"/><circle cx="348" cy="380" r="100"/><path d="M 496.5 213.7 C 478.0 281.6 442.2 302.0 374.3 283.5 A 100 100 0 1 0 444.5 406.3 C 463.0 338.4 498.8 318.0 566.7 336.5 A 100 100 0 1 0 496.5 213.7 Z"/><circle cx="593" cy="520" r="100"/><circle cx="348" cy="660" r="100"/><path d="M 496.5 493.7 C 478.0 561.6 442.2 582.0 374.3 563.5 A 100 100 0 1 0 444.5 686.3 C 463.0 618.4 498.8 598.0 566.7 616.5 A 100 100 0 1 0 496.5 493.7 Z"/></svg><h1>COS approval</h1></header>
 
 <section id="loading"><p>Loading.</p></section>
 
@@ -36,23 +36,34 @@
 </section>
 
 <section id="sign" hidden>
+<div class="main-col">
 <h2>You are about to approve</h2>
-<p class="label">Words</p>
+<p class="label">Your message</p>
 <pre id="sign-words"></pre>
 <dl>
 <dt>Sent to</dt><dd id="sign-provider"></dd>
-<dt>Session</dt><dd class="mono" id="sign-session"></dd>
 <dt>What it allows</dt><dd id="sign-scope"></dd>
 </dl>
+</div>
+<div class="side-col">
 <pre id="sign-packet" hidden></pre>
+<details class="more">
+<summary>Session</summary>
+<p class="mono" id="sign-session"></p>
+</details>
+</div>
+<div class="act-col">
+<div class="acts">
 <button type="button" id="sign-approve">Approve with phone passkey</button>
 <button type="button" id="sign-cancel" class="quiet">Cancel approval</button>
+</div>
 <p class="status" id="sign-status" role="status"></p>
+</div>
 </section>
 
 <section id="done" hidden>
 <p id="done-text"></p>
-<p><a id="done-back" href="#">Back to Control</a></p>
+<p><a id="done-back" class="btn" href="#">Back to Control</a></p>
 </section>
 
 <section id="idle" hidden>
