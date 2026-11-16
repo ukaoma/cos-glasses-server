@@ -58,6 +58,10 @@ describe('the sessions a banner announces', () => {
     expect(bannerSessions([reply(A, 'claude'), other])).toBeUndefined()
     expect(bannerSessions([{ ...reply(A, 'claude'), links: [] }])).toBeUndefined()
     expect(bannerSessions([])).toBeUndefined()
+    // an item of another kind that links a session (a follow-up to a drop sent to one) is still not a session ping
+    const followUp: PingCandidate = { source: 'resolution', key: 'res:x', line: 'Done.', links: [{ kind: 'session', id: B, label: 'x', provider: 'claude' }], actions: [], createdAt: WORK }
+    expect(bannerSessions([followUp])).toBeUndefined()
+    expect(bannerSessions([reply(A, 'claude'), followUp])).toBeUndefined()
   })
   it('the engine puts them on the banner it shows and sends to the phone', () => {
     let state: PingState = { ledger: [], held: [], consumed: [] }

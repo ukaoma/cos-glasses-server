@@ -92,6 +92,17 @@ describe('mergeReplies on', () => {
     await long.tick('14:00')
     expect(long.shown).toHaveLength(2)
   })
+  it('the gap counts from the last merged reply banner only, not from a banner of another kind', async () => {
+    const r = rig(on())
+    const resolution: PingCandidate = { source: 'resolution', key: 'res:1', line: 'Your drop is done.', links: [], actions: [], createdAt: at('10:30') }
+    r.push('10:00', reply(A, at('10:00')))
+    r.push('10:30', resolution)
+    r.push('10:31', reply(B, at('10:31')))
+    expect(r.shown.map(b => b.sources[0])).toEqual(['agent', 'resolution'])
+    await r.tick('10:45')
+    expect(r.shown).toHaveLength(3)
+    expect(r.shown[2]).toMatchObject({ replies: true, sessions: [{ id: B, provider: 'claude' }] })
+  })
   it('one session replying twice in the gap: "Reply ready" with its newest line', async () => {
     const r = rig(on())
     r.push('10:00', reply(A, at('10:00')))
