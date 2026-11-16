@@ -724,6 +724,17 @@ describe('7.0.51 item 6: a trip that never left the page releases itself, and sa
         expect(h.docListenerCount()).toBe(0)
       })
     }
+    // Q1 07:06 (their T11): a navigation slower than the bound, which then returns from BFCache. The bound already
+    // released it and read on the next visible; pageshow must not read it again or send a second row.
+    it(`${prefix}: a slow navigation released by the bound, then restored from BFCache, is read exactly once`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: () => ({ status: 200, body: { outcome: 'completed' } }) })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.runTripTimers(); await flush()                          // 4 s, still on the page: stayed
+      h.pageHide(); h.setVisible('hidden')                      // the slow navigation finally leaves
+      h.pageShow(); h.setVisible('visible'); await flush()      // and comes back from BFCache
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+      expect(h.crumbs.map(c => c[1].case)).toEqual(['stayed'])
+    })
     it(`${prefix}: a page that left (pagehide) and came back from BFCache is not released twice, and its row says bfcache`, async () => {
       const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed })
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
