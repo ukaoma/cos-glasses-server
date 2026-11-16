@@ -348,7 +348,7 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       expect(facts.children.map((e: any) => e.className)).toEqual(['pa-ch', 'pa-phone', 'pa-wide'])
       expect(facts.children[1].textContent).toMatch(/^, expires \d/)
       expect(facts.children[2].textContent).toMatch(/^ · asked by this Claude session · expires \d/)
-      expect(more.textContent).toBe('One more request is waiting after this one.')
+      expect(more.textContent).toBe('1 of 2 requests, newest shown.')
       const go = h.form.querySelector('[data-phone-offer]')!
       expect(go.innerHTML).toContain('<span class="pa-short">Approve</span><span class="pa-long">Approve and send</span>')
       expect(go.getAttribute('aria-label')).toBe('Approve the request and send, confirmed with this phone')
@@ -388,6 +388,54 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       h.form.listeners.submit({ submitter: null, preventDefault: () => { prevented++ }, stopImmediatePropagation: () => { stopped++ } }); await flush()
       expect([prevented, stopped]).toEqual([1, 1])
       expect(h.requests.filter(q => q.path === '/api/web-key/handoff')).toHaveLength(1)
+    })
+  }
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: a newer request arriving later never swaps the carried one under his thumb; it only adds to the count (lead 08:0x)`, async () => {
+      const first = { ...PACKET, version: '7.0.6' }, newer = { ...PACKET, version: '7.0.7', createdAt: PACKET.createdAt + 60000 }
+      const opts: any = { signer: 1, prefix, text: '', packets: [{ packet: first, packetSha256: 'b'.repeat(64) }] }
+      const h = harness(opts)
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.r.phonePacketSha256).toBe('b'.repeat(64))
+      expect([...card(h).children].find((c: any) => c.className === 'pa-more')).toBeUndefined()
+      opts.packets = [{ packet: first, packetSha256: 'b'.repeat(64) }, { packet: newer, packetSha256: 'f'.repeat(64) }]
+      h.pageShow(); await flush()                               // a repaint in the same opening
+      expect(h.r.phonePacketSha256).toBe('b'.repeat(64))
+      const c = card(h)
+      expect(c.children[0].children[0].children[2].textContent).toBe('7.0.6')
+      expect([...c.children].find((e: any) => e.className === 'pa-more').textContent).toBe('1 of 2 requests. A newer one arrived; reopen this session to see it.')
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).toMatchObject({ packetSha256: 'b'.repeat(64), prompt: 'Approve publish @gotcos/glasses-server 7.0.6 on npm-latest.' })
+    })
+    it(`${prefix}: a carried request that expires gives way to the newest, and the count says so`, async () => {
+      const first = { ...PACKET, version: '7.0.6' }, newer = { ...PACKET, version: '7.0.7', createdAt: PACKET.createdAt + 60000 }
+      const opts: any = { signer: 1, prefix, packets: [{ packet: first, packetSha256: 'b'.repeat(64) }] }
+      const h = harness(opts)
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      opts.packets = [{ packet: { ...first, exp: Date.now() - 600000 }, packetSha256: 'b'.repeat(64) }, { packet: newer, packetSha256: 'f'.repeat(64) }]
+      h.pageShow(); await flush()
+      expect(h.r.phonePacketSha256).toBe('f'.repeat(64))
+      expect([...card(h).children].find((e: any) => e.className === 'pa-more')).toBeUndefined()
+    })
+    it(`${prefix}: a new opening of the session (a new reading) chooses the newest again`, async () => {
+      const first = { ...PACKET, version: '7.0.6' }, newer = { ...PACKET, version: '7.0.7', createdAt: PACKET.createdAt + 60000 }
+      const h = harness({ signer: 1, prefix, packets: [{ packet: first, packetSha256: 'b'.repeat(64) }, { packet: newer, packetSha256: 'f'.repeat(64) }] })
+      h.r.phoneCarried = undefined
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.r.phonePacketSha256).toBe('f'.repeat(64))
+      expect([...card(h).children].find((e: any) => e.className === 'pa-more').textContent).toBe('1 of 2 requests, newest shown.')
+    })
+    it(`${prefix}: a hostile packet shows only fixed text and its own fields as plain text (Q1 K22)`, async () => {
+      const hostile = { ...PACKET, channel: 'mac-local', action: 'install', artifact: '<img src=x onerror=alert(1)>', effect: 'HOSTILE effect line', title: 'HOSTILE title', does: 'HOSTILE does' }
+      const h = harness({ signer: 1, prefix, packets: [{ packet: hostile, packetSha256: 'b'.repeat(64) }] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      const c = card(h), all = (e: any): string => e.textContent + e.innerHTML + e.children.map(all).join('')
+      expect(all(c)).not.toContain('HOSTILE')
+      expect(c.children[1].children[0].textContent).toBe(h.CHANNEL['mac-local'])
+      // The artifact is text, never markup: set as textContent, no innerHTML anywhere in the card.
+      expect(c.children[0].children[0].children[1].textContent).toBe('<img src=x onerror=alert(1)>')
+      const html = (e: any): string => e.innerHTML + e.children.map(html).join('')
+      expect(html(c)).toBe('')
     })
   }
   it('a stale selected packet fails rather than silently falling back to message authority', async () => {
@@ -1116,8 +1164,8 @@ describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about i
   it('F1 08:0x: with a request card up, the reader\'s own placeholder logic says Add a note; the beside title keeps its gaps; Send as message only comes first', async () => {
     // The reader's placeholder painter (app.js, at the Mac's prompt) yields to the card.
     expect(APP).toContain("var phNote = typeof phoneBoxPlaceholder === 'function' ? phoneBoxPlaceholder() : '';")
-    expect(APP).toContain("box.phLong = phNote || (te ? 'Or write your own answer'")
-    expect(APP).toContain("box.phShort = phNote ? '' : open && !te ? 'Message (not an answer)' : '';")
+    expect(APP).toContain("if (phNote) { box.phLong = phNote; box.phShort = ''; }")
+    expect(APP.indexOf("if (phNote) { box.phLong = phNote; box.phShort = ''; }")).toBeGreaterThan(APP.indexOf("box.phShort = open && !te ? 'Message (not an answer)' : '';"))
     const h = harness({ signer: 1, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
     h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
     expect((h.input as any).phLong).toBe('Add a note')
