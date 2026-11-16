@@ -22,7 +22,7 @@ class El {
   parentNode: El | null = null
   listeners: Record<string, (e?: any) => void> = {}
   get firstChild() { return this.children[0] ?? null }
-  get nextSibling() { const p = this.parentNode; if (!p) return null; const i = p.children.indexOf(this); return p.children[i + 1] ?? null }
+  get nextSibling(): El | null { const p = this.parentNode; if (!p) return null; const i = p.children.indexOf(this); return p.children[i + 1] ?? null }
   get classList() { const el = this; const list = () => el.className.split(/\s+/).filter(Boolean)
     return { contains: (c: string) => list().includes(c), add: (c: string) => { if (!list().includes(c)) el.className = [...list(), c].join(' ') },
       remove: (c: string) => { el.className = list().filter(x => x !== c).join(' ') }, toggle: (c: string, on?: boolean) => { const has = list().includes(c); const want = on === undefined ? !has : on; if (want && !has) el.className = [...list(), c].join(' '); if (!want && has) el.className = list().filter(x => x !== c).join(' '); return want } } }
@@ -101,7 +101,7 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   const clearBoxOf = (text: string, rr: any) => { if (rr === state.reading && input.value.trim() === String(text).trim()) input.value = ''; if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null }
   const fns = new Function(
     'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf', 'setTimeout', 'layoutCrumb', 'navigator', 'sessionStorage', 'history', 'turnEndOf', 'readerRowOf',
-    BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, phoneBusyPaint: phoneBusyPaint, CHANNEL: PHONE_CHANNEL_EFFECT, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
+    BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, phoneBusyPaint: phoneBusyPaint, phoneBoxPlaceholder: phoneBoxPlaceholder, CHANNEL: PHONE_CHANNEL_EFFECT, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
   )(
     () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, doc,
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
@@ -110,7 +110,7 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, hash: opts.hash ?? '', pathname: '/control/', search: '', assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) }, replace: (u: string) => { replaced.push(u) } }, URL, nextKey, window, Clock, clearBoxOf,
     (fn: () => void, ms: number) => { tripTimers.push({ fn, ms, done: false }); return tripTimers.length }, (what: string, data: Record<string, unknown>) => { crumbs.push([what, data]); return true }, { standalone: !!opts.standalone }, sessionStorage, { state: { keep: 1 }, replaceState: (st: unknown, _t: string, u: string) => { expect(st).toEqual({ keep: 1 }); replaced.push(u) } },
     (row: any) => (row && row.ask ? row.ask : null), (rr: any) => (rr && rr.row ? rr.row : null),
-  ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string; phoneBusyPaint: (r: unknown) => void; CHANNEL: Record<string, string> }
+  ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string; phoneBusyPaint: (r: unknown) => void; phoneBoxPlaceholder: () => string; CHANNEL: Record<string, string> }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
   const plainKey = () => fns.draftForPlain(input.value.trim(), r)
@@ -945,7 +945,7 @@ describe('7.0.51 item 4: the draft survives the trip, and the return lands in th
       expect(h.store.size).toBe(0)
     })
     it(`${prefix}: a fresh load of the same session puts the words back under the same key, reads the turn once, and drops the record`, async () => {
-      const h = harness({ signer: 1, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('Ship it.')
       expect(h.plainKey()).toBe('ct-key-trip01')
@@ -956,32 +956,32 @@ describe('7.0.51 item 4: the draft survives the trip, and the return lands in th
       expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
     })
     it(`${prefix}: a fresh load after it landed clears the restored words`, async () => {
-      const h = harness({ signer: 1, prefix, text: '', trip: trip(), turnStatus: landed })
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: trip(), turnStatus: landed })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('')
       expect(h.statuses.at(-1)?.[0]).toBe('Sent from your phone.')
     })
     it(`${prefix}: words already in the box are never overwritten by the record`, async () => {
-      const h = harness({ signer: 1, prefix, text: 'Something else.', trip: trip(), turnStatus: landed })
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: 'Something else.', trip: trip(), turnStatus: landed })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('Something else.')
     })
     it(`${prefix}: another session never gets the words, and the record waits for its own session`, async () => {
-      const h = harness({ signer: 1, prefix, text: '', trip: trip({ id: 'other-session-0000' }) })
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: trip({ id: 'other-session-0000' }) })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('')
       expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
       expect(h.store.size).toBe(1)
     })
     it(`${prefix}: a record older than 30 minutes is dropped without restoring anything`, async () => {
-      const h = harness({ signer: 1, prefix, text: '', trip: trip({ at: Date.now() - 31 * 60000 }) })
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: trip({ at: Date.now() - 31 * 60000 }) })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('')
       expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
       expect(h.store.size).toBe(0)
     })
     it(`${prefix}: a malformed record is dropped and nothing is restored`, async () => {
-      const h = harness({ signer: 1, prefix, text: '', trip: '{not json' })
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: '{not json' })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('')
       expect(h.store.size).toBe(0)
@@ -995,11 +995,57 @@ describe('7.0.51 item 4: the draft survives the trip, and the return lands in th
       expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
       expect(h.crumbs.map(c => c[1].case)).toEqual(['bfcache'])
     })
-    it(`${prefix}: a trip that stayed on the page drops its record too`, async () => {
+    // Lead 08:3x (Codex's review of 19ecc975): a page that stayed (a Home Screen app that opened the approval page in
+    // a sheet or in Safari) may be reloaded or evicted before he comes back, so its record lives on to its normal expiry.
+    it(`${prefix}: a BFCache return that did NOT land still drops the record (this page handles its own trip)`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.store.size).toBe(1)
+      h.pageHide(); h.pageShow(); await flush()
+      expect(h.input.value.trim()).toBe('Ship it.')
+      expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: a trip that stayed on the page KEEPS its record, so a later #/phone-return load still has it`, async () => {
       const h = harness({ signer: 1, prefix, text: 'Ship it.' })
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
       h.runTripTimers(); await flush()
+      expect(h.store.size).toBe(1)
+      expect(h.r.sending).toBe(false)
+    })
+    it(`${prefix}: a stayed trip that is read as landed when he comes back drops its record`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.runTripTimers(); h.setVisible('hidden'); h.setVisible('visible'); await flush()
+      expect(h.input.value).toBe('')
       expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: an ORDINARY load (no #/phone-return) never acts on the record: no words, no read, the record kept`, async () => {
+      const h = harness({ signer: 1, prefix, text: '', trip: trip(), turnStatus: landed })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('')
+      expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
+      expect(h.crumbs).toEqual([])
+      expect(h.store.size).toBe(1)
+    })
+    it(`${prefix}: after a #/phone-return load has acted, a NEW trip that stays is not acted on by a later repaint of that page`, async () => {
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()          // the return: words back, one read
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')   // he approves again on the same page
+      h.runTripTimers(); await flush()                             // and it stays: the record is kept
+      expect(h.store.size).toBe(1)
+      h.input.value = ''
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()          // an ordinary repaint of that page
+      expect(h.input.value).toBe('')
+      expect(h.store.size).toBe(1)
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+    })
+    it(`${prefix}: a #/phone-return load acts once: a second paint in the same load does nothing more`, async () => {
+      const h = harness({ hash: '#/phone-return', signer: 1, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      h.input.value = ''
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+      expect(h.input.value).toBe('')
     })
     it(`${prefix}: a navigation that fails keeps no record`, async () => {
       const h = harness({ signer: 1, prefix, text: 'Ship it.', navigate: () => { throw new Error('blocked navigation') } })
@@ -1007,7 +1053,7 @@ describe('7.0.51 item 4: the draft survives the trip, and the return lands in th
       expect(h.store.size).toBe(0)
     })
     it(`${prefix}: the words come back even if phone approval was turned off while he was away`, async () => {
-      const h = harness({ signer: 0, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      const h = harness({ hash: '#/phone-return', signer: 0, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(h.input.value).toBe('Ship it.')
       expect(h.plainKey()).toBe('ct-key-trip01')
@@ -1174,6 +1220,40 @@ describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about i
     expect(CSS).toContain('#session-reader.pa-beside .pa-card .pa-title { white-space: normal; flex-wrap: wrap; column-gap: 5px; }')
     expect(CSS).not.toMatch(/pa-beside \.pa-card \.pa-title \{[^}]*display: block/)
     expect(CSS).toContain('.composer.pa-on .composer-actions [data-action="fork-session"] { order: 1; }')
+  })
+  // Q1 08:29 (C3, C4): the reader's placeholder is 7.0.50's words unless a request card is up; "Add a note" only then,
+  // and the reader's own words come back when the card goes.
+  for (const [name, opts] of [
+    ['approvals off', { signer: 0, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] }],
+    ['no enrolled key', { signer: 1, activeKeys: 0, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] }],
+    ['a key but no request', { signer: 1, packets: [] }],
+    ['off the ts.net name', { signer: 1, hostname: '192.168.1.20', packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] }],
+  ] as const) {
+    it(`Q1 C3: ${name}: the reader keeps its own placeholder words (phoneBoxPlaceholder is empty, phLong untouched)`, async () => {
+      const h = harness(opts as any)
+      ;(h.input as any).phLong = 'Continue this session…'; (h.input as any).phShort = ''
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.phoneBoxPlaceholder()).toBe('')
+      expect((h.input as any).phLong).toBe('Continue this session…')
+      expect(h.input.getAttribute('placeholder')).toBe('Continue this session…')
+    })
+  }
+  it('Q1 C3: with a request card up, phoneBoxPlaceholder says Add a note', async () => {
+    const h = harness({ signer: 1, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
+    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+    expect(h.phoneBoxPlaceholder()).toBe('Add a note')
+  })
+  it('Q1 C4: when the card goes (key revoked), the reader\'s own words come back: phLong, the placeholder and phoneBoxPlaceholder', async () => {
+    const opts: any = { signer: 1, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] }
+    const h = harness(opts)
+    ;(h.input as any).phLong = 'Continue this session…'
+    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+    expect((h.input as any).phLong).toBe('Add a note')
+    opts.activeKeys = 0
+    h.pageShow(); await flush()
+    expect((h.input as any).phLong).toBe('Continue this session…')
+    expect(h.input.getAttribute('placeholder')).toBe('Continue this session…')
+    expect(h.phoneBoxPlaceholder()).toBe('')
   })
   it('the reader repaints the phone action when working changes: one call, in sxSettle, after the flag is set', () => {
     const settle = APP.slice(APP.indexOf('  function sxSettle(r) {'), APP.indexOf('  function sxNoteGate(r, busy)'))
