@@ -5669,6 +5669,7 @@
   if (window.addEventListener) window.addEventListener('pageshow', function (e) {
     if (!e || !e.persisted) return;
     var nav = WEB_KEY.navigation; WEB_KEY.navigation = null;
+    if (nav && nav.token.completed) phoneTripDrop();   // this page handles its own trip; a fresh-load record is not needed
     if (nav && nav.token.completed && nav.r.phoneNavigation === nav.token) {
       if (nav.r.sending === nav.token) nav.r.sending = false;
       nav.r.phoneNavigation = null;
@@ -5695,6 +5696,7 @@
       if (window.removeEventListener) window.removeEventListener('pagehide', onHide);
       if (left || WEB_KEY.navigation !== nav) return;
       WEB_KEY.navigation = null;
+      phoneTripDrop();
       if (nav.r.phoneNavigation === nav.token) { if (nav.r.sending === nav.token) nav.r.sending = false; nav.r.phoneNavigation = null; }
       phoneCrumb('stayed', nav);
       var back = function () {
@@ -5740,9 +5742,11 @@
       '\nThis request approves nothing until you review it and confirm on the phone.';
   }
   function paintWebKeyOffer(r, opts) {
-    if (!webKeyCapable()) return;
     var view = phoneApprovalView(r, opts);
     if (!phoneApprovalViewLive(view)) return;
+    // Before the capability check: his words come back even if phone approval was turned off while he was away.
+    phoneTripRestore(r, opts);
+    if (!webKeyCapable()) return;
     // 7.0.51 (W1, lead 06:5x): the host is decided before anything is asked or painted. The approval page and its
     // passkey live only on the Mac's full ts.net name (webKeySetupUrl); anywhere else (a LAN address, 3141, a local
     // name) there is no phone action at all, and Send is the composer exactly as before.
@@ -5795,6 +5799,42 @@
       }, function () { /* No packet is selected implicitly when this read fails. */ });
     });
   }
+  // 7.0.51 item 4 (W1, lead 06:5x): the trip, kept per tab (sessionStorage: gone with the tab, never shared with
+  // another tab) so a FRESH load back from the approval page still has it. One record: the session, the turn key,
+  // the binding and the words. Restored only into that same session (paintWebKeyOffer), never another; dropped
+  // once used, when the BFCache return or the stayed bound handles the trip itself, or past PHONE_TRIP_MAX_MS.
+  var PHONE_TRIP_STORE = 'cos.phoneTrip', PHONE_TRIP_MAX_MS = 30 * 60000;
+  function phoneTripSave(t) { try { sessionStorage.setItem(PHONE_TRIP_STORE, JSON.stringify(t)); } catch (_e) { /* no storage: the BFCache return still works */ } }
+  function phoneTripDrop() { try { sessionStorage.removeItem(PHONE_TRIP_STORE); } catch (_e) { /* nothing kept */ } }
+  function phoneTripRead() {
+    var raw = null, t = null;
+    try { raw = sessionStorage.getItem(PHONE_TRIP_STORE); } catch (_e) { return null; }
+    if (raw == null) return null;
+    try { t = JSON.parse(raw); } catch (_e) { t = null; }
+    var age = t && typeof t.at === 'number' ? Date.now() - t.at : -1;
+    if (!t || t.v !== 1 || typeof t.provider !== 'string' || typeof t.id !== 'string' || typeof t.key !== 'string' || typeof t.bindingId !== 'string'
+      || typeof t.text !== 'string' || !t.text || !(age >= 0 && age <= PHONE_TRIP_MAX_MS)) { phoneTripDrop(); return null; }
+    return t;
+  }
+  // The approval page's Back (X1's contract): history.back() when it can, else this fixed address. It carries
+  // nothing; the session comes from this tab's own record. Rewritten before the first route() (showShell), with
+  // replaceState, so there is no extra history entry and no hashchange.
+  // (Guarded: it runs at load, and the web-control vm harnesses load this file with no location.)
+  if (typeof location === 'object' && location && location.hash === '#/phone-return') {
+    var phoneBack = phoneTripRead();
+    try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/') : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
+  }
+  function phoneTripRestore(r, opts) {
+    var t = phoneTripRead();
+    if (!t || t.provider !== r.provider || t.id !== r.id) return;
+    phoneTripDrop();
+    var view = phoneApprovalView(r, opts);
+    if (!view.input) return;
+    if (!view.input.value.trim()) view.input.value = t.text;
+    if (!r.draft || r.draft.text !== t.text) r.draft = { text: t.text, key: t.key, ids: [] };
+    phoneCrumb('fresh', t);
+    phoneLanded(r, { key: t.key, bindingId: t.bindingId, text: t.text, view: view });
+  }
   // Only the signer on this same host, port 3144, path /, with nothing but the handoff id in the fragment.
   function webKeySignerUrlOk(u) {
     try {
@@ -5845,6 +5885,8 @@
         if (h.status === 201 && body.ok === true && webKeySignerUrlOk(body.signerUrl)) {
           say('Opening the approval page.');
           location.assign(body.signerUrl);
+          // After the call: a navigation that throws keeps no record. Script runs on after assign, so this lands first.
+          phoneTripSave({ v: 1, provider: provider, id: id, key: draft.key, bindingId: b.bindingId, text: draft.text, at: Date.now() });
           operation.completed = true;
           WEB_KEY.navigation = { r: r, token: operation, at: Date.now(), trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
           phoneTripWatch(WEB_KEY.navigation);

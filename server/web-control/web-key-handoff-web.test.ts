@@ -35,7 +35,7 @@ class El {
   removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; hash?: string; trip?: Record<string, unknown> | string; storageThrows?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
   form.children.push(actions); actions.children.push(send); send.parentNode = actions
@@ -60,6 +60,12 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     addEventListener: (name: string, fn: () => void) => { (docListeners[name] ??= []).push(fn) },
     removeEventListener: (name: string, fn: () => void) => { docListeners[name] = (docListeners[name] ?? []).filter(f => f !== fn) } }
   const crumbs: Array<[string, Record<string, unknown>]> = []
+  // 7.0.51 item 4: per-tab storage and the address (hash, replace).
+  const store = new Map<string, string>()
+  if (opts.trip !== undefined) store.set('cos.phoneTrip', typeof opts.trip === 'string' ? opts.trip : JSON.stringify(opts.trip))
+  const boom = () => { if (opts.storageThrows) throw new Error('SecurityError') }
+  const sessionStorage = { getItem: (k: string) => { boom(); return store.has(k) ? store.get(k)! : null }, setItem: (k: string, v: string) => { boom(); store.set(k, String(v)) }, removeItem: (k: string) => { boom(); store.delete(k) } }
+  const replaced: string[] = []
   const actualStatus = opts.statusWire ? new Function('fetch', 'AbortController', 'setTimeout', 'clearTimeout', 'sxNoteClock', 'noteServer', 'showAuth', 'unreachableError', 'Date', API_BLOCK + '\nreturn apiAnswer;')(
     opts.statusWire, AbortController, (fn: () => void, delay: number) => { timeoutDelays.push(delay); timers.set(++timerId, fn); return timerId }, (id: number) => timers.delete(id),
     () => {}, (up: boolean) => downMarks.push(up), () => {}, (err: unknown) => err, Clock,
@@ -79,15 +85,15 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   // app.js clearBoxOf: only the very words that were sent leave the box.
   const clearBoxOf = (text: string, rr: any) => { if (rr === state.reading && input.value.trim() === String(text).trim()) input.value = ''; if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null }
   const fns = new Function(
-    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf', 'setTimeout', 'layoutCrumb', 'navigator',
+    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf', 'setTimeout', 'layoutCrumb', 'navigator', 'sessionStorage', 'history',
     BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
   )(
     () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, doc,
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
     (text: string, rr: any, ids?: string[]) => { const f = Array.isArray(ids) ? ids.slice() : []; rr.draft = rr.draft && rr.draft.text === text && (rr.draft.ids || []).join(',') === f.join(',') ? rr.draft : { text, key: nextKey(), ids: f }; return rr.draft },
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
-    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) } }, URL, nextKey, window, Clock, clearBoxOf,
-    (fn: () => void, ms: number) => { tripTimers.push({ fn, ms, done: false }); return tripTimers.length }, (what: string, data: Record<string, unknown>) => { crumbs.push([what, data]); return true }, { standalone: !!opts.standalone },
+    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, hash: opts.hash ?? '', pathname: '/control/', search: '', assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) }, replace: (u: string) => { replaced.push(u) } }, URL, nextKey, window, Clock, clearBoxOf,
+    (fn: () => void, ms: number) => { tripTimers.push({ fn, ms, done: false }); return tripTimers.length }, (what: string, data: Record<string, unknown>) => { crumbs.push([what, data]); return true }, { standalone: !!opts.standalone }, sessionStorage, { state: { keep: 1 }, replaceState: (st: unknown, _t: string, u: string) => { expect(st).toEqual({ keep: 1 }); replaced.push(u) } },
   ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
@@ -95,7 +101,7 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   return { ...fns, r, state, form, input, plainKey, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
     pageShow: (persisted = true) => { for (const fn of windowListeners.pageshow ?? []) fn({ persisted }) }, advance: (ms: number) => { now += ms },
     pageHide: () => { for (const fn of [...(windowListeners.pagehide ?? [])]) fn({ persisted: true }) },
-    tripTimers, crumbs, runTripTimers: () => { for (const t of tripTimers) if (!t.done) { t.done = true; t.fn() } }, runTripTimer: (i: number) => { const t = tripTimers[i]; if (t && !t.done) { t.done = true; t.fn() } },
+    tripTimers, crumbs, store, replaced, runTripTimers: () => { for (const t of tripTimers) if (!t.done) { t.done = true; t.fn() } }, runTripTimer: (i: number) => { const t = tripTimers[i]; if (t && !t.done) { t.done = true; t.fn() } },
     setVisible: (v: 'visible' | 'hidden') => { doc.visibilityState = v; for (const fn of [...(docListeners.visibilitychange ?? [])]) fn() },
     docListenerCount: () => Object.values(docListeners).reduce((n, a) => n + a.length, 0), windowListenerCount: (name: string) => (windowListeners[name] ?? []).length,
     statusTimeouts, timeoutDelays, downMarks, timerCount: () => timers.size, expireTimers: () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn() },
@@ -806,4 +812,118 @@ describe('7.0.51 item 5: no enrolled key, or approvals off, is 7.0.50 (W1)', () 
       })
     }
   }
+})
+
+describe('7.0.51 item 4: the draft survives the trip, and the return lands in the same session (W1, lead 06:5x)', () => {
+  const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
+  const landed = () => ({ status: 200, body: { outcome: 'completed' } })
+  const trip = (over: Record<string, unknown> = {}) => ({ v: 1, provider: 'claude', id: SID, key: 'ct-key-trip01', bindingId: 'b-1', text: 'Ship it.', at: Date.now(), ...over })
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: an opened approval keeps one per-tab record: the session, the turn key, the binding and the words, nothing else`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.' })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const key = h.requests.filter(q => q.path === '/api/web-key/handoff')[0].body.clientTurnId
+      const rec = JSON.parse(h.store.get('cos.phoneTrip')!)
+      expect(Object.keys(rec).sort()).toEqual(['at', 'bindingId', 'id', 'key', 'provider', 'text', 'v'])
+      expect(rec).toMatchObject({ v: 1, provider: 'claude', id: SID, key, bindingId: 'b-1', text: 'Ship it.' })
+      expect(h.store.size).toBe(1)
+    })
+    it(`${prefix}: a refused approval keeps no record`, async () => {
+      const h = harness({ signer: 1, prefix, handoff: () => ({ status: 409, body: { ok: false, error: 'no_phone_key' } }) })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('refused')
+      expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: a fresh load of the same session puts the words back under the same key, reads the turn once, and drops the record`, async () => {
+      const h = harness({ signer: 1, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('Ship it.')
+      expect(h.plainKey()).toBe('ct-key-trip01')
+      expect(h.requests.filter(q => /\/turns\//.test(q.path)).map(q => q.path)).toEqual(['/api/agent-sessions/bindings/b-1/turns/ct-key-trip01'])
+      expect(h.crumbs.map(c => c[1].case)).toEqual(['fresh'])
+      expect(h.store.size).toBe(0)
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+    })
+    it(`${prefix}: a fresh load after it landed clears the restored words`, async () => {
+      const h = harness({ signer: 1, prefix, text: '', trip: trip(), turnStatus: landed })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('')
+      expect(h.statuses.at(-1)?.[0]).toBe('Sent from your phone.')
+    })
+    it(`${prefix}: words already in the box are never overwritten by the record`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Something else.', trip: trip(), turnStatus: landed })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('Something else.')
+    })
+    it(`${prefix}: another session never gets the words, and the record waits for its own session`, async () => {
+      const h = harness({ signer: 1, prefix, text: '', trip: trip({ id: 'other-session-0000' }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('')
+      expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
+      expect(h.store.size).toBe(1)
+    })
+    it(`${prefix}: a record older than 30 minutes is dropped without restoring anything`, async () => {
+      const h = harness({ signer: 1, prefix, text: '', trip: trip({ at: Date.now() - 31 * 60000 }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('')
+      expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
+      expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: a malformed record is dropped and nothing is restored`, async () => {
+      const h = harness({ signer: 1, prefix, text: '', trip: '{not json' })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('')
+      expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: the BFCache return handles the trip itself, so its record is dropped and read only once`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.pageHide(); h.pageShow(); await flush()
+      expect(h.store.size).toBe(0)
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+      expect(h.crumbs.map(c => c[1].case)).toEqual(['bfcache'])
+    })
+    it(`${prefix}: a trip that stayed on the page drops its record too`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.' })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.runTripTimers(); await flush()
+      expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: a navigation that fails keeps no record`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', navigate: () => { throw new Error('blocked navigation') } })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('failed')
+      expect(h.store.size).toBe(0)
+    })
+    it(`${prefix}: the words come back even if phone approval was turned off while he was away`, async () => {
+      const h = harness({ signer: 0, prefix, text: '', trip: trip(), turnStatus: () => ({ status: 404, body: { outcome: 'unknown' } }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.input.value).toBe('Ship it.')
+      expect(h.plainKey()).toBe('ct-key-trip01')
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+    })
+    it(`${prefix}: storage that throws never stops the approval or the return`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', storageThrows: true, turnStatus: landed })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.pageHide(); h.pageShow(); await flush()
+      expect(h.input.value).toBe('')
+    })
+  }
+  it('a load at #/phone-return opens the session the record names, replacing the address (history.replaceState: no entry, no hashchange)', () => {
+    const h = harness({ signer: 1, hash: '#/phone-return', trip: trip() })
+    expect(h.replaced).toEqual(['/control/#/sessions/claude/' + SID])
+    expect(h.store.size).toBe(1)
+  })
+  it('a load at #/phone-return with no record, an old one or a broken one opens Today', () => {
+    for (const t of [undefined, trip({ at: Date.now() - 31 * 60000 }), '{x']) {
+      const h = harness({ signer: 1, hash: '#/phone-return', trip: t as any })
+      expect(h.replaced).toEqual(['/control/#/today'])
+    }
+  })
+  it('any other address is left alone at load', () => {
+    for (const hash of ['', '#/sessions', '#/today', '#/phone-return/x', '#phone-return']) {
+      const h = harness({ signer: 1, hash, trip: trip() })
+      expect(h.replaced).toEqual([])
+    }
+  })
 })
