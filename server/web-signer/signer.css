@@ -1,10 +1,10 @@
 /* COS approval page (7.0.51 restyle, F1 2026-11-16, Miles's go 07:08): Control's own look. The cream and espresso
    pages, the gold accent and the type are Control Web's tokens (web-control/app.css). DM Sans and Fraunces load from
-   this origin once X1 ships the files (font-src 'self'); until then the system faces below stand in. No inline style
+   this origin at /fonts/ (X1's claude/server-signer-fonts-7051: TTF, font-src 'self'); until then the system faces below stand in. No inline style
    and no script: the page's words, its #sign-words and #sign-packet, are written by signer.js and are never styled
    into a different text. */
-@font-face { font-family: 'DM Sans'; src: url('/DMSans.woff2') format('woff2'); font-weight: 100 1000; font-display: swap; }
-@font-face { font-family: 'Fraunces'; src: url('/Fraunces.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'DM Sans'; src: url('/fonts/DMSans.ttf') format('truetype'); font-weight: 100 1000; font-display: swap; }
+@font-face { font-family: 'Fraunces'; src: url('/fonts/Fraunces.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
 :root {
   color-scheme: light dark;
   --page: #f5f0e6; --ink: #1f1712; --sub: #66635e; --panel: #ffffff; --panel-border: #e3d9c6; --row: #efe7d8; --soft: #fbf7ef;
