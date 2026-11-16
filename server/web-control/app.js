@@ -5714,7 +5714,7 @@
       if (window.removeEventListener) window.removeEventListener('pagehide', onHide);
       if (left || WEB_KEY.navigation !== nav) return;
       WEB_KEY.navigation = null;
-      phoneTripDrop();
+      // The record is NOT dropped here (lead 08:3x): a Home Screen app may be reloaded or evicted before he returns.
       if (nav.r.phoneNavigation === nav.token) { if (nav.r.sending === nav.token) nav.r.sending = false; nav.r.phoneNavigation = null; }
       phoneCrumb('stayed', nav);
       var back = function () {
@@ -5746,6 +5746,7 @@
           if (box && box.value.trim() === trip.text) box.value = '';
           if (r.draft && r.draft.text === trip.text) r.draft = null;
         }
+        phoneTripDrop();
         say(PHONE_LANDED.landed); return 'landed';
       }
       if (a.status === 404) { say(PHONE_LANDED.unknown); return 'unknown'; }
@@ -5829,13 +5830,18 @@
   // nothing; the session comes from this tab's own record. Rewritten before the first route() (showShell), with
   // replaceState, so there is no extra history entry and no hashchange.
   // (Guarded: it runs at load, and the web-control vm harnesses load this file with no location.)
-  if (typeof location === 'object' && location && location.hash === '#/phone-return') {
+  // Lead 08:3x: the record is acted on ONLY by a load that arrived at #/phone-return (his tap on the approval page),
+  // and only once; an ordinary load never acts on it, so the page never moves him or fills his box by itself.
+  var PHONE_RETURN_LOAD = typeof location === 'object' && !!location && location.hash === '#/phone-return';
+  if (PHONE_RETURN_LOAD) {
     var phoneBack = phoneTripRead();
     try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/') : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
   }
   function phoneTripRestore(r, opts) {
+    if (!PHONE_RETURN_LOAD) return;
     var t = phoneTripRead();
     if (!t || t.provider !== r.provider || t.id !== r.id) return;
+    PHONE_RETURN_LOAD = false;
     phoneTripDrop();
     var view = phoneApprovalView(r, opts);
     if (!view.input) return;
