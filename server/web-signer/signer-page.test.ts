@@ -378,6 +378,20 @@ describe('the page markup and stylesheet', () => {
     expect(rules.filter(r => /(?:^|[;{\s])content\s*:/.test(r.body)).map(r => r.sel)).toEqual(['#sign-packet::before'])
   })
 
+  it('the session shows short in the main list before Approve: one element, clipped by CSS to 8 characters, a plain … after it, full when opened (lead 07:36)', () => {
+    expect(HTML.match(/id="sign-session"/g)).toHaveLength(1)
+    const list = HTML.slice(HTML.indexOf('<dl>', HTML.indexOf('id="sign"')), HTML.indexOf('</dl>', HTML.indexOf('id="sign"')))
+    expect(list).toContain('id="sign-provider"')
+    expect(list).toMatch(/<details class="sid"><summary><span class="mono" id="sign-session"><\/span><span class="sid-more" aria-hidden="true">…<\/span><\/summary><\/details>/)
+    expect(at('sign-session')).toBeLessThan(at('sign-approve'))
+    const rule = (sel: string) => (rules.find(r => r.sel === sel) || { body: '' }).body
+    expect(rule('#sign-session')).toMatch(/max-width:\s*8ch;/)
+    expect(rule('#sign-session')).toMatch(/overflow:\s*hidden;/)
+    expect(rule('#sign-session')).not.toMatch(/ellipsis/)
+    expect(rule('.sid[open] #sign-session')).toMatch(/max-width:\s*none;/)
+    expect(rule('.sid[open] .sid-more')).toMatch(/display:\s*none;/)
+  })
+
   it('fonts load only from this origin, at the two fixed paths; no data:, no @import', () => {
     const urls = [...CSS.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)].map(m => m[1])
     expect(urls.sort()).toEqual(['/fonts/DMSans.ttf', '/fonts/Fraunces.ttf'])

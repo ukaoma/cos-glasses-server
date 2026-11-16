@@ -42,10 +42,15 @@ button, .btn { box-sizing: border-box; display: flex; align-items: center; justi
 button.quiet { min-height: 44px; background: none; color: var(--ink); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--panel-border); }
 button:disabled { opacity: 0.5; }
 .status { min-height: 1.4em; margin: 8px 0 0; color: var(--sub); font-size: 15px; }
-/* The session id is still on the page, one tap down. */
-.more { margin: 4px 0 0; }
-.more summary { display: flex; align-items: center; min-height: 44px; color: var(--sub); font: 500 15px/1.2 var(--body); cursor: pointer; }
-.more .mono { margin: 0 0 8px; }
+/* The session: its first 8 characters beside "Sent to", so two sessions read apart at a glance (lead 07:36). One
+   element: CSS clips it to 8ch, with no CSS ellipsis; the "…" after it is plain text in the page. A tap opens the same
+   element to the full id in place. */
+.sid summary { display: inline-flex; align-items: baseline; padding: 4px 0; list-style: none; cursor: pointer; }
+.sid summary::-webkit-details-marker { display: none; }
+#sign-session { display: inline-block; max-width: 8ch; overflow: hidden; white-space: nowrap; vertical-align: bottom; text-overflow: clip; }
+.sid[open] #sign-session { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+.sid[open] .sid-more { display: none; }
+.sid-more { color: var(--sub); }
 #problem-text, #done-text { margin: 8px 0 16px; font: 400 17px/1.45 var(--body); }
 #problem-text { color: var(--hot); }
 .code { margin: 8px 0 16px; font: 600 2.2rem/1.2 var(--mono); letter-spacing: 0.08em; }
