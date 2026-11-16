@@ -33,6 +33,7 @@
 - Merged reply notifications: a reply he has already answered at his desk can still be announced, because the release does not yet check the session's state (only that the item is still in the chat). A named 7.0.53 follow-up (the lead, 16:42).
 - Merged reply notifications: replies still waiting when quiet hours begin are not announced later. They are in the chat, as an ordinary reply inside the gap was before (the lead, 16:47).
 - The merged reply notification is new on the Mac and the phone, and was exercised with fakes only, not on his phone.
+- Merged reply notifications have no Settings control yet, in Control Web or on the Mac (a Settings switch is a visible change and waits for Miles). It is switched through the settings route; the existing session-update banner switch and the pings switch still turn it off from Settings.
 - The layout sweep (F1) and Q1's mutants on the merged head have not run yet.
 
 **Tested on this build** (the full suite on its parent b1ff9b90; this commit adds only these lines):

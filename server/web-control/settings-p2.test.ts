@@ -62,8 +62,14 @@ describe('web Settings: COS reaching out', () => {
   it('has a control for every setting, and none of the AI telltales in its copy', async () => {
     const { pane } = await load(ON, P2_DEFAULTS)
     expect(pane.innerHTML).toContain('COS reaching out')
-    // banners.reminder is the reminders.banners switch ("Notify me"); every other leaf has its own control.
-    for (const path of leafPaths(P2_DEFAULTS).filter(p => p !== 'banners.reminder')) {
+    // banners.reminder is the reminders.banners switch ("Notify me"); every other leaf has its own control, except:
+    // pings.mergeReplies (7.0.52 B) is switched through the settings route, off by default, with no Control Web switch yet by the
+    // lead's ruling of 2026-11-16 (a Settings switch is a visible change and waits for Miles). The existing session-update banner
+    // switch (banners.agent) and the pings switch still turn it off from Settings.
+    const noControl = ['banners.reminder', 'pings.mergeReplies']
+    // Exact paths, and every one still a real setting, so a stale entry cannot hide a missing control later.
+    expect(noControl.filter(p => !leafPaths(P2_DEFAULTS).includes(p))).toEqual([])
+    for (const path of leafPaths(P2_DEFAULTS).filter(p => !noControl.includes(p))) {
       expect(pane.innerHTML, path).toContain(`data-p2="${path}"`)
     }
     const section = pane.innerHTML.slice(pane.innerHTML.indexOf('COS reaching out'))
