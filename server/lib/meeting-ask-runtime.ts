@@ -23,7 +23,8 @@ import type { MeetingAskPhaseTiming, MeetingAskTimings } from '../../shared/meet
 import { refineActiveMeetingAsk } from './meeting-ask-refinement.js';
 import { getMediaStore, MediaStoreError } from './media-store.js';
 import { createHash } from 'node:crypto';
-import { DATA_ASK_ADDENDUM, DATA_FACTS_FILE, askDataIntent, askUserWords, dataArmGate, dataFactsForAsk, dataFactsReader, quiltTitleSignal, type DataFactsRead } from './live-cues-v2-data.js';
+import { DATA_ASK_ADDENDUM, DATA_FACTS_FILE, askDataIntent, askUserWords, dataArmGate, dataFactsForAsk, dataFactsReader, namedGroups, quiltSpeechSignal, quiltTitleSignal, refreshText, type DataFactsRead } from './live-cues-v2-data.js';
+import { FUNNEL_ASK_ADDENDUM, FUNNEL_LOG_FILE, askNamesSalesforce, funnelLogForAsk, funnelLogReader, funnelRowsFor, type FunnelLogRead } from './funnel-log.js';
 import { dataPath } from './data-dir.js';
 import { readMeetingImage, imageTextHasSecrets } from './meeting-image-ocr.js';
 import { isValidMediaId, mediaCategoryOf } from '../../shared/media-attachment.js';
@@ -82,6 +83,9 @@ interface RuntimeDeps {
     logTimings: (line: string) => void;
     /** Tableau funnel facts (`data-facts.json`, written by cue_data_facts.py): local file, never the network. */
     dataFacts: () => DataFactsRead;
+    /** Salesforce beside Tableau (`funnel-log.json`, written by sfdc_funnel_log.py): local file, never the network. Optional: absent
+     *  means no Salesforce source. */
+    funnelLog?: () => FunnelLogRead;
 }
 /** The timing breadcrumb: request id, action, outcome, total and each phase in order. No user text. */
 export function meetingAskTimingLine(requestId: string, action: string, outcome: string, timings: MeetingAskTimings): string {
@@ -95,7 +99,7 @@ function profileWearer(): string | null { try {
 catch {
     return null;
 } }
-const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: () => defaultOwnerArea(), ownerLabel: () => { try { return getOwnerSpeakerLabel(); } catch { return null; } }, owner: ownerCardFromProfile, logTimings: line => console.info(line), dataFacts: dataFactsReader(dataPath(DATA_FACTS_FILE)) };
+const defaults: RuntimeDeps = { reviewAnswers:true, domains: meetingDomains, store: new MeetingAskStore(), identity: getServerInstanceId, admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('meeting_ask'), catalog: listLensGistEngines, run: runMeetingAskModel, search: searchAskHistory, webCapability: meetingWebCapability, webSearch: searchMeetingWeb, wearer: profileWearer, media: getMediaStore, readImage: readMeetingImage, refine: refineActiveMeetingAsk, finalized: input => captureFinalizedAskEvidence(input, transcriptSources), ownerArea: () => defaultOwnerArea(), ownerLabel: () => { try { return getOwnerSpeakerLabel(); } catch { return null; } }, owner: ownerCardFromProfile, logTimings: line => console.info(line), dataFacts: dataFactsReader(dataPath(DATA_FACTS_FILE)), funnelLog: funnelLogReader(dataPath(FUNNEL_LOG_FILE)) };
 function modelValue(v: unknown): MeetingAskModel {
     const m = v as MeetingAskModel;
     if (!m || !['claude', 'codex', 'cursor', 'ollama'].includes(m.engine) || typeof m.model !== 'string' || !m.model.trim() || m.model.length > 120 || !/^[A-Za-z0-9_.:[\]-]+$/.test(m.model))
@@ -487,34 +491,59 @@ export class MeetingAskRuntime {
             const extraNotices = [...refinementNotices, ...(finalized?.notices ?? []), ...files.filter(f => f.status !== 'ready').map(f => `${f.name}: ${f.status}; text not available.`)];
             if (files.reduce((n, f) => n + f.text.length, 0) > 16000)
                 extraNotices.push('Attachment context is limited to selected text (16,000 characters).');
-            // A question about Quilt funnel numbers, budget or pacing, or one that says Tableau, gets the Tableau facts as one more local
-            // source (live-cues-v2-data.ts). No network. Never in a personal meeting; a question that only names a group needs a Quilt or
-            // not yet known meeting. When Tableau was asked for by name and the file cannot be used, the answer says so.
+            // A question about Quilt funnel numbers, budget or pacing, or one that says Tableau or Salesforce, gets the Tableau facts AND the
+            // Salesforce funnel log (Salesforce via Coefficient beside Tableau, with the disagreements) as local sources (live-cues-v2-data.ts,
+            // funnel-log.ts). Miles's standing rule: a funnel read uses both and says where they disagree. No network. Never in a personal
+            // meeting; a question that only names a group needs a Quilt meeting, or a not yet known one with a Quilt brand, SBU or XBU named in
+            // the question, the calendar title or the transcript. When a source was asked for by name, or a funnel question cannot have the
+            // Salesforce log, the answer says why; a question the gate turns away stays silent, as before.
             let dataSystem = '';
             try {
                 const read = this.deps.dataFacts();
+                const funnel: FunnelLogRead | null = this.deps.funnelLog ? this.deps.funnelLog() : null;
                 const own = askUserWords(input.question);
                 const wantsTableau = /\btableau\b/i.test(own);
                 const personal = (orientation?.domain ?? '').trim().toLowerCase() === 'personal';
-                if (!read.ok) {
-                    if (wantsTableau && !personal)
-                        extraNotices.push(`Tableau data is not available (${read.reason}), so no Tableau figures were used.`);
-                }
-                else if (!personal) {
-                    const { intent, brand } = askDataIntent(input.question, read.facts);
-                    // Saying Tableau is explicit. Only naming a group goes through the cue arm's gate: a Quilt meeting, or one with no
-                    // confirmed domain and a Quilt brand named (or a Quilt term in the calendar title).
-                    const ok = intent === 'tableau' || (intent === 'named' && dataArmGate({ domain: orientation?.domain, brand, titleQuilt: quiltTitleSignal(read.facts, [orientation?.calendar?.title]) }).ok);
+                // Salesforce named is explicit only in a Quilt meeting or one with no confirmed domain: a client of another domain may run
+                // its own Salesforce, and Quilt's numbers are not the answer there.
+                const wantsSalesforce = askNamesSalesforce(own) && dataArmGate({ domain: orientation?.domain, brand: true }).ok;
+                if (!personal) {
+                    const facts = read.ok ? read.facts : null;
+                    const { intent, brand } = facts ? askDataIntent(input.question, facts) : { intent: null, brand: false };
+                    // Without the Tableau sheet, a funnel question can still be routed by the log's own industry names.
+                    const fallbackNamed = !facts && funnel !== null && funnel.ok && funnelRowsFor(funnel.log, null, own) !== null && /\b(?:funnel|leads?|opps?|opportunit(?:y|ies)|demos?|customers?|budget|pacing|forecast)\b/i.test(own);
+                    const explicit = wantsTableau || wantsSalesforce;
+                    const named = intent === 'named' || fallbackNamed;
+                    // Saying Tableau or Salesforce is explicit. Only naming a group goes through the cue arm's gate. What the room said vouches
+                    // only for a question that names a group: a lead source alone ("ppc leads") needs a Quilt meeting or title, as for cues.
+                    const gate = named && !explicit ? dataArmGate({ domain: orientation?.domain, brand: brand || (facts !== null && namedGroups(facts, own).length > 0 && quiltSpeechSignal(facts, normal.turns.map(t => t.text))), titleQuilt: facts ? quiltTitleSignal(facts, [orientation?.calendar?.title]) : false }) : null;
+                    const ok = explicit || intent === 'tableau' || (gate?.ok ?? false);
+                    const nextF = () => `F${extraSources.filter(s => s.kind === 'file').length + 1}`;
                     if (ok) {
-                        const data = dataFactsForAsk(read.facts, input.question);
-                        if (data) {
-                            extraSources.push({ id: `F${extraSources.filter(s => s.kind === 'file').length + 1}`, kind: 'file', title: data.title, text: data.text });
-                            dataSystem = DATA_ASK_ADDENDUM;
+                        if (facts) {
+                            const data = dataFactsForAsk(facts, input.question);
+                            if (data) {
+                                // The refresh rides in the title, so a cited figure always shows when Tableau was read.
+                                extraSources.push({ id: nextF(), kind: 'file', title: `${data.title}, refreshed ${refreshText(facts.asOfIso)}`, text: data.text });
+                                dataSystem = DATA_ASK_ADDENDUM;
+                            }
                         }
+                        else if (wantsTableau)
+                            extraNotices.push(`Tableau data is not available (${(read as { reason: string }).reason}), so no Tableau figures were used.`);
+                        if (funnel?.ok) {
+                            const groups = facts ? namedGroups(facts, own).map(n => n.group) : null;
+                            const sf = funnelLogForAsk(funnel.log, own, facts, groups);
+                            extraSources.push({ id: nextF(), kind: 'file', title: sf.title, text: sf.text });
+                            dataSystem = (dataSystem || DATA_ASK_ADDENDUM) + FUNNEL_ASK_ADDENDUM;
+                        }
+                        // A missing log is said only where the Tableau sheet exists (a Quilt install that writes both); on any other install a
+                        // question that names Salesforce is about the user's own Salesforce, and this server has nothing to say about it.
+                        else if (funnel && (funnel.reason !== 'missing' || facts))
+                            extraNotices.push(`The daily Salesforce funnel log is not available (${funnel.reason}), so no Salesforce figures were used${wantsSalesforce ? ', and Ask cannot query Salesforce live' : ''}.`);
                     }
                 }
             }
-            catch { /* the Tableau source is optional context */ }
+            catch { /* the Tableau and Salesforce sources are optional context */ }
             const withoutPublic=/\b(?:without\s+(?:any\s+)?public\s+information|(?:do not|don.t|no)\s+(?:use\s+)?(?:the\s+)?(?:web|public search))\b/i.test(input.question);
             const webAvailable = this.deps.webCapability().available && !withoutPublic;
             if(withoutPublic)extraNotices.push('Public lookup was skipped because this question excludes public information. Clarify if you meant to exclude private details instead.');

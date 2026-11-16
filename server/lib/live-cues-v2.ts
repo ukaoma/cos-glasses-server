@@ -51,6 +51,7 @@ import { generalTriggerCalls } from './live-cues-general-prompts.js'
 import { isGenericSpeakerLabel } from './live-cues-general-topic.js'
 import { publicHttpsUrl } from './public-https-url.js'
 import { DATA_FACTS_FILE, DATA_WRITER_ADDENDUM, dataArmGate, dataCandidate, dataFactsReader, isQuiltDomain, quiltTitleSignal, type DataFactsRead } from './live-cues-v2-data.js'
+import { FUNNEL_LOG_FILE, FUNNEL_WRITER_ADDENDUM, SFDC_CUE_MARK, funnelCueClause, funnelLogReader, type FunnelLogRead } from './funnel-log.js'
 import { GROUNDED_LIMITS, SessionShingles, groundedCandidates, groundedSource, selfIdSet, usableFiles, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
@@ -559,6 +560,9 @@ export interface LiveCuesV2Deps {
   files?(sessionId: string): GroundedFile[]
   /** Live cues, grounded only (absent means no data arm): the Tableau facts file, read and checked for staleness. Never throws. */
   dataFacts?(): DataFactsRead
+  /** Live cues, grounded only (absent means Tableau alone): the Salesforce funnel log (funnel-log.json), read and checked for staleness. A
+   *  Tableau note about an industry the log covers then carries Salesforce for the same figures and says where they disagree. Never throws. */
+  funnelLog?(): FunnelLogRead
   /** The user-confirmed context of this meeting: its domain and calendar title (MeetingAskStore.orientation). May throw. */
   orientation?(sessionId: string): { domain: string | null; title: string | null }
   /** 6.97.8 pacing: the length of the calendar match for this meeting in ms, or null. Separate from `orientation`, which classic cues never read. May throw. */
@@ -656,6 +660,7 @@ function realDeps(): LiveCuesV2Deps {
     judgeB: (title, window, cands, signal, provider) => calls(provider).judgeB(title, window, cands, signal),
     files: sessionId => new MeetingAskStore().files(sessionId),
     dataFacts: dataFactsReader(dataPath(DATA_FACTS_FILE)),
+    funnelLog: funnelLogReader(dataPath(FUNNEL_LOG_FILE)),
     meetingLength(sessionId) {
       const cal = new MeetingAskStore().orientation(sessionId).calendar
       const start = Date.parse(cal?.start ?? ''), end = Date.parse(cal?.end ?? '')
@@ -1148,7 +1153,8 @@ export class LiveCuesV2Engine {
       if (!this.deps.store.charge(liveCuesV2WeeklyCap(this.deps.env), s.sessionId)) { trace.outcome = 'budget_exhausted'; s.stopReason = 'budget_exhausted'; return }
       const { version, system: baseSystem } = liveCuesV2WriterSystem(this.deps.env, s.kinds)
       // The Tableau scope rule rides on the rules only when a Tableau note was kept; every other cue sees the pinned text unchanged.
-      const system = kept.some(m => (m as GroundedNote).arm === 'data') ? baseSystem + DATA_WRITER_ADDENDUM : baseSystem
+      const dataKept = kept.filter(m => (m as GroundedNote).arm === 'data')
+      const system = dataKept.length ? baseSystem + DATA_WRITER_ADDENDUM + (dataKept.some(m => m.notes.includes(SFDC_CUE_MARK)) ? FUNNEL_WRITER_ADDENDUM : '') : baseSystem
       if (s.kinds === 'extended') trace.kindSet = 'extended'
       const model = liveCuesV2Model(this.deps.env)
       const history = this.cueHistory(s)
@@ -1331,8 +1337,22 @@ export class LiveCuesV2Engine {
       if (!gate.ok) { trace.dataArm = gate.why; return null }
       trace.dataArm = 'offered'
       trace.dataSignal = gate.signal
-      return found.candidate
+      return this.withSalesforce(found.candidate, found.groups, found.stages, trace)
     } catch { trace.dataArm = 'threw'; return null }
+  }
+
+  /** The Tableau note with Salesforce set beside the same figures, when the funnel log is fresh and covers the industry named.
+   *  `trace.sfdcArm` says what happened: added, no_row, or the log's own reason (missing, unreadable, invalid, stale, future). */
+  private withSalesforce(note: GroundedNote, groups: Parameters<typeof funnelCueClause>[1], stages: readonly string[], trace: Record<string, unknown>): GroundedNote {
+    if (!this.deps.funnelLog || !groups.length) return note
+    try {
+      const read = this.deps.funnelLog()
+      if (!read.ok) { trace.sfdcArm = read.reason; return note }
+      const clause = funnelCueClause(read.log, groups, stages)
+      if (!clause) { trace.sfdcArm = 'no_row'; return note }
+      trace.sfdcArm = 'added'
+      return { ...note, notes: `${note.notes} ${clause}`, key: `${note.key}|sfdc:${read.log.generatedAtIso}` }
+    } catch { trace.sfdcArm = 'threw'; return note }
   }
 
   private reap(): void {

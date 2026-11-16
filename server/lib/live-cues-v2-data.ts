@@ -475,6 +475,16 @@ export function dataArmGate(i: DataGateInput): DataGate {
 /** Does a Quilt-domain note (cue_memory.py or the notes arm says the domain) stand among the candidates. */
 export const isQuiltDomain = (domain: unknown): boolean => typeof domain === 'string' && domain.trim().toLowerCase() === 'quilt'
 
+/** A Quilt brand name, SBU or XBU spoken in the meeting so far (the last `chars` of its transcript): the same signal the cue arm takes from
+ *  speech, for a typed question that names only an industry ("how many opps in liquor") in a meeting with no confirmed domain. A plain
+ *  industry word, "quilt" or "Tableau" in the transcript is not one. */
+export function quiltSpeechSignal(facts: DataFacts, texts: ReadonlyArray<string>, chars = 20_000): boolean {
+  let joined = ''
+  for (let i = texts.length - 1; i >= 0 && joined.length < chars; i -= 1) joined = `${texts[i]} ${joined}`
+  const tokens = wordsOfSpeech(joined.slice(-chars))
+  return facts.groups.flatMap(g => g.brandAliases).some(b => occurrences(tokens, wordsOfSpeech(b)).length > 0)
+}
+
 /** A Quilt term in a meeting title: the company, SBU or XBU, Tableau, or the name of a Quilt brand in the facts. */
 export function quiltTitleSignal(facts: DataFacts, titles: ReadonlyArray<string | null | undefined>): boolean {
   const brands = facts.groups.flatMap(g => g.brandAliases)
@@ -621,8 +631,10 @@ export function dataSourceCandidateText(facts: DataFacts, source: NamedSource, g
   return parts.length ? `${head} ${parts.join(' ')}`.slice(0, max) : ''
 }
 
-/** The grounded candidate for a window, or why there is none. */
-export function dataCandidate(facts: DataFacts, window: string, nowDate: string): { candidate: GroundedNote; brand: boolean; /** Fired by a lead source with no group named. */ sourceOnly: boolean } | { none: 'no_group' | 'no_funnel' | 'no_stage' } {
+/** The grounded candidate for a window, or why there is none. `groups` and `stages` are what the totals note shows (empty for a lead-source
+ *  note), so the caller can set Salesforce beside the same figures (funnel-log.ts funnelCueClause). */
+export function dataCandidate(facts: DataFacts, window: string, nowDate: string): { candidate: GroundedNote; brand: boolean; /** Fired by a lead source with no group named. */ sourceOnly: boolean
+  groups: DataGroup[]; stages: DataStageKey[] } | { none: 'no_group' | 'no_funnel' | 'no_stage' } {
   const t = dataTrigger(facts, window)
   if (!t.fired) return { none: t.why }
   const fromSource = t.source ? dataSourceCandidateText(facts, t.source, t.groups, t.stages) : ''
@@ -631,7 +643,8 @@ export function dataCandidate(facts: DataFacts, window: string, nowDate: string)
   const notes = fromSource || (t.groups.length ? dataCandidateText(facts, t.groups, t.stages) : '')
   if (!notes) return { none: 'no_stage' }
   const date = /^\d{4}-\d{2}-\d{2}/.exec(facts.asOfIso)?.[0] ?? nowDate
-  return { candidate: { id: 'D1', date, title: facts.label, notes, key: `data:tableau|${facts.label}|${facts.asOfIso}`, arm: 'data', kind: 'data' }, brand: t.brand, sourceOnly: t.groups.length === 0 }
+  return { candidate: { id: 'D1', date, title: facts.label, notes, key: `data:tableau|${facts.label}|${facts.asOfIso}`, arm: 'data', kind: 'data' }, brand: t.brand, sourceOnly: t.groups.length === 0,
+    groups: fromSource ? [] : t.groups, stages: fromSource ? [] : (t.groups[0] ? shownStages(t.groups[0], t.stages) : t.stages) }
 }
 
 /** Appended to the writer's rules only when a Tableau note was kept. The v3/v4 rules themselves stay byte-identical. */

@@ -9,6 +9,8 @@ import { MeetingAskRuntime } from './meeting-ask-runtime.js'
 import { MeetingAskStore } from './meeting-ask-store.js'
 import { DATA_ASK_ADDENDUM, parseDataFacts, type DataFactsRead } from './live-cues-v2-data.js'
 import { NOW, rawFacts, rawSourceFacts } from './__fixtures__/live-cues-v2-data-fixture.js'
+import { FUNNEL_ASK_ADDENDUM, parseFunnelLog, type FunnelLogRead } from './funnel-log.js'
+import { rawFunnelLog } from './__fixtures__/funnel-log-fixture.js'
 
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000,
   turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'SBU closed at 120% of MRR budget, 148 vs 131 locations.' }] }
@@ -16,14 +18,14 @@ const ok = (): DataFactsRead => parseDataFacts(rawFacts(), NOW)
 const withSources = (): DataFactsRead => parseDataFacts(rawSourceFacts(), NOW)
 const tableauOf = (f: ReturnType<typeof fixture>) => evidenceOf(f).find(s => s.title.startsWith('Tableau'))
 
-function fixture(dataFacts: () => DataFactsRead, domain: string | null = 'quilt', calendarTitle?: string) {
+function fixture(dataFacts: () => DataFactsRead, domain: string | null = 'quilt', calendarTitle?: string, funnelLog?: () => FunnelLogRead) {
   const dir = mkdtempSync(join(tmpdir(), 'ask-data-')), store = new MeetingAskStore(dir), release = vi.fn()
   const run = vi.fn(async (_model: unknown, _prompt: string, _system: string) => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'SBU customers are 54 against 81 in Tableau [F1]' }], searchQuery: null }), model: 'claude-haiku-5-5' }))
   const webSearch = vi.fn(async () => ({ sources: [], notices: [] }))
   const search = vi.fn(async () => ({ sources: [], notices: [] }))
   const runtime = new MeetingAskRuntime({ reviewAnswers: false, finalized: () => ({ sources: [], notices: [] }), domains: () => [{ id: 'quilt', label: 'Quilt' }, { id: 'personal', label: 'Personal' }, { id: 'hermit_crabs', label: 'HC' }],
     store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release, id: 'lease', kind: 'meeting_ask' } as any),
-    catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search, webSearch, webCapability: () => ({ available: true, engine: 'claude' }), dataFacts } as any)
+    catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }], run, search, webSearch, webCapability: () => ({ available: true, engine: 'claude' }), dataFacts, ...(funnelLog ? { funnelLog } : {}) } as any)
   if (domain || calendarTitle) store.putOrientation(base.sessionId, { revision: 1, domain: domain as any, calendar: calendarTitle ? { id: 'cal_1', title: calendarTitle, start: '2026-11-02T15:00:00Z', end: '2026-11-02T16:00:00Z' } : null })
   return { runtime, store, run, webSearch, search, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
@@ -34,8 +36,10 @@ async function terminal(f: ReturnType<typeof fixture>, id = base.requestId) {
 const evidenceOf = (f: ReturnType<typeof fixture>) => (JSON.parse(f.run.mock.calls[0][1]) as { evidence: Array<{ id: string; kind: string; title: string; text: string }> }).evidence
 const systemOf = (f: ReturnType<typeof fixture>) => f.run.mock.calls[0][2] as string
 
-async function ask(f: ReturnType<typeof fixture>, question: string) {
-  await f.runtime.submit({ ...base, question })
+/** A transcript with no Quilt brand, SBU or XBU in it: the base one says SBU, which is itself a Quilt signal for the gate. */
+const neutral = [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'We went over the plan for next week and who owns each item.' }]
+async function ask(f: ReturnType<typeof fixture>, question: string, turns: typeof base.turns = base.turns) {
+  await f.runtime.submit({ ...base, question, turns })
   return terminal(f)
 }
 
@@ -45,13 +49,13 @@ describe('the meeting assistant and the Tableau facts', () => {
     try {
       const e = await ask(f, 'How is SBU pacing against budget?')
       expect(e.status).toBe('completed')
-      const tableau = evidenceOf(f).find(s => s.title === 'Tableau, Oct 2026 close, marketing sources')!
+      const tableau = evidenceOf(f).find(s => s.title === 'Tableau, Oct 2026 close, marketing sources, refreshed Nov 2 05:41 CT')!
       expect(tableau).toMatchObject({ id: 'F1', kind: 'file' })
       expect(tableau.text).toContain('SBU (3 of 4 industries: Grocery, Liquor, Tobacco): leads 402 vs 428 (94%)')
       expect(tableau.text).toContain('Not company revenue, MRR, ARR or location counts.')
       expect(tableau.text).toContain('Extract refreshed Nov 2 05:41 CT.')
       expect(systemOf(f)).toContain(DATA_ASK_ADDENDUM)
-      expect(e.sources.find(s => s.id === 'F1')).toMatchObject({ kind: 'file', title: 'Tableau, Oct 2026 close, marketing sources' })
+      expect(e.sources.find(s => s.id === 'F1')).toMatchObject({ kind: 'file', title: 'Tableau, Oct 2026 close, marketing sources, refreshed Nov 2 05:41 CT' })
       expect(e.sources.find(s => s.id === 'F1')).not.toHaveProperty('fileId')
       expect(e.sections?.[0].sources).toContain('F1')
       expect(f.webSearch).not.toHaveBeenCalled()
@@ -124,7 +128,7 @@ describe('the meeting assistant and the Tableau facts', () => {
       for (const [domain, title, served] of [['personal', undefined, false], ['hermit_crabs', undefined, false], [null, undefined, false], [null, 'Quilt weekly forecast', true], ['quilt', undefined, true]] as const) {
         const f = fixture(withSources, domain, title)
         try {
-          const e = await ask(f, q)
+          const e = await ask(f, q, neutral)
           expect(tableauOf(f) !== undefined, `${domain} ${title}`).toBe(served)
           if (!served) expect(e.notices.join(' ')).not.toMatch(/Tableau/)
         } finally { f.cleanup() }
@@ -198,10 +202,25 @@ describe('the meeting assistant and the Tableau facts', () => {
       for (const q of ['How is the thrift budget doing this month?', 'Are our pet leads on plan?', 'How are liquor opps pacing against the goal?']) {
         const f = fixture(ok, null)
         try {
-          const e = await ask(f, q)
+          const e = await ask(f, q, neutral)
           expect(evidenceOf(f).some(s => s.title.startsWith('Tableau')), q).toBe(false)
           expect(e.notices.join(' ')).not.toMatch(/Tableau/)
         } finally { f.cleanup() }
+      }
+    })
+    it('a meeting with no confirmed domain is served for an industry word when the room said a Quilt brand, SBU or XBU (the 11/16 forecast call)', async () => {
+      const said = [{ id: 0, elapsedMs: 0, speaker: 'Silas Larson', text: 'Two different stories within SBU, grocery is pacing quite well across the funnel.' }]
+      const f = fixture(ok, null)
+      try {
+        await ask(f, 'How many opps are from this month in Liquor?', said)
+        expect(evidenceOf(f).some(s => s.title.startsWith('Tableau'))).toBe(true)
+      } finally { f.cleanup() }
+      for (const text of ['The liquor store down the street had a sale.', 'I love the quilt my grandmother made.', 'We should check Tableau later.']) {
+        const g = fixture(ok, null)
+        try {
+          await ask(g, 'How many opps are from this month in Liquor?', [{ id: 0, elapsedMs: 0, speaker: 'Person', text }])
+          expect(evidenceOf(g).some(s => s.title.startsWith('Tableau')), text).toBe(false)   // an industry word, "quilt" or "Tableau" said is not a signal
+        } finally { g.cleanup() }
       }
     })
     it('a meeting with no confirmed domain and a Quilt term in the calendar title is served for an industry word', async () => {
@@ -270,6 +289,118 @@ describe('the meeting assistant and the Tableau facts', () => {
       const f = fixture(() => { throw new Error('disk gone') })
       try {
         expect((await ask(f, 'Check Tableau for liquor')).status).toBe('completed')
+      } finally { f.cleanup() }
+    })
+  })
+
+  describe('Salesforce beside Tableau (the daily funnel log)', () => {
+    // The Tableau fixture is dated Nov 2, the log Nov 16: read the log at a clock that keeps it fresh, the facts at theirs.
+    const sfOk = (): FunnelLogRead => parseFunnelLog(rawFunnelLog(), Date.parse('2026-11-16T16:00:00Z'))
+    const sfOf = (f: ReturnType<typeof fixture>) => evidenceOf(f).find(s => s.title.startsWith('Salesforce via Coefficient'))
+    const forecast = [{ id: 0, elapsedMs: 0, speaker: 'Silas Larson', text: 'Two different stories within SBU, grocery is pacing quite well across the funnel.' }]
+    it('the 11/16 question in an unconfirmed meeting where SBU was said: Tableau and Salesforce are both cited sources, with the disagreement', async () => {
+      const f = fixture(ok, null, undefined, sfOk)
+      try {
+        const e = await ask(f, 'How many opps are from this month in Liquor?', forecast)
+        expect(e.status).toBe('completed')
+        expect(tableauOf(f)).toMatchObject({ id: 'F1', kind: 'file' })
+        const sf = sfOf(f)!
+        expect(sf).toMatchObject({ id: 'F2', kind: 'file', title: 'Salesforce via Coefficient, Nov 1 to 15, marketing sources, queried Nov 16 07:08 CT' })
+        expect(sf.text).toContain('opps Salesforce 40 vs Tableau 38 [DISAGREE: Salesforce 2 higher]')
+        expect(sf.text).toContain('Tableau and Salesforce disagree on: Liquor opps: Salesforce 40, Tableau 38 (Salesforce 2 higher).')
+        expect(systemOf(f)).toContain(DATA_ASK_ADDENDUM)
+        expect(systemOf(f)).toContain(FUNNEL_ASK_ADDENDUM)
+        expect(systemOf(f)).toContain('Never say Salesforce figures were not provided')
+        expect(e.notices.join(' ')).not.toMatch(/Salesforce/)
+        expect(f.webSearch).not.toHaveBeenCalled()
+      } finally { f.cleanup() }
+    })
+    it('"use the tableau and SFDC coefficient" with no group: every Tableau group and every log row, both cited', async () => {
+      const f = fixture(ok, null, undefined, sfOk)
+      try {
+        await ask(f, 'use the tableau and SFDC coefficient.', neutral)
+        expect(tableauOf(f)).toBeDefined()
+        expect(sfOf(f)!.text).toContain('Liquor (POS Nation org) Salesforce/Tableau')
+        expect(sfOf(f)!.text).toContain('Thrift (Rain Retail org) Salesforce/Tableau')
+      } finally { f.cleanup() }
+    })
+    it('Salesforce named is explicit: served in an unconfirmed meeting with nothing Quilt said, as Tableau named is', async () => {
+      const f = fixture(ok, null, undefined, sfOk)
+      try {
+        await ask(f, 'what does salesforce say for grocery demos', neutral)
+        expect(sfOf(f)!.text).toContain('Grocery (POS Nation org): demos Salesforce 32 vs Tableau 32')
+        expect(tableauOf(f)).toBeDefined()
+      } finally { f.cleanup() }
+    })
+    it('a cohort question gets the log with what it cannot answer said, never a claim that Salesforce was not provided', async () => {
+      const f = fixture(ok, 'quilt', undefined, sfOk)
+      try {
+        await ask(f, 'Check SFDC: how many liquor opps came from leads created this month?')
+        expect(sfOf(f)!.text).toContain('This question asks for lead-cohort splits (which month the lead was created): the daily log does not carry it.')
+        expect(sfOf(f)!.text).toContain('Ask cannot query Salesforce live')
+      } finally { f.cleanup() }
+    })
+    it.each(['missing', 'stale', 'invalid'] as const)('a %s log: Tableau still answers, and the answer says why there is no Salesforce', async (reason) => {
+      const f = fixture(ok, 'quilt', undefined, () => ({ ok: false, reason }))
+      try {
+        const e = await ask(f, 'How are liquor opps pacing?')
+        expect(tableauOf(f)).toBeDefined()
+        expect(sfOf(f)).toBeUndefined()
+        expect(systemOf(f)).not.toContain(FUNNEL_ASK_ADDENDUM)
+        expect(e.notices).toContain(`The daily Salesforce funnel log is not available (${reason}), so no Salesforce figures were used.`)
+      } finally { f.cleanup() }
+      const g = fixture(ok, 'quilt', undefined, () => ({ ok: false, reason }))
+      try {
+        const e = await ask(g, 'use SFDC for liquor opps')
+        expect(e.notices).toContain(`The daily Salesforce funnel log is not available (${reason}), so no Salesforce figures were used, and Ask cannot query Salesforce live.`)
+      } finally { g.cleanup() }
+    })
+    it('no Tableau sheet: Salesforce named still answers from the log, and Tableau named says it is missing', async () => {
+      const f = fixture(() => ({ ok: false, reason: 'missing' }), 'quilt', undefined, sfOk)
+      try {
+        const e = await ask(f, 'tableau and salesforce for liquor opps')
+        expect(tableauOf(f)).toBeUndefined()
+        expect(sfOf(f)!.text).toContain('Liquor (POS Nation org): opps Salesforce 40 vs Tableau 38')
+        expect(systemOf(f)).toContain(FUNNEL_ASK_ADDENDUM)
+        expect(e.notices).toContain('Tableau data is not available (missing), so no Tableau figures were used.')
+      } finally { f.cleanup() }
+    })
+    it('another install (no Tableau sheet, no log): a question that names Salesforce gets no source and no notice about a log it never had', async () => {
+      const f = fixture(() => ({ ok: false, reason: 'missing' }), null, undefined, () => ({ ok: false, reason: 'missing' }))
+      try {
+        const e = await ask(f, 'what does salesforce say about our pipeline', neutral)
+        expect(sfOf(f)).toBeUndefined()
+        expect(e.notices.join(' ')).not.toMatch(/Salesforce|Tableau/)
+      } finally { f.cleanup() }
+      const g = fixture(() => ({ ok: false, reason: 'missing' }), null, undefined, () => ({ ok: false, reason: 'stale' }))
+      try {
+        const e = await ask(g, 'what does salesforce say about liquor opps', neutral)
+        expect(e.notices).toContain('The daily Salesforce funnel log is not available (stale), so no Salesforce figures were used, and Ask cannot query Salesforce live.')
+      } finally { g.cleanup() }
+    })
+    it('the gates: personal never; another business domain not even for Salesforce named (a client may run its own); unrelated questions nothing', async () => {
+      for (const [domain, q] of [['personal', 'what does salesforce say for liquor opps'], ['hermit_crabs', 'what does salesforce say for their pipeline'], ['hermit_crabs', 'How are liquor leads pacing against budget?'], ['quilt', 'What was decided?']] as const) {
+        const f = fixture(ok, domain, undefined, sfOk)
+        try {
+          const e = await ask(f, q)
+          expect(sfOf(f), `${domain} ${q}`).toBeUndefined()
+          expect(e.notices.join(' '), `${domain} ${q}`).not.toMatch(/Salesforce/)
+        } finally { f.cleanup() }
+      }
+      const g = fixture(ok, 'hermit_crabs', undefined, sfOk)
+      try {
+        await ask(g, 'Check Tableau for liquor')                // Tableau named in another domain still serves, and Salesforce rides with it
+        expect(tableauOf(g)).toBeDefined()
+        expect(sfOf(g)).toBeDefined()
+      } finally { g.cleanup() }
+    })
+    it('an unconfirmed meeting with nothing Quilt said: an industry word alone gets neither source and no notice', async () => {
+      const f = fixture(ok, null, undefined, sfOk)
+      try {
+        const e = await ask(f, 'How many opps are from this month in Liquor?', neutral)
+        expect(tableauOf(f)).toBeUndefined()
+        expect(sfOf(f)).toBeUndefined()
+        expect(e.notices.join(' ')).not.toMatch(/Salesforce|Tableau/)
       } finally { f.cleanup() }
     })
   })

@@ -159,6 +159,45 @@ describe('the Tableau data arm in the engine', () => {
     })
   })
 
+  describe('Salesforce beside the Tableau note (the daily funnel log)', () => {
+    const funnelMod = () => import('./funnel-log.js')
+    const fixtureMod = () => import('./__fixtures__/funnel-log-fixture.js')
+    const LIQUOR_OPPS = ' Bottle POS liquor opps are at 38 this month against the plan'
+    async function sfRead(over: Record<string, unknown> = {}) {
+      const { parseFunnelLog } = await funnelMod(), { rawFunnelLog } = await fixtureMod()
+      // the Tableau fixture's clock is Nov 2; read the log at its own day so it is fresh
+      return () => parseFunnelLog(rawFunnelLog(over), Date.parse('2026-11-16T16:00:00Z'))
+    }
+    it('a Liquor opps window: the note carries Salesforce for the same stage and the disagreement, and the writer is told to say both', async () => {
+      const { FUNNEL_WRITER_ADDENDUM, SFDC_CUE_MARK } = await funnelMod()
+      writerText = JSON.stringify({ cue: 'Liquor opps: Tableau 38, Salesforce 40. The two disagree; check which is current.', kind: 'challenge', memoryIds: ['D1'] })
+      await feed(LIQUOR_OPPS, engine({ funnelLog: await sfRead() }))
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', sfdcArm: 'added', keptIds: ['D1'] })
+      const notes = judgedNotes[0][0].notes
+      expect(notes).toMatch(/^Tableau Oct 2026 final, marketing-sourced funnel only, actual vs budget to date, refreshed Nov 2 05:41 CT\. Liquor: opps 108 vs 98/)
+      expect(notes).toContain(`${SFDC_CUE_MARK}, Nov 1 to 15, queried Nov 16 07:08 CT: Liquor opps 40. Disagree: Liquor opps Tableau 38 vs Salesforce 40.`)
+      const memory = (JSON.parse(prompts[0]) as { memory: Array<Record<string, string>> }).memory
+      expect(memory[0].notes).toBe(notes)                                     // the writer reads all of it
+      expect(systems[0]).toBe(liveCuesV2WriterSystem(env, 'legacy').system + dataMod.DATA_WRITER_ADDENDUM + FUNNEL_WRITER_ADDENDUM)
+      expect(systems[0]).not.toMatch(/[—–]|->|→/)
+    })
+    it('a group the log does not cover (SBU totals) or a stale log: the Tableau note and the rules are exactly as before', async () => {
+      await feed(SBU_TOPIC, engine({ funnelLog: await sfRead() }))
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', sfdcArm: 'no_row' })
+      expect(judgedNotes[0][0].notes).not.toContain('Salesforce')
+      expect(systems[0]).toBe(liveCuesV2WriterSystem(env, 'legacy').system + dataMod.DATA_WRITER_ADDENDUM)
+      judgedNotes = []; systems = []; traces = []
+      await feed(LIQUOR_OPPS, engine({ funnelLog: () => ({ ok: false, reason: 'stale' }) }))
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', sfdcArm: 'stale' })
+      expect(judgedNotes[0][0].notes).not.toContain('Salesforce')
+      expect(systems[0]).toBe(liveCuesV2WriterSystem(env, 'legacy').system + dataMod.DATA_WRITER_ADDENDUM)
+    })
+    it('a reader that throws leaves the Tableau cue standing', async () => {
+      await feed(LIQUOR_OPPS, engine({ funnelLog: () => { throw new Error('boom') } }))
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', sfdcArm: 'threw', outcome: 'cue' })
+    })
+  })
+
   describe('not offered', () => {
     it('a window that names no group: the arm is on, finds nothing, says no_group, and no data candidate is made', async () => {
       cueMemoryNotes = [note('M1')]; yes = { M1: 0.9 }
