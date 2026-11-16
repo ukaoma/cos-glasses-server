@@ -775,3 +775,35 @@ describe('7.0.51 item 6: a trip that never left the page releases itself, and sa
     })
   }
 })
+
+// 7.0.51 item 5 (W1, lead 06:5x, the default-on proof, H4): with no enrolled key, or phone approval off, Control Web
+// sends exactly as 7.0.50. Every app.js change in 7.0.51 is inside the web-key block (checked at each cut against
+// 33f8ab3e: outside the block the file is byte-identical), so the plain send paths are 7.0.50's own code; what is
+// left to prove is that this block adds nothing to them in those states: no button, no request, no timer, no row,
+// no turn read, and no change to the busy state or the draft, through paint and both kinds of return.
+describe('7.0.51 item 5: no enrolled key, or approvals off, is 7.0.50 (W1)', () => {
+  const STATES = [
+    { name: 'approvals off (no webKeySigner capability)', opts: { signer: 0 }, requests: 0, setup: false },
+    { name: 'approvals off on the Mac (status route 404)', opts: { signer: 1, statusRead: () => Promise.resolve({ status: 404, body: {} }) }, requests: 1, setup: false },
+    { name: 'no enrolled key', opts: { signer: 1, activeKeys: 0 }, requests: 1, setup: true },
+  ] as const
+  for (const prefix of ['session', 'ta'] as const) {
+    for (const st of STATES) {
+      it(`${prefix}: ${st.name}: no approval, no trip, nothing on return`, async () => {
+        const h = harness({ ...(st.opts as any), prefix })
+        h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+        expect(h.form.querySelector('[data-action="approve-on-phone"],[data-ta="approve-phone"]')).toBeNull()
+        expect(!!h.form.querySelector('[data-phone-setup]')).toBe(st.setup)
+        expect(h.requests).toHaveLength(st.requests)
+        h.pageHide(); h.pageShow(true); h.pageShow(false); h.setVisible('hidden'); h.setVisible('visible'); await flush()
+        expect(h.requests.some(q => /\/turns\/|\/web-key\/handoff|\/attach|\/web-key\/packets/.test(q.path))).toBe(false)
+        expect(h.tripTimers).toEqual([])
+        expect(h.crumbs).toEqual([])
+        expect(h.r.sending).toBe(false)
+        expect(h.r.draft).toBe(null)
+        expect(h.input.value).toBe('Yes, go ahead.  ')
+        expect(h.statuses).toEqual([])
+      })
+    }
+  }
+})
