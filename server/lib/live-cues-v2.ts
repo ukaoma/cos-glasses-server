@@ -1351,7 +1351,7 @@ export class LiveCuesV2Engine {
       const clause = funnelCueClause(read.log, groups, stages)
       if (!clause) { trace.sfdcArm = 'no_row'; return note }
       trace.sfdcArm = 'added'
-      return { ...note, notes: `${note.notes} ${clause}`, key: `${note.key}|sfdc:${read.log.generatedAtIso}` }
+      return { ...note, notes: `${note.notes} ${clause}`, key: `${note.key}|sfdc:${read.log.queriedAtIso}` }
     } catch { trace.sfdcArm = 'threw'; return note }
   }
 

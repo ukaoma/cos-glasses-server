@@ -30,6 +30,7 @@ describe('the Tableau data arm in the engine', () => {
   let logged: Array<Record<string, unknown>>
   let judged: string[][]
   let judgedNotes: Array<Array<{ id: string; title: string; notes: string }>>
+  let sfKeys: string[]
   let systems: string[]
   let prompts: string[]
   let factsCalls: number
@@ -50,7 +51,7 @@ describe('the Tableau data arm in the engine', () => {
       notes: async () => ({ notes: [] }),
       judge: async () => ({ probs: { M1: 0.9, none: 0.1 }, tokens: 900 }),
       judgeB: async (_t, _w, cands) => {
-        judged.push(cands.map(c => c.id)); judgedNotes.push(cands.map(c => ({ id: c.id, title: c.title, notes: c.notes })))
+        judged.push(cands.map(c => c.id)); judgedNotes.push(cands.map(c => ({ id: c.id, title: c.title, notes: c.notes }))); sfKeys.push(...cands.filter(c => c.arm === 'data').map(c => c.key))
         return { yes: Object.fromEntries(cands.map(c => [c.id, yes[c.id] ?? 0])), same: {}, tokens: 2300 }
       },
       files: () => [],
@@ -83,7 +84,7 @@ describe('the Tableau data arm in the engine', () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'cues-v2-data-'))
     clock = Date.parse('2026-11-02T21:30:00Z')
-    emitted = []; traces = []; logged = []; judged = []; judgedNotes = []; systems = []; prompts = []; factsCalls = 0
+    emitted = []; traces = []; logged = []; judged = []; judgedNotes = []; systems = []; prompts = []; factsCalls = 0; sfKeys = []
     cueMemoryNotes = []
     yes = { D1: 0.9 }; orientation = { domain: 'quilt', title: null }; grounding = 'grounded'
     read = okRead()
@@ -178,8 +179,16 @@ describe('the Tableau data arm in the engine', () => {
       expect(notes).toContain(`${SFDC_CUE_MARK}, Nov 1 to 15, queried Nov 16 07:08 CT: Liquor opps 40. Disagree: Liquor opps Tableau 38 vs Salesforce 40.`)
       const memory = (JSON.parse(prompts[0]) as { memory: Array<Record<string, string>> }).memory
       expect(memory[0].notes).toBe(notes)                                     // the writer reads all of it
+      expect(sfKeys.at(-1)).toMatch(/\|sfdc:2026-11-16T07:08:23-06:00$/)       // no queriedAt in this file: generatedAt
       expect(systems[0]).toBe(liveCuesV2WriterSystem(env, 'legacy').system + dataMod.DATA_WRITER_ADDENDUM + FUNNEL_WRITER_ADDENDUM)
       expect(systems[0]).not.toMatch(/[—–]|->|→/)
+    })
+    it('the cue key follows the Salesforce query, so the 10:45 re-join (a new generatedAt) cannot make the same cue look new', async () => {
+      const { rawFunnelLog } = await fixtureMod()
+      const rejoined = await sfRead({ generatedAt: '2026-11-16T10:45:08-06:00', salesforce: { ...rawFunnelLog().salesforce, queriedAt: '2026-11-16T07:07:01-06:00' } })
+      await feed(LIQUOR_OPPS, engine({ funnelLog: rejoined }))
+      expect(evaluation()).toMatchObject({ sfdcArm: 'added' })
+      expect(sfKeys.at(-1)).toMatch(/\|sfdc:2026-11-16T07:07:01-06:00$/)
     })
     it('a group the log does not cover (SBU totals) or a stale log: the Tableau note and the rules are exactly as before', async () => {
       await feed(SBU_TOPIC, engine({ funnelLog: await sfRead() }))
