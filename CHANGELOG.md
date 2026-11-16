@@ -1,3 +1,29 @@
+## 7.0.51 - Approving from the phone: one Send that confirms with the phone, the request in full, and a way back to the session
+
+2026-11-16. 7.0.50 plus the changes below. Miles, 2026-11-16 07:08 and 07:14 ("Build it") on F1's design; the lead's choices 07:09 and rulings 06:50 to 07:5x.
+
+**On for everyone, one line each:**
+- Control Web: in a session's reader, the "Sign-in here ends" line shows only in its last 2 hours on any window under 620 px tall too (it already did on a folded phone), so the open Duo's conversation gets about 58 px back. Today and the other panes keep the 24-hour notice.
+- Everything else below changes nothing unless phone approval is on (COS_WEB_KEY_AUTHORITY, off by default) AND a phone key is enrolled AND Control is open at the Mac's full Tailscale name. Anywhere else the composer is 7.0.50's, byte for byte.
+
+**With phone approval on and a phone enrolled:**
+- **One primary action beside the words, confirmed with the phone's passkey:** "Send" with a key mark. With a release request waiting it reads "Approve" on phones and "Approve and send" from 600 px. Enter takes it. The form's own Send becomes the quiet "Send as message only" (the unsigned send, unchanged), with Fork beside it.
+- **The request in full, never behind a disclosure:** what it is, the approval page's own fixed line for its channel, the channel and when it expires. On phones above the words; on a wide window with a narrow reader in two lines; with the reader 560 px or wider beside the conversation. The newest request is the one shown and carried; more than one says so. An empty box sends the standard words ("Approve install X 7.0.51 on mac-local."), which the approval page shows exactly before he signs; anything typed goes as his note.
+- **A verified message lands once:** the phone and Send share one turn key, and back from the approval page the page asks the Mac whether that turn landed. Landed: only those words leave the box, "Sent from your phone." Anything else: the words stay, with a line saying which; sending again cannot post twice.
+- **Decided before he leaves, so no passkey is spent on a refusal:** while the session works, or a message waits behind COS's reply, the primary waits, dimmed, with the reason above the words, and the quiet button reads "Queue as message only". The caution (another app has this session open) is asked first in the same box Send uses, and its Send anyway continues on the phone. With the "session changed" box up, approving carries its Send anyway. An open end-of-turn question with the session idle does not hold it: his words go as they are.
+- **The way back lands in the same session with his words:** the approval page's Back and Done go back in history when they can, else to a fixed address that carries nothing; this tab's own record (sessionStorage, gone with the tab, never another session's) opens the session and puts the words back under the same key.
+- **The phone action exists only where it can work:** on the Mac's full Tailscale name with a key enrolled. A LAN address, port 3141 or a local name gets no button and no request; nothing is created on the Mac.
+- **A Home Screen app that opens the approval page outside itself** no longer leaves Send silent: a 4 second bound releases only that trip, and one numbers-only row (web.layout phone-trip: case, standalone, ms, vis) says which case it was.
+- **The approval page:** Control's look (cream and espresso, DM Sans served from the page's own address, never another origin), a summary of what is approved, the session's short id beside "Sent to" with the full id one tap away, and its own manifest hash in the integrity report and the signed proof (X1, G1). Control 0.5.400 carries the pin for this page; the pair installs Control first, then this server.
+
+**Not covered, said plainly:**
+- Not yet tried on his phone: the composer, the request card, the way back and the standalone-app case were checked in test browsers and fakes only.
+- A message tapped while the session is busy waits; it is not parked signed (a follow-up: signed park). A verified reply to an end-of-turn question goes as a plain verified turn, so the question card closes the way it does today when a session moves on, and reads answered at the Mac (a follow-up: the question id in the handoff).
+
+**Tested on this build:** <filled at the cut: full suite count, tsc, gates, FAST sweep failing keys>
+
+**Tests:** <filled at the cut: each piece's gate and Q1 pass>
+
 ## 7.0.50 - Signed Mac activation for phone approvals
 
 - Require a fresh Touch ID signature from the registered Mac anchor before phone authority can open its signer listener or request its certificate.
