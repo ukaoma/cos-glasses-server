@@ -4,6 +4,9 @@
 
 **On for everyone, one line each:**
 - Control Web, Ask COS with Drop it off: after a reload the chat shows the questions and answers asked from it earlier that day, in the thread's existing history card under one "Today" day line. Before, it showed "Ask COS anything." If that read fails with anything but "not found", one quiet line says "Couldn’t load your earlier asks." with Try again.
+- Control Web, Reply ready cards in the COS thread: Open result opened the Sessions list; it now opens that session's reader. The ping's session link carries its provider (Claude, Codex or Cursor). An older card takes the provider from its own fixed line, only when the card names that session; otherwise it keeps the old tap and never guesses.
+- Back from that reader returns to the COS thread with the tapped card at the same height on screen, never jumping to the newest line.
+- A Reply ready card is headed by its session's name when the session list has one; the line under it still names the provider. The server's title and line are unchanged.
 - Today: with no Work handoffs file (COS Control has not written Work yet, or the server is not on a Mac), Work reads as nothing open, so Today no longer says "Couldn't read Work". That includes a Mac with Control installed but no Work handoff yet. A real failed read still says "Couldn’t read Work. Try again".
 - Live Ask and data cues: nothing changes on an install without the Quilt funnel files (data-facts.json and funnel-log.json in the data folder). A question that names Salesforce there gets no new source and no new notice.
 
