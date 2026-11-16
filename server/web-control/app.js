@@ -5728,11 +5728,16 @@
   // 7.0.51 (W1, lead 06:5x): back from the approval page, ask the Mac whether that turn landed, by its key.
   // Landed: its words leave the box (only those words, as a plain Send does). Anything else: the words stay, and
   // sending again is safe because the phone and Send share one turn key (draftFor), so the Mac takes it once.
+  // The words follow what the turn ledger KNOWS (lead 08:4x). It stores only completed, ambiguous and a post-202
+  // refused. A 404 also covers a turn admitted and still running, so it never reads as "did not take". Only a
+  // recorded refusal does, and those words get a FRESH key: a resend under the refused key would only replay the
+  // refusal. Ambiguous keeps its key (a resend replays, never posts twice). Any other answer: "could not check".
   var PHONE_LANDED = {
     landed: 'Sent from your phone.',
     unknown: 'The Mac has no record of that message yet. Your words are still here; sending again will not post twice.',
     pending: 'Your message from the phone is still on its way. Your words are still here; sending again will not post twice.',
-    refused: 'The Mac did not take the message from your phone. Your words are still here.',
+    refused: 'The Mac did not take the message from your phone. Your words are still here to send again.',
+    ambiguous: 'COS cannot tell whether your message from the phone reached the session. Your words are still here; look at the session before sending them again.',
     unread: 'COS could not check whether your phone sent it. Your words are still here; sending again will not post twice.'
   };
   function phoneLanded(r, trip) {
@@ -5751,7 +5756,11 @@
       }
       if (a.status === 404) { say(PHONE_LANDED.unknown); return 'unknown'; }
       if (a.status === 200 && out === 'pending') { say(PHONE_LANDED.pending); return 'pending'; }
-      if (a.status === 200) { say(PHONE_LANDED.refused, 'error'); return 'refused'; }
+      if (a.status === 200 && out === 'refused') {
+        if (r.draft && r.draft.key === trip.key) r.draft = null;   // the next Send keys these words afresh (draftFor)
+        say(PHONE_LANDED.refused, 'error'); return 'refused';
+      }
+      if (a.status === 200 && out === 'ambiguous') { say(PHONE_LANDED.ambiguous, 'error'); return 'ambiguous'; }
       say(PHONE_LANDED.unread, 'error'); return 'unread';
     }, function () { say(PHONE_LANDED.unread, 'error'); return 'unread'; });
   }
