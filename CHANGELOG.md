@@ -8,7 +8,7 @@
 - Live Ask and data cues: nothing changes on an install without the Quilt funnel files (data-facts.json and funnel-log.json in the data folder). A question that names Salesforce there gets no new source and no new notice.
 
 **Where the Quilt funnel files exist (Miles's Mac):**
-- A Live Ask funnel question gets two sources: the Tableau sheet, its title now saying when it was refreshed, and the daily Salesforce log (Salesforce via Coefficient, queried each weekday at 06:15 and re-joined with the Tableau sheet at 10:45), titled with its query time. The answer gives each figure with its source and time, and states where the two disagree by 2 or more as a finding.
+- A Live Ask funnel question gets two sources: the Tableau sheet, its title now saying when it was refreshed, and the daily Salesforce log (Salesforce via Coefficient, queried each weekday at 06:15 and re-joined with the Tableau sheet at 10:45), titled with its query time. Each source is cited with its time (Tableau refresh, Salesforce query) and the answer names both and states where they disagree by 2 or more.
 - The answer says what the log does not carry (SQLs, lead-cohort splits, lead source, campaign or rep detail, conversion rates, other industries) instead of stretching the totals. Ask cannot query Salesforce live.
 - Saying Salesforce, SFDC or Coefficient (beside a data word) asks for it, in a Quilt meeting or one with no confirmed domain. A question that names only an industry or business unit is also let through when a Quilt brand, SBU or XBU was said in the meeting (the 9:33 miss today); a lead source alone still is not.
 - A Tableau data cue about an industry the log covers adds Salesforce for the same stages and any disagreement.
@@ -22,7 +22,7 @@
 **Tests (each branch, before the merge):**
 - **S1, claude/server-7052-ask-reload (38b7fc2b), focused files at one worker, Uncounted:** the reload test 15 of 15 (6 of 10 failed on 7.0.51 before the fix), 1,210 passed in the 30 web test files that read cos-chat.js, 17 of 17 web mutants killed; the Work test 19 of 19 (5 of 16 failed before), 722 passed in the 20 server neighbour files, 13 of 13 server mutants killed. W1 PASS on the web part; Q1 PASS 10:20 (17 of 17 of Q1's mutants killed).
 - **sfdc-ask, claude/server-ask-sfdc-funnel (a2885509):** on its diff alone (sha256 4e607b2264d0), tsc exit 0 and npm test 973 files, 17,865 passed, 6 skipped; 20 of 20 mutants killed. That run started outside the lease order (sfdc-ask's 13:07 correction). Q1's read of a2885509 is owed.
-- **The cut:** cherry-picks onto 23d60dee with no conflicts. The two sets share no file, and all 14 files are byte-identical to 38b7fc2b and a2885509.
+- **The cut:** cherry-picks onto 23d60dee with no conflicts, then sfdc-ask's queriedAt fix 7b7ab938 (the cited Salesforce time is when it was queried, not when the 10:45 job re-joined the file; 133 passed in its focused files, 5 of 5 mutants killed). The two sets share no file, and all 14 files are byte-identical to 38b7fc2b and 7b7ab938.
 
 ## 7.0.51 - Approving from the phone: one Send that confirms with the phone, the request in full, and a way back to the session
 
