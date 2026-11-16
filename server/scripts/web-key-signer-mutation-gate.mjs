@@ -28,7 +28,8 @@ const HLT = ['server/routes/health-web-key-signer.test.ts']
 const AUT = ['server/lib/web-key-authority.test.ts']
 const ALL = [...PRT, ...PGT, ...APT, ...HOT, ...CMT, ...HLT, ...AUT]
 const PROOF = 'server/web-signer/signer-proof.js', PAGE = 'server/web-signer/signer.js', SAPP = 'server/lib/web-key-signer-app.ts', AUTH = 'server/lib/web-key-authority.ts'
-const HAND = 'server/lib/web-key-handoff.ts', WKR = 'server/routes/web-key.ts', HEALTH = 'server/routes/health.ts', APP = 'server/web-control/app.js'
+const ACT = 'server/lib/web-key-activation.ts'
+const HAND = 'server/lib/web-key-handoff.ts', WKR = 'server/routes/web-key.ts', APP = 'server/web-control/app.js'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 const drop = (name, file, line, tests) => m(name, file, [line, ''], tests)
 
@@ -49,7 +50,8 @@ const mutations = [
   m('proof-never-fork', PROOF, ['          fork: false, wordsSha256: d.sha256,', '          fork: true, wordsSha256: d.sha256,'], PRT),
   m('proof-sas-includes-r', PROOF, ['return sha256(concat(challenge, spkiDer, r)).then', 'return sha256(concat(challenge, spkiDer)).then'], [...PRT, ...PGT]),
   m('proof-enroll-message-nonce', PROOF, ['      phoneNonce: p.phoneNonce, passkey_credential_id: p.passkeyCredentialId,', '      passkey_credential_id: p.passkeyCredentialId,'], PRT),
-  m('proof-scope-closed', PROOF, ["    throw fail('scope_not_allowed')\n  }\n\n  /**", "    return { kind: 'message' }\n  }\n\n  /**"], PRT),
+  // Repointed 11/16 (X1, Q1): the comment after scopeOf became a line comment, so the old target matched nothing.
+  m('proof-scope-closed', PROOF, ["    throw fail('scope_not_allowed')\n  }\n\n  // What an approval", "    return { kind: 'message' }\n  }\n\n  // What an approval"], PRT),
   m('proof-jcs-lone-surrogate', PROOF, ["      if (hasLoneSurrogate(value)) throw fail('not_signable')\n      return JSON.stringify(value)", '      return JSON.stringify(value)'], PRT),
   // ── The page (server/web-signer/signer.js) ──
   drop('page-never-framed', PAGE, "    if (framed()) { show('framed'); return Promise.resolve() }\n", PGT),
@@ -100,7 +102,8 @@ const mutations = [
   m('route-enroll-prove-on-signer', WKR, ["  router.post('/web-key/enroll/prove', (req, res) => {\n    if (!web(req)) return refuse(res, 403, 'web_origin_required')\n    if (!onSigner(req)) return refuse(res, 403, SIGNER_ORIGIN_REQUIRED)\n", "  router.post('/web-key/enroll/prove', (req, res) => {\n    if (!web(req)) return refuse(res, 403, 'web_origin_required')\n"], HOT),
   m('route-onsigner-absent-is-old-behaviour', WKR, ['    if (!deps.isSignerRequest) return true', '    if (!deps.isSignerRequest) return false'], HOT),
   // ── Health and the composer ──
-  m('health-flag-gated', HEALTH, ['    ...(webKeyAuthorityEnabled() ? { webKeySigner: 1 } : {}),', '    ...({ webKeySigner: 1 }),'], HLT),
+  // Repointed 11/16 (X1, Q1): health reads webKeyActivationHealthField() now; the gate moved into web-key-activation.ts.
+  m('health-flag-gated', ACT, ['  return registeredActivation?.enabled() ? { webKeySigner: 1 } : {}', '  return registeredActivation ? { webKeySigner: 1 } : {}'], HLT),
   m('composer-offer-gated', APP, ['  function paintWebKeyOffer(r, opts) {\n    if (!webKeyCapable()) return;\n', '  function paintWebKeyOffer(r, opts) {\n'], CMT),
   m('composer-needs-active-key', APP, ["      if (!st || st.activeKeys < 1 || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;", "      if (!st || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;"], CMT),
   m('composer-url-https', APP, ["      return x.protocol === 'https:' && x.hostname", '      return x.hostname'], CMT),
