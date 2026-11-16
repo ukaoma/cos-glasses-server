@@ -5,12 +5,19 @@
 // headers TTL, Urgency, Topic and Content-Encoding. The Topic is an opaque id per kind (a hash, so it says nothing),
 // letting a newer ping replace an undelivered one. The payload is Declarative Web Push (iOS 18.4 and later, no service
 // worker): a title and the URL a tap opens. Title only: "COS" and the kind, never words from a ping.
+// 7.0.52 A: for a banner about exactly one session that names its provider, that URL carries the provider and the session's
+// opaque id (#/sessions/<provider>/<id>), inside the same encrypted payload; never its title or any words.
+// 7.0.52 C: on a phone whose owner chose words for it (showWords, per device, off for a new one), a Reply ready banner's body is
+// "Reply ready: <session title> (Claude)", or the count of sessions when several replied. The title is cleaned and cut
+// (lockScreenTitle) and never goes into the URL or the notification title. With words off, the kind only, as before.
 
 import { request } from 'node:https'
 import { createHash } from 'node:crypto'
 import { b64u, encryptPushMessage, vapidAuthorization } from './web-push-crypto.js'
-import type { PingBanner } from './ping-engine.js'
+import type { BannerSession, PingBanner } from './ping-engine.js'
+import { sessionTitleFor } from './session-title-cache.js'
 import { isAllowedPushEndpoint, type WebPushStore } from './web-push-store.js'
+import { SESSION_LINK_PROVIDERS } from './drop-store.js'
 
 /** Short: a stale ping is noise. Apple keeps an undelivered message at most this long. */
 export const PING_TTL_SECONDS = 300
@@ -105,22 +112,73 @@ const SOURCE_LABEL: Record<PingBanner['sources'][number], string> = {
   reminder: 'Reminder', resolution: 'Follow-up', prep: 'Meeting prep', agent: 'Session update',
   followups: 'Follow-ups ready', stale: 'Update', checkin: 'Weekly check-in',
 }
+/**
+ * 7.0.52 A (Miles 16:08): where a session ping opens. One session that names a provider the reader serves: its reader,
+ * #/sessions/<provider>/<id> (the route Control Web's Open result uses). Several sessions: the COS thread. Anything else
+ * (no sessions named, or one with no provider): today's Sessions list, never a guessed provider.
+ */
+function sessionTarget(banner: PingBanner, origin: string): string {
+  const sessions = banner.sessions ?? []
+  if (sessions.length > 1) return `${origin}/control#/messages/cos`
+  const one = sessions[0]
+  if (one && typeof one.id === 'string' && one.id && (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(one.provider)) {
+    return `${origin}/control#/sessions/${encodeURIComponent(one.provider as string)}/${encodeURIComponent(one.id)}`
+  }
+  return `${origin}/control#/sessions/t/sessions`
+}
+
+/** 7.0.52 C: at most this many code points of a session's title on the lock screen (X1's read, the lead's 16:30 ruling). */
+export const REPLY_TITLE_CHARS = 60
+const PROVIDER_WORD: Record<string, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' }
+/**
+ * A session title as the lock screen may show it. The title is session-written text (a first prompt or a title a session set),
+ * so: C0 and C1 controls, line and paragraph separators become spaces; bidi controls and zero-width characters are removed (they
+ * can reorder or hide text); ** and backticks are dropped; whitespace collapses; then at most REPLY_TITLE_CHARS code points,
+ * the last one an ellipsis when cut, so no surrogate pair is split. Empty means no title.
+ */
+function lockScreenTitle(raw: string | null): string {
+  if (typeof raw !== 'string') return ''
+  const clean = raw
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/\*\*|`/g, '')
+    .replace(/\s+/g, ' ').trim()
+  const points = Array.from(clean)
+  return points.length > REPLY_TITLE_CHARS ? points.slice(0, REPLY_TITLE_CHARS - 1).join('') + '…' : clean
+}
+/**
+ * 7.0.52 C: the body for a Reply ready banner on a phone with words on. One session: "Reply ready: <title> (Claude)", the
+ * title from the Sessions list's own cache, or "session <first 8 of the id>" when it has none; the provider word only from the
+ * provider enum. Several sessions: the count only. Never the reply's text, never the line.
+ */
+export function replyBody(sessions: readonly BannerSession[], titleFor: (sessionId: string) => string | null): string {
+  if (sessions.length > 1) return `${sessions.length} sessions replied`
+  const one = sessions[0]
+  let title = ''
+  try { title = lockScreenTitle(titleFor(one.id)) } catch { title = '' }
+  const word = one.provider ? PROVIDER_WORD[one.provider] : undefined
+  return `Reply ready: ${title || `session ${one.id.slice(0, 8)}`}${word ? ` (${word})` : ''}`
+}
+
 /** Only the kind leaves the Mac by default. Never copy the Mac banner title: it can contain private words. */
-export function bannerPayload(banner: PingBanner, origin: string, showWords = false): Buffer {
+export function bannerPayload(banner: PingBanner, origin: string, showWords = false, titleFor: (sessionId: string) => string | null = () => null): Buffer {
   const kind = banner.feedIds.length > 1 ? `${banner.feedIds.length} updates` : SOURCE_LABEL[banner.sources[0]] ?? 'Update'
-  const body = showWords ? Array.from(banner.line.split(/[\r\n]/, 1)[0]).slice(0, 100).join('') : kind
   const item = banner.feedIds[0]
   // Session completions belong in Sessions. Mixed digests retain their COS message so all updates remain visible.
   const sessionOnly = banner.sources.length > 0 && banner.sources.every(source => source === 'agent')
-  const navigate = sessionOnly ? `${origin}/control#/sessions/t/sessions` : `${origin}/control#/messages/cos${item ? '/' + encodeURIComponent(item) : ''}`
+  // 7.0.52 C: words on, and every item a Reply ready: the session's name or the count, never the line. Otherwise as before.
+  const replyWords = showWords && sessionOnly && banner.replies === true && !!banner.sessions?.length
+  const body = replyWords ? replyBody(banner.sessions!, titleFor) : showWords ? Array.from(banner.line.split(/[\r\n]/, 1)[0]).slice(0, 100).join('') : kind
+  const navigate = sessionOnly ? sessionTarget(banner, origin) : `${origin}/control#/messages/cos${item ? '/' + encodeURIComponent(item) : ''}`
   return Buffer.from(JSON.stringify({ web_push: 8030, notification: { title: 'COS', body, navigate, silent: false } }))
 }
 
 /** Called only for the engine's already-ledgered banners. No retries: a failed phone never repeats the Mac's ping. */
-export async function sendBannerPush(store: WebPushStore, banner: PingBanner, deps: { post?: PushPost; nowSeconds?: () => number } = {}): Promise<void> {
+export async function sendBannerPush(store: WebPushStore, banner: PingBanner, deps: { post?: PushPost; nowSeconds?: () => number; titleFor?: (sessionId: string) => string | null } = {}): Promise<void> {
   try {
     const devices = store.devices().filter(d => d.production === true)
-    await Promise.all(devices.map(d => sendPayload(store, d.id, bannerPayload(banner, d.origin, d.showWords === true),
+    const titleFor = deps.titleFor ?? sessionTitleFor
+    await Promise.all(devices.map(d => sendPayload(store, d.id, bannerPayload(banner, d.origin, d.showWords === true, titleFor),
       banner.sources.join(':'), deps)))
   } catch { /* store, crypto and network failures never fail the original ping */ }
 }

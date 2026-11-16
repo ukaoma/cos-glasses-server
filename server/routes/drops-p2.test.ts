@@ -126,6 +126,39 @@ describe('P2 settings routes (6.99.11)', () => {
     expect(second.body.settings.pings).toMatchObject({ dailyCap: 20, sources: { stale: false } })
     expect(second.body.settings.steer.leaveAlone).toBe('HubDB')
   })
+  // 7.0.52 D (lead 16:24; D4 16:29: Control 0.5.400 and 0.5.401 PUT only the one field changed, nested, through a strict
+  // schema): a save from a client that knows fewer fields than the server changes that field and nothing else. Every other
+  // field, set away from its default first, reads back as it was. A replace instead of a merge would reset them.
+  it('a one-field save (Control\'s shape) keeps every other field, including ones that client does not know', async () => {
+    const h = await setup({ settings: true })
+    const full = {
+      pings: { on: false, dailyCap: 9, perSource: 5, gapMinutes: 30, quietStart: '19:00', quietEnd: '07:00', weekendsQuiet: false, firstBanner: '09:15',
+        sources: { prep: false, agent: false, followups: false, stale: false, signals: false } },
+      followUps: { on: false, kinds: { card: false, handoff: false, session: false, thread: false } },
+      checkin: { on: false, weekday: 3, time: '10:30' },
+      reminders: { defaultTime: '08:15', snoozeMinutes: 90, banners: false, lensPush: false },
+      banners: { reminder: false, resolution: false, prep: true, agent: true, followups: true, stale: true, checkin: true },
+      steer: { about: 'HubDB pricing', leaveAlone: 'Weekly digest' },
+    }
+    const set = await h.call('PUT', '/drops/settings/p2', full)
+    expect(set.body.settings).toEqual(full)
+    const controlSaves: Array<[Record<string, unknown>, (s: typeof full) => void]> = [
+      [{ pings: { gapMinutes: 45 } }, s => { s.pings.gapMinutes = 45 }],
+      [{ pings: { sources: { agent: true } } }, s => { s.pings.sources.agent = true }],
+      [{ banners: { agent: false } }, s => { s.banners.agent = false }],
+      [{ followUps: { kinds: { thread: true } } }, s => { s.followUps.kinds.thread = true }],
+      [{ steer: { about: 'Liquor' } }, s => { s.steer.about = 'Liquor' }],
+    ]
+    const want = structuredClone(full)
+    for (const [body, apply] of controlSaves) {
+      apply(want)
+      const out = await h.call('PUT', '/drops/settings/p2', body)
+      expect(out.status).toBe(200)
+      expect(out.body.settings).toEqual(want)
+      expect((await h.call('GET', '/drops/settings/p2')).body.settings).toEqual(want)
+    }
+    expect((await h.call('GET', '/drops/settings/p2')).body.defaults).toEqual(P2_DEFAULTS)
+  })
   it('refuses a body that is not sections, and answers 503 with no store', async () => {
     const h = await setup({ settings: true })
     for (const body of [{}, { nope: {} }, { pings: 3 }, [1]]) expect((await h.call('PUT', '/drops/settings/p2', body)).status).toBe(400)

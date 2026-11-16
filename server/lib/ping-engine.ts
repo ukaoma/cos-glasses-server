@@ -22,6 +22,7 @@ import { acquireServerInstanceLock, type ServerInstanceLock } from './server-ins
 import { localClock } from './morning-brief-schedule.js'
 import { DEFAULT_BANNER_SOURCES, DEFAULT_BUDGET, isQuietHours, PING_SOURCES, planBanners, trimLedger, bannerTitle, type BannerRecord, type BudgetOptions, type PingSource } from './ping-budget.js'
 import { bannerSourcesFrom, budgetFrom, matchesSteer, steerWords, timeMinutes, type P2Settings } from './drop-p2-settings.js'
+import { SESSION_LINK_PROVIDERS, type SessionLinkProvider } from './drop-store.js'
 import {
   agentCandidate, checkinCandidates, digestCandidate, followupCandidates, prepCandidates, signalCandidates, staleCandidates,
   type IntakeRow, type PingCandidate, type SignalRow, type ThreadRow,
@@ -108,7 +109,38 @@ export interface PingFeedSink {
   hasKey(key: string): boolean
   post(candidate: PingCandidate): string
 }
-export interface PingBanner { feedIds: string[]; title: string; line: string; sources: PingSource[]; exempt: boolean; notifyId?: string }
+/**
+ * `sessions` (7.0.52 A): the sessions the banner announces, one entry per session, when every item in it is a session ping
+ * (bannerSessions). The phone opens that session's reader when there is one and it names its provider; never a guess.
+ */
+export interface PingBanner { feedIds: string[]; title: string; line: string; sources: PingSource[]; exempt: boolean; notifyId?: string; sessions?: BannerSession[]; replies?: true }
+export interface BannerSession { id: string; provider?: SessionLinkProvider }
+
+/**
+ * 7.0.52 C: a Reply ready item, by the exact title and fixed sentence agentCandidate writes for one. A finished or stopped
+ * item never matches (its line says "finished" or "stopped on", even when its own label is "Reply ready").
+ */
+const REPLY_READY_LINE = /^(?:Claude|Codex|Cursor|Grok|Your agent) has a reply ready\.$/
+export const isReplyReady = (c: PingCandidate): boolean => c.source === 'agent' && c.title === 'Reply ready' && REPLY_READY_LINE.test(c.line)
+
+/**
+ * The sessions a banner announces, or undefined when any item is not a session ping (then nothing is named and the tap
+ * keeps today's target). One entry per session id, in order; its provider only when every item for it names the same one
+ * the reader serves, so a conflict never picks one.
+ */
+export function bannerSessions(items: readonly PingCandidate[]): BannerSession[] | undefined {
+  if (!items.length) return undefined
+  const out = new Map<string, { provider: SessionLinkProvider | undefined; conflict: boolean }>()
+  for (const item of items) {
+    const link = item.source === 'agent' ? item.links.find(l => l.kind === 'session') : undefined
+    if (!link || typeof link.id !== 'string' || !link.id) return undefined
+    const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(link.provider) ? link.provider : undefined
+    const seen = out.get(link.id)
+    if (!seen) out.set(link.id, { provider, conflict: false })
+    else if (seen.provider !== provider) seen.conflict = true
+  }
+  return [...out].map(([id, s]) => (s.provider && !s.conflict ? { id, provider: s.provider } : { id }))
+}
 
 export interface PingEngineDeps {
   state: Pick<PingStateStore, 'read' | 'write'>
@@ -229,6 +261,8 @@ export class PingEngine {
           feedIds: b.ids, sources: b.sources, exempt: b.exempt, title: bannerTitle(items.length, items[0].title ?? 'COS'),
           line: items.length === 1 ? items[0].line : items.map(i => i.title ?? i.line).join(', '),
           ...(items.length === 1 && items[0].notifyId ? { notifyId: items[0].notifyId } : {}),
+          ...((s => (s ? { sessions: s } : {}))(bannerSessions(items))),
+          ...(items.every(isReplyReady) ? { replies: true as const } : {}),
         }
       })
       for (const b of plan.banners) state.ledger.push({ at: nowMs, sources: b.sources, ids: b.ids })
