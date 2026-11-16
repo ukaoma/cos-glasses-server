@@ -118,7 +118,9 @@ const mutations = [
   // ── Health and the composer ──
   // Repointed 11/16 (X1, Q1): health reads webKeyActivationHealthField() now; the gate moved into web-key-activation.ts.
   m('health-flag-gated', ACT, ['  return registeredActivation?.enabled() ? { webKeySigner: 1 } : {}', '  return registeredActivation ? { webKeySigner: 1 } : {}'], HLT),
-  m('composer-offer-gated', APP, ['  function paintWebKeyOffer(r, opts) {\n    if (!webKeyCapable()) return;\n', '  function paintWebKeyOffer(r, opts) {\n'], CMT),
+  // 7.0.51 (W1): the capability check now follows the fresh-load draft restore (item 4: his words come back even with
+  // approvals turned off); dropping it still paints the phone action with the capability off.
+  m('composer-offer-gated', APP, ['    phoneTripRestore(r, opts);\n    if (!webKeyCapable()) return;\n', '    phoneTripRestore(r, opts);\n'], CMT),
   // 7.0.51 (W1, X1's leave): no enrolled key must give the setup link, never the verified composer.
   m('composer-needs-active-key', APP, ["      if (st.activeKeys === 0) {\n        var setupUrl = webKeySetupUrl(); if (!setupUrl) return;", "      if (false) {\n        var setupUrl = webKeySetupUrl(); if (!setupUrl) return;"], CMT),
   m('composer-url-https', APP, ["      return x.protocol === 'https:' && x.hostname", '      return x.hostname'], CMT),
