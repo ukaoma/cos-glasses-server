@@ -12,7 +12,7 @@
 - The answer says what the log does not carry (SQLs, lead-cohort splits, lead source, campaign or rep detail, conversion rates, other industries) instead of stretching the totals. Ask cannot query Salesforce live.
 - Saying Salesforce, SFDC or Coefficient (beside a data word) asks for it, in a Quilt meeting or one with no confirmed domain. A question that names only an industry or business unit is also let through when a Quilt brand, SBU or XBU was said in the meeting (the 9:33 miss today); a lead source alone still is not.
 - A Tableau data cue about an industry the log covers adds Salesforce for the same stages and any disagreement. The cue is keyed by when Salesforce was queried, so the 10:45 re-join of the same query does not make the same cue look new and show it again.
-- When the Salesforce text has to be shortened to fit, the rows and the list of industries give way first; the disagreement line and the line saying what the question asks for that the log does not carry are cut last.
+- When the Salesforce text has to be shortened to fit, the notes go first, then the line about disagreements elsewhere, then rows (a line says how many are not shown). The disagreement line and the line saying what the question asks for that the log does not carry are never cut.
 - When the log is missing, unreadable, invalid, more than 5 days old or dated in the future, the answer to a funnel question says so ("The daily Salesforce funnel log is not available (stale), so no Salesforce figures were used.") and uses Tableau alone.
 - No model, network, Salesforce or Coefficient call is added: one local file check per Ask, and a cue reads the log only when it already has a Tableau note.
 
