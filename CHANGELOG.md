@@ -1,3 +1,29 @@
+## 7.0.52 - Ask COS keeps today's asks after a reload, Today without Work set up, and Salesforce beside Tableau in Live Ask
+
+2026-11-16. 7.0.51 plus the changes below. The lead's order 09:5x and rulings 10:08 (Ask COS and Today); Miles, 11:59: "Fold it into 7.0.52 and install" (Salesforce).
+
+**On for everyone, one line each:**
+- Control Web, Ask COS with Drop it off: after a reload the chat shows the questions and answers asked from it earlier that day, in the thread's existing history card under one "Today" day line. Before, it showed "Ask COS anything." If that read fails with anything but "not found", one quiet line says "Couldn’t load your earlier asks." with Try again.
+- Today: with no Work handoffs file (COS Control has not written Work yet, or the server is not on a Mac), Work reads as nothing open, so Today no longer says "Couldn't read Work". That includes a Mac with Control installed but no Work handoff yet. A real failed read still says "Couldn’t read Work. Try again".
+- Live Ask and data cues: nothing changes on an install without the Quilt funnel files (data-facts.json and funnel-log.json in the data folder). A question that names Salesforce there gets no new source and no new notice.
+
+**Where the Quilt funnel files exist (Miles's Mac):**
+- A Live Ask funnel question gets two sources: the Tableau sheet, its title now saying when it was refreshed, and the daily Salesforce log (Salesforce via Coefficient, queried each weekday at 06:15 and re-joined with the Tableau sheet at 10:45), titled with its query time. The answer gives each figure with its source and time, and states where the two disagree by 2 or more as a finding.
+- The answer says what the log does not carry (SQLs, lead-cohort splits, lead source, campaign or rep detail, conversion rates, other industries) instead of stretching the totals. Ask cannot query Salesforce live.
+- Saying Salesforce, SFDC or Coefficient (beside a data word) asks for it, in a Quilt meeting or one with no confirmed domain. A question that names only an industry or business unit is also let through when a Quilt brand, SBU or XBU was said in the meeting (the 9:33 miss today); a lead source alone still is not.
+- A Tableau data cue about an industry the log covers adds Salesforce for the same stages and any disagreement.
+- When the log is missing, unreadable, invalid, more than 5 days old or dated in the future, the answer to a funnel question says so ("The daily Salesforce funnel log is not available (stale), so no Salesforce figures were used.") and uses Tableau alone.
+- No model, network, Salesforce or Coefficient call is added: one local file check per Ask, and a cue reads the log only when it already has a Tableau note.
+
+**Not covered, said plainly:**
+- Ask COS after a reload: earlier days and an ended conversation are not shown. While the read is in flight, "Ask COS anything." can show for a moment (W1's note 1, a visible change left for Miles). An ask with no message number answered during the read could be drawn twice (W1's note 2); web asks are numbered at admission.
+- This build's own type check, full suite and sweep have not run yet. They run in the lead's slot after the Control install; the lines below are each branch's evidence before the merge.
+
+**Tests (each branch, before the merge):**
+- **S1, claude/server-7052-ask-reload (38b7fc2b), focused files at one worker, Uncounted:** the reload test 15 of 15 (6 of 10 failed on 7.0.51 before the fix), 1,210 passed in the 30 web test files that read cos-chat.js, 17 of 17 web mutants killed; the Work test 19 of 19 (5 of 16 failed before), 722 passed in the 20 server neighbour files, 13 of 13 server mutants killed. W1 PASS on the web part; Q1 PASS 10:20 (17 of 17 of Q1's mutants killed).
+- **sfdc-ask, claude/server-ask-sfdc-funnel (a2885509):** on its diff alone (sha256 4e607b2264d0), tsc exit 0 and npm test 973 files, 17,865 passed, 6 skipped; 20 of 20 mutants killed. That run started outside the lease order (sfdc-ask's 13:07 correction). Q1's read of a2885509 is owed.
+- **The cut:** cherry-picks onto 23d60dee with no conflicts. The two sets share no file, and all 14 files are byte-identical to 38b7fc2b and a2885509.
+
 ## 7.0.51 - Approving from the phone: one Send that confirms with the phone, the request in full, and a way back to the session
 
 2026-11-16. 7.0.50 plus the changes below. Miles, 2026-11-16 07:08 and 07:14 ("Build it") on F1's design; the lead's choices 07:09 and rulings 06:50 to 07:5x.
