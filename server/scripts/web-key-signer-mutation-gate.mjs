@@ -54,10 +54,11 @@ const mutations = [
   m('proof-scope-closed', PROOF, ["    throw fail('scope_not_allowed')\n  }\n\n  // What an approval", "    return { kind: 'message' }\n  }\n\n  // What an approval"], PRT),
   m('proof-jcs-lone-surrogate', PROOF, ["      if (hasLoneSurrogate(value)) throw fail('not_signable')\n      return JSON.stringify(value)", '      return JSON.stringify(value)'], PRT),
   // ── The page (server/web-signer/signer.js) ──
-  // The way back (W1 return contract, 7.0.51): real taps only, history first, replace never assign, a fixed address.
-  m('page-return-trusted-only', PAGE, ['    if (!ev || ev.isTrusted !== true) return undefined\n    try {', '    try {'], PGT),
+  // The way back (W1 return contract, 7.0.51; lead 08:3x): real taps only, always replace (never history.back), never
+  // assign, a fixed address.
+  m('page-return-trusted-only', PAGE, ['    if (!ev || ev.isTrusted !== true) return undefined\n    W.location.replace(controlUrl())', '    W.location.replace(controlUrl())'], PGT),
   m('page-return-link-stopped', PAGE, ["    if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()\n", ''], PGT),
-  m('page-return-history-first', PAGE, ['      if (W.history && W.history.length > 1) { W.history.back(); return undefined }', '      if (false) { W.history.back(); return undefined }'], PGT),
+  m('page-return-never-history', PAGE, ['    W.location.replace(controlUrl())\n    return undefined\n  }', '    if (W.history && W.history.length > 1) { W.history.back(); return undefined }\n    W.location.replace(controlUrl())\n    return undefined\n  }'], PGT),
   m('page-return-replace-not-assign', PAGE, ['    W.location.replace(controlUrl())', '    W.location.assign(controlUrl())'], PGT),
   m('page-return-fixed-fragment', PAGE, [":3143/control/#/phone-return' }", ":3143/control/' }"], PGT),
   m('page-return-done-wired', PAGE, ["  on('done-back', goBack)\n", ''], PGT),

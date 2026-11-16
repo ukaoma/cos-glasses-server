@@ -360,22 +360,27 @@ describe('per-turn signing', () => {
     expect(r.visible()).toEqual(['done'])
     expect(r.navs).toEqual([])
   })
-  it('return: a real tap on Done goes back in history when there is history, and only that', async () => {
+  // Lead 08:3x (Codex's review): with history behind it, history.back() could land anywhere (a Safari tab's history, a
+  // Home Screen sheet). Control Web sends Referrer-Policy: no-referrer on /control (server/index.ts), so this page can
+  // never prove the previous entry is Control. It therefore always REPLACES itself with the return address.
+  it('return: a real tap on Done REPLACES this page with the fixed address even with history behind it, never history.back()', async () => {
     const { r } = await enrolledRig()
     await r.el('sign-approve').tap(true)
+    r.W.history.length = 5
     r.el('done-back').tap(true)
-    expect(r.navs).toEqual(['back'])
+    expect(r.navs).toEqual(['replace ' + RETURN])
     expect(r.el('done-back').prevented).toBe(1)
+  })
+  it('return: a real tap on Back with history behind it also replaces, and never reads history', async () => {
+    const { r } = await enrolledRig()
+    r.W.history.length = 3
+    r.W.history.back = () => { r.navs.push('back'); throw new Error('history.back must not be called') }
+    r.el('back').tap(true)
+    expect(r.navs).toEqual(['replace ' + RETURN])
   })
   it('return: with no history (a new tab) a real tap REPLACES this page with the fixed address, never assign', async () => {
     const { r } = await enrolledRig()
     r.W.history.length = 1
-    r.el('back').tap(true)
-    expect(r.navs).toEqual(['replace ' + RETURN])
-  })
-  it('return: history.back() throwing still lands on the fixed address', async () => {
-    const { r } = await enrolledRig()
-    r.W.history.back = () => { throw new Error('SecurityError') }
     r.el('back').tap(true)
     expect(r.navs).toEqual(['replace ' + RETURN])
   })
