@@ -35,7 +35,7 @@ class El {
   removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
   form.children.push(actions); actions.children.push(send); send.parentNode = actions
@@ -50,7 +50,16 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   let now = Date.now()
   class Clock extends Date { static now() { return now } }
   const windowListeners: Record<string, Array<(ev: { persisted: boolean }) => void>> = {}
-  const window = { addEventListener: (name: string, fn: (ev: { persisted: boolean }) => void) => { (windowListeners[name] ??= []).push(fn) } }
+  const window = { addEventListener: (name: string, fn: (ev: { persisted: boolean }) => void) => { (windowListeners[name] ??= []).push(fn) },
+    removeEventListener: (name: string, fn: any) => { windowListeners[name] = (windowListeners[name] ?? []).filter(f => f !== fn) },
+    matchMedia: (q: string) => ({ matches: q === '(display-mode: standalone)' && !!opts.standalone }) }
+  // 7.0.51 item 6: the trip timer, visibility and the numbers-only breadcrumb.
+  const tripTimers: Array<{ fn: () => void; ms: number; done: boolean }> = []
+  const docListeners: Record<string, Array<() => void>> = {}
+  const doc = { createElement: (t: string) => new El(t), visibilityState: 'visible',
+    addEventListener: (name: string, fn: () => void) => { (docListeners[name] ??= []).push(fn) },
+    removeEventListener: (name: string, fn: () => void) => { docListeners[name] = (docListeners[name] ?? []).filter(f => f !== fn) } }
+  const crumbs: Array<[string, Record<string, unknown>]> = []
   const actualStatus = opts.statusWire ? new Function('fetch', 'AbortController', 'setTimeout', 'clearTimeout', 'sxNoteClock', 'noteServer', 'showAuth', 'unreachableError', 'Date', API_BLOCK + '\nreturn apiAnswer;')(
     opts.statusWire, AbortController, (fn: () => void, delay: number) => { timeoutDelays.push(delay); timers.set(++timerId, fn); return timerId }, (id: number) => timers.delete(id),
     () => {}, (up: boolean) => downMarks.push(up), () => {}, (err: unknown) => err, Clock,
@@ -70,20 +79,25 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   // app.js clearBoxOf: only the very words that were sent leave the box.
   const clearBoxOf = (text: string, rr: any) => { if (rr === state.reading && input.value.trim() === String(text).trim()) input.value = ''; if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null }
   const fns = new Function(
-    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf',
+    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date', 'clearBoxOf', 'setTimeout', 'layoutCrumb', 'navigator',
     BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk, draftForPlain: function (t, rr) { return draftFor(t, rr).key; } };',
   )(
-    () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, { createElement: (t: string) => new El(t) },
+    () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, doc,
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
     (text: string, rr: any, ids?: string[]) => { const f = Array.isArray(ids) ? ids.slice() : []; rr.draft = rr.draft && rr.draft.text === text && (rr.draft.ids || []).join(',') === f.join(',') ? rr.draft : { text, key: nextKey(), ids: f }; return rr.draft },
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
     (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) } }, URL, nextKey, window, Clock, clearBoxOf,
+    (fn: () => void, ms: number) => { tripTimers.push({ fn, ms, done: false }); return tripTimers.length }, (what: string, data: Record<string, unknown>) => { crumbs.push([what, data]); return true }, { standalone: !!opts.standalone },
   ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean; draftForPlain: (t: string, r: unknown) => string }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
   const plainKey = () => fns.draftForPlain(input.value.trim(), r)
   return { ...fns, r, state, form, input, plainKey, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
     pageShow: (persisted = true) => { for (const fn of windowListeners.pageshow ?? []) fn({ persisted }) }, advance: (ms: number) => { now += ms },
+    pageHide: () => { for (const fn of [...(windowListeners.pagehide ?? [])]) fn({ persisted: true }) },
+    tripTimers, crumbs, runTripTimers: () => { for (const t of tripTimers) if (!t.done) { t.done = true; t.fn() } }, runTripTimer: (i: number) => { const t = tripTimers[i]; if (t && !t.done) { t.done = true; t.fn() } },
+    setVisible: (v: 'visible' | 'hidden') => { doc.visibilityState = v; for (const fn of [...(docListeners.visibilitychange ?? [])]) fn() },
+    docListenerCount: () => Object.values(docListeners).reduce((n, a) => n + a.length, 0), windowListenerCount: (name: string) => (windowListeners[name] ?? []).length,
     statusTimeouts, timeoutDelays, downMarks, timerCount: () => timers.size, expireTimers: () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn() },
     addView: (other: 'session' | 'ta') => {
       const another = new El('form', other + '-form'), buttons = new El('div'), submit = new El('button', other + '-send'), text = new El('textarea', other + '-input')
@@ -672,6 +686,92 @@ describe('7.0.51: one turn key for the phone and Send, and a landing check on re
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       h.pageShow(); await flush()
       expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
+    })
+  }
+})
+
+describe('7.0.51 item 6: a trip that never left the page releases itself, and says which case it was (W1, lead 06:5x)', () => {
+  const landed = () => ({ status: 200, body: { outcome: 'completed' } })
+  for (const prefix of ['session', 'ta'] as const) {
+    for (const standalone of [true, false]) {
+      it(`${prefix}${standalone ? ' (Home Screen app)' : ''}: no pagehide within the bound releases this trip's busy state, sends one numbers-only row, and reads the turn when he is back`, async () => {
+        const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed, standalone })
+        expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+        expect(h.r.sending).toBeTruthy()
+        expect(h.tripTimers.map(t => t.ms)).toEqual([4000])
+        h.advance(4000); h.runTripTimers(); await flush()
+        expect(h.r.sending).toBe(false)
+        expect(h.r.phoneNavigation).toBe(null)
+        expect(h.crumbs).toHaveLength(1)
+        const [what, data] = h.crumbs[0]
+        expect(what).toBe('phone-trip')
+        expect(data).toEqual({ case: 'stayed', standalone, ms: 4000, vis: 'v' })
+        // Back on the page (it was hidden behind the approval page): one read of that turn by its key.
+        expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
+        h.setVisible('hidden'); await flush()
+        expect(h.requests.some(q => /\/turns\//.test(q.path))).toBe(false)
+        h.setVisible('visible'); await flush()
+        expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+        expect(h.input.value).toBe('')
+        h.setVisible('hidden'); h.setVisible('visible'); await flush()
+        expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+        expect(h.docListenerCount()).toBe(0)
+      })
+    }
+    it(`${prefix}: a page that left (pagehide) and came back from BFCache is not released twice, and its row says bfcache`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: landed })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.pageHide(); h.advance(9000); h.pageShow(); await flush()
+      expect(h.r.sending).toBe(false)
+      h.r.sending = true                 // a newer plain send started after the return
+      h.runTripTimers(); await flush()   // the paused timer resumes after the restore
+      expect(h.r.sending).toBe(true)
+      expect(h.crumbs.map(c => c[0] + ':' + c[1].case)).toEqual(['phone-trip:bfcache'])
+      expect(h.crumbs[0][1]).toEqual({ case: 'bfcache', standalone: false, ms: 9000, vis: 'v' })
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+      expect(h.windowListenerCount('pagehide')).toBe(0)
+    })
+    it(`${prefix}: a page that is leaving (pagehide, not yet restored) is never released by the bound`, async () => {
+      const h = harness({ signer: 1, prefix })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const owner = h.r.sending
+      h.pageHide(); h.runTripTimers(); await flush()
+      expect(h.r.sending).toBe(owner)
+      expect(h.crumbs).toEqual([])
+    })
+    it(`${prefix}: the bound never releases a newer plain send that took the busy state`, async () => {
+      const h = harness({ signer: 1, prefix })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.r.sending = true
+      h.runTripTimers(); await flush()
+      expect(h.r.sending).toBe(true)
+    })
+    it(`${prefix}: an older trip's bound never touches a newer trip (its record, its busy state, its row)`, async () => {
+      const h = harness({ signer: 1, prefix, text: 'Ship it.', turnStatus: () => ({ status: 200, body: { outcome: 'completed' } }) })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.r.sending = false; h.r.phoneNavigation = null           // the first trip was settled some other way
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const second = h.r.sending
+      h.runTripTimer(0); await flush()                           // only the FIRST trip's bound fires
+      expect(h.r.sending).toBe(second)
+      expect(h.crumbs).toEqual([])
+      h.pageHide(); h.pageShow(); await flush()                  // the second trip's return still reads its turn
+      expect(h.requests.filter(q => /\/turns\//.test(q.path))).toHaveLength(1)
+    })
+    it(`${prefix}: the bound never releases a newer owner`, async () => {
+      const h = harness({ signer: 1, prefix })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const newer = { completed: false }
+      h.r.sending = newer; h.r.phoneNavigation = newer
+      h.runTripTimers(); await flush()
+      expect(h.r.sending).toBe(newer)
+      expect(h.r.phoneNavigation).toBe(newer)
+    })
+    it(`${prefix}: a refused or failed approval sets no trip timer`, async () => {
+      const h = harness({ signer: 1, prefix, handoff: () => ({ status: 409, body: { ok: false, error: 'no_phone_key' } }) })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('refused')
+      expect(h.tripTimers).toEqual([])
+      expect(h.crumbs).toEqual([])
     })
   }
 })

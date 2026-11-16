@@ -5674,8 +5674,37 @@
       nav.r.phoneNavigation = null;
     }
     refreshWebKeyOffers();
-    if (nav && nav.token.completed && nav.trip) phoneLanded(nav.r, nav.trip);
+    if (nav && nav.token.completed && nav.trip) { phoneCrumb('bfcache', nav); phoneLanded(nav.r, nav.trip); }
   });
+  // 7.0.51 item 6 (W1, lead 06:5x): a Home Screen app may open the approval page OUTSIDE itself, so this page never
+  // leaves and no pageshow ever releases the send. One bounded check: if no pagehide came within PHONE_STAY_MS of the
+  // navigation, release this trip's own busy state (never a newer owner), send one numbers-only row, and read the
+  // turn when the page is next visible. A page that did leave (pagehide, then BFCache or a fresh load) is not touched.
+  var PHONE_STAY_MS = 4000;
+  function phoneCrumb(kind, nav) {
+    if (typeof layoutCrumb !== 'function') return;
+    var standalone = false;
+    try { standalone = (typeof navigator === 'object' && !!navigator && navigator.standalone === true) || !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches); } catch (_e) { standalone = false; }
+    layoutCrumb('phone-trip', { case: kind, standalone: standalone, ms: Math.max(0, Date.now() - nav.at), vis: document.visibilityState === 'visible' ? 'v' : 'h' });
+  }
+  function phoneTripWatch(nav) {
+    var left = false;
+    var onHide = function () { left = true; };
+    if (window.addEventListener) window.addEventListener('pagehide', onHide);
+    setTimeout(function () {
+      if (window.removeEventListener) window.removeEventListener('pagehide', onHide);
+      if (left || WEB_KEY.navigation !== nav) return;
+      WEB_KEY.navigation = null;
+      if (nav.r.phoneNavigation === nav.token) { if (nav.r.sending === nav.token) nav.r.sending = false; nav.r.phoneNavigation = null; }
+      phoneCrumb('stayed', nav);
+      var back = function () {
+        if (document.visibilityState !== 'visible') return;
+        document.removeEventListener('visibilitychange', back);
+        phoneLanded(nav.r, nav.trip);
+      };
+      if (document.addEventListener) document.addEventListener('visibilitychange', back);
+    }, PHONE_STAY_MS);
+  }
   // 7.0.51 (W1, lead 06:5x): back from the approval page, ask the Mac whether that turn landed, by its key.
   // Landed: its words leave the box (only those words, as a plain Send does). Anything else: the words stay, and
   // sending again is safe because the phone and Send share one turn key (draftFor), so the Mac takes it once.
@@ -5817,7 +5846,8 @@
           say('Opening the approval page.');
           location.assign(body.signerUrl);
           operation.completed = true;
-          WEB_KEY.navigation = { r: r, token: operation, trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
+          WEB_KEY.navigation = { r: r, token: operation, at: Date.now(), trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
+          phoneTripWatch(WEB_KEY.navigation);
           return 'opened';
         }
         if (h.status === 201) { say('Open Control from your Mac’s Tailscale name to approve on this phone.', 'error'); return 'refused'; }
