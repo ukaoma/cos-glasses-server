@@ -81,7 +81,8 @@ describe('7.0.54: two Claude rows, and a pane kept past its pause (Control at 6:
     expect(html).not.toContain('ended at yesterday')
     expect(html).toContain('Claude Desktop')
     expect(html).not.toContain('background:undefined')
-    expect(html).toContain('background:var(--u-gold)')
+    expect(html).toContain('background:var(--up-claude)')
+    expect(html).not.toContain('var(--u-gold)')
     expect(html).toContain('background:var(--sub)')
     expect(html).toContain('Read yesterday 12:00 PM.')
   })
@@ -349,5 +350,93 @@ describe('7.0.54: the closed row keeps "62% used, resets Fri 8:59 PM" whole besi
     const narrow = CSS.slice(CSS.indexOf('@media (max-width: 600px) {'))
     expect(narrow).toContain('.up-others { flex-basis: 100%; }')
     expect(CSS.indexOf('@media (min-width: 601px) { .up-lead > .up-others')).toBeGreaterThan(-1)
+  })
+})
+
+// 7.0.55 (Miles 2026-11-17 11:25 on the Duo, "Can we set claude usage to be an orange bar as well"; the lead 11:2x): both
+// Claude rows draw their chip and their bar in one look-aware Claude orange, --up-claude, in the closed row and the open
+// rows. An older Claude reading keeps the orange (it was grey beside a tan chip); its words still say how old it is. A
+// limit stays the warning colour. Codex, Cursor and an unknown row keep their own colours.
+describe('plan ruler: both Claude rows in Claude orange (7.0.55)', () => {
+  const lane = (html: string, name: string) => {
+    const lanes = html.split('<div class="up-lane">').slice(1)
+    const hit = lanes.filter(l => l.includes('</i>' + name + '</span>'))
+    expect(hit.length, name).toBe(1)
+    return hit[0]!
+  }
+  const pane = (desktopState: string, closest = 'claude_desktop') => ({ protocolVersion: 1, now: '2026-11-17T17:00:00.000Z', readAt: '2026-11-17T17:00:00.000Z', closest, others: '', lines: [
+    line('claude', 'Claude CLI', { usedPct: 40, gonePct: 20, short: '40% used', shortLong: '40% used', long: '40% used.', quiet: 'Claude CLI 40% used' }),
+    line('claude_desktop', 'Claude Desktop', { state: desktopState, usedPct: desktopState === 'limit' ? 100 : 48, gonePct: 18, short: '48% used', shortLong: '48% used, read 40 min ago', long: '48% used.', quiet: 'Claude Desktop 48% used' }),
+    line('codex', 'Codex', { state: 'older', usedPct: 30, short: '30% used', shortLong: '30% used', long: '30% used.', quiet: 'Codex 30% used' }),
+    line('cursor', 'Cursor', { usedPct: 70, short: '70% used', shortLong: '70% used', long: '70% used.', quiet: 'Cursor 70% used' }),
+  ] })
+  const render = async (p: unknown) => { const t = load({ 'cos.usage.planOpen': '1' }); void t.p.open(false); t.answer(p); await flush(); return t.el().innerHTML }
+
+  it('Claude CLI and Claude Desktop: chip and bar in --up-claude, fresh and older alike; Codex older stays grey', async () => {
+    const html = await render(pane('older'))
+    for (const name of ['Claude CLI', 'Claude Desktop']) {
+      const l = lane(html, name)
+      expect(l, name).toContain('class="up-dot" style="background:var(--up-claude)"')
+      expect(l, name).toContain('up-fill" style="width:' + (name === 'Claude CLI' ? 40 : 48) + '%;background:var(--up-claude)"')
+    }
+    const codex = lane(html, 'Codex')
+    expect(codex).toContain('class="up-dot" style="background:var(--u-codex)"')
+    expect(codex).toContain('width:30%;background:var(--sub)"')
+    expect(lane(html, 'Cursor')).toContain('width:70%;background:var(--u-cursor)"')
+    expect(html).not.toContain('var(--u-gold)')
+  })
+  it('the closed row: an older Claude Desktop reading leads with an orange chip and an orange small bar', async () => {
+    const html = await render(pane('older'))
+    const head = html.slice(0, html.indexOf('class="up-rows"') < 0 ? html.length : html.indexOf('class="up-rows"'))
+    const seg = head.slice(head.indexOf('class="up-seg"'))
+    expect(seg).toContain('class="up-dot" style="background:var(--up-claude)"></i>Claude Desktop')
+    expect(seg).toContain('class="up-mini"')
+    expect(seg).toContain('width:48%;background:var(--up-claude)"')
+  })
+  it('a Claude row at its limit keeps the orange chip and draws the warning bar', async () => {
+    const l = lane(await render(pane('limit')), 'Claude Desktop')
+    expect(l).toContain('class="up-dot" style="background:var(--up-claude)"')
+    expect(l).toContain('width:100%;background:var(--up-warn)"')
+  })
+})
+
+describe('plan ruler: the Claude orange token, light and dark, both looks (7.0.55)', () => {
+  const CSS = readFileSync(join(HERE, 'panes', 'sessions.css'), 'utf8')
+  const APP = readFileSync(join(HERE, 'app.css'), 'utf8')
+  const AMBER = readFileSync(join(HERE, 'amber.css'), 'utf8')
+  const LIGHT = 'rgb(184, 98, 40)', DARK = 'rgb(226, 146, 92)'
+  const tokenIn = (block: string, name: string) => {
+    const m = new RegExp(name.replace(/[-]/g, '\\-') + ':\\s*([^;]+);').exec(block)
+    expect(m, name).toBeTruthy()
+    return m![1]!.trim()
+  }
+  const blockAfter = (text: string, selector: string) => { const i = text.indexOf(selector); expect(i, selector).toBeGreaterThan(-1); return text.slice(i, text.indexOf('}', i)) }
+  const rgb = (c: string): number[] => {
+    const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(c); if (m) return [+m[1]!, +m[2]!, +m[3]!]
+    const h = /^#([0-9a-f]{6})$/i.exec(c); expect(h, c).toBeTruthy(); return [0, 2, 4].map(i => parseInt(h![1]!.slice(i, i + 2), 16))
+  }
+  const lum = (c: number[]) => { const [r, g, b] = c.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r! + 0.7152 * g! + 0.0722 * b! }
+  const ratio = (a: number[], b: number[]) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x! + 0.05) / (y! + 0.05) }
+  const mix = (fg: number[], bg: number[], a: number) => fg.map((v, i) => Math.round(v * a + bg[i]! * (1 - a)))
+
+  it('one token on the plan ruler: light by default, dark under both dark selectors, nowhere else', () => {
+    expect(tokenIn(blockAfter(CSS, '.up { --up-warn'), '--up-claude')).toBe(LIGHT)
+    expect(CSS).toContain(":root[data-theme='dark'] .up { --up-claude: " + DARK + '; }')
+    expect(CSS).toContain("@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .up { --up-claude: " + DARK + '; } }')
+    expect(CSS.match(/--up-claude:/g)!.length).toBe(3)
+    expect(AMBER).not.toContain('--up-claude')   // the same two values hold in Amber; measured below
+    // The rail the bar sits on is ink at 12% over the panel; the test below measures against exactly that.
+    expect(CSS).toContain('.up-rail { right: 0; background: color-mix(in srgb, var(--ink) 12%, transparent); }')
+  })
+  it('clears 3:1 against the panel and the rail in Espresso and Amber, light and dark', () => {
+    const looks: [string, string, string][] = [
+      ['Espresso light', blockAfter(APP, ':root {'), LIGHT], ['Espresso dark', blockAfter(APP, ":root[data-theme='dark'] {"), DARK],
+      ['Amber light', blockAfter(AMBER, "html[data-look='amber'][data-theme='light'] {"), LIGHT], ['Amber dark', blockAfter(AMBER, "html[data-look='amber'][data-theme='dark'] {"), DARK],
+    ]
+    for (const [name, block, token] of looks) {
+      const panel = rgb(tokenIn(block, '--panel')), ink = rgb(tokenIn(block, '--ink')), bar = rgb(token)
+      expect(ratio(bar, panel), name + ' on the panel').toBeGreaterThanOrEqual(3)
+      expect(ratio(bar, mix(ink, panel, 0.12)), name + ' on the rail').toBeGreaterThanOrEqual(3)
+    }
   })
 })

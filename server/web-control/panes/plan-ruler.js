@@ -69,13 +69,17 @@
     var rest = lines.filter(function (l) { return l.provider !== p.closest; }).map(function (l) { return current(l, now).quiet; });
     return rest.length ? rest.join('. ') + '.' : '';
   }
-  var COLOR = { claude: 'var(--u-gold)', claude_desktop: 'var(--u-gold)', codex: 'var(--u-codex)', cursor: 'var(--u-cursor)' };
+  // 7.0.55 (Miles 11:25): both Claude rows in one Claude orange (sessions.css --up-claude, light and dark, both looks).
+  var COLOR = { claude: 'var(--up-claude)', claude_desktop: 'var(--up-claude)', codex: 'var(--u-codex)', cursor: 'var(--u-cursor)' };
+  var CLAUDE = { claude: true, claude_desktop: true };
   function colorOf(provider) { return COLOR[provider] || 'var(--sub)'; } // an unknown row is drawn, never colourless
 
   // The short ruler in the closed row and the long one in an open row. No ruler at all when usedPct is null.
   function ruler(line, long) {
     if (line.usedPct === null || line.usedPct === undefined) return '';
-    var fill = line.state === 'limit' ? 'var(--up-warn)' : line.state === 'older' ? 'var(--sub)' : colorOf(line.provider);
+    // An older reading's bar is grey, except a Claude row's, which stays Claude orange (Miles 11:25: the Claude Desktop bar
+    // was grey beside its chip); its words still say how old it is. A limit is always the warning colour.
+    var fill = line.state === 'limit' ? 'var(--up-warn)' : line.state === 'older' && !CLAUDE[line.provider] ? 'var(--sub)' : colorOf(line.provider);
     var now = line.gonePct === null || line.gonePct === undefined ? '' : '<span class="up-now" style="left:' + Number(line.gonePct) + '%"></span>';
     return '<span class="' + (long ? 'up-track' : 'up-mini') + '" aria-hidden="true"><span class="up-rail"></span><span class="up-fill" style="width:' +
       Math.max(0, Math.min(100, Number(line.usedPct))) + '%;background:' + fill + '"></span>' + now + '</span>';
