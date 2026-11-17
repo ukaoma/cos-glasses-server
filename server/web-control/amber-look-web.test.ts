@@ -236,8 +236,11 @@ describe('the look makes no request, no server setting and no log line', () => {
     expect(run(reporting)).toEqual(['fetch'])
   })
   it('the look code in theme.js, app.js and settings.js contains no request, server route or log call', () => {
-    const lookBlock = THEME.slice(THEME.indexOf("var LOOK_KEY = 'cos_web_look';"), THEME.indexOf('lookApply(lookRead());'))
+    // Ends at the next block (fp-wait), never at a line inside the look code (Codex 00:1x: the old end marker moved
+    // above window.CosLook with e9a47367, so set() fell outside the guard). It must hold the whole API.
+    const lookBlock = THEME.slice(THEME.indexOf("var LOOK_KEY = 'cos_web_look';"), THEME.indexOf('// 7.0.19: the first paint'))
     expect(lookBlock.length).toBeGreaterThan(200)
+    for (const part of ['function lookRead', 'function lookApply', 'window.CosLook', 'choice: function', 'set: function', 'localStorage.setItem(LOOK_KEY']) expect(lookBlock).toContain(part)
     expect(lookBlock).not.toMatch(NETWORK)
     const paint = APP.slice(APP.indexOf('function paintLook()'), APP.indexOf('function paintStorySize()'))
     expect(paint.length).toBeGreaterThan(100)
