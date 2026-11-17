@@ -133,7 +133,9 @@ describe('the reader report (lead 17:48): where the box and Reply sit, numbers o
     expect(h.k.RD.n).toBe(0)
   })
   it('the fold report (rail) also carries 100dvh, the number his 17:25 frame was missing', () => {
-    expect(slice(APP, '  function railSync() {', '\n  }\n')).toContain("layoutCrumb('rail', { sw: sc.width, sh: sc.height, rail: on, railHit: RAIL.hit, dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null });")
+    // 7.0.55: the record moved into railRecord (rail-record-web.test.ts runs it); it still carries 100dvh.
+    expect(slice(APP, '  function railSync() {', '\n  }\n')).toContain("if (RAIL.on !== null && RAIL.on !== on) railRecord('change', on);")
+    expect(slice(APP, '  function railRecord(at, on) {', '\n  }\n')).toContain("dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null,")
   })
 })
 
