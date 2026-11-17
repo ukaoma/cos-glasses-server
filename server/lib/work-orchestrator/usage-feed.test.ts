@@ -15,6 +15,8 @@ import {
 import { claudeCliEntry, desktopLine, planLine, planPane } from './plan-pane.js'
 import { UsageMonitor, type UsageEntry } from './usage.js'
 import { createWorkOrchestratorRouter, readPlan } from '../../routes/work-orchestrator.js'
+import { requireApiToken } from '../api-auth.js'
+import { mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../web-session-auth.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TOOL = JSON.parse(readFileSync(join(HERE, '__fixtures__', 'claude-desktop-get-usage-2026-11-17.json'), 'utf8'))
@@ -120,7 +122,7 @@ describe('the two Claude rows (Miles: "Claude desktop vs the CLI")', () => {
     const newer = blank('claude', { observedAt: NOW, reading: { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct: 40, resetsAt: '2026-11-22T17:00:00Z' }] } })
     expect(planLine(claudeCliEntry(newer, cli), NOW, TZ).usedPct).toBe(40)
     // A limit the probe was told about still beats the status line's percent.
-    expect(planLine(claudeCliEntry({ ...probe, limitUntil: NOW + 3_600_000, limitSource: 'provider_limit' }, cli), NOW, TZ).state).toBe('limit')
+    expect(planLine(claudeCliEntry({ ...probe, limitUntil: NOW + 3_600_000, limitSource: 'provider_limit' }, cli), NOW, TZ)).toMatchObject({ state: 'limit', until: new Date(NOW + 3_600_000).toISOString() })
   })
   it('the pane: Claude CLI, then Claude Desktop, then Codex and Cursor; the closest across all four', () => {
     const pane = planPane([blank('claude'), blank('codex'), blank('cursor')], NOW, TZ, false, { cli: { reading: null, problem: 'missing' }, desktop: desktop() })
@@ -140,25 +142,61 @@ describe('the expired pause (Control showed "Paused until 11:50 PM" at 6:55 the 
   })
 })
 
-describe('POST /api/usage/feed/claude-desktop', () => {
+describe('POST /api/usage/feed/claude-desktop, through the real /api gate (Q1 07:38)', () => {
+  const API_TOKEN = 'a'.repeat(48)
+  /** The server's own order: the global 10 MB JSON parser, then requireApiToken on /api, then the router. */
   async function serve(write: (r: unknown) => void) {
-    const app = express(); app.use(express.json()); app.use(createWorkOrchestratorRouter({ writeDesktopFeed: write as never, now: () => NOW }))
+    let port = 0
+    const app = express(); app.use(express.json({ limit: '10mb' }))
+    app.use('/api', requireApiToken(API_TOKEN, { allowedPorts: () => [port], selfDnsName: () => null }))
+    app.use('/api', createWorkOrchestratorRouter({ writeDesktopFeed: write as never, now: () => NOW, plan: async () => ({ protocolVersion: 1, now: '', readAt: null, closest: null, others: '', lines: [] }) as never }))
     const server = await new Promise<Server>(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
-    const addr = server.address() as { port: number }
-    return { url: `http://127.0.0.1:${addr.port}`, close: () => new Promise(r => server.close(r)) }
+    port = (server.address() as { port: number }).port
+    const origin = `http://127.0.0.1:${port}`
+    const cookie = `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue(API_TOKEN, Date.now(), 600_000).value}`
+    const post = (headers: Record<string, string>, body: unknown) => fetch(origin + '/api/usage/feed/claude-desktop', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) })
+    return { origin, cookie, post, close: () => new Promise(r => server.close(r)) }
   }
-  it('records a checked reading; refuses a bad one with its reason and writes nothing', async () => {
+  it('the token writes a checked reading; a bad one is refused with its reason and nothing written', async () => {
     const written: unknown[] = []
     const s = await serve(r => written.push(r))
     try {
-      const ok = await fetch(s.url + '/usage/feed/claude-desktop', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(TOOL) })
+      const ok = await s.post({ 'x-cos-token': API_TOKEN }, TOOL)
       expect(ok.status).toBe(200)
       expect(await ok.json()).toEqual({ ok: true, at: new Date(NOW).toISOString(), plan: 'Ultra', windows: 2 })
       expect(written).toEqual([desktopReadingFromTool(TOOL, NOW)])
-      const bad = await fetch(s.url + '/usage/feed/claude-desktop', { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ plan: { ...TOOL.plan, windows: [{ ...TOOL.plan.windows[0], percentUsed: 480 }] } }) })
-      expect(bad.status).toBe(400)
-      expect(await bad.json()).toEqual({ error: 'invalid_reading', reason: 'bad_percent' })
+      const bad = await s.post({ 'x-cos-token': API_TOKEN }, { plan: { ...TOOL.plan, windows: [{ ...TOOL.plan.windows[0], percentUsed: 480 }] } })
+      expect([bad.status, await bad.json()]).toEqual([400, { error: 'invalid_reading', reason: 'bad_percent' }])
+      // A reset past the last date JavaScript can hold is a refused reading, not a server error.
+      const huge = await s.post({ 'x-cos-token': API_TOKEN }, { plan: { ...TOOL.plan, windows: [{ ...TOOL.plan.windows[0], resetsAt: 1e16 }] } })
+      expect([huge.status, await huge.json()]).toEqual([400, { error: 'invalid_reading', reason: 'bad_time' }])
+      expect(written).toHaveLength(1)
+    } finally { await s.close() }
+  })
+  it('a signed-in Control Web cookie is refused (403) and writes nothing, though the same cookie passes the gate', async () => {
+    const written: unknown[] = []
+    const s = await serve(r => written.push(r))
+    try {
+      const web = { cookie: s.cookie, 'x-cos-web': '1', origin: s.origin }
+      // Control: the cookie does get through the /api gate (the plan route answers it).
+      expect((await fetch(s.origin + '/api/usage/plan', { headers: { cookie: s.cookie } })).status).toBe(200)
+      const r = await s.post(web, TOOL)
+      expect([r.status, await r.json()]).toEqual([403, { error: 'token_required' }])
+      expect((await s.post({}, TOOL)).status).toBe(401)
+      expect(written).toEqual([])
+    } finally { await s.close() }
+  })
+  it('a body over 16 KB is refused (413) before it is read as a reading', async () => {
+    const written: unknown[] = []
+    const s = await serve(r => written.push(r))
+    try {
+      const body = JSON.stringify({ ...TOOL, pad: 'x'.repeat(MAX_FEED_BYTES) })
+      expect(Buffer.byteLength(body)).toBeGreaterThan(MAX_FEED_BYTES)
+      const r = await s.post({ 'x-cos-token': API_TOKEN }, body)
+      expect([r.status, await r.json()]).toEqual([413, { error: 'reading_too_large' }])
+      const atCap = JSON.stringify({ ...TOOL, pad: 'x'.repeat(MAX_FEED_BYTES - Buffer.byteLength(JSON.stringify({ ...TOOL, pad: '' }))) })
+      expect(Buffer.byteLength(atCap)).toBe(MAX_FEED_BYTES)
+      expect((await s.post({ 'x-cos-token': API_TOKEN }, atCap)).status).toBe(200)
       expect(written).toHaveLength(1)
     } finally { await s.close() }
   })

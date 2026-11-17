@@ -47,9 +47,11 @@
     if (!line || !line.until || isNaN(Date.parse(line.until)) || Date.parse(line.until) > nowMs) return line;
     var o = {}; for (var k in line) o[k] = line[k];
     o.state = 'not_read'; o.usedPct = null; o.gonePct = null; o.estimate = null;
-    o.short = 'Pause over'; o.shortLong = 'Pause over. Refresh to read';
-    o.long = 'The pause ended at ' + readWhen(line.until, nowMs) + '. Refresh to read it again.';
-    o.quiet = line.name + ': pause over';
+    // Q1 07:38: a limit that has lifted says so as a limit, not as a pause.
+    var what = line.state === 'limit' ? 'limit' : 'pause';
+    o.short = what === 'limit' ? 'Limit over' : 'Pause over'; o.shortLong = o.short + '. Refresh to read';
+    o.long = 'The ' + what + ' ended at ' + readWhen(line.until, nowMs) + '. Refresh to read it again.';
+    o.quiet = line.name + ': ' + what + ' over';
     return o;
   }
   // The closed row's quiet words, rebuilt from the guarded lines when one of them has expired (else the server's words).

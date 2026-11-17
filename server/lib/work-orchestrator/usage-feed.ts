@@ -39,7 +39,11 @@ function percent(v: unknown): number {
 /** An ISO time, or epoch seconds or milliseconds (the status line's resets_at). Null when not stated; anything else refuses. */
 function isoOrNull(v: unknown): string | null {
   if (v === undefined || v === null) return null
-  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return new Date(v > 1e12 ? v : v * 1000).toISOString()
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    const ms = v > 1e12 ? v : v * 1000
+    if (ms > 8.64e15) throw new FeedError('bad_time') // past the last date JavaScript can hold (Q1 07:38: was a 503)
+    return new Date(ms).toISOString()
+  }
   if (typeof v === 'string' && v.length <= 40) { const t = Date.parse(v); if (!Number.isNaN(t)) return new Date(t).toISOString() }
   throw new FeedError('bad_time')
 }

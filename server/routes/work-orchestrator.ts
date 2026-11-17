@@ -20,13 +20,15 @@
  *   POST /api/usage/feed/claude-desktop {plan: {status, plan, windows: [{label, percentUsed, resetsAt}]}, ...}
  *        7.0.54: a desktop session records the Claude Desktop app's own usage tool reply. Checked and written
  *        atomically; only the plan name and its windows are kept. 400 {error: 'invalid_reading', reason} otherwise.
+ *        The API token only (403 for a Control Web cookie); bodies over 16 KB get 413.
  */
 import { Router } from 'express'
 import { parseSnapshotReport, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
 import type { OrchestratorInput } from '../lib/work-orchestrator/input.js'
 import { USAGE_PROVIDERS, type UsageMonitor, type UsageView } from '../lib/work-orchestrator/usage.js'
 import { planPane, type PlanFeeds, type PlanPane } from '../lib/work-orchestrator/plan-pane.js'
-import { desktopReadingFromTool, FeedError, readFeed, writeDesktopFeed, type FeedReading } from '../lib/work-orchestrator/usage-feed.js'
+import { desktopReadingFromTool, FeedError, MAX_FEED_BYTES, readFeed, writeDesktopFeed, type FeedReading } from '../lib/work-orchestrator/usage-feed.js'
+import { API_AUTH_BY_LOCAL } from '../lib/api-auth.js'
 import { orchestratorInputFor, orchestratorSnapshots, orchestratorUsage } from '../lib/work-orchestrator/runtime.js'
 import { listBoard, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader } from '../lib/work-board-reader.js'
@@ -156,6 +158,11 @@ export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps
   // reply's session context and anything else are dropped. No timer posts it.
   router.post('/usage/feed/claude-desktop', (req, res) => {
     res.set('Cache-Control', 'private, no-store')
+    // Q1 07:38: the token only. A signed-in Control Web cookie passes the /api gate too, and a browser tab must not write
+    // this reading (the same rule as session-hooks.ts and native-mac-caller.ts).
+    if (res.locals?.[API_AUTH_BY_LOCAL] !== 'token') return res.status(403).json({ error: 'token_required' })
+    // The real reply is about 500 bytes; the global JSON parser allows 10 MB, so the route sets its own cap.
+    if (Buffer.byteLength(JSON.stringify(req.body ?? null)) > MAX_FEED_BYTES) return res.status(413).json({ error: 'reading_too_large' })
     try {
       const reading = desktopReadingFromTool(req.body, deps.now())
       deps.writeDesktopFeed(reading)

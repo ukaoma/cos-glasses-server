@@ -62,11 +62,12 @@ const PANE = { protocolVersion: 1, now: '2026-11-14T16:03:55.000Z', readAt: '202
 describe('7.0.54: two Claude rows, and a pane kept past its pause (Control at 6:55 showed a 10:50 PM pause as current)', () => {
   it('a line whose pause has ended is not shown as current; the read time names its day; every row has a colour', async () => {
     const now = Date.now(), iso = (ms: number) => new Date(ms).toISOString()
-    const readAt = iso(now - 32 * 3_600_000)
+    const n0 = new Date(now)
+    const readAt = new Date(n0.getFullYear(), n0.getMonth(), n0.getDate() - 1, 12, 0).toISOString() // always yesterday, at noon
     const pane = { protocolVersion: 1, now: readAt, readAt, closest: 'claude_desktop', others: 'Claude CLI paused. Codex 30% used.',
       lines: [
         line('claude', 'Claude CLI', { state: 'paused', short: 'Paused until tonight 11:50 PM', shortLong: 'Paused until tonight 11:50 PM',
-          long: 'Paused until tonight 11:50 PM. COS waits before asking Claude CLI again.', quiet: 'Claude CLI paused', until: iso(now - 31 * 3_600_000) }),
+          long: 'Paused until tonight 11:50 PM. COS waits before asking Claude CLI again.', quiet: 'Claude CLI paused', until: iso(Date.parse(readAt) + 3_600_000) }),
         line('claude_desktop', 'Claude Desktop', { usedPct: 48, gonePct: 18, short: '48% used, resets Sun', shortLong: '48% used, resets Sun 2:00 AM', long: '48% used. Ultra plan.', quiet: 'Claude Desktop 48% used', until: null }),
         line('some_new_tool', 'Some new tool', { usedPct: 30, short: '30% used', shortLong: '30% used', long: '30% used.', quiet: 'Some new tool 30% used', until: null }),
       ] }
@@ -81,9 +82,22 @@ describe('7.0.54: two Claude rows, and a pane kept past its pause (Control at 6:
     expect(html).not.toContain('background:undefined')
     expect(html).toContain('background:var(--u-gold)')
     expect(html).toContain('background:var(--sub)')
-    const d = new Date(Date.parse(readAt)), n = new Date(now)
-    const days = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86_400_000)
-    expect(html).toContain(days === 1 ? 'Read yesterday ' : 'Read ' + d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ')
+    expect(html).toContain('Read yesterday 12:00 PM.')
+  })
+  it('the closed row lead line is guarded too: an ended limit says "Limit over", never "Limit reached" (Q1 U13, U14)', async () => {
+    const now = Date.now(), iso = (ms: number) => new Date(ms).toISOString()
+    const pane = { protocolVersion: 1, now: iso(now - 9 * 3_600_000), readAt: iso(now - 9 * 3_600_000), closest: 'claude', others: 'Codex 30% used.', lines: [
+      line('claude', 'Claude CLI', { state: 'limit', usedPct: 100, short: 'Limit reached, back tonight 11:50 PM', shortLong: 'Limit reached, back tonight 11:50 PM',
+        long: 'Limit reached. Claude CLI says new work waits until tonight 11:50 PM.', quiet: 'Claude CLI at its limit', until: iso(now - 3_600_000) }),
+      line('codex', 'Codex', { usedPct: 30, short: '30% used', shortLong: '30% used', long: '30% used.', quiet: 'Codex 30% used', until: null })] }
+    const t = load()
+    void t.p.open(false); t.answer(pane); await flush()
+    const head = t.el().innerHTML
+    expect(head).not.toContain('Limit reached')
+    expect(head).toContain('Limit over')
+    t.click('up-toggle')
+    expect(t.el().innerHTML).toContain('The limit ended at ')
+    expect(t.el().innerHTML).not.toContain('width:100%')
   })
   it('a pause still running keeps its words', async () => {
     const now = Date.now(), iso = (ms: number) => new Date(ms).toISOString()
