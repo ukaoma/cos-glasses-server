@@ -42,19 +42,20 @@ function frame(hidden = false, bad = false, applies = true) {
     matchMedia: (q: string) => { media.push(q); return { matches: applies } } }
   const doc: any = { documentElement: de, body: {}, activeElement: field, scrollingElement: { scrollHeight: 787 }, querySelector: (q: string) => (q === '.rail' ? rail : null) }
   const src = APP.slice(APP.indexOf('  var PG_FRAME_PANES'), APP.indexOf('  var RD_FRAME = { hooked: false, n: 0 };'))
-  const make = new Function('document', 'window', 'getComputedStyle', '$', 'parseRoute', 'viewportFit', 'layoutCrumb', 'requestAnimationFrame',
+  const make = new Function('document', 'window', 'getComputedStyle', '$', 'parseRoute', 'sideRail', 'viewportFit', 'layoutCrumb', 'requestAnimationFrame',
     src + '\nreturn { pgFrameSync: pgFrameSync, pgFrameOn: pgFrameOn };')
-  const api = make(doc, win, win.getComputedStyle, (id: string) => (id === 'app-shell' ? shell : id === 'workspace' ? ws : null), () => ({ pane: 'today', args: [] }),
+  const api = make(doc, win, win.getComputedStyle, (id: string) => (id === 'app-shell' ? shell : id === 'workspace' ? ws : null), () => ({ pane: 'today', args: [] }), () => false,
     () => ({ bad, top: 0, height: 787 }), (what: string, data: any) => { rows.push({ what, data }); return true }, (fn: () => void) => fn())
   return { cls, rows, hooks, doc, field, outside, scrolled, media, shellNoClass: () => { delete (shell as any).classList }, ...api }
 }
 
 describe('Settings frame: the rail stays a column of the visible box', () => {
-  it('on for Settings, off for every other pane, off while the sign-in gate shows', () => {
+  it('on for Settings and Today only, off while the sign-in gate shows', () => {
     const f = frame()
     expect(f.pgFrameSync({ pane: 'settings', args: [] })).toBe(true); expect(f.cls.has('pg-frame')).toBe(true)
     expect(f.pgFrameSync({ pane: 'settings', args: ['pet'] })).toBe(true)
-    for (const pane of ['today', 'messages', 'sessions', 'work', 'meetings', 'memories', 'toString', 'constructor']) {
+    expect(f.pgFrameSync({ pane: 'today', args: [] })).toBe(true)
+    for (const pane of ['messages', 'sessions', 'work', 'meetings', 'memories', 'toString', 'constructor']) {
       expect(f.pgFrameSync({ pane, args: [] }), pane).toBe(false); expect(f.cls.has('pg-frame')).toBe(false)
     }
     // a shell with no classList (route harnesses, W1 08:04): no throw, Settings still framed
@@ -65,7 +66,7 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
   })
   it('one numbers-only pg-frame row when the frame comes on and after the keyboard closes; at most 8; none unframed', () => {
     const f = frame(false, true)
-    f.pgFrameSync({ pane: 'today', args: [] }); expect(f.rows).toHaveLength(0)
+    f.pgFrameSync({ pane: 'work', args: [] }); expect(f.rows).toHaveLength(0)
     f.pgFrameSync({ pane: 'settings', args: [] }); f.pgFrameSync({ pane: 'settings', args: ['pet'] })
     expect(f.rows).toHaveLength(1)
     const d = f.rows[0].data
@@ -86,13 +87,14 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
     f.hooks[0]('close'); f.hooks[0]('after'); expect(f.scrolled).toHaveLength(2)
     f.doc.activeElement = f.outside; f.hooks[0]('open'); expect(f.scrolled).toHaveLength(2)   // a field outside the workspace
     f.doc.activeElement = f.doc.body; f.hooks[0]('open'); expect(f.scrolled).toHaveLength(2)  // nothing focused
-    f.doc.activeElement = f.field; f.pgFrameSync({ pane: 'today', args: [] }); f.hooks[0]('open')
+    f.doc.activeElement = f.field; f.pgFrameSync({ pane: 'work', args: [] }); f.hooks[0]('open')
     expect(f.scrolled).toHaveLength(2)                                                          // not framed: Safari's own pan
   })
-  it('under 600 px or with a mouse (the CSS frame does not apply), a keyboard opening in Settings scrolls nothing', () => {
+  it('on a tall phone under 600 px or with a mouse (the CSS frame does not apply), a keyboard opening in Settings scrolls nothing', () => {
     const f = frame(false, false, false)
-    f.pgFrameSync({ pane: 'settings', args: [] }); expect(f.cls.has('pg-frame')).toBe(true)
-    f.hooks[0]('open'); f.hooks[0]('move')
+    f.pgFrameSync({ pane: 'settings', args: [] }); expect(f.cls.has('pg-frame')).toBe(false)
+    // No frame, hence no keyboard hook. A wide-touch or folded-Duo frame owns its own hook.
+    f.hooks.forEach((fn: (what: string) => void) => { fn('open'); fn('move') })
     expect(f.scrolled).toHaveLength(0)
     expect(f.media).toContain('(min-width: 600px) and (pointer: coarse)')
     // the query is the CSS block's own
@@ -125,8 +127,12 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
     expect(rule(b, 'html.pg-frame .workspace::after')).toMatch(/display:\s*block/)
     expect(rule(b, 'html.pg-frame .main-col')).toMatch(/overflow:\s*hidden/)
   })
-  it('nothing framed under 600 px or on a mouse: pg-frame appears only in that one block', () => {
-    const outside = CSS.replace(mediaBlock(CSS, '(min-width: 600px) and (pointer: coarse)'), '')
-    expect(outside).not.toContain('pg-frame')
+  it('the folded block is short-screen only, touch only, and follows the old sticky rail', () => {
+    const at = CSS.indexOf('html.short-screen.pg-frame, html.short-screen.pg-frame body')
+    expect(at).toBeGreaterThan(CSS.indexOf('html.short-screen .section-btn { cursor: default; }'))
+    const folded = CSS.slice(at)
+    expect(folded).toMatch(/html\.short-screen\.pg-frame \.app-shell \{[^}]*align-items:\s*stretch/)
+    expect(folded).toMatch(/html\.short-screen\.pg-frame \.rail \{[^}]*position:\s*static;[^}]*height:\s*auto/)
+    expect(folded).toMatch(/html\.short-screen\.pg-frame \.workspace \{[^}]*overflow-y:\s*auto/)
   })
 })

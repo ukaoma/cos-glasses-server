@@ -180,7 +180,9 @@ describe('app.js: when the rail is on', () => {
     expect(h.btn.inert).toBe(true)
     // 7.0.31: the fold report also carries 100dvh (app.js lrProbe; this harness has none, so null), the number Miles's
     // 17:25 open-Duo frame was missing.
-    expect(h.crumbs).toEqual([{ what: 'rail', data: { sw: 466, sh: 678, rail: true, railHit: 52, dvh: null } }])
+    // 7.0.55: the record grew (rail-record-web.test.ts pins all of it); these fields, and that it is the first change.
+    expect(h.crumbs).toHaveLength(1)
+    expect(h.crumbs[0]).toMatchObject({ what: 'rail', data: { sw: 466, sh: 678, rail: true, railHit: 52, dvh: null, n: 1, at: 'change' } })
     h.listeners.orientationchange!.forEach(f => f())
     expect(h.crumbs, 'no change, no report').toHaveLength(1)
     h.env.short = false
