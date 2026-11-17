@@ -94,7 +94,7 @@ describe('Settings frame: the rail stays a column of the visible box', () => {
     const f = frame(false, false, false)
     f.pgFrameSync({ pane: 'settings', args: [] }); expect(f.cls.has('pg-frame')).toBe(false)
     // No frame, hence no keyboard hook. A wide-touch or folded-Duo frame owns its own hook.
-    f.hooks.forEach(fn => { fn('open'); fn('move') })
+    f.hooks.forEach((fn: (what: string) => void) => { fn('open'); fn('move') })
     expect(f.scrolled).toHaveLength(0)
     expect(f.media).toContain('(min-width: 600px) and (pointer: coarse)')
     // the query is the CSS block's own

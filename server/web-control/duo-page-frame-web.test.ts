@@ -20,7 +20,7 @@ function frame() {
   const shell = { classList: { contains: (s: string) => s === 'hidden' && hidden }, getBoundingClientRect: () => ({ top: 0, bottom: 787 }) }
   const rail = { getBoundingClientRect: () => ({ top: 0, bottom: 787 }) }
   const bar = { getBoundingClientRect: () => ({ top: 0, bottom: 64 }) }
-  const emit = (name: string) => (events[name] || []).forEach(fn => fn({}))
+  const emit = (name: string, ev: object = {}) => (events[name] || []).forEach(fn => fn(ev))
   const on = (name: string, fn: Function) => { (events[name] ||= []).push(fn) }
   const win: any = { get innerWidth() { return width }, get scrollY() { return page }, addEventListener: on,
     scrollTo: (_x: number, y: number) => { page = y }, scrollBy: (_x: number, y: number) => { page += y },
@@ -139,7 +139,7 @@ describe('Duo page-frame ownership and live place migration', () => {
   it('a caret whose text is not inside the element hit there, or not on the probe line, is ignored', () => {
     const f = frame(); f.sync()
     const hit = { isConnected: true, contains: () => false, getBoundingClientRect: () => ({ top: 116, height: 24 }) }
-    const stray = { nodeType: 3, isConnected: true }
+    const stray = { nodeType: 3, isConnected: true, getBoundingClientRect: () => ({ top: 116, height: 20 }) }   // on the probe line
     f.pane.contains = (n: unknown) => n === hit || n === stray
     f.doc.elementFromPoint = () => hit
     f.doc.caretRangeFromPoint = () => ({ startContainer: stray, startOffset: 0 })
@@ -170,6 +170,27 @@ describe('Duo page-frame ownership and live place migration', () => {
     g.resize(1019, 250); g.flush()
     expect(g.writes).toHaveLength(1); expect(g.place.auto).toBe(true)
     g.drop(); expect(g.place.auto).toBe(false)
+  })
+
+  it('a fold re-checks the frame after the rail (railSync), so the screen shape is current first', () => {
+    const rs = APP.slice(APP.indexOf('  function railSync() {'), APP.indexOf('\n  }\n', APP.indexOf('  function railSync() {')))
+    expect(rs.indexOf("if (typeof pgFrameSync === 'function') pgFrameSync();")).toBeGreaterThan(rs.indexOf('RAIL.on = on;'))
+  })
+  it('inside the frame the top bar never tucks or marks itself scrolled on a page scroll', () => {
+    const src = APP.slice(APP.indexOf('  var lastY = 0;\n  function onScroll() {'), APP.indexOf('  function openMenu() {'))
+    const cls = new Set<string>(['scrolled']), bar = { classList: { toggle: (c: string, on: boolean) => { if (on) cls.add(c); else cls.delete(c) }, add: (c: string) => cls.add(c), remove: (c: string) => cls.delete(c), contains: (c: string) => cls.has(c) } }
+    const win = { scrollY: 0 }
+    const run = new Function('window', '$', 'barShow', 'isPhone', 'pgFrameApplies', src + '; return onScroll;')(win, (id: string) => (id === 'topbar' ? bar : { classList: { contains: () => true } }), () => cls.delete('tucked'), () => true, () => true)
+    win.scrollY = 100; run(); win.scrollY = 400; run()
+    expect(cls.has('tucked')).toBe(false); expect(cls.has('scrolled')).toBe(false)
+  })
+
+  it('two fingers down, one lifted: still touching, so a fold queues no restore; the last lift ends it (Codex 13:0x)', () => {
+    const f = frame(); f.sync(); f.remember(); f.emit('touchstart'); f.emit('touchend', { touches: { length: 1 } }); f.writes.length = 0
+    f.resize(1019, 250); f.flush()
+    expect(f.writes).toHaveLength(0)
+    expect(f.place.touching).toBe(true)
+    f.emit('touchend', { touches: { length: 0 } }); expect(f.place.touching).toBe(false); expect(f.place.flinging).toBe(true)
   })
 })
 

@@ -87,6 +87,8 @@ describe('numbered, settled, capped', () => {
     expect(k.syncs()).toBe(3); expect(k.timers.size).toBe(1); expect(k.sent).toHaveLength(0)
     k.setSide(false); k.fire()
     expect(k.sent).toHaveLength(1); expect(k.sent[0].data).toMatchObject({ n: 1, at: 'settled', rail: false })
+    k.setSide(true); k.api.railMoved(); k.fire()                       // the strip as it is at settle, not the last change's value
+    expect(k.sent[1].data).toMatchObject({ n: 2, at: 'settled', rail: true })
     expect(BLOCK).toContain('RAIL_SETTLE_MS = 600')
   })
   it('at most 6 in any minute, then again after the minute', () => {

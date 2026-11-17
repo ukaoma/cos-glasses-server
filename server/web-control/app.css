@@ -811,11 +811,9 @@ html { touch-action: manipulation; }
      goes, and stays put while you read; the rail's foot keeps its own Back within the thumb's reach. */
   html.short-screen .section-btn .caret { display: none !important; }
   html.short-screen .section-btn { cursor: default; }
-}
-/* 7.0.55 candidate: Today and Settings on the folded Duo reuse pg-frame, not a second frame. Kept AFTER the folded
-   rail rules: its align-items:flex-start and sticky 100dvh rail must not win. The same width/pointer + short-screen
-   gate is used by pgFrameViewport/sideRail. Wide touch screens keep the existing pg-frame block above. */
-@media (max-width: 599px) and (pointer: coarse) {
+  /* 7.0.55 candidate: Today and Settings on the folded Duo reuse pg-frame, not a second frame. Kept AFTER the folded
+     rail rules: its align-items:flex-start and sticky 100dvh rail must not win. The same width/pointer + short-screen
+     gate is used by pgFrameViewport/sideRail. Wide touch screens keep the existing pg-frame block above. */
   html.short-screen.pg-frame, html.short-screen.pg-frame body { height: 100%; overflow: hidden; overscroll-behavior: none; }
   html.short-screen.pg-frame body { min-height: 0; }
   html.short-screen.pg-frame .app-shell { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh);

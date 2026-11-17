@@ -3495,8 +3495,11 @@
       if (name === 'touchstart') PG_PLACE.touching = true;
       if (PG_PLACE.pending) { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; }
     }, { capture: true, passive: true }); });
-    ['touchend', 'touchcancel'].forEach(function (name) { document.addEventListener(name, function () {
-      PG_PLACE.touching = false; PG_PLACE.flinging = true; PG_PLACE.lastFling = Date.now();
+    // Lifting one of two fingers leaves him touching (Codex 13:0x): only the last lift ends the touch and starts a fling.
+    ['touchend', 'touchcancel'].forEach(function (name) { document.addEventListener(name, function (e) {
+      var left = e && e.touches && typeof e.touches.length === 'number' ? e.touches.length : 0;
+      PG_PLACE.touching = left > 0;
+      if (!left) { PG_PLACE.flinging = true; PG_PLACE.lastFling = Date.now(); }
     }, { capture: true, passive: true }); });
     window.addEventListener('resize', function () { pgFrameSync(); });
     window.addEventListener('orientationchange', function () { pgFrameSync(); });
