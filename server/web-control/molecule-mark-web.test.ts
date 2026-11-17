@@ -24,7 +24,7 @@ function between(src: string, from: string, to: string): string {
   return src.slice(a, b)
 }
 const BLOCK = between(APP, '  // ── 7.0.54: the COS mark at work', '  // 6.99.27 (Miles 11/07 09:29, "a big delay')
-const MKCSS = CSS.slice(CSS.indexOf('/* 7.0.54: the COS mark at work'))
+const MKCSS = between(CSS, '/* 7.0.54: the COS mark at work', "/* ── 7.0.29: the folded Duo's side rail")
 
 // ── a page of fakes ───────────────────────────────────────────────────────────────────────────────────────────────
 type Rect = { top: number; left: number; bottom: number; right: number; width: number; height: number }
@@ -243,6 +243,25 @@ describe('never Working from a list that is not fresh', () => {
     expect(p.timers.intervals.size).toBe(1)   // one timer, never one per look
     p.now.t += 91_000; p.api.mkSync()          // the list went stale with no event: the 15 s look catches it
     expect(p.rail.attrs['data-mk']).toBe('rest'); expect(p.timers.intervals.size).toBe(0)
+  })
+})
+
+describe('wired to the shared list', () => {
+  it('a read that lands or fails looks again, on a branch of its own, so callers still get the read\'s own answer or failure', () => {
+    const sl = between(APP, '  function sessionList(maxAgeMs) {', '  function sessionListCached()')
+    expect(sl).toContain("    }, function (err) { SL.inflight = null; SL.failed = true; throw err; });\n    // 7.0.54: a read that lands or fails may start or stop the mark (mkSync).")
+    expect(sl).toContain("    if (typeof mkSoon === 'function') SL.inflight.then(mkSoon, mkSoon);\n    return SL.inflight;")
+  })
+  it('the route, the Running card and the live repaint look again', () => {
+    expect(between(APP, '  function route(forceChanged) {', "    document.querySelectorAll('#section-menu [data-goto]')")).toContain("if (typeof mkSoon === 'function') mkSoon();")
+    const rr = between(APP, '  function renderRunning(working, open) {', '  function runJobsHtml()')
+    expect(rr.split("if (typeof mkSoon === 'function') mkSoon();")).toHaveLength(3)   // the failed branch and the rows
+    expect(between(APP, '  function liveRepaint(rows, structural) {', '  function liveSessionRows(')).toMatch(/^  function liveRepaint\(rows, structural\) \{\n    if \(typeof mkSoon === 'function'\) mkSoon\(\);/)
+  })
+  it('no page (a script sliced into a test, a worker): nothing to do, no throw', () => {
+    const ctx: Record<string, unknown> = { SL: { data: null }, state: {} }
+    vm.createContext(ctx)
+    expect(() => vm.runInContext(BLOCK + '\n;mkSoon();', ctx)).not.toThrow()
   })
 })
 

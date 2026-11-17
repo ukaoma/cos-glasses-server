@@ -1062,9 +1062,11 @@
         else if (liveOn()) LIVE.freshAt = SL.at;
       }
       noteWaiting(d);
-      if (typeof mkSoon === 'function') mkSoon();
       return d;
-    }, function (err) { SL.inflight = null; SL.failed = true; if (typeof mkSoon === 'function') mkSoon(); throw err; });
+    }, function (err) { SL.inflight = null; SL.failed = true; throw err; });
+    // 7.0.54: a read that lands or fails may start or stop the mark (mkSync). A branch of its own: callers still get the
+    // read's own answer or failure.
+    if (typeof mkSoon === 'function') SL.inflight.then(mkSoon, mkSoon);
     return SL.inflight;
   }
   function sessionListCached() { return SL.data ? { data: SL.data, at: SL.at } : null; }
@@ -1144,6 +1146,7 @@
     else if (MK.timer) { clearInterval(MK.timer); MK.timer = null; }
   }
   function mkSoon() {
+    if (typeof document === 'undefined' || !document) return;
     if (!MK.wired) mkWire();
     if (document.hidden) { clearTimeout(MK.soon); mkSync(); return; }   // hidden: stop at once, no timer
     if (MK.soon) return;

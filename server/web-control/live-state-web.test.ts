@@ -438,6 +438,8 @@ describe('7.0.1: no stream means 7.0.0 behaviour', () => {
         $: (id: string) => els[id], esc: (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'), badge: (p: string) => '<b>' + p + '</b>', sessionTitle: (s: { title?: string }) => s.title || 'Untitled session',
         usualProject: () => 'p', countWord: (n: number) => String(n), TODAY: { sessionsState: 'answered' }, Date, Math, String, isFinite,
         liveOn: () => liveIsOn, liveSince: () => 12345, liveClock: () => '5m 0s', liveElapsed: () => 300, liveTickStart: () => {},
+        // 7.0.54: the working mark (molecule-mark-web.test.ts owns it) stands in for 7.0.0's pulse; nothing else moved.
+        mkRow: (st: string) => (st ? '<i mk="' + st + '"></i>' : ''), sxState: (s: { agent_state?: string }) => (s.agent_state === 'waiting' ? 'waiting' : 'recent'),
         // keep the block's own view code inert: only runRow and renderRunning are called
       }
       const body = src.indexOf('  // ── live state on screen (7.0.1)') > 0 ? src.slice(0, src.indexOf('  // ── live state on screen (7.0.1)')) : src
@@ -447,7 +449,10 @@ describe('7.0.1: no stream means 7.0.0 behaviour', () => {
     const working = [{ provider: 'claude', session_id: 'a', title: 'One', running: true, running_active: true, state_since: new Date(now - 5 * 60000).toISOString(), project: 'other' }]
     const quiet = [{ provider: 'codex', session_id: 'b', title: 'Two', running: true, running_active: false, last_activity_at: new Date(now - 3 * 3600000).toISOString() }]
     const oldKit = make(OLD, false), newKit = make(RUNROW, false)
-    expect(newKit.runRow(working[0], true)).toBe(oldKit.runRow(working[0], true))
+    // 7.0.54: the one difference from 7.0.0 is the working mark where the 8 px pulse was.
+    const PULSE = '<span class="pulse" aria-label="working"></span>'
+    expect(oldKit.runRow(working[0], true)).toContain(PULSE)
+    expect(newKit.runRow(working[0], true)).toBe(oldKit.runRow(working[0], true).replace(PULSE, '<i mk="work"></i>'))
     expect(newKit.runRow(quiet[0], false)).toBe(oldKit.runRow(quiet[0], false))
     expect(newKit.runRow(working[0], true)).toContain('Working for 5 min')
     // Live: the same row carries the ticking clock instead.
