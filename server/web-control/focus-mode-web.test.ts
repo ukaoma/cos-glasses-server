@@ -212,7 +212,9 @@ describe('markup and styles', () => {
     for (const i of ['i-expand', 'i-collapse', 'i-down']) expect(HTML).toContain(`<symbol id="${i}" viewBox="0 0 24 24">`)
   })
   it('every focus rule is under html.focus inside the narrow query, or hides the controls by default; tokens only', () => {
-    const appBlock = APP_CSS.slice(APP_CSS.indexOf('/* ── 7.0.53 focus mode'))
+    // The focus rules sit above the side rail's block, which stays last in app.css (side-rail-web reads it to the end).
+    const appBlock = APP_CSS.slice(APP_CSS.indexOf('/* ── 7.0.53 focus mode'), APP_CSS.indexOf("/* ── 7.0.29: the folded Duo's side rail"))
+    expect(APP_CSS.indexOf('/* ── 7.0.53 focus mode')).toBeLessThan(APP_CSS.indexOf("/* ── 7.0.29: the folded Duo's side rail"))
     const chatBlock = CHAT_CSS.slice(CHAT_CSS.indexOf('/* 7.0.53 focus mode'))
     for (const block of [appBlock, chatBlock]) {
       expect(block).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i)
