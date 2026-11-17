@@ -21,7 +21,8 @@ import { clockLabel } from './drop-when.js'
 import { PING_RANK, type PingSource } from './ping-budget.js'
 import { parsePrepOccurrence } from './prep-store.js'
 import type { PrepOccurrence } from '../../shared/prep.js'
-import { SESSION_LINK_PROVIDERS, type SessionLinkProvider } from './drop-store.js'
+import { DROP_LIMITS, SESSION_LINK_PROVIDERS, type SessionLinkProvider } from './drop-store.js'
+import { plainText } from './plain-text.js'
 
 export interface PingLink { kind: 'card' | 'session' | 'handoff' | 'thread' | 'memory' | 'meeting' | 'file' | 'reminder' | 'ask'; id: string; label: string; domain?: string; provider?: SessionLinkProvider }
 export interface PingCandidate {
@@ -47,6 +48,9 @@ export interface PingCandidate {
    * local backup notification, so a server fire replaces Control's instead of doubling it (plan section 7).
    */
   notifyId?: string
+  /** 7.0.53: a Reply ready's reply, plain text (plain-text.ts), and when its turn ended. Never in `title` or `line`. */
+  excerpt?: string
+  turnAt?: string
   /** The drop a follow-up answers (it threads under that drop in the chat); a ping without one is its own thread. */
   threadId?: string
 }
@@ -174,10 +178,12 @@ export function checkinCandidates(nowMs: number, timezone: string, when: { weekd
 
 const PROVIDER_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor', grok: 'Grok' }
 /** Agent finished: a session linked to a drop or a Work handoff ended its turn. Pushed by the caller, never polled. */
-export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; turnEndedAt?: unknown; label?: unknown; failed?: unknown; turnId?: string; replyReady?: boolean }): PingCandidate | null {
+export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; turnEndedAt?: unknown; label?: unknown; failed?: unknown; turnId?: string; replyReady?: boolean; title?: unknown; reply?: unknown }): PingCandidate | null {
   if (typeof ev.sessionId !== 'string' || !ID_SAFE.test(ev.sessionId) || typeof ev.turnEndedAt !== 'number' || !Number.isFinite(ev.turnEndedAt)) return null
   const who = PROVIDER_NAME[typeof ev.provider === 'string' ? ev.provider : ''] ?? 'Your agent'
-  const label = clip(ev.label, PING_TEXT.title) || (ev.replyReady ? 'Session' : 'its task')
+  // 7.0.53 (W1): a Reply ready's link names the session by its listed title (the caller's exact-id lookup), cleaned; else as before.
+  const label = (ev.replyReady ? plainText(ev.title, PING_TEXT.title) : '') || clip(ev.label, PING_TEXT.title) || (ev.replyReady ? 'Session' : 'its task')
+  const excerpt = ev.replyReady ? plainText(ev.reply, DROP_LIMITS.excerpt) : ''
   // 7.0.52: the session link carries its provider, so "Open result" opens this session's reader, not the list.
   // Only a provider the reader route serves; anything else leaves the field off and the page keeps the old tap.
   const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(ev.provider) ? ev.provider as SessionLinkProvider : undefined
@@ -186,6 +192,8 @@ export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; tu
     line: ev.replyReady ? `${who} has a reply ready.` : ev.failed === true ? `${who} stopped on ${label}. It needs a look.` : `${who} finished ${label}.`,
     links: [{ kind: 'session', id: ev.sessionId, label, ...(provider ? { provider } : {}) }], actions: [{ id: 'open_result', label: 'Open result' }],
     createdAt: ev.turnEndedAt, needsReply: ev.failed === true,
+    ...(ev.replyReady ? { turnAt: new Date(ev.turnEndedAt).toISOString() } : {}),
+    ...(excerpt ? { excerpt } : {}),
   }
 }
 

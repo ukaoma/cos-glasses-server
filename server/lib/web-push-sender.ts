@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto'
 import { b64u, encryptPushMessage, vapidAuthorization } from './web-push-crypto.js'
 import type { BannerSession, PingBanner } from './ping-engine.js'
 import { sessionTitleExact } from './session-title-cache.js'
+import { plainText } from './plain-text.js'
 import { isAllowedPushEndpoint, type WebPushStore } from './web-push-store.js'
 import { SESSION_LINK_PROVIDERS } from './drop-store.js'
 
@@ -130,23 +131,9 @@ function sessionTarget(banner: PingBanner, origin: string): string {
 /** 7.0.52 C: at most this many code points of a session's title on the lock screen (X1's read, the lead's 16:30 ruling). */
 export const REPLY_TITLE_CHARS = 60
 const PROVIDER_WORD: Record<string, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' }
-/**
- * A session title as the lock screen may show it. The title is session-written text (a first prompt or a title a session set),
- * so: C0 and C1 controls, line and paragraph separators become spaces; bidi controls (with U+061C), zero-width and other invisible
- * characters (soft hyphen, U+180E, U+2060 to U+2064, U+FFF9 to U+FFFB, the tag block U+E0000 to U+E007F) are removed (they can
- * reorder or hide text; X1 16:4x); ** and backticks are dropped; whitespace collapses; then at most REPLY_TITLE_CHARS code points,
- * the last one an ellipsis when cut, so no surrogate pair is split. Empty means no title.
- */
-function lockScreenTitle(raw: string | null): string {
-  if (typeof raw !== 'string') return ''
-  const clean = raw
-    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
-    .replace(/[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb\u{e0000}-\u{e007f}]/gu, '')
-    .replace(/\*\*|`/g, '')
-    .replace(/\s+/g, ' ').trim()
-  const points = Array.from(clean)
-  return points.length > REPLY_TITLE_CHARS ? points.slice(0, REPLY_TITLE_CHARS - 1).join('') + '…' : clean
-}
+/** A session title as the lock screen may show it (plain-text.ts plainText; X1's cleaning rules). */
+const lockScreenTitle = (raw: string | null): string => plainText(raw, REPLY_TITLE_CHARS)
+
 /**
  * 7.0.52 C: the body for a Reply ready banner on a phone with words on. One session: "Reply ready: <title> (Claude)", the
  * title from the Sessions list's own cache, or "session <first 8 of the id>" when it has none; the provider word only from the

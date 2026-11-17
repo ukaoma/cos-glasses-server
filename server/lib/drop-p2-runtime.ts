@@ -33,7 +33,7 @@ export interface JournalReceiptLite { id: string; workID?: string | null; status
 
 export interface DropP2Deps {
   drops: ReminderStore & { list(): DropRecord[] }
-  feed: Pick<InboxFeedStore, 'byKey' | 'insert'>
+  feed: Pick<InboxFeedStore, 'byKey' | 'insert'> & Partial<Pick<InboxFeedStore, 'list' | 'update'>>
   pingState: Pick<PingStateStore, 'read' | 'write'>
   timezone: () => string
   now?: () => number

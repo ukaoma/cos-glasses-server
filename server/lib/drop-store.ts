@@ -119,11 +119,27 @@ export interface FeedItem {
    * dismissed. Kept only when it is a real boolean; an older row without it is valid and does not wait.
    */
   needsReply?: boolean
+  /**
+   * 7.0.53 (W1's Reply ready row; the lead 20:5x): the turn's reply as plain text, at most DROP_LIMITS.excerpt code points. UI data
+   * only: it is never in `title` or `line`, so it never reaches a timeline crumb, the quiet-hours digest, a banner, phone words or
+   * any prompt (X1's rule; ping-reply-feed.test.ts pins each).
+   */
+  excerpt?: string
+  /** 7.0.53: when the turn ended (ISO); `createdAt` stays the time it was posted. */
+  turnAt?: string
+  /** 7.0.53 G3: Reply ready items of this session since the oldest live one, this one included. */
+  count?: number
+  /** 7.0.53 G3: up to DROP_LIMITS.earlier earlier excerpts of this session, newest first. */
+  earlier?: Array<{ at: string; excerpt: string }>
+  /** 7.0.53 G3: a newer Reply ready of the same session carries this one; GET /api/inbox/feed leaves it out. Never deleted. */
+  superseded?: true
 }
 
 export const DROP_LIMITS = {
   text: 2_000, label: 200, line: 2_000, title: 200, links: 12, choices: 3, timeline: 40,
   drops: 20_000, feed: 20_000, fileBytes: 32_000_000, quarantineKept: 500,
+  /** 7.0.53: the Reply ready excerpt (code points), the earlier excerpts kept on the newest item, and the largest count. */
+  excerpt: 400, earlier: 5, count: 1_000_000,
   /** Files on one drop: the Ask's own cap (shared/media-attachment.ts MAX_ATTACHMENTS_PER_PROMPT). */
   attachments: 5, attachmentName: 255,
   /** Retention (plan section 6): drop records and links a year; undone drops and chat receipts 30 days. */
@@ -288,6 +304,19 @@ export function parseFeedItem(raw: unknown): FeedItem {
   if (raw.title !== undefined) { const t = str(raw.title, DROP_LIMITS.title, true); if (t === null) throw new DropStoreError('invalid_feed_item', 400); item.title = t }
   if (raw.undoUntil !== undefined) { const u = isoOrNull(raw.undoUntil); if (u === undefined) throw new DropStoreError('invalid_feed_item', 400); item.undoUntil = u }
   if (typeof raw.needsReply === 'boolean') item.needsReply = raw.needsReply
+  // 7.0.53: optional, and never fatal: a value that does not fit is dropped and the item stays.
+  const excerpt = (v: unknown): string | null => typeof v === 'string' && v.length > 0 && Array.from(v).length <= DROP_LIMITS.excerpt ? v : null
+  const e = excerpt(raw.excerpt); if (e) item.excerpt = e
+  const turnAt = iso(raw.turnAt); if (turnAt) item.turnAt = turnAt
+  if (typeof raw.count === 'number' && Number.isInteger(raw.count) && raw.count >= 1 && raw.count <= DROP_LIMITS.count) item.count = raw.count
+  if (Array.isArray(raw.earlier)) {
+    const earlier = raw.earlier.slice(0, DROP_LIMITS.earlier).flatMap(x => {
+      const at = record(x) ? iso(x.at) : null, ex = record(x) ? excerpt(x.excerpt) : null
+      return at && ex ? [{ at, excerpt: ex }] : []
+    })
+    if (earlier.length) item.earlier = earlier
+  }
+  if (raw.superseded === true) item.superseded = true
   return item
 }
 

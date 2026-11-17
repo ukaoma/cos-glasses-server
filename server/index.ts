@@ -214,6 +214,7 @@ import { readWorkJournal } from './lib/work-activity.js'
 import { createDropP2Boot } from './lib/drop-p2-boot.js'
 import { createP2SettingsReader } from './lib/drop-p2-settings.js'
 import { replyStillNewFromSignal } from './lib/ping-engine.js'
+import { sessionTitleExact } from './lib/session-title-cache.js'
 import { createDropP2Runtime, journalReceiptsLite } from './lib/drop-p2-runtime.js'
 import { sessionTurnOutcome } from './lib/drop-resolution.js'
 import { createSessionReplyPings } from './lib/session-reply-pings.js'
@@ -1167,7 +1168,9 @@ const sessionReplyPings = createSessionReplyPings({
   initial: sessionSignalStore.snapshot(),
   waiting: id => !!peekTurnEndAsk(id),
   signal: id => sessionSignalStore.get(id),
-  deliver: reply => { if (!gracefulShutdownStarted && maintenanceAdmissionsOpen()) dropP2.runtime()?.pushAgent(reply) },
+  // 7.0.53 (W1's Reply ready row): the session's listed title (exact id only) and this turn's reply text go to the feed item, cleaned
+  // there; the reply stays UI data (excerpt), never in the item's title or line.
+  deliver: reply => { if (!gracefulShutdownStarted && maintenanceAdmissionsOpen()) dropP2.runtime()?.pushAgent({ ...reply, title: sessionTitleExact(reply.sessionId), reply: sessionSignalStore.get(reply.sessionId)?.lastReply }) },
 })
 sessionSignalStore.subscribe((signal, env, child) => sessionReplyPings.observe(signal, env, child))
 sessionSignalStore.subscribeObservations((signal, env, child) => sessionReplyPings.observe(signal, env, child))

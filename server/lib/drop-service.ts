@@ -630,7 +630,9 @@ export class DropService {
       start = index + 1
     }
     const limit = Math.max(1, Math.min(200, options.limit ?? 100))
-    const rest = items.slice(start)
+    // 7.0.53 G3: a superseded Reply ready is carried by its session's newer item, so it is left out. `after` is still found in
+    // the full list, so a client whose last item was superseded pages on from it.
+    const rest = items.slice(start).filter(i => i.superseded !== true)
     // Without `after` the newest page; with it, the next page forward.
     const page = options.after ? rest.slice(0, limit) : rest.slice(-limit)
     const nowMs = this.now().getTime()
