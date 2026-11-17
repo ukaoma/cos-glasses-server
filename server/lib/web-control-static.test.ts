@@ -176,6 +176,17 @@ describe('the shipped web-control folder', () => {
     }
   })
 
+  it('versions the opt-in Amber URL without adding it to the default stylesheet requests', () => {
+    const metadata = /<script type="application\/json" id="amber-style">([^<]*)<\/script>/.exec(html)
+    expect(metadata).not.toBeNull()
+    const asset = table.get('/amber.css')!
+    expect(asset).toBeDefined()
+    expect(JSON.parse(metadata![1]!)).toBe(`/control/amber.css?v=${asset.hash}`)
+    const boot = JSON.parse(/id="boot-styles">([^<]*)<\/script>/.exec(html)![1]!) as string[]
+    expect(boot).toHaveLength(10)
+    expect(boot.some(url => url.includes('/amber.css'))).toBe(false)
+  })
+
   it('versions every pane that loads on demand, and each file registers that pane', () => {
     const block = html.match(/<script type="application\/json" id="lazy-panes">([\s\S]*?)<\/script>/)
     expect(block).not.toBeNull()

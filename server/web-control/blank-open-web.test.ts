@@ -26,12 +26,13 @@ function el(tag: string): any {
   n.addEventListener = (ev: string, fn: () => void) => { (n.listeners[ev] ??= []).push(fn) }
   return n
 }
-function boot(opts: { store?: Record<string, string>; readyState?: string } = {}) {
+function boot(opts: { store?: Record<string, string>; readyState?: string; source?: string; amberHref?: string } = {}) {
   const store: Record<string, string> = { ...(opts.store || {}) }
   const localStorage = { getItem: (k: string) => (k in store ? store[k]! : null), setItem: (k: string, v: string) => { store[k] = String(v) }, removeItem: (k: string) => { delete store[k] } }
   const listeners: Record<string, Array<() => void>> = {}, timers: Array<{ fn: () => void; ms: number; id: number }> = []
-  const head = el('head'), body = el('body'), classes: string[] = []
+  const head = el('head'), body = el('body'), classes: string[] = [], attrs: Record<string, string> = {}
   const byId = (id: string): any => {
+    if (id === 'amber-style') return { textContent: JSON.stringify(opts.amberHref ?? JSON.parse(/id="amber-style">([^<]*)<\/script>/.exec(HTML)![1]!)) }
     if (id === 'boot-styles') return { textContent: JSON.stringify(STYLES) }
     if (id === 'boot-scripts') return { textContent: JSON.stringify(SCRIPTS) }
     const find = (n: any): any => n.id === id ? n : n.children.map(find).find(Boolean)
@@ -39,7 +40,7 @@ function boot(opts: { store?: Record<string, string>; readyState?: string } = {}
   }
   const document: any = {
     readyState: opts.readyState ?? 'loading', head, body,
-    documentElement: { setAttribute() {}, classList: { add: (c: string) => classes.push(c), remove() {} } },
+    documentElement: { setAttribute(k: string, v: string) { attrs[k] = v }, getAttribute(k: string) { return attrs[k] ?? null }, hasAttribute(k: string) { return Object.hasOwn(attrs, k) }, removeAttribute(k: string) { delete attrs[k] }, classList: { add: (c: string) => classes.push(c), remove() {} } },
     addEventListener: (ev: string, fn: () => void) => { (listeners[ev] ??= []).push(fn) },
     getElementById: byId, createElement: (t: string) => el(t), querySelectorAll: () => [],
   }
@@ -49,7 +50,7 @@ function boot(opts: { store?: Record<string, string>; readyState?: string } = {}
   const setTimeout = (fn: () => void, ms: number) => { timers.push({ fn, ms, id: ++tid }); return tid }
   const clearTimeout = (id: number) => { const i = timers.findIndex(t => t.id === id); if (i >= 0) timers.splice(i, 1) }
   // eslint-disable-next-line no-new-func
-  new Function('window', 'document', 'localStorage', 'sessionStorage', 'setTimeout', 'clearTimeout', 'location', 'history', 'URL', THEME)(window, document, localStorage, localStorage, setTimeout, clearTimeout, location, undefined, URL)
+  new Function('window', 'document', 'localStorage', 'sessionStorage', 'setTimeout', 'clearTimeout', 'location', 'history', 'URL', opts.source ?? THEME)(window, document, localStorage, localStorage, setTimeout, clearTimeout, location, undefined, URL)
   const sheets = () => head.children.filter((c: any) => c.rel === 'stylesheet')
   const scripts = () => body.children.filter((c: any) => c.tagName === 'SCRIPT')
   const loadScripts = () => { (listeners.DOMContentLoaded ?? []).forEach(f => f()); for (const t of timers.filter(t => t.ms <= 50).slice()) { clearTimeout(t.id); t.fn() } ; for (const t of timers.filter(t => t.ms === 0).slice()) { clearTimeout(t.id); t.fn() } }
@@ -93,6 +94,34 @@ describe('B: the stylesheets do not hold the first paint, and boot waits for the
     expect(b.booted()).toBe(false)
     sc[sc.length - 1].onerror()
     expect(b.booted()).toBe(true)
+  })
+})
+
+describe('Amber alone adds a final stylesheet without changing the default open', () => {
+  it('default and invalid preferences keep exactly the original requests; an unconditional-load mutant fails', () => {
+    const assertDefault = (source: string) => {
+      for (const value of [undefined, 'default', 'Amber', '__proto__']) {
+        const b = boot({ source, store: value == null ? {} : { cos_web_look: value } })
+        expect(b.sheets().map((s: any) => s.href)).toEqual(STYLES)
+      }
+    }
+    assertDefault(THEME)
+    const mutant = THEME.replace("window.CosLook && window.CosLook.choice() === 'amber'", 'true')
+    expect(mutant).not.toBe(THEME)
+    expect(() => assertDefault(mutant)).toThrow()
+  })
+  it('amber is appended last, including the server-stamped version, and boot waits for it to settle', () => {
+    for (const href of ['/control/amber.css', '/control/amber.css?v=deadbeef']) for (const outcome of ['onload', 'onerror']) {
+      const b = boot({ store: { cos_web_look: 'amber' }, amberHref: href })
+      const sheets = b.sheets()
+      expect(sheets).toHaveLength(STYLES.length + 1)
+      expect(sheets.map((s: any) => s.href)).toEqual([...STYLES, href])
+      b.loadScripts(); b.scripts().forEach((s: any) => s.onload())
+      sheets.slice(0, -1).forEach((s: any) => s.onload())
+      expect(b.booted(), 'amber still pending').toBe(false)
+      sheets[sheets.length - 1][outcome]()
+      expect(b.booted(), 'all sheets settled').toBe(true)
+    }
   })
 })
 

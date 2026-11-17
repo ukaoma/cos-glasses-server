@@ -1,0 +1,66 @@
+/* Amber candidate: color tokens only, explicitly selected per device by CosLook.
+   Frozen A1 Control Web palette (2026-11-16); no layout, surfaces or working-mark changes.
+   Loaded last so the look also wins over control.css's later theme tokens.
+   No preference means no data-look attribute: all existing styles remain in force. */
+
+html[data-look='amber'][data-theme='light'] {
+  --page: #f5f0e6;
+  --rail: #efe8db;
+  --rail-border: #e0d5c0;
+  --rail-active: #ffffff;
+  --ink: #1f1712;
+  --sub: #66635e;
+  --grey: #5c5a55;
+  --tertiary: #6e675d;
+  --hot: #8a3a10;
+  --panel: #ffffff;
+  --panel-border: #e3d9c6;
+  --row-border: #efe7d8;
+  --qopen: #fbf7ef;
+  --accent: #a8481a;
+  --on-accent: #ffffff;
+  --gold: var(--accent);
+  --gold-bg: rgba(168, 72, 26, 0.14);
+  --gold-bg: color-mix(in srgb, var(--accent) 14%, transparent);
+  --btn-border: #a87c62;
+  --btn-bg: #ffffff;
+  --kbd-border: #d8ccb6;
+  --run-bg: #22140c;
+  --run-border: #22140c;
+  --run-title: #f6e7d6;
+  --run-sub: #c0a189;
+  --run-open: #f6b46e;
+  --run-count: #f29a45;
+  --run-line: rgba(255, 190, 140, 0.13);
+}
+
+html[data-look='amber'][data-theme='dark'] {
+  --page: #1a0f09;
+  --rail: #150b06;
+  --rail-border: #2a1a10;
+  --rail-active: rgba(242, 154, 69, 0.14);
+  --ink: #f6e7d6;
+  --sub: #c0a189;
+  --grey: rgba(246, 231, 214, 0.62);
+  --tertiary: #a38a77;
+  --hot: #f6b46e;
+  --panel: #22140c;
+  --panel-border: #3a2416;
+  --row-border: #2c1a0f;
+  --qopen: #28170d;
+  --accent: #f29a45;
+  --on-accent: #2a1206;
+  --gold: var(--accent);
+  --gold-bg: rgba(242, 154, 69, 0.16);
+  --gold-bg: color-mix(in srgb, var(--accent) 16%, transparent);
+  --btn-border: #8a6244;
+  --btn-bg: #22140c;
+  --kbd-border: #4a2e1c;
+  --run-bg: #22140c;
+  --run-border: #5a3620;
+  --run-title: #f6e7d6;
+  --run-sub: #c0a189;
+  --run-open: #f6b46e;
+  --run-count: #f29a45;
+  --run-line: rgba(255, 190, 140, 0.10);
+}
