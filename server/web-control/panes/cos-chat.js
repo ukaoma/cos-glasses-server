@@ -955,7 +955,7 @@
   }
   // Where the chat was scrolled (the page below 860 px, the column from 860 px), to put it back on Close.
   function rrScrollNow() {
-    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    var feed = C.host && typeof C.host.querySelector === 'function' ? C.host.querySelector('[data-cos-feed]') : null;
     return wide() ? (feed ? feed.scrollTop : 0) : Math.round(window.scrollY || window.pageYOffset || 0);
   }
   function rrAnswer(key) {
@@ -3572,7 +3572,7 @@
     if (!n || !n.getBoundingClientRect) return false;
     v = v || (W.viewportFit ? W.viewportFit() : null);
     var top = v ? v.top : 0, bottom = v ? v.top + v.height : (window.innerHeight || 0), w = wide();
-    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    var feed = C.host && typeof C.host.querySelector === 'function' ? C.host.querySelector('[data-cos-feed]') : null;
     if (w && feed && feed.getBoundingClientRect) { var fr = feed.getBoundingClientRect(); top = Math.max(top, fr.top); bottom = Math.min(bottom, fr.bottom); }
     var bar = !w && document.getElementById ? document.getElementById('topbar') : null;
     if (bar && bar.getBoundingClientRect) { var br = bar.getBoundingClientRect(); if (br.height > 0 && br.bottom > top && br.top <= top + 1) top = br.bottom; }
