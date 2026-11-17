@@ -122,7 +122,7 @@ describe('the Running row mark (mkRow)', () => {
   it('runRow puts it where the 8 px pulse was: Working on a working row, Waiting on a waiting one, nothing on a quiet one', () => {
     const run = between(APP, '  function runRow(s, activeNow) {', '  function renderRunning(')
     // 7.0.55: the glass slot rides before the strip (the wiring test below pins the exact line); the strip's state is unchanged.
-    expect(run).toContain("mkSt = sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : ''")
+    expect(run).toContain("(sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '')")
     expect(run).toContain("(typeof mkRow === 'function' ? mkRow(mkSt) : '') + '</span>'")
     expect(run).not.toContain('class="pulse"')
   })

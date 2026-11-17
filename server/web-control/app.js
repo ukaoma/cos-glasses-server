@@ -2232,7 +2232,8 @@
   }
   function listWords(names) { return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]; }
   function runRow(s, activeNow) {
-    var key = splitSessionId(s.provider, s.session_id), mkSt = sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '';
+    var key = splitSessionId(s.provider, s.session_id);
+    var mkSt = typeof mkRow === 'function' || typeof rgSlot === 'function' ? (sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '') : '';
     // 7.0.1: with the live stream, a working row's clock ticks every second from the turn's start (liveTickOnce).
     // Without it (an older server, the switch off), the minute line 7.0.0 showed.
     var since = activeNow && typeof liveOn === 'function' && liveOn() ? liveSince(s) : null;
