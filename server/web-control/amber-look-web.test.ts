@@ -95,7 +95,19 @@ function themeRun(options: { store?: Record<string, string>; dark?: boolean; sto
   const XHR = function () { options.calls?.push('XMLHttpRequest') }
   const consoleRec = { log: rec('console.log'), info: rec('console.info'), warn: rec('console.warn'), error: rec('console.error'), debug: rec('console.debug') }
   window.fetch = rec('fetch'); window.XMLHttpRequest = XHR; window.navigator = { sendBeacon: rec('sendBeacon') }; window.console = consoleRec
-  new Function('window', 'document', 'localStorage', 'fetch', 'XMLHttpRequest', 'navigator', 'console', source.slice(start, end))(window, { documentElement: de }, localStorage, window.fetch, XHR, window.navigator, consoleRec)
+  // Q1 00:5x: every other way a page can send or leave: a cookie write, a socket, an image or event-stream request, a
+  // message to another frame, and a navigation. Each is a recorder, so a mutant that uses one is named, never just thrown.
+  const ctorRec = (name: string) => function (this: any) { options.calls?.push(name) } as unknown as new (...a: unknown[]) => unknown
+  const WebSocketRec = ctorRec('WebSocket'), EventSourceRec = ctorRec('EventSource')
+  const ImageRec = function (this: any) { options.calls?.push('Image'); Object.defineProperty(this, 'src', { set: () => { options.calls?.push('Image.src') } }) } as unknown as new () => unknown
+  const doc: any = { documentElement: de }
+  Object.defineProperty(doc, 'cookie', { get: () => '', set: () => { options.calls?.push('document.cookie') } })
+  const location: any = { assign: rec('location.assign'), replace: rec('location.replace') }
+  Object.defineProperty(location, 'href', { get: () => 'https://x/control/', set: () => { options.calls?.push('location.href') } })
+  window.WebSocket = WebSocketRec; window.EventSource = EventSourceRec; window.Image = ImageRec; window.postMessage = rec('postMessage'); window.location = location
+  window.parent = { postMessage: rec('parent.postMessage') }; window.top = window.parent
+  new Function('window', 'document', 'localStorage', 'fetch', 'XMLHttpRequest', 'navigator', 'console', 'WebSocket', 'EventSource', 'Image', 'postMessage', 'location',
+    source.slice(start, end))(window, doc, localStorage, window.fetch, XHR, window.navigator, consoleRec, WebSocketRec, EventSourceRec, ImageRec, window.postMessage, location)
   return { store, attrs, order, look: window.CosLook, theme: window.CosTheme, story: window.CosStorySize, changeSystem: (dark: boolean) => { media.matches = dark; mediaChanged() } }
 }
 
@@ -222,7 +234,7 @@ describe('Amber is the default look; Espresso is chosen per device, before the f
 // sent, set on the server, logged or counted, including a switch back to Espresso.
 describe('the look makes no request, no server setting and no log line', () => {
   const APP = readFileSync(join(HERE, 'app.js'), 'utf8'), SETTINGS = readFileSync(join(HERE, 'panes', 'settings.js'), 'utf8')
-  const NETWORK = /\bfetch\(|XMLHttpRequest|sendBeacon|\bapi\(|apiAnswer\(|clientLog|layoutCrumb|crumb\(|console\./
+  const NETWORK = /\bfetch\(|XMLHttpRequest|sendBeacon|\bapi\(|apiAnswer\(|clientLog|layoutCrumb|crumb\(|console\.|document\.cookie|WebSocket|EventSource|new Image\b|\.src\s*=|postMessage|\blocation\s*(\.(href|assign|replace)|=)|window\.open\(/
   it('opening and choosing a look call no request, beacon or console, in any order (a mutant that reports a revert is caught)', () => {
     const run = (source: string) => {
       const calls: string[] = []
@@ -234,6 +246,24 @@ describe('the look makes no request, no server setting and no log line', () => {
     const reporting = THEME.replace("try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {}", "try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} if (choice === 'espresso') fetch('/api/look-revert');")
     expect(reporting).not.toBe(THEME)
     expect(run(reporting)).toEqual(['fetch'])
+    // Q1 00:5x: each other way out, planted in set() for a switch to Espresso, is named by the recorders.
+    const plant = (code: string) => THEME.replace("try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {}", "try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} if (choice === 'espresso') { " + code + " }")
+    const ways: Array<[string, string[]]> = [
+      ["document.cookie = 'look=' + choice;", ['document.cookie']],
+      ["new WebSocket('wss://x/look');", ['WebSocket']],
+      ["new Image().src = '/api/look?c=' + choice;", ['Image', 'Image.src']],
+      ["new EventSource('/api/look');", ['EventSource']],
+      ["window.parent.postMessage(choice, '*');", ['parent.postMessage']],
+      ["postMessage(choice, '*');", ['postMessage']],
+      ["location.href = '/api/look?c=' + choice;", ['location.href']],
+      ["location.assign('/api/look');", ['location.assign']],
+      ["navigator.sendBeacon('/api/look', choice);", ['sendBeacon']],
+    ]
+    for (const [code, want] of ways) {
+      const mutant = plant(code)
+      expect(mutant, code).not.toBe(THEME)
+      expect(run(mutant), code).toEqual(want)
+    }
   })
   it('the look code in theme.js, app.js and settings.js contains no request, server route or log call', () => {
     // Ends at the next block (fp-wait), never at a line inside the look code (Codex 00:1x: the old end marker moved
@@ -241,6 +271,8 @@ describe('the look makes no request, no server setting and no log line', () => {
     const lookBlock = THEME.slice(THEME.indexOf("var LOOK_KEY = 'cos_web_look';"), THEME.indexOf('// 7.0.19: the first paint'))
     expect(lookBlock.length).toBeGreaterThan(200)
     for (const part of ['function lookRead', 'function lookApply', 'window.CosLook', 'choice: function', 'set: function', 'localStorage.setItem(LOOK_KEY']) expect(lookBlock).toContain(part)
+    // Q1 00:5x: the source pattern names each other way out too; each planted line is caught.
+    for (const code of ["document.cookie = 'a';", "new WebSocket('w');", "new Image().src = 'u';", "x.src = 'u';", "new EventSource('e');", "postMessage(1, '*');", "location.href = 'u';", "location = 'u';", "location.assign('u');", "location.replace('u');", "window.open('u');"]) expect(code, code).toMatch(NETWORK)
     expect(lookBlock).not.toMatch(NETWORK)
     const paint = APP.slice(APP.indexOf('function paintLook()'), APP.indexOf('function paintStorySize()'))
     expect(paint.length).toBeGreaterThan(100)
