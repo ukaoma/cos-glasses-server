@@ -1219,6 +1219,9 @@
       RG.panel = panel; panel.classList.add('rg-on');
     }
     G.sync(RG.rows);
+    // Who plays may have changed (Codex 11:4x): on the lazy path the glass mounts after renderRunning's own look ran, so the
+    // rail or top-bar mark would keep playing beside it until the next scroll or the 15 s look.
+    mkSoon();
   }
   function rgWake() { var G = RG.panel ? rgGlass() : null; if (G && typeof G.wake === 'function') { try { G.wake(); } catch (_e) {} } }
   function rgAnimating() { var G = RG.panel && !RG.failed ? rgGlass() : null; try { return !!(G && typeof G.animating === 'function' && G.animating()); } catch (_e) { return false; } }

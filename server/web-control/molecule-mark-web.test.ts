@@ -433,6 +433,18 @@ describe('7.0.55: rgRender mounts once and tells the glass only what the rows sa
     await new Promise(r => setTimeout(r, 0))
     expect(g.mounts).toBe(1); expect(g.synced.at(-1)).toEqual([{ key: 'claude|a', state: 'work' }])
   })
+  it('the script arriving later hands the motion to the glass at once: the rail stops when the glass starts (Codex 11:4x)', async () => {
+    const g = fakeGlass(); g.anim = true
+    const p = page({ lazyGlass: g }); p.working()
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    p.api.mkSync()
+    expect(p.live()).toEqual([p.rail])                          // the script is still loading: the rail plays
+    await new Promise(r => setTimeout(r, 0))                    // it arrives: mount, sync
+    expect(g.mounts).toBe(1)
+    expect(p.timers.timeouts.size).toBe(1)                      // and a look is asked for at once, not left to scroll or 15 s
+    p.flush()
+    expect(p.live()).toEqual([]); expect(p.rail.attrs['data-mk']).toBe('rest')
+  })
   it('a script that will not load leaves the strips', async () => {
     const p = page({ lazyGlass: 'fails' })
     p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
