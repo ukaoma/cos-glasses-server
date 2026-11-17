@@ -234,6 +234,13 @@ describe('run-glass: what moves, and when', () => {
     p.G.sync([work('a', { done: 2, total: 3 })]); expect(p.G.state().frames).toBe(f0 + 2)
     expect(p.draws[p.draws.length - 1].necks).toEqual([p.G.LIMITS.NECK, p.G.LIMITS.NECK, 0])
   })
+  it('Reduce Motion: a row that moves inside the panel (same size, same state) gets its still redrawn where it now is (Codex 11:3x)', () => {
+    const p = page({ reduced: true }); p.G.mount(p.panel); p.slot('a', 340)
+    p.G.sync([work('a', { done: 1, total: 3 })]); const f0 = p.G.state().frames
+    p.G.wake(); expect(p.G.state().frames).toBe(f0)          // nothing moved: no new still
+    p.slot('a', 420); p.G.wake(); expect(p.G.state().frames).toBe(f0 + 1)   // the row moved down 80 px
+    p.G.wake(); expect(p.G.state().frames).toBe(f0 + 1)
+  })
   it('turning Reduce Motion on mid-loop stops the loop', () => {
     const p = page(); p.G.mount(p.panel); p.slot('a'); p.G.sync([work('a')]); p.run(200)
     p.setReduced(true); p.run(50); expect(p.pending()).toBe(0)

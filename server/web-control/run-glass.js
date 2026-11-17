@@ -259,10 +259,14 @@
 
   function rot(ry, rx) { var cy = Math.cos(ry), sy = Math.sin(ry), cx = Math.cos(rx), sx = Math.sin(rx); return [cy, sy * sx, sy * cx, 0, cx, -sx, -sy, cy * sx, cy * cx]; }
 
-  /** A still frame: the pose for each row's real progress, no drift, no turn. Drawn again only when something changed. */
+  /** A still frame: the pose for each row's real progress, no drift, no turn. Drawn again only when something changed,
+   *  including where a slot sits in the panel (W1, Codex 11:3x: a row that moved with the panel's size unchanged must not
+   *  leave its glass where the row was). */
   function drawStill() {
     var keys = C.order.filter(function (k) { return !!slotFor(k); });
-    var sig = keys.map(function (k) { var m = C.rows[k]; return k + ':' + m.state + ':' + m.done + '/' + m.total; }).join('|') + '@' + (C.panel ? C.panel.clientWidth + 'x' + C.panel.clientHeight : '') + ':' + (window.devicePixelRatio || 1);
+    var pr = C.panel && C.panel.getBoundingClientRect ? C.panel.getBoundingClientRect() : { left: 0, top: 0 };
+    var at = function (k) { var r = slotFor(k).getBoundingClientRect(); return Math.round(r.left - pr.left) + ',' + Math.round(r.top - pr.top); };
+    var sig = keys.map(function (k) { var m = C.rows[k]; return k + ':' + m.state + ':' + m.done + '/' + m.total + ':' + at(k); }).join('|') + '@' + (C.panel ? C.panel.clientWidth + 'x' + C.panel.clientHeight : '') + ':' + (window.devicePixelRatio || 1);
     if (sig === C.stillSig) return;
     C.stillSig = sig;
     keys.forEach(function (k) { var m = C.rows[k], j; m.e = targetE(m); for (j = 0; j < 3; j++) m.nk[j] = targetNeck(m, j); for (j = 0; j < 7; j++) m.pulse[j] = 0; m.drops.length = 0; m.bead = false; });
