@@ -6202,6 +6202,118 @@
     }, 3000);
   }
 
+  // ── the send gates, written once (7.0.53, the lead's ruling (c), 21:0x; W1) ──
+  // The reader's own gates (sendSessionTurn, watchTurn, renderVerdict), for a composer that is not the reader. The COS
+  // thread's Answer box is the only caller in 7.0.53: the reader and Today's sheet keep their own code, and
+  // session-gates-parity-web.test.ts pins these words and this order to the reader's, and records where Today's copy
+  // differs, so drift in any of the three fails a test until the follow-up moves both onto this. In order:
+  //   no words; a file still uploading or failed; the caution (another app holds the session and looks idle: asked
+  //   before the first send); one send at a time; then continueSession (attach or reuse the binding, one key per
+  //   draft, park on a busy refusal, the server's refusals word for word); a lost answer becomes Retry; the 3-minute
+  //   watch of the sent turn. Two rulings differ from the reader on purpose:
+  //   - the watch pauses while the page is hidden (Today's newer rule, 6.99.30);
+  //   - no turn-end answer and no automatic resend: this is a plain message (X1's message scope), sent as he wrote it,
+  //     and a changed session always shows the box (Send it anyway carries that refusal's revision).
+  var GATE_COPY = {
+    empty: 'Write a message first.',
+    uploading: 'A file is still uploading. Send when it finishes.',
+    fileFailed: 'A file did not upload. Retry it or remove it.',
+    lost: 'No answer from your Mac yet. It may still land. Sending again is safe; it will not post twice.',
+    unreachable: 'Could not reach your Mac.',
+    cautionTitle: 'Send into an open session?',
+    cautionBody: 'Another app on this Mac has this session open. It looks idle right now, but a reply will run with that session’s own permissions.',
+    cautionSend: 'Send anyway', cautionCancel: 'Cancel', retry: 'Retry', sendAnyway: 'Send it anyway',
+    cautionCodex: 'The Codex app has this thread open. COS will ask before the first send, then hands your message to the app’s own queue, where it shows.',
+    cautionOther: 'Another app on this Mac has this session open. COS will ask before the first send. The reply lands in the transcript; the open desk tab will not show it until you resume.',
+    live: 'Sent into the open session.', done: 'Done.',
+    refused: 'The session refused that message.',
+    ambiguous: 'COS cannot tell whether that landed. Look at the session before sending it again.'
+  };
+  var GATE_WATCH_MS = 180000, GATE_WATCH_EVERY = 3000;
+  /**
+   * One message through the gates. `opts.files` is the caller's box, or none: { state: 'none'|'waiting'|'failed'|'ready',
+   * ids: [...] }. `opts.sendAnyway`: his tap on Send it anyway, carrying that refusal's revision. Resolves to the gate
+   * that stopped it ('empty', 'uploading', 'file-failed', 'caution', 'busy') or continueSession's outcome ('sent',
+   * 'parked', 'held', 'refused', 'changed'), or 'lost' (no answer: the box says Retry).
+   */
+  function gateSend(r, text, opts) {
+    opts = opts || {};
+    var view = viewOf(r);
+    text = String(text == null ? '' : text).trim();
+    if (!text) { view.status(r, GATE_COPY.empty, 'error'); return Promise.resolve('empty'); }
+    var files = opts.files || { state: 'none' }, ids = files.state === 'ready' && Array.isArray(files.ids) ? files.ids.slice() : [];
+    if (files.state === 'waiting') { view.status(r, GATE_COPY.uploading); return Promise.resolve('uploading'); }
+    if (files.state === 'failed') { view.status(r, GATE_COPY.fileFailed, 'error'); return Promise.resolve('file-failed'); }
+    if (r.verdict && r.verdict.caution && !r.cautionAck) { r.cautionAsk = true; view.verdict(r); return Promise.resolve('caution'); }
+    if (r.sending) return Promise.resolve('busy');
+    if (r.refusal || r.cautionAsk) { r.refusal = null; r.cautionAsk = false; view.verdict(r); }
+    var rev = opts.sendAnyway ? r.sendAnyway : null; r.sendAnyway = null;
+    var send = Object.assign({}, ids.length ? { attachmentIds: ids } : {}, rev ? { acknowledgedRevision: rev } : {});
+    r.sending = true; if (view.sending) view.sending(r, true);
+    var done = function () { r.sending = false; if (view.sending) view.sending(r, false); };
+    return continueSession(r, text, send).then(function (how) { done(); return how; }, function (err) {
+      done();
+      view.status(r, '');
+      r.refusal = { copy: err && err.name === 'AbortError' ? GATE_COPY.lost : (err && err.message) || GATE_COPY.unreachable, retry: true };
+      view.verdict(r);
+      return 'lost';
+    });
+  }
+  /** Follow one sent turn to its end for up to 3 minutes of the page in view; `view.live(r)` false stops it. */
+  function gateWatch(r, bindingId, key) {
+    var view = viewOf(r);
+    clearInterval(r.watchTimer);
+    var started = Date.now();
+    r.watchTimer = setInterval(function () {
+      if (document.hidden) { started += GATE_WATCH_EVERY; return; }
+      if ((view.live && !view.live(r)) || Date.now() - started > GATE_WATCH_MS) { clearInterval(r.watchTimer); return; }
+      apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
+        if (view.live && !view.live(r)) return;
+        var b = s.body || {}, o = b.outcome;
+        if (o === 'completed') {
+          clearInterval(r.watchTimer);
+          if (b.via === 'live') { sxNoteGate(r, true); view.status(r, GATE_COPY.live); }
+          else { r.stoppedAt = Date.now(); view.status(r, GATE_COPY.done); }
+          sxRepaint(r);
+        } else if (o === 'refused') { clearInterval(r.watchTimer); view.status(r, b.reasonCopy || GATE_COPY.refused, 'error'); }
+        else if (o === 'ambiguous') { clearInterval(r.watchTimer); view.status(r, b.reasonCopy || GATE_COPY.ambiguous, 'error'); }
+      }).catch(function () {});
+    }, GATE_WATCH_EVERY);
+  }
+  /**
+   * The verdict slot, as the reader draws it: the caution's confirm, a refusal box (Send it anyway, Retry), the
+   * working note, or the session's own refusal. `openHtml` is the caller's way into the session where the reader
+   * offers Fork (a fork is the reader's; the thread box never makes one). `tag` is added to each gate button, so the
+   * caller's own delegate can route the tap (gateAction reads data-gate).
+   */
+  function gateVerdictHtml(r, openHtml, tag) {
+    var v = r.verdict, f = r.refusal, open = openHtml || '', at = tag || '';
+    var box = function (copy, supplement, buttons) {
+      return '<div class="sx-box refusal" role="status"><p>' + esc(copy) + '</p>' + (supplement ? '<p class="sx-box-sub">' + esc(supplement) + '</p>' : '') +
+        (buttons ? '<div class="sx-box-actions">' + buttons + '</div>' : '') + '</div>';
+    };
+    if (r.cautionAsk) {
+      return '<div class="sx-box confirm" role="alertdialog"><strong>' + esc(GATE_COPY.cautionTitle) + '</strong><p>' + esc(GATE_COPY.cautionBody) + '</p>' +
+        '<div class="sx-box-actions"><button type="button" class="cx-btn danger" data-gate="caution-send"' + at + '>' + esc(GATE_COPY.cautionSend) + '</button><button type="button" class="cx-btn quiet" data-gate="caution-cancel"' + at + '>' + esc(GATE_COPY.cautionCancel) + '</button></div></div>';
+    }
+    if (f) {
+      return box(f.copy, f.supplement, (f.changed ? '<button type="button" class="cx-btn quiet" data-gate="send-anyway"' + at + '>' + esc(GATE_COPY.sendAnyway) + '</button>' : '') +
+        (f.retry ? '<button type="button" class="cx-btn quiet" data-gate="retry"' + at + '>' + esc(GATE_COPY.retry) + '</button>' : '') + (f.fork ? open : ''));
+    }
+    if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) return sxParkNoteShows(r) ? '<div class="sx-park"><p>' + esc(sxParkLine(r, false)) + '</p></div>' : '';
+    if (v && v.attachable === false && v.reasonCopy) return box(v.reasonCopy, sxSupplement(v.reason), /fork/i.test(v.reasonCopy) ? open : '');
+    return '';
+  }
+  function gateCaution(r) { var v = r.verdict; return v && v.caution ? (sxProvider(r.provider) === 'codex' ? GATE_COPY.cautionCodex : GATE_COPY.cautionOther) : ''; }
+  /** A tap inside the verdict slot ([data-gate]). `resend(opts)` sends the box's words again through gateSend. */
+  function gateAction(r, act, resend) {
+    var view = viewOf(r);
+    if (act === 'caution-send') { r.cautionAck = true; r.cautionAsk = false; view.verdict(r); return resend({}); }
+    if (act === 'caution-cancel') { r.cautionAsk = false; view.verdict(r); return Promise.resolve('cancelled'); }
+    if (act === 'retry') { r.refusal = null; view.verdict(r); return resend({}); }
+    if (act === 'send-anyway') { r.refusal = null; view.verdict(r); return resend({ sendAnyway: true }); }
+    return Promise.resolve('');
+  }
   // Fork copies the session and runs the message there. One key per draft, so a second tap or
   // a resend after a timeout finds the same job instead of making a second copy.
   function forkSession(r, text, ids) {
@@ -9004,6 +9116,7 @@
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
+    gates: { send: gateSend, watch: gateWatch, verdictHtml: gateVerdictHtml, caution: gateCaution, action: gateAction, copy: GATE_COPY, watchMs: GATE_WATCH_MS },
     parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
 

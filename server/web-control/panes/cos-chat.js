@@ -750,7 +750,10 @@
     var foot = '<div class="rr-foot">' +
       '<button type="button" class="' + (approval ? 'cx-btn primary' : 'link-btn rr-go') + '" data-cos="rr-open" data-rr="' + esc(g.key) + '">Open the session</button>' +
       (n > 1 ? '<button type="button" class="link-btn rr-count" data-cos="rr-more" data-rr="' + esc(g.key) + '" aria-expanded="' + (open ? 'true' : 'false') + '">' + (open ? 'Hide earlier replies' : (n - 1) + ' earlier ' + (n - 1 === 1 ? 'reply' : 'replies')) + '</button>' : '') +
-      '</div>';
+      // 7.0.53: Answer, only where it works (the shared gates are on this page) and never while the session waits on an
+      // approval (X1: no approve or deny from the thread; the line above says where).
+      (rrAnswerOn() && !approval ? '<button type="button" class="link-btn rr-answer-go" data-cos="rr-answer" data-rr="' + esc(g.key) + '" aria-expanded="' + (C.ans.key === g.key ? 'true' : 'false') + '">Answer</button>' : '') +
+      '</div>' + (rrAnswerOn() && !approval && C.ans.key === g.key ? '<div class="rr-answer-slot" data-rr-answer-slot="' + esc(g.key) + '"></div>' : '');
     return '<div class="rr" data-rr-row="' + esc(g.key) + '" data-item-id="' + esc(it.id) + '">' +
       '<span class="rr-glyph" aria-hidden="true"><svg class="icon"><use href="#i-sessions"/></svg></span><div class="rr-main">' +
       '<div class="rr-who"><button type="button" class="rr-name" data-cos="rr-open" data-rr="' + esc(g.key) + '">' + esc(rrTitle(g)) + '</button><span class="rr-meta">' + meta + '</span></div>' +
@@ -776,6 +779,131 @@
     var row = C.host.querySelector('[data-rr-row="' + String(key).replace(/["\\]/g, '') + '"]');
     var el = row && row.querySelector(which === 'count' ? '.rr-count' : '.rr-said[data-cos="rr-more"]');
     if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (_e) { el.focus(); } }
+  }
+  // ── the Answer box (7.0.53; the lead's 23:5x: the smaller box first; X1_thread_reply_authority.md) ──
+  // Answer on a Reply ready row opens an EMPTY box under that row, addressed to that one session ("To <name>, Claude,
+  // <short id>"). Its Send is the reader's message-only send, through the shared gates (sessionKit.gates, written once
+  // from the reader's): the same act as the Sessions composer, by the same route, to the session the row names. The COS
+  // model never sees it, and nothing from the reply's text goes with it: no prefill, no chips, plain words as he wrote
+  // them. One box at a time; the words of a closed box stay for that session while the page is open. The box is one
+  // element kept across the feed's repaints (moved into the row's new slot, never rebuilt), so his words, caret and the
+  // gates' state never jump, and the feed is not drawn again while he types in it.
+  var RR_SEND = 'Send as message only';
+  var RR_PLACEHOLDER = 'Message this session';
+  var RR_HOLD = 'COS is still answering in this session. Send again when it finishes; it will not post twice. Or open the session, where it sends on its own.';
+  C.ans = { key: '', node: null };
+  C.ansS = {};
+  C.ansDraft = {};
+  function rrKit() { var k = W.sessionKit; return k && k.gates && typeof k.gates.send === 'function' && typeof k.session === 'function' ? k : null; }
+  function rrAnswerOn() { return !!rrKit(); }
+  function rrAnswerEl(r) { return r && C.ans.key && C.ans.key === r.rrKey ? C.ans.node : null; }
+  function rrSafeKey(key) { return String(key).replace(/["\\]/g, ''); }
+  // His own tap (Answer on another row, Close) draws the feed even with focus in the box: the never-under-the-finger
+  // rule is for the feed's own repaints.
+  function rrPaintNow() { C.paintTap = true; try { paintFeed(false); } finally { C.paintTap = false; } }
+  var RR_VIEW = {
+    status: function (r, text, kind) { r.note = { text: text || '', kind: kind || '' }; rrAnswerPaint(r); },
+    // Sent, or waiting in line: the status line set right after says which, in the gates' own words.
+    pending: function () {},
+    clear: function (r, text) {
+      var said = String(text).trim(), n = rrAnswerEl(r), box = n && n.querySelector('[data-cos-rr-input]');
+      if (box && box.value.trim() === said) { box.value = ''; if (W.autoGrow) W.autoGrow(box); }
+      if (String(C.ansDraft[r.rrKey] || '').trim() === said) delete C.ansDraft[r.rrKey];
+      // The next message is another draft, with a key of its own.
+      if (r.draft && String(r.draft.text).trim() === said) r.draft = null;
+    },
+    verdict: function (r) { rrAnswerPaint(r); },
+    stateChanged: function (r) { rrAnswerPaint(r); },
+    // The thread does not hold a message for later (the reader does): it says so, and the words stay in the box.
+    hold: function (r) { RR_VIEW.status(r, RR_HOLD, 'error'); },
+    watch: function (r, bindingId, key) { var K = rrKit(); if (K) K.gates.watch(r, bindingId, key); },
+    queue: function () {},
+    live: function (r) { return C.ansS[r.rrKey] === r; },
+    sending: function (r, on) {
+      var n = rrAnswerEl(r); if (!n) return;
+      Array.prototype.forEach.call(n.querySelectorAll('button'), function (b) { b.disabled = !!on; });
+      var box = n.querySelector('[data-cos-rr-input]'); if (box) box.readOnly = !!on;
+    }
+  };
+  function rrSessionFor(g) {
+    var K = rrKit();
+    if (!C.ansS[g.key]) { C.ansS[g.key] = K.session(g.provider, g.id, RR_VIEW); C.ansS[g.key].rrKey = g.key; }
+    return C.ansS[g.key];
+  }
+  function rrAnswerNode(g) {
+    var id = 'rr-a-' + rrSafeKey(g.key).replace(/[^a-z0-9]/gi, '-');
+    var f = document.createElement('form');
+    f.className = 'rr-answer';
+    f.setAttribute('data-cos-rr-answer', g.key);
+    f.innerHTML = '<p class="rr-to" id="' + id + '-to">To <strong>' + esc(rrTitle(g)) + '</strong>, ' + esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(String(g.id).slice(0, 8)) + '</span></p>' +
+      '<textarea class="rr-input" rows="2" data-cos-rr-input="' + esc(g.key) + '" aria-labelledby="' + id + '-to" placeholder="' + esc(RR_PLACEHOLDER) + '"></textarea>' +
+      '<p class="rr-caution hidden" data-rr-caution></p>' +
+      '<div class="rr-verdict" data-rr-verdict></div>' +
+      '<p class="rr-note" data-rr-note role="status" aria-live="polite"></p>' +
+      '<div class="rr-answer-actions"><button type="submit" class="cx-btn" data-rr-send>' + esc(RR_SEND) + '</button>' +
+      '<button type="button" class="link-btn" data-cos="rr-answer-close" data-rr="' + esc(g.key) + '">Close</button></div>';
+    var box = f.querySelector('[data-cos-rr-input]');
+    if (box) box.value = C.ansDraft[g.key] || '';
+    return f;
+  }
+  function rrAnswerPaint(r) {
+    var K = rrKit(), n = rrAnswerEl(r); if (!K || !n) return;
+    var key = r.rrKey, note = n.querySelector('[data-rr-note]'), slot = n.querySelector('[data-rr-verdict]'), caution = n.querySelector('[data-rr-caution]');
+    // Where the reader offers Fork, the thread offers the session itself (a fork is the reader's).
+    var open = '<button type="button" class="cx-btn quiet" data-cos="rr-open" data-rr="' + esc(key) + '">Open the session</button>';
+    var html = K.gates.verdictHtml(r, open, ' data-cos="rr-gate" data-rr="' + esc(key) + '"');
+    if (slot && slot.getAttribute('data-html') !== html) { slot.innerHTML = html; slot.setAttribute('data-html', html); }
+    var line = K.gates.caution(r);
+    if (caution) { caution.textContent = line; caution.classList.toggle('hidden', !line); }
+    if (note) { note.textContent = (r.note && r.note.text) || ''; note.classList.toggle('error', !!(r.note && r.note.kind === 'error')); }
+  }
+  function rrAnswer(key) {
+    var g = rrFind(key), K = rrKit();
+    if (!g || !K) return;
+    if (C.ans.key !== key) {
+      rrAnswerKeep();
+      var r = rrSessionFor(g);
+      C.ans = { key: key, node: rrAnswerNode(g) };
+      rrPaintNow();
+      rrAnswerPaint(r);
+      // What the session takes right now (the caution, or why it cannot): the reader's own probe, painted here.
+      if (!r.probing) K.probe(r);
+    }
+    var box = C.ans.node && C.ans.node.querySelector('[data-cos-rr-input]');
+    if (box && box.focus) { try { box.focus({ preventScroll: true }); } catch (_e) { box.focus(); } }
+  }
+  // His words in the open box, kept for that session when it closes or another opens.
+  function rrAnswerKeep() {
+    var box = C.ans.node && C.ans.node.querySelector('[data-cos-rr-input]');
+    if (C.ans.key && box) { if (box.value.trim()) C.ansDraft[C.ans.key] = box.value; else delete C.ansDraft[C.ans.key]; }
+  }
+  function rrAnswerClose(key) {
+    if (!key || C.ans.key !== key) return;
+    rrAnswerKeep();
+    C.ans = { key: '', node: null };
+    rrPaintNow();
+    var row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(key) + '"]'), go = row && row.querySelector('.rr-answer-go');
+    if (go && go.focus) { try { go.focus({ preventScroll: true }); } catch (_e) { go.focus(); } }
+  }
+  function rrAnswerSend(key, extra) {
+    var K = rrKit(), r = C.ansS[key], n = key && C.ans.key === key ? C.ans.node : null;
+    if (!K || !r || !n) return Promise.resolve('');
+    var box = n.querySelector('[data-cos-rr-input]');
+    return K.gates.send(r, box ? box.value : '', extra || {});
+  }
+  function rrGate(key, act) {
+    var K = rrKit(), r = C.ansS[key];
+    if (!K || !r || !key || C.ans.key !== key) return Promise.resolve('');
+    return K.gates.action(r, act, function (extra) { return rrAnswerSend(key, extra); });
+  }
+  // After the feed is drawn again: the open box goes into its row's new slot, as the same element. No slot (the row
+  // went, or its session now waits on an approval): the box closes and keeps his words.
+  function rrAnswerPlace(feed, focused) {
+    if (!C.ans.key) return;
+    var slot = feed.querySelector('[data-rr-answer-slot="' + rrSafeKey(C.ans.key) + '"]');
+    if (!slot || !C.ans.node) { rrAnswerKeep(); C.ans = { key: '', node: null }; return; }
+    slot.appendChild(C.ans.node);
+    if (focused && C.ans.node.contains(focused) && focused.focus) { try { focused.focus({ preventScroll: true }); } catch (_e) { focused.focus(); } }
   }
   function itemHtml(item) {
     if (item.kind === 'drop' || item.kind === 'answer') {
@@ -989,8 +1117,9 @@
     var feed = C.host && C.host.querySelector('[data-cos-feed]');
     if (!feed) return;
     wantReplyNames();
-    // Never rebuild under the finger: a focused steer box or an open Move list keeps the lines as they are.
-    if (document.activeElement && feed.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+    // Never rebuild under the finger: a focused steer box or an open Move list keeps the lines as they are. 7.0.53: the
+    // Answer box's words too (a TEXTAREA).
+    if (!C.paintTap && document.activeElement && feed.contains(document.activeElement) && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
     var html;
     if (C.items === null && C.feedState !== 'error') html = W.skeletonRows(3);
     else if (C.feedState === 'error' && C.items === null) html = '<div class="cx-notice warn"><span>' + esc(C.feedError) + '</span></div><button type="button" class="cx-btn quiet" data-cos="retry">Try again</button>';
@@ -1040,7 +1169,9 @@
       keepPlace(function () { paintFeed(false); }, true);
       return;
     }
+    var focused = C.ans.node && document.activeElement && C.ans.node.contains(document.activeElement) ? document.activeElement : null;
     feed.innerHTML = '<div data-cos-content>' + html + '</div>';
+    rrAnswerPlace(feed, focused);
     if (historyOn()) paintTrim(feed);
     watchTail(feed);
     if (stick) followLatest();
@@ -3116,6 +3247,9 @@
     if (what === 'tl-open') return openNote(t);
     if (what === 'rr-open') return rrOpen(t.getAttribute('data-rr'));
     if (what === 'rr-more') return rrToggle(t.getAttribute('data-rr'), t.tagName === 'BUTTON' ? 'count' : 'words');
+    if (what === 'rr-answer') return rrAnswer(t.getAttribute('data-rr'));
+    if (what === 'rr-answer-close') return rrAnswerClose(t.getAttribute('data-rr'));
+    if (what === 'rr-gate') return rrGate(t.getAttribute('data-rr'), t.getAttribute('data-gate'));
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -3159,6 +3293,12 @@
   }
   function onInput(e) {
     if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cos-prep-steer')) return onPrepInput(e.target);
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cos-rr-input')) {
+      var rk = e.target.getAttribute('data-cos-rr-input');
+      if (e.target.value.trim()) C.ansDraft[rk] = e.target.value; else delete C.ansDraft[rk];
+      if (W.autoGrow) W.autoGrow(e.target);
+      return;
+    }
     if (isComposerInput(e.target)) { var k = kOf(e.target); k.draft = e.target.value; saveDraft(k); W.autoGrow(e.target); paintButtons(k); }
   }
   function onChangeEvent(e) {
@@ -3177,6 +3317,8 @@
   function onSubmit(e) {
     var f = e.target.closest && e.target.closest('[data-cos-steer]');
     if (f) { e.preventDefault(); steer(f.getAttribute('data-cos-steer'), (f.querySelector('input') || {}).value || ''); return true; }
+    var ra = e.target.closest && e.target.closest('[data-cos-rr-answer]');
+    if (ra) { e.preventDefault(); rrAnswerSend(ra.getAttribute('data-cos-rr-answer'), {}); return true; }
     if (e.target.matches && e.target.matches('[data-cos-form]')) { e.preventDefault(); return true; }
     if (e.target.matches && e.target.matches('[data-cos-prep-form]')) { e.preventDefault(); return true; }
     return false;
@@ -3392,7 +3534,7 @@
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
-    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
+    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
     _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
     _steer: steer, _cancel: cancel,
