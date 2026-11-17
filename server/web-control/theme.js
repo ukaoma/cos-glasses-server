@@ -77,12 +77,14 @@
     else de.setAttribute('data-look', 'amber');
     return choice;
   }
+  // The look on screen is held here, so the Settings check always names what he sees, even when storage refuses the
+  // write (Codex 00:00, P2): the write is best effort and only decides the next open.
+  var lookNow = lookApply(lookRead());
   window.CosLook = {
-    choice: lookRead,
+    choice: function () { return lookNow; },
     // His choice is stored as he made it, so a later change of the default never changes it for him.
-    set: function (choice) { choice = choice === 'espresso' ? 'espresso' : 'amber'; try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} return lookApply(choice); }
+    set: function (choice) { choice = choice === 'espresso' ? 'espresso' : 'amber'; try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} lookNow = lookApply(choice); return lookNow; }
   };
-  lookApply(lookRead());
   // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
   // never shows a mark that nothing would take away. app.js removes the class when the sign-in card or the app shows.
   document.documentElement.classList.add('fp-wait');

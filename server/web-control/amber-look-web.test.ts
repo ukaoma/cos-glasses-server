@@ -75,14 +75,14 @@ function readable(css: string) {
     }
   }
 }
-function themeRun(options: { store?: Record<string, string>; dark?: boolean; storageThrows?: boolean; source?: string; calls?: string[] } = {}) {
+function themeRun(options: { store?: Record<string, string>; dark?: boolean; storageThrows?: boolean; writeThrows?: boolean; source?: string; calls?: string[] } = {}) {
   const store = { ...options.store }, attrs: Record<string, string> = {}, order: string[] = []
   let mediaChanged = () => {}
   const media = { matches: !!options.dark, addEventListener: (_type: string, fn: () => void) => { mediaChanged = fn } }
   const de = { setAttribute: (k: string, v: string) => { attrs[k] = v; order.push(k + '=' + v) }, hasAttribute: (k: string) => Object.hasOwn(attrs, k), removeAttribute: (k: string) => { delete attrs[k]; order.push('remove:' + k) }, classList: { add: (c: string) => order.push('class:' + c) } }
   const localStorage = {
     getItem: (key: string) => { if (options.storageThrows) throw new Error('SecurityError'); return store[key] ?? null },
-    setItem: (key: string, value: string) => { if (options.storageThrows) throw new Error('SecurityError'); store[key] = value },
+    setItem: (key: string, value: string) => { if (options.storageThrows || options.writeThrows) throw new Error('QuotaExceededError'); store[key] = value },
     removeItem: (key: string) => { if (options.storageThrows) throw new Error('SecurityError'); delete store[key] },
   }
   const window: any = { matchMedia: () => media }
@@ -185,6 +185,26 @@ describe('Amber is the default look; Espresso is chosen per device, before the f
     // Anything else asked for is Amber, the default; it never turns the look off.
     expect(t.look.set('__proto__')).toBe('amber')
     expect(t.attrs['data-look']).toBe('amber')
+  })
+  it('a refused write still changes the look, and the choice names what is on screen (Codex 00:00 P2)', () => {
+    // Nothing stored, writes refused: Espresso is shown and named; the next open is Amber, the default.
+    const t = themeRun({ writeThrows: true })
+    expect(t.look.set('espresso')).toBe('espresso')
+    expect(t.attrs).not.toHaveProperty('data-look')
+    expect(t.look.choice()).toBe('espresso')
+    expect(t.store).not.toHaveProperty('cos_web_look')
+    // A stale saved Espresso and a refused write: Amber is shown and named, though storage still says espresso.
+    const s = themeRun({ store: { cos_web_look: 'espresso' }, writeThrows: true })
+    expect(s.look.choice()).toBe('espresso')
+    expect(s.look.set('amber')).toBe('amber')
+    expect(s.attrs['data-look']).toBe('amber')
+    expect(s.look.choice()).toBe('amber')
+    expect(s.store.cos_web_look).toBe('espresso')
+    // Reads and writes both blocked: the same.
+    const b = themeRun({ storageThrows: true })
+    b.look.set('espresso')
+    expect(b.look.choice()).toBe('espresso')
+    expect(b.attrs).not.toHaveProperty('data-look')
   })
   it('a system theme change keeps the look', () => {
     for (const look of ['amber', 'espresso']) {
