@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { derivedFields, listRow } from './session-row-fixture.js'
+import { derivedFields, listRow } from '../../test-support/session-row-fixture.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')

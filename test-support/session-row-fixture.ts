@@ -1,10 +1,10 @@
 /**
- * Session list rows for the web tests, built the way the server builds them (X1 01:0x): routes/agent-sessions.ts
+ * Session list rows for the web tests (moved out of server/web-control in 7.0.54 so it never ships; the lead 06:3x), built the way the server builds them (X1 01:0x): routes/agent-sessions.ts
  * toEntry sends `state` as running or recent, and the one derived state (agent_state, waiting_kind and the rest) comes
  * from lib/session-state-derive.ts derivedRowFields, the same function the route calls. A field the server does not
  * send cannot make a test pass. The session detail route (GET /api/agent-sessions/<p>/<id>) spreads the same fields.
  */
-import { derivedRowFields, type AgentState, type DerivedSessionState } from '../lib/session-state-derive.js'
+import { derivedRowFields, type AgentState, type DerivedSessionState } from '../server/lib/session-state-derive.js'
 
 type Extra = Omit<Partial<DerivedSessionState>, 'agent_state' | 'deadScans' | 'deadSince'>
 
