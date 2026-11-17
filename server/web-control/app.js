@@ -5825,6 +5825,11 @@
   var PHONE_TRIP_STORE = 'cos.phoneTrip', PHONE_TRIP_MAX_MS = 30 * 60000;
   function phoneTripSave(t) { try { sessionStorage.setItem(PHONE_TRIP_STORE, JSON.stringify(t)); } catch (_e) { /* no storage: the BFCache return still works */ } }
   function phoneTripDrop() { try { sessionStorage.removeItem(PHONE_TRIP_STORE); } catch (_e) { /* nothing kept */ } }
+  function phoneTripThread(opts) {
+    var t = opts && opts.from === 'thread' && typeof opts.thread === 'function' ? opts.thread() : null;
+    if (!t || !/^[A-Za-z0-9_.:-]{1,160}$/.test(String(t.item || ''))) return {};
+    return { from: 'thread', item: String(t.item), top: typeof t.top === 'number' && isFinite(t.top) ? Math.round(t.top) : null };
+  }
   function phoneTripRead() {
     var raw = null, t = null;
     try { raw = sessionStorage.getItem(PHONE_TRIP_STORE); } catch (_e) { return null; }
@@ -5832,7 +5837,9 @@
     try { t = JSON.parse(raw); } catch (_e) { t = null; }
     var age = t && typeof t.at === 'number' ? Date.now() - t.at : -1;
     if (!t || t.v !== 1 || typeof t.provider !== 'string' || typeof t.id !== 'string' || typeof t.key !== 'string' || typeof t.bindingId !== 'string'
-      || typeof t.text !== 'string' || !t.text || !(age >= 0 && age <= PHONE_TRIP_MAX_MS)) { phoneTripDrop(); return null; }
+      || typeof t.text !== 'string' || !t.text || !(age >= 0 && age <= PHONE_TRIP_MAX_MS)
+      // 7.0.53: a thread record names its row's item; anything else under `from` is not a record this page wrote.
+      || (t.from !== undefined && (t.from !== 'thread' || typeof t.item !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(t.item) || !(t.top === null || (typeof t.top === 'number' && isFinite(t.top)))))) { phoneTripDrop(); return null; }
     return t;
   }
   // The approval page's Back (X1's contract): history.back() when it can, else this fixed address. It carries
@@ -5844,12 +5851,14 @@
   var PHONE_RETURN_LOAD = typeof location === 'object' && !!location && location.hash === '#/phone-return';
   if (PHONE_RETURN_LOAD) {
     var phoneBack = phoneTripRead();
-    try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/') : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
+    try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? (phoneBack.from === 'thread' ? '#/messages/cos' : '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/')) : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
   }
   function phoneTripRestore(r, opts) {
     if (!PHONE_RETURN_LOAD) return;
     var t = phoneTripRead();
     if (!t || t.provider !== r.provider || t.id !== r.id) return;
+    // A record from the thread goes back into the thread's box only, and the reader's into the reader's (7.0.53).
+    if ((t.from === 'thread') !== !!(opts && opts.from === 'thread')) return;
     PHONE_RETURN_LOAD = false;
     phoneTripDrop();
     var view = phoneApprovalView(r, opts);
@@ -5915,7 +5924,10 @@
     form.classList.add('pa-on');
     var go = document.createElement('button');
     go.type = 'button'; go.className = 'pa-go'; go.setAttribute('data-phone-offer', '1');
-    go.setAttribute(view.prefix === 'ta' ? 'data-ta' : 'data-action', view.prefix === 'ta' ? 'approve-phone' : 'approve-on-phone');
+    // Each composer's own delegate routes the tap: Today's sheet (data-ta), the COS thread's Answer box (data-cos, 7.0.53),
+    // else the reader (data-action).
+    var goAttr = { ta: ['data-ta', 'approve-phone'], rr: ['data-cos', 'rr-phone'] }[view.prefix] || ['data-action', 'approve-on-phone'];
+    go.setAttribute(goAttr[0], goAttr[1]);
     phoneGoLabel(go, false);
     if (view.input && view.input.parentNode === form) form.insertBefore(go, view.input.nextSibling); else form.appendChild(go);
     form.__paEntry = { r: r, opts: opts };   // the quiet label and the reason come from phoneBusyApply, called right after
@@ -6063,7 +6075,9 @@
           say('Opening the approval page.');
           location.assign(body.signerUrl);
           // After the call: a navigation that throws keeps no record. Script runs on after assign, so this lands first.
-          phoneTripSave({ v: 1, provider: provider, id: id, key: draft.key, bindingId: b.bindingId, text: draft.text, at: Date.now() });
+          // 7.0.53 (X1): from the COS thread's Answer box, the record says so, with the row's newest item and its height on
+          // screen, so the way back is that row at that height with this box (phoneTripThread). Others are as before.
+          phoneTripSave(Object.assign({ v: 1, provider: provider, id: id, key: draft.key, bindingId: b.bindingId, text: draft.text, at: Date.now() }, phoneTripThread(opts)));
           operation.completed = true;
           WEB_KEY.navigation = { r: r, token: operation, at: Date.now(), trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
           phoneTripWatch(WEB_KEY.navigation);
@@ -9102,6 +9116,8 @@
   };
   window.COSWeb.sessionKit = {
     phoneOffer: paintWebKeyOffer, approvePhone: approveOnPhone,
+    // 7.0.53: on a load back from the approval page for a message sent from the COS thread, which row to put back.
+    phoneReturn: function () { var t = PHONE_RETURN_LOAD ? phoneTripRead() : null; return t && t.from === 'thread' ? { provider: t.provider, id: t.id, item: t.item, top: t.top } : null; },
     // A session object for continueSession, with the overlay's own view (READER_VIEW's methods).
     session: function (provider, id, view) {
       return { provider: provider, id: id, draft: null, held: [], view: view, verdict: null, refusal: null, cautionAck: false, feed: newFeed(), live: null, queued: 0 };

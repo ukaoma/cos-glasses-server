@@ -46,7 +46,7 @@ class El {
   removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; readerWidth?: number; hash?: string; trip?: Record<string, unknown> | string; storageThrows?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta' | 'rr'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any>; standalone?: boolean; readerWidth?: number; hash?: string; trip?: Record<string, unknown> | string; storageThrows?: boolean; turnStatus?: (path: string) => { status: number; body: any } | Promise<{ status: number; body: any }> }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
   form.children.push(input, actions); input.parentNode = form; actions.parentNode = form; actions.children.push(send); send.parentNode = actions
@@ -1292,5 +1292,68 @@ describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about i
       expect(c.parentNode === h.body).toBe(beside)
       expect(c.parentNode === h.chat).toBe(!beside)
     }
+  })
+})
+
+describe('7.0.53: the phone trip from the COS thread\'s Answer box (W1; X1: from: "thread", back to #/messages/cos)', () => {
+  const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
+  const trip = (over: Record<string, unknown> = {}) => ({ v: 1, provider: 'claude', id: SID, key: 'ct-key-trip01', bindingId: 'b-1', text: 'Ship it.', at: Date.now(), ...over })
+  const thread = (item: unknown = 'fi_42', top: unknown = 212.4) => ({ from: 'thread', thread: () => ({ item, top }) })
+  it('the box\'s primary is routed by the thread\'s own delegate (data-cos="rr-phone"), never the reader\'s or Today\'s', async () => {
+    const h = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+    const go = h.form.querySelector('[data-phone-offer]')!
+    expect(go.getAttribute('data-cos')).toBe('rr-phone')
+    expect(go.getAttribute('data-action')).toBeNull()
+    expect(go.getAttribute('data-ta')).toBeNull()
+    expect(h.send.textContent).toBe('Send as message only')
+    for (const [prefix, attr, value] of [['session', 'data-action', 'approve-on-phone'], ['ta', 'data-ta', 'approve-phone']] as const) {
+      const o = harness({ signer: 1, prefix, text: 'x' }); o.paintWebKeyOffer(o.r, o.viewOpts); await flush()
+      expect(o.form.querySelector('[data-phone-offer]')!.getAttribute(attr)).toBe(value)
+    }
+  })
+  it('from the thread, the record says so, with the row\'s newest item and its height (rounded); nothing else is added', async () => {
+    const h = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+    expect(await h.approveOnPhone({ ...h.viewOpts, ...thread() })).toBe('opened')
+    const rec = JSON.parse(h.store.get('cos.phoneTrip')!)
+    expect(Object.keys(rec).sort()).toEqual(['at', 'bindingId', 'from', 'id', 'item', 'key', 'provider', 'text', 'top', 'v'])
+    expect(rec).toMatchObject({ from: 'thread', item: 'fi_42', top: 212, text: 'Ship it.' })
+  })
+  it('an item that is not a feed id, or no row at all: a plain record, exactly as before', async () => {
+    for (const t of [thread('<img>'), thread(''), { from: 'thread', thread: () => null }, { from: 'elsewhere', thread: () => ({ item: 'fi_1', top: 1 }) }]) {
+      const h = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+      expect(await h.approveOnPhone({ ...h.viewOpts, ...t })).toBe('opened')
+      expect(Object.keys(JSON.parse(h.store.get('cos.phoneTrip')!)).sort()).toEqual(['at', 'bindingId', 'id', 'key', 'provider', 'text', 'v'])
+    }
+    // A height that is not a number is kept as unknown (null), never as text.
+    const h = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+    await h.approveOnPhone({ ...h.viewOpts, ...thread('fi_7', 'x') })
+    expect(JSON.parse(h.store.get('cos.phoneTrip')!)).toMatchObject({ from: 'thread', item: 'fi_7', top: null })
+  })
+  it('a #/phone-return load with a thread record goes back to the COS thread; a record without from still opens its session', () => {
+    expect(harness({ signer: 1, hash: '#/phone-return', trip: trip({ from: 'thread', item: 'fi_42', top: 212 }) }).replaced).toEqual(['/control/#/messages/cos'])
+    expect(harness({ signer: 1, hash: '#/phone-return', trip: trip({ from: 'thread', item: 'fi_42', top: null }) }).replaced).toEqual(['/control/#/messages/cos'])
+    expect(harness({ signer: 1, hash: '#/phone-return', trip: trip() }).replaced).toEqual(['/control/#/sessions/claude/' + SID])
+  })
+  it('a record this page did not write (another from, a bad item, a text height) is dropped: Today, as for a broken one', () => {
+    for (const bad of [{ from: 'reader', item: 'fi_1', top: 1 }, { from: 'thread', item: 'a b', top: 1 }, { from: 'thread', top: 1 }, { from: 'thread', item: 'fi_1', top: '9' }]) {
+      const h = harness({ signer: 1, hash: '#/phone-return', trip: trip(bad) })
+      expect(h.replaced, JSON.stringify(bad)).toEqual(['/control/#/today'])
+      expect(h.store.size).toBe(0)
+    }
+  })
+  it('a thread record comes back only into the thread\'s box, and a reader record only into the reader\'s', async () => {
+    const h = harness({ hash: '#/phone-return', signer: 1, prefix: 'rr', text: '', trip: trip({ from: 'thread', item: 'fi_42', top: 10 }) })
+    h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+    expect(h.input.value).toBe('')
+    expect(h.store.size).toBe(1)
+    h.paintWebKeyOffer(h.r, { ...h.viewOpts, from: 'thread' }); await flush()
+    expect(h.input.value).toBe('Ship it.')
+    expect(h.plainKey()).toBe('ct-key-trip01')
+    expect(h.store.size).toBe(0)
+    const s = harness({ hash: '#/phone-return', signer: 1, prefix: 'rr', text: '', trip: trip() })
+    s.paintWebKeyOffer(s.r, { ...s.viewOpts, from: 'thread' }); await flush()
+    expect(s.input.value).toBe('')
+    expect(s.store.size).toBe(1)
   })
 })

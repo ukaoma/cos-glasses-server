@@ -402,7 +402,7 @@
     var route = W.parseRoute(), routeItem = route.args[0] === 'cos' ? route.args[1] || '' : '';
     // 7.0.52: back from a reader Open result opened, the chat goes to where he tapped. It never scrolls to the newest
     // line on the way, not even for a moment: the tapped card is put back where it was by showFocusItem.
-    var back = takeReturn(route);
+    var back = takeReturn(route) || takePhoneReturn(route);
     if (!TAIL || TAIL.feed !== feed || !TAIL.active) { watchTail(feed); if (back) { TAIL.active = true; TAIL.following = false; } else followLatest(); }
     if (back) TAIL.routeItem = routeItem;
     else if (TAIL && TAIL.routeItem !== routeItem) {
@@ -834,13 +834,15 @@
     var id = 'rr-a-' + rrSafeKey(g.key).replace(/[^a-z0-9]/gi, '-');
     var f = document.createElement('form');
     f.className = 'rr-answer';
+    // One box at a time, so these ids are unique: the phone composer finds the box by them (prefix 'rr').
+    f.id = 'rr-form';
     f.setAttribute('data-cos-rr-answer', g.key);
     f.innerHTML = '<p class="rr-to" id="' + id + '-to">To <strong>' + esc(rrTitle(g)) + '</strong>, ' + esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(String(g.id).slice(0, 8)) + '</span></p>' +
-      '<textarea class="rr-input" rows="2" data-cos-rr-input="' + esc(g.key) + '" aria-labelledby="' + id + '-to" placeholder="' + esc(RR_PLACEHOLDER) + '"></textarea>' +
+      '<textarea class="rr-input" id="rr-input" rows="2" data-cos-rr-input="' + esc(g.key) + '" aria-labelledby="' + id + '-to" placeholder="' + esc(RR_PLACEHOLDER) + '"></textarea>' +
       '<p class="rr-caution hidden" data-rr-caution></p>' +
       '<div class="rr-verdict" data-rr-verdict></div>' +
       '<p class="rr-note" data-rr-note role="status" aria-live="polite"></p>' +
-      '<div class="rr-answer-actions"><button type="submit" class="cx-btn" data-rr-send>' + esc(RR_SEND) + '</button>' +
+      '<div class="rr-answer-actions"><button type="submit" class="cx-btn" id="rr-send" data-rr-send>' + esc(RR_SEND) + '</button>' +
       '<button type="button" class="link-btn" data-cos="rr-answer-close" data-rr="' + esc(g.key) + '">Close</button></div>';
     var box = f.querySelector('[data-cos-rr-input]');
     if (box) box.value = C.ansDraft[g.key] || '';
@@ -857,6 +859,50 @@
     if (caution) { caution.textContent = line; caution.classList.toggle('hidden', !line); }
     if (note) { note.textContent = (r.note && r.note.text) || ''; note.classList.toggle('error', !!(r.note && r.note.kind === 'error')); }
   }
+  // ── the phone key from the box (7.0.53, the second piece): the reader's own phone path (sessionKit.phoneOffer and
+  // approvePhone) with this box as its composer. With an enrolled key on the Mac's ts.net name, the box's primary is
+  // Send with the key mark, and "Send as message only" stays the plain send. The trip record says it came from the
+  // thread, with this row's newest item and its height on screen, so the way back is this row at that height with this
+  // box (phoneReturn below). The words wait on the Mac, never in a URL; "Sent from your phone" only from the Mac's turn.
+  function rrPhoneOpts(r) {
+    return { r: r, prefix: 'rr', from: 'thread',
+      live: function () { return C.ans.key === r.rrKey && !!C.ans.node; },
+      askCaution: function () { r.cautionAsk = true; r.cautionVia = 'phone'; rrAnswerPaint(r); },
+      status: function (text, kind) { RR_VIEW.status(r, text, kind); },
+      files: function () { return 'none'; },
+      thread: function () {
+        var g = rrFind(r.rrKey), row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(r.rrKey) + '"]');
+        var top = row && row.getBoundingClientRect ? row.getBoundingClientRect().top : null;
+        return g ? { item: g.newest.id, top: top } : null;
+      } };
+  }
+  function rrPhoneOffer(r) { var K = rrKit(); if (K && typeof K.phoneOffer === 'function' && rrAnswerEl(r)) K.phoneOffer(r, rrPhoneOpts(r)); }
+  function rrPhone(key) {
+    var K = rrKit(), r = C.ansS[key];
+    if (!K || !r || !key || C.ans.key !== key || typeof K.approvePhone !== 'function') return Promise.resolve('');
+    return K.approvePhone(rrPhoneOpts(r));
+  }
+  // A load back from the approval page for a message sent from this thread: the row he left goes back to its height
+  // (the 7.0.52 Back placement), and its box opens with his words, through the reader's own restore. Taken once.
+  function takePhoneReturn(route) {
+    var K = rrKit(), p = !C.phoneBackTaken && K && typeof K.phoneReturn === 'function' && route.args[0] === 'cos' && !route.args[1] ? K.phoneReturn() : null;
+    if (!p) return false;
+    C.phoneBackTaken = true;
+    C.focusItem = p.item; C.focusTop = typeof p.top === 'number' ? { item: p.item, top: p.top, at: Date.now() } : null; C.focusQuiet = true;
+    C.phoneBack = { key: p.provider + '|' + String(p.id).toLowerCase() };
+    return true;
+  }
+  // In paintFeed, once the chat is read: the box for that row, before the rows are drawn (so its slot is there).
+  function phoneBackOpen() {
+    if (!C.phoneBack || C.items === null || C.feedState !== 'ready') return null;
+    var g = rrFind(C.phoneBack.key);
+    C.phoneBack = null;
+    if (!g || !rrKit()) return null;
+    var r = rrSessionFor(g);
+    C.ans = { key: g.key, node: rrAnswerNode(g) };
+    C.phoneBackR = r;
+    return r;
+  }
   function rrAnswer(key) {
     var g = rrFind(key), K = rrKit();
     if (!g || !K) return;
@@ -866,6 +912,7 @@
       C.ans = { key: key, node: rrAnswerNode(g) };
       rrPaintNow();
       rrAnswerPaint(r);
+      rrPhoneOffer(r);
       // What the session takes right now (the caution, or why it cannot): the reader's own probe, painted here.
       if (!r.probing) K.probe(r);
     }
@@ -894,6 +941,9 @@
   function rrGate(key, act) {
     var K = rrKit(), r = C.ansS[key];
     if (!K || !r || !key || C.ans.key !== key) return Promise.resolve('');
+    // The caution asked on the way to the phone: its Send anyway continues there, as the reader's does.
+    if (act === 'caution-send' && r.cautionVia === 'phone') { r.cautionAck = true; r.cautionAsk = false; r.cautionVia = null; rrAnswerPaint(r); return rrPhone(key); }
+    if (act === 'caution-cancel') r.cautionVia = null;
     return K.gates.action(r, act, function (extra) { return rrAnswerSend(key, extra); });
   }
   // After the feed is drawn again: the open box goes into its row's new slot, as the same element. No slot (the row
@@ -1127,6 +1177,7 @@
       // 7.0.9: a question asked 7 days ago or more (the server marks it `archived`) lives under older questions.
       // 7.0.53 Part A: Reply ready items are one row per session, at its newest reply; every item of a group counts as
       // drawn, so the history never adds a note for one folded into its row.
+      phoneBackOpen();
       var groups = rrGroups(C.items), inRow = {};
       groups.forEach(function (g) { g.items.forEach(function (it) { inRow[it.id] = 1; }); });
       var rows = (C.items || []).filter(function (it) { return !it.archived && !inRow[it.id]; }).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
@@ -1172,6 +1223,9 @@
     var focused = C.ans.node && document.activeElement && C.ans.node.contains(document.activeElement) ? document.activeElement : null;
     feed.innerHTML = '<div data-cos-content>' + html + '</div>';
     rrAnswerPlace(feed, focused);
+    // The box opened for the way back from the phone, once it is in the page (a held paint may have drawn it first).
+    var backR = C.phoneBackR;
+    if (backR && rrAnswerEl(backR)) { C.phoneBackR = null; rrAnswerPaint(backR); rrPhoneOffer(backR); var bkit = rrKit(); if (bkit && !backR.probing) bkit.probe(backR); }
     if (historyOn()) paintTrim(feed);
     watchTail(feed);
     if (stick) followLatest();
@@ -3249,6 +3303,7 @@
     if (what === 'rr-more') return rrToggle(t.getAttribute('data-rr'), t.tagName === 'BUTTON' ? 'count' : 'words');
     if (what === 'rr-answer') return rrAnswer(t.getAttribute('data-rr'));
     if (what === 'rr-answer-close') return rrAnswerClose(t.getAttribute('data-rr'));
+    if (what === 'rr-phone') return rrPhone(C.ans.key);
     if (what === 'rr-gate') return rrGate(t.getAttribute('data-rr'), t.getAttribute('data-gate'));
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
@@ -3534,7 +3589,7 @@
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
-    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
+    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _rrPhoneOpts: rrPhoneOpts, _takePhoneReturn: takePhoneReturn, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
     _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
     _steer: steer, _cancel: cancel,
