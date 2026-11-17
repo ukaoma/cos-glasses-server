@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import { derivedFields, listRow } from './session-row-fixture.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
@@ -94,8 +95,8 @@ const SID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d', SID2 = '019a7b2c-3d4e-7f60-8
 const P = (tail: string, id = SID) => `/api/agent-sessions/claude/${encodeURIComponent(id)}${tail}`
 const OK: Routes = {
   // X1's must-fix: the box reads the session fresh at Send (idle here).
-  ['GET ' + P('?turns=1')]: { status: 200, body: { agent_state: 'idle' } },
-  ['GET ' + P('?turns=1', SID2)]: { status: 200, body: { agent_state: 'idle' } },
+  ['GET ' + P('?turns=1')]: { status: 200, body: derivedFields('idle') },
+  ['GET ' + P('?turns=1', SID2)]: { status: 200, body: derivedFields('idle') },
   ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 0 } },
   ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
   ['POST /api/agent-sessions/bindings/b1/turns']: { status: 202, body: { outcome: 'queued' } },
@@ -367,7 +368,7 @@ describe('Answer on a Reply ready row', () => {
     expect(thread({ noKit: true }).paint([rr()])).not.toContain('data-cos="rr-answer"')
     const t = thread()
     expect(t.paint([rr()])).toContain('<button type="button" class="link-btn rr-answer-go" data-cos="rr-answer" data-rr="' + esc(A_KEY) + '" aria-expanded="false">Answer</button>')
-    t.chat._state.sessionRows = [{ provider: 'claude', session_id: SID, state: 'waiting', waiting_kind: 'permission' }]
+    t.chat._state.sessionRows = [listRow({ id: SID, agentState: 'waiting', derived: { waiting_kind: 'permission' } })]
     const waiting = t.paint([rr()])
     expect(waiting).not.toContain('data-cos="rr-answer"')
     expect(waiting).toContain('It asked for approval.')
@@ -500,7 +501,7 @@ describe('Answer on a Reply ready row', () => {
     t.paint([rr()])
     t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
     t.forms[0]!.input.value = 'Kept.'
-    t.chat._state.sessionRows = [{ provider: 'claude', session_id: SID, state: 'waiting', waiting_kind: 'plan' }]
+    t.chat._state.sessionRows = [listRow({ id: SID, agentState: 'waiting', derived: { waiting_kind: 'plan' } })]
     t.chat._paintFeed(false)
     expect(t.chat._state.ans.key).toBe(A_KEY)
     t.document.activeElement = null
@@ -684,7 +685,7 @@ describe('7.0.53, the second piece: back from the phone, to the row he left', ()
 })
 
 describe('the lead 00:5x: X1\'s must-fix and the four smaller items', () => {
-  const waiting = (kind: string) => ({ ...OK, ['GET ' + P('?turns=1')]: { status: 200, body: { agent_state: 'waiting', waiting_kind: kind } } })
+  const waiting = (kind: 'permission' | 'plan' | 'question') => ({ ...OK, ['GET ' + P('?turns=1')]: { status: 200, body: derivedFields('waiting', { waiting_kind: kind }) } })
   it('MUST-FIX: an approval that arrived while the box was open: Send reads the session fresh, refuses with the row\'s line, keeps his words, posts nothing', async () => {
     for (const kind of ['permission', 'plan']) {
       const t = thread({ routes: waiting(kind) })
@@ -803,5 +804,20 @@ describe('the two survivors of the 00:5x mutants (Q1 asks for each to have its t
     const n = t.calls.length
     t.K.tick(); await flush()
     expect(t.calls.length).toBe(n)
+  })
+})
+
+describe('X1 01:0x: the list row\'s real shape, and no approval from the thread', () => {
+  it('a row as the server sends it (state running, agent_state waiting on a permission) hides Answer and shows the line; the old wrong field does nothing', () => {
+    const t = thread()
+    t.chat._state.sessionRows = [listRow({ id: SID, agentState: 'waiting', derived: { waiting_kind: 'permission' } })]
+    const real = t.paint([rr()])
+    expect(real).not.toContain('data-cos="rr-answer"')
+    expect(real).toContain('It asked for approval.')
+    // `state` is running or recent on a real row; a fixture that put "waiting" there is a field the server never sends.
+    t.chat._state.sessionRows = [{ ...listRow({ id: SID, agentState: 'running' }), state: 'waiting', waiting_kind: 'permission' }]
+    const wrong = t.paint([rr()])
+    expect(wrong).toContain('data-cos="rr-answer"')
+    expect(wrong).not.toContain('It asked for approval.')
   })
 })

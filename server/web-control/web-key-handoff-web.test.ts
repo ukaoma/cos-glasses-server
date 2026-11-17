@@ -1359,6 +1359,34 @@ describe('7.0.53: the phone trip from the COS thread\'s Answer box (W1; X1: from
     expect(await err.approveOnPhone({ ...err.viewOpts, precheck: () => Promise.reject(new Error('x')) })).toBe('checked')
     expect(err.assigned).toEqual([])
   })
+  it('X1 01:0x: the thread never reads, shows or carries an install or publish request, even with one live for the session', async () => {
+    const live = [{ packet: PACKET, packetSha256: 'b'.repeat(64) }]
+    // The reader on the same session gets the card (the control: the packet is live and valid).
+    const reader = harness({ signer: 1, packets: live, text: '' })
+    reader.paintWebKeyOffer(reader.r, reader.viewOpts); await flush()
+    expect(reader.requests.some(q => q.path.startsWith('/api/web-key/packets?'))).toBe(true)
+    expect([...reader.chat.children].some((c: any) => c.attrs['data-phone-card'] === '1')).toBe(true)
+    // The thread's box: no read of the requests, no card, no "Approve" label.
+    const h = harness({ signer: 1, prefix: 'rr', packets: live, text: '' })
+    const opts = { ...h.viewOpts, ...thread() }
+    h.paintWebKeyOffer(h.r, opts); await flush()
+    expect(h.requests.some(q => q.path.startsWith('/api/web-key/packets?'))).toBe(false)
+    expect([...h.chat.children].some((c: any) => c.attrs['data-phone-card'] === '1')).toBe(false)
+    expect((h.form as any).__paCard).toBeFalsy()
+    const go = h.form.querySelector('[data-phone-offer]')!
+    expect(go.innerHTML).not.toContain('Approve')
+    // An empty box is a message with no words, never "Approve install X".
+    expect(await h.approveOnPhone(opts)).toBe('empty')
+    expect(h.statuses).toContainEqual(['Write a message first.', 'error'])
+    // A request loaded for this session elsewhere is never carried from the thread.
+    h.r.phonePacketSha256 = 'b'.repeat(64); h.r.phonePackets = { ['b'.repeat(64)]: PACKET }
+    h.input.value = 'Ship it.'
+    expect(await h.approveOnPhone(opts)).toBe('opened')
+    const handoff = h.requests.filter(q => q.path === '/api/web-key/handoff')
+    expect(handoff).toHaveLength(1)
+    expect(handoff[0]!.body).not.toHaveProperty('packetSha256')
+    expect(handoff[0]!.body.prompt).toBe('Ship it.')
+  })
   it('a thread record comes back only into the thread\'s box, and a reader record only into the reader\'s', async () => {
     const h = harness({ hash: '#/phone-return', signer: 1, prefix: 'rr', text: '', trip: trip({ from: 'thread', item: 'fi_42', top: 10 }) })
     h.paintWebKeyOffer(h.r, h.viewOpts); await flush()

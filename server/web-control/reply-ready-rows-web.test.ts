@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import { listRow } from './session-row-fixture.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCE = readFileSync(join(HERE, 'panes', 'cos-chat.js'), 'utf8')
@@ -214,14 +215,16 @@ describe('Open the session, and the approval line', () => {
   it('waiting on a permission or a plan: the approval line, and Open the session is the primary button', () => {
     for (const kind of ['permission', 'plan']) {
       const h = load()
-      h.chat._state.sessionRows = [{ provider: 'claude', session_id: 'claude:' + A, state: 'waiting', waiting_kind: kind }]
+      h.chat._state.sessionRows = [listRow({ id: 'claude:' + A, agentState: 'waiting', derived: { waiting_kind: kind as 'permission' | 'plan' } })]
       const html = h.paint([rr({ excerpt: 'x' })])
       expect(html).toContain('It asked for approval. Approve it in Sessions, where the request card is.')
       expect(html).toContain('class="cx-btn primary" data-cos="rr-open"')
     }
   })
   it('no approval line for a question, a working session, or another provider with the same id', () => {
-    for (const row of [{ provider: 'claude', session_id: A, state: 'waiting', waiting_kind: 'question' }, { provider: 'claude', session_id: A, state: 'working', waiting_kind: 'permission' }, { provider: 'codex', session_id: A, state: 'waiting', waiting_kind: 'permission' }]) {
+    // X1 01:0x: rows as the server sends them (session-row-fixture.ts). Waiting on a question; running (waiting_kind left
+    // over); another provider's session with the same id.
+    for (const row of [listRow({ id: A, agentState: 'waiting', derived: { waiting_kind: 'question' } }), listRow({ id: A, agentState: 'running', derived: { waiting_kind: 'permission' } }), listRow({ id: A, provider: 'codex', agentState: 'waiting', derived: { waiting_kind: 'permission' } })]) {
       const h = load()
       h.chat._state.sessionRows = [row]
       const html = h.paint([rr({ excerpt: 'x' })])

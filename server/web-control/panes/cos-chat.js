@@ -729,7 +729,9 @@
     }
     return null;
   }
-  function rrNeedsApproval(g) { var r = rrRow(g); return !!(r && r.state === 'waiting' && (r.waiting_kind === 'permission' || r.waiting_kind === 'plan')); }
+  // X1 01:0x: a list row's `state` is running or recent; waiting is in agent_state (routes/agent-sessions.ts toEntry,
+  // lib/session-state-derive.ts derivedRowFields). The tests build their rows from derivedRowFields for that reason.
+  function rrNeedsApproval(g) { var r = rrRow(g); return !!(r && r.agent_state === 'waiting' && (r.waiting_kind === 'permission' || r.waiting_kind === 'plan')); }
   function rrHtml(g) {
     var it = g.newest, n = rrCount(g), open = !!(C.rrOpen && C.rrOpen[g.key]);
     var short = String(g.id).slice(0, 8), when = aboutAgo(rrWhen(it));

@@ -5794,6 +5794,9 @@
       }
       var go = phoneComposerOn(r, view, opts);
       phoneBusyApply(r, view);
+      // 7.0.53 (X1's must-fix 01:0x): the COS thread's box sends a message only. It never reads, shows or carries an
+      // install or publish request: approving anything stays in Sessions, where the request card is.
+      if (opts && opts.from === 'thread') return;
       return apiAnswer('/api/web-key/packets?provider=' + encodeURIComponent(r.provider) + '&sessionId=' + encodeURIComponent(r.id)).then(function (a) {
         if (generation !== WEB_KEY.generation || !phoneApprovalViewLive(view) || view.form.querySelector('[data-phone-offer]') !== go) return;
         var rows = a.status === 200 && a.body && a.body.ok === true && Array.isArray(a.body.packets) ? a.body.packets : [];
@@ -6024,7 +6027,8 @@
     if (!webKeySetupUrl()) { say('Approval on the phone works only when Control is open at your Mac’s Tailscale name. Send still works here.', 'error'); return Promise.resolve('host'); }
     if (!view.live()) return Promise.resolve('stale');
     var input = view.input, text = input ? input.value.trim() : '';
-    var provider = r.provider, id = r.id, packetSha = r.phonePacketSha256 || '';
+    // 7.0.53 (X1): never a request from the thread, even if one was loaded for this session elsewhere.
+    var provider = r.provider, id = r.id, packetSha = opts.from === 'thread' ? '' : r.phonePacketSha256 || '';
     var packet = packetSha && r.phonePackets && r.phonePackets[packetSha];
     if (packetSha && (!packet || packet.exp < Date.now() || packet.provider !== provider || packet.sessionId !== id)) { say('That release request expired or changed. Reopen this session to load its current request.', 'error'); return Promise.resolve('packet'); }
     // 7.0.51 (lead 07:09, choice 2): with a request, an empty box sends the standard words, which the approval page
