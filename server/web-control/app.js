@@ -772,6 +772,40 @@
     if (de && de.style) de.style.setProperty('--rail-hit', RAIL.hit + 'px');
     return RAIL.hit;
   }
+  // 7.0.55 (the lead 11:2x; F1_findings_1120): the folded strip broke on his Duo beside Running, and his phone's rail
+  // records said the strip was on at 1019 wide and off at 449 (48 of 145), with the visual viewport at height 0. No fix
+  // until the mechanism is seen: each rail record now carries what the strip was drawn against, and a SETTLED record follows
+  // 600 ms after the last resize, fold or media change, numbered, so his phone shows whether the page stays stuck or was
+  // caught mid-change. Numbers and fixed labels only (layoutCrumb keeps them so): never text, ids or a title.
+  // At most RAIL_REC_PER_MIN in any minute and RAIL_REC_MAX a page load, so a desktop window dragged about can never use up
+  // layoutCrumb's page budget (80) that the keyboard and frame reports share.
+  var RAIL_REC = { n: 0, minute: [], timer: null }, RAIL_SETTLE_MS = 600, RAIL_REC_PER_MIN = 6, RAIL_REC_MAX = 24;
+  function railRecord(at, on) {
+    try {
+      if (typeof layoutCrumb !== 'function') return false;
+      var now = Date.now();
+      RAIL_REC.minute = RAIL_REC.minute.filter(function (t) { return now - t < 60000; });
+      if (RAIL_REC.minute.length >= RAIL_REC_PER_MIN || RAIL_REC.n >= RAIL_REC_MAX) return false;
+      var de = document.documentElement, sc = window.screen || {}, mm = function (q) { try { return !!window.matchMedia(q).matches; } catch (_e) { return null; } };
+      var strip = document.querySelector ? document.querySelector('.rail') : null, sb = strip && strip.getBoundingClientRect ? strip.getBoundingClientRect() : null;
+      var pos = strip && window.getComputedStyle ? String(window.getComputedStyle(strip).position || '') : '';
+      var shell = typeof $ === 'function' ? $('app-shell') : null, ab = shell && shell.getBoundingClientRect ? shell.getBoundingClientRect() : null;
+      var ok = layoutCrumb('rail', { n: RAIL_REC.n + 1, at: at === 'settled' ? 'settled' : 'change', sw: sc.width, sh: sc.height, rail: !!on, railHit: RAIL.hit,
+        dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null,
+        mqRail: mm(SIDE_RAIL_MQ), mqNarrow: mm('(max-width: 599px)'), short: !!(de && de.classList && de.classList.contains('short-screen')),
+        cw: de ? de.clientWidth : null, sy: window.scrollY || 0,
+        stripTop: sb ? sb.top : null, stripH: sb ? sb.height : null, stripPos: /^(static|relative|absolute|fixed|sticky)$/.test(pos) ? pos : 'other',
+        shellH: ab ? ab.height : null });
+      if (ok) { RAIL_REC.n++; RAIL_REC.minute.push(now); }
+      return ok;
+    } catch (_e) { return false; }
+  }
+  /** A resize, a fold or the strip's media test changed: sync now, and report how it settled 600 ms after the last one. */
+  function railMoved() {
+    railSync();
+    clearTimeout(RAIL_REC.timer);
+    RAIL_REC.timer = setTimeout(function () { RAIL_REC.timer = null; railRecord('settled', sideRail()); }, RAIL_SETTLE_MS);
+  }
   function railSync() {
     var on = false;
     try {
@@ -787,14 +821,14 @@
       // The rail changes the reply box's width: an empty box re-fits its placeholder (autoGrow, F2).
       var si = typeof $ === 'function' ? $('session-input') : null; if (si && typeof sxPlaceholderFit === 'function' && si.phLong) sxPlaceholderFit(si); else if (si && !si.value && typeof autoGrow === 'function') autoGrow(si);
       // A change after boot (a fold, a rotation, a new screen) is reported once, with the screen's own numbers.
-      if (RAIL.on !== null && RAIL.on !== on && typeof layoutCrumb === 'function') { var sc = window.screen || {}; layoutCrumb('rail', { sw: sc.width, sh: sc.height, rail: on, railHit: RAIL.hit, dvh: typeof lrProbe === 'function' ? lrProbe('height:100dvh', 'h') : null }); }
+      if (RAIL.on !== null && RAIL.on !== on) railRecord('change', on);
       RAIL.on = on;
       if (!RAIL.hooked && typeof window.matchMedia === 'function' && typeof window.addEventListener === 'function') {
         RAIL.hooked = true;
         var mq = window.matchMedia(SIDE_RAIL_MQ);
-        if (mq && mq.addEventListener) mq.addEventListener('change', railSync); else if (mq && mq.addListener) mq.addListener(railSync);
-        window.addEventListener('resize', function () { railSync(); });
-        window.addEventListener('orientationchange', function () { railSync(); });
+        if (mq && mq.addEventListener) mq.addEventListener('change', railMoved); else if (mq && mq.addListener) mq.addListener(railMoved);
+        window.addEventListener('resize', railMoved);
+        window.addEventListener('orientationchange', railMoved);
       }
     } catch (_e) { /* a harness without a page: no rail */ }
     return on;
