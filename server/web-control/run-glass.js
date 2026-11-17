@@ -196,11 +196,18 @@
 
   }
 
-  /** The rows that may move: working, in display order, the first LIVE_MAX of them. */
+  /** The rows that may move: working, in display order, whose slot is in the window (Codex 11:5x: the panel's observer
+   *  alone let a panel edge on screen run the loop for slots no one could see), the first LIVE_MAX of them. The page's
+   *  own scroll wakes the glass (app.js mkSoon), so a slot scrolled back into view starts again. */
   function liveKeys() {
     var out = [];
-    for (var i = 0; i < C.order.length && out.length < LIVE_MAX; i++) { var m = C.rows[C.order[i]]; if (m && (m.state === 'work' || (m.state === 'done' && settling(m)))) out.push(m.key); }
+    for (var i = 0; i < C.order.length && out.length < LIVE_MAX; i++) { var m = C.rows[C.order[i]]; if (m && (m.state === 'work' || (m.state === 'done' && settling(m))) && slotSeen(slotFor(m.key))) out.push(m.key); }
     return out;
+  }
+  function slotSeen(s) {
+    if (!s || typeof s.getBoundingClientRect !== 'function') return false;
+    var r = s.getBoundingClientRect(), vw = window.innerWidth > 0 ? window.innerWidth : Infinity, vh = window.innerHeight > 0 ? window.innerHeight : Infinity;
+    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
   }
   function settling(m) {
     if (Math.abs(targetE(m) - m.e) > 0.004) return true;
@@ -218,7 +225,7 @@
   function animating() {
     if (!motionAllowed()) return false;
     var keys = liveKeys();
-    for (var i = 0; i < keys.length; i++) if (C.rows[keys[i]].state === 'work' && slotFor(keys[i])) return true;
+    for (var i = 0; i < keys.length; i++) if (C.rows[keys[i]].state === 'work' && slotSeen(slotFor(keys[i]))) return true;
     return false;
   }
 

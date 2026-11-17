@@ -22,7 +22,7 @@ const APPCSS = readFileSync(join(HERE, 'app.css'), 'utf8')
 const CSS = APPCSS.slice(APPCSS.indexOf('/* 7.0.55: live glass on the Running rows'), APPCSS.indexOf("/* ── 7.0.29: the folded Duo's side rail"))
 
 type Draw = { necks: number[]; drops: number }
-interface Opts { gl?: 'ok' | 'none' | 'compile'; reduced?: boolean; hidden?: boolean; noIO?: boolean }
+interface Opts { gl?: 'ok' | 'none' | 'compile'; reduced?: boolean; hidden?: boolean; noIO?: boolean; vh?: number }
 
 function page(o: Opts = {}) {
   const draws: Draw[] = []
@@ -68,7 +68,7 @@ function page(o: Opts = {}) {
     addEventListener: (t: string, f: () => void) => { docListeners[t] = f },
   }
   const win: Record<string, unknown> = {
-    document: doc, devicePixelRatio: 3, Float32Array, Math, Object, Array, String, Error, isFinite,
+    document: doc, devicePixelRatio: 3, Float32Array, Math, Object, Array, String, Error, isFinite, innerWidth: 382, innerHeight: o.vh ?? 2000,
     addEventListener: () => {},
     matchMedia: () => ({ get matches() { return reduced }, addEventListener: (_t: string, f: () => void) => mqListeners.push(f) }),
     requestAnimationFrame: (f: (t: number) => void) => { rafs.set(++rafId, f); return rafId },
@@ -240,6 +240,17 @@ describe('run-glass: what moves, and when', () => {
     p.G.wake(); expect(p.G.state().frames).toBe(f0)          // nothing moved: no new still
     p.slot('a', 420); p.G.wake(); expect(p.G.state().frames).toBe(f0 + 1)   // the row moved down 80 px
     p.G.wake(); expect(p.G.state().frames).toBe(f0 + 1)
+  })
+  it('only the panel\'s edge on screen, every slot below the window: nothing moves, and the rail is not told to rest (Codex 11:5x)', () => {
+    const p = page({ vh: 557 }); p.G.mount(p.panel); p.slot('a', 700); p.slot('b', 760)
+    p.G.sync([work('a'), work('b')])
+    expect(p.G.animating()).toBe(false); expect(p.pending()).toBe(0); expect(p.G.state().live).toEqual([])
+  })
+  it('a slot scrolled back into the window starts again on the page\'s wake, and only it is live', () => {
+    const p = page({ vh: 557 }); p.G.mount(p.panel); p.slot('a', 700); p.slot('b', 760)
+    p.G.sync([work('a'), work('b')]); expect(p.pending()).toBe(0)
+    p.slot('a', 400); p.G.wake()
+    expect(p.G.animating()).toBe(true); expect(p.pending()).toBe(1); expect(p.G.state().live).toEqual(['a'])
   })
   it('turning Reduce Motion on mid-loop stops the loop', () => {
     const p = page(); p.G.mount(p.panel); p.slot('a'); p.G.sync([work('a')]); p.run(200)
