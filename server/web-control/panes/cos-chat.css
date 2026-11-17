@@ -477,3 +477,12 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
   html.focus .cc-buttons:has(.cc-drop) { flex-wrap: wrap; }
   html.focus .cc-buttons:has(.cc-drop) .cc-me { order: 9; flex: 1 1 100%; min-height: 32px; }
 }
+
+/* 7.0.53 (F1 02:3x, the lead's must-fix): an Answer box has the keyboard (cos-chat.js sets html.kb-rr). The chat's own
+   composer must not dock over it: below 860 px it stays where it is in the page, not docked above the keyboard (the
+   same space either way, so nothing jumps); from 860 px, where the column is the visible box, it steps out so the thread
+   has the column. It comes back as it was, its draft in its own box, when the box loses the keyboard. */
+html.kb-rr .cc-composer[data-cos-form="chat"] { position: static; }
+@media (min-width: 860px) {
+  html.kb-rr .msg-right .cc-composer[data-cos-form="chat"] { display: none; }
+}

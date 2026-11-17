@@ -953,6 +953,11 @@
     C.phoneBackR = r;
     return r;
   }
+  // Where the chat was scrolled (the page below 860 px, the column from 860 px), to put it back on Close.
+  function rrScrollNow() {
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    return wide() ? (feed ? feed.scrollTop : 0) : Math.round(window.scrollY || window.pageYOffset || 0);
+  }
   function rrAnswer(key) {
     var g = rrFind(key), K = rrKit();
     if (!g || !K) return;
@@ -962,7 +967,9 @@
       // He is answering this row now, not following the newest line: a later quiet repaint must not scroll to the end.
       if (TAIL) TAIL.following = false;
       var r = rrSessionFor(g);
-      C.ans = { key: key, node: rrAnswerNode(g) };
+      // F1 02:3x: the scroll before the box opened; Close puts it back unless he scrolled himself in between.
+      var before = rrScrollNow();
+      C.ans = { key: key, node: rrAnswerNode(g), before: before, after: before };
       rrPaintNow();
       rrAnswerPaint(r);
       rrPhoneOffer(r);
@@ -982,8 +989,15 @@
     rrAnswerKeep();
     // Close stops the watch now (Q1), not on its next tick.
     var r = C.ansS[key], kit = rrKit(); if (r && kit && typeof kit.gates.stop === 'function') kit.gates.stop(r);
+    var was = C.ans, moved = Math.abs(rrScrollNow() - was.after) > 2;
     C.ans = { key: '', node: null };
     rrPaintNow();
+    // F1 02:3x (and the last row at 951x539, where the column's scroll clamped 200 px): back to exactly where it was
+    // before the box opened, unless he scrolled himself while it was open (then the paint has held his place).
+    if (!moved && typeof was.before === 'number') {
+      var feed = C.host && C.host.querySelector('[data-cos-feed]');
+      if (wide()) { if (feed) feed.scrollTop = was.before; } else if (Math.round(window.scrollY || 0) !== was.before) window.scrollTo(0, was.before);
+    }
     var row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(key) + '"]'), go = row && row.querySelector('.rr-answer-go');
     if (go && go.focus) { try { go.focus({ preventScroll: true }); } catch (_e) { go.focus(); } }
   }
@@ -3529,6 +3543,11 @@
     if (form && form.classList) form.classList.add('cc-kb');
     var inChat = !!(a && C.host && C.host.contains && C.host.contains(a));
     if (de && de.classList) de.classList.toggle('kb-chat', inChat);
+    // 7.0.53 (F1 02:3x, the lead's must-fix): an Answer box has the keyboard. The chat's own composer must not dock over
+    // it: cos-chat.css undocks it below 860 px (in flow, so nothing jumps) and hides it from 860 px (the column is the
+    // visible box there), until the box loses the keyboard. Its draft stays in its own box.
+    var inBox = !!(a && a.closest && a.closest('[data-cos-rr-answer]'));
+    if (de && de.classList) de.classList.toggle('kb-rr', inBox);
     // 7.0.30 item 2: the message reader's Reply box, the same kit (cos-chat.css lifts it onto the keyboard).
     var inReply = !!(form && form.classList && typeof form.classList.contains === 'function' && form.classList.contains('cx-reply-form'));
     if (de && de.classList) de.classList.toggle('kb-reply', inReply);
@@ -3545,17 +3564,38 @@
     form.scrollIntoView({ block: 'nearest' });
     return true;
   }
+  // 7.0.53 (F1 02:3x): the Answer box with the keyboard is brought into the visible box by the smallest scroll that
+  // does it: its bottom above the keyboard, or, when it does not fit, its top under whatever covers the top (the visible
+  // box's top, the sticky top bar, or from 860 px the chat column's own scroller).
+  function boxReveal(v) {
+    var a = document.activeElement, n = a && a.closest ? a.closest('[data-cos-rr-answer]') : null;
+    if (!n || !n.getBoundingClientRect) return false;
+    v = v || (W.viewportFit ? W.viewportFit() : null);
+    var top = v ? v.top : 0, bottom = v ? v.top + v.height : (window.innerHeight || 0), w = wide();
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    if (w && feed && feed.getBoundingClientRect) { var fr = feed.getBoundingClientRect(); top = Math.max(top, fr.top); bottom = Math.min(bottom, fr.bottom); }
+    var bar = !w && document.getElementById ? document.getElementById('topbar') : null;
+    if (bar && bar.getBoundingClientRect) { var br = bar.getBoundingClientRect(); if (br.height > 0 && br.bottom > top && br.top <= top + 1) top = br.bottom; }
+    var r = n.getBoundingClientRect(), pad = 8, by = 0;
+    if (r.top < top + pad || r.height > bottom - top - 2 * pad) by = r.top - (top + pad);
+    else if (r.bottom > bottom - pad) by = r.bottom - (bottom - pad);
+    by = Math.round(by);
+    if (by) { if (w && feed) feed.scrollTop += by; else window.scrollBy(0, by); }
+    if (C.ans.node === n) C.ans.after = rrScrollNow();
+    return true;
+  }
   if (W.onKeyboard) W.onKeyboard(function (what, v) {
     if (what === 'after') { settleAfterKeyboard(); return; }
     markKeyboard(what !== 'close');
     dockWide(what, v);
-    if (what !== 'close') revealComposer();
+    if (what !== 'close' && !boxReveal(v)) revealComposer();
   });
   // Focus moving between fields while the keyboard stays up: mark (and dock) for the new one.
   document.addEventListener('focusin', function () {
     if (!W.keyboardUp || !W.keyboardUp()) return;
     markKeyboard(true);
     dockWide('move');
+    boxReveal();
   });
 
   // Crossing 860 px shows the chat beside the list: load it then.
