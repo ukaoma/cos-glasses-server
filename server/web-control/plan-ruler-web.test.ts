@@ -408,7 +408,7 @@ describe('plan ruler: the Claude orange token, light and dark, both looks (7.0.5
   const CSS = readFileSync(join(HERE, 'panes', 'sessions.css'), 'utf8')
   const APP = readFileSync(join(HERE, 'app.css'), 'utf8')
   const AMBER = readFileSync(join(HERE, 'amber.css'), 'utf8')
-  const LIGHT = 'rgb(184, 98, 40)', DARK = 'rgb(226, 146, 92)'
+  const LIGHT = 'rgb(180, 95, 38)', DARK = 'rgb(226, 146, 92)'   // #b45f26 light, the same as the Mac (the lead 12:1x)
   const tokenIn = (block: string, name: string) => {
     const m = new RegExp(name.replace(/[-]/g, '\\-') + ':\\s*([^;]+);').exec(block)
     expect(m, name).toBeTruthy()
@@ -437,12 +437,12 @@ describe('plan ruler: the Claude orange token, light and dark, both looks (7.0.5
     // The rail the bar sits on is ink at 12% over the panel; the test below measures against exactly that.
     expect(CSS).toContain('.up-rail { right: 0; background: color-mix(in srgb, var(--ink) 12%, transparent); }')
   })
-  // The lead 11:3x: an older Claude bar is the token at 55% over the rail. Measured: 1.90:1 against the rail in light (both
+  // The lead 11:3x: an older Claude bar is the token at 55% over the rail. Measured: 1.95:1 against the rail in light (both
   // looks), 2.56:1 in Espresso dark, 2.68:1 in Amber dark: under the 3:1 a current bar needs, on purpose (a kept number
   // must not look current), and still visible as a bar; its words carry the age. Pinned here so a change is seen.
-  it('an older Claude bar (55% over the rail) measures 1.90 light and 2.56 / 2.68 dark, and the faded opacity is 0.55', () => {
+  it('an older Claude bar (55% over the rail) measures 1.95 light and 2.56 / 2.68 dark, and the faded opacity is 0.55', () => {
     expect(SOURCE_JS).toContain('var OLDER_CLAUDE_OPACITY = 0.55;')
-    const want: Record<string, number> = { 'Espresso light': 1.90, 'Espresso dark': 2.56, 'Amber light': 1.90, 'Amber dark': 2.68 }
+    const want: Record<string, number> = { 'Espresso light': 1.95, 'Espresso dark': 2.56, 'Amber light': 1.95, 'Amber dark': 2.68 }
     for (const [name, block, token] of looks()) {
       const panel = rgb(tokenIn(block, '--panel')), rail = mix(rgb(tokenIn(block, '--ink')), panel, 0.12)
       const faded = ratio(mix(rgb(token), rail, 0.55), rail)
@@ -450,10 +450,10 @@ describe('plan ruler: the Claude orange token, light and dark, both looks (7.0.5
       expect(Math.round(faded * 100) / 100, name).toBe(want[name])
     }
   })
-  it('clears 3:1 against the panel and the rail in Espresso and Amber, light and dark', () => {
+  it('clears 4.5:1 on the panel and 3:1 on the rail in Espresso and Amber, light and dark (light: 4.56 and 3.56)', () => {
     for (const [name, block, token] of looks()) {
       const panel = rgb(tokenIn(block, '--panel')), ink = rgb(tokenIn(block, '--ink')), bar = rgb(token)
-      expect(ratio(bar, panel), name + ' on the panel').toBeGreaterThanOrEqual(3)
+      expect(ratio(bar, panel), name + ' on the panel').toBeGreaterThanOrEqual(4.5)
       expect(ratio(bar, mix(ink, panel, 0.12)), name + ' on the rail').toBeGreaterThanOrEqual(3)
     }
   })
