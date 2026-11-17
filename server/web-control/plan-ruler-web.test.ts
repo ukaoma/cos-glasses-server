@@ -77,7 +77,8 @@ describe('7.0.54: two Claude rows, and a pane kept past its pause (Control at 6:
     expect(html).not.toContain('Paused until')
     expect(html).not.toContain('Claude CLI paused')
     expect(html).toContain('Claude CLI: pause over.')
-    expect(html).toContain('The pause ended at ')
+    expect(html).toContain('The pause ended yesterday at 1:00 PM.')   // the lead 09:0x: never "ended at yesterday 1:00 PM"
+    expect(html).not.toContain('ended at yesterday')
     expect(html).toContain('Claude Desktop')
     expect(html).not.toContain('background:undefined')
     expect(html).toContain('background:var(--u-gold)')
@@ -96,7 +97,7 @@ describe('7.0.54: two Claude rows, and a pane kept past its pause (Control at 6:
     expect(head).not.toContain('Limit reached')
     expect(head).toContain('Limit over')
     t.click('up-toggle')
-    expect(t.el().innerHTML).toContain('The limit ended at ')
+    expect(t.el().innerHTML).toMatch(/The limit ended (yesterday )?at \d{1,2}:\d{2} [AP]M\./)   // yesterday only just after midnight
     expect(t.el().innerHTML).not.toContain('width:100%')
   })
   it('a pause still running keeps its words', async () => {
@@ -318,5 +319,35 @@ describe("Miles's rule on Control Web: a read when Usage opens, at most once eve
       expect(sent).toEqual(['/api/usage/plan', '/api/usage/plan', '/api/usage/plan?refresh=1', '/api/usage/plan?refresh=1', '/api/usage/plan', '/api/usage/plan'])
       expect(panes.planRuler._state.pane.lines.find((l: any) => l.provider === 'codex').usedPct).not.toBeNull()
     } finally { s.close() }
+  })
+})
+
+// 7.0.54 (the lead 09:0x): when a pause or limit ended, in spoken order. The three helpers run as they ship, at fixed times.
+describe('7.0.54: "The pause ended yesterday at 11:50 PM", never "ended at yesterday 11:50 PM"', () => {
+  const fns = ['clock', 'readWhen', 'endedWhen'].map(n => { const m = new RegExp('  function ' + n + '\\(iso, ?(nowMs)?\\) \\{[\\s\\S]*?\\n  \\}\\n|  function ' + n + '\\(iso\\) \\{[^\\n]*\\}\\n').exec(SOURCE); expect(m, n).toBeTruthy(); return m![0] }).join('')
+  const ctx: Record<string, unknown> = {}
+  vm.createContext(ctx); vm.runInContext(fns + ';this.endedWhen = endedWhen;', ctx)
+  const ended = ctx.endedWhen as (iso: string, nowMs: number) => string
+  const at = (d: number, h: number, m: number) => new Date(2026, 10, d, h, m).getTime()   // Nov 2026, local time
+  const now = at(17, 9, 5)   // Tue Nov 17, 9:05 AM
+  it('today: "at 2:02 AM"', () => { expect(ended(new Date(at(17, 2, 2)).toISOString(), now)).toBe('at 2:02 AM') })
+  it('yesterday: "yesterday at 11:50 PM"', () => { expect(ended(new Date(at(16, 23, 50)).toISOString(), now)).toBe('yesterday at 11:50 PM') })
+  it('this week: the day first, "Sun at 11:50 PM"', () => { expect(ended(new Date(at(15, 23, 50)).toISOString(), now)).toBe('Sun at 11:50 PM') })
+  it('older: the date first, "Nov 3 at 8:00 AM"', () => { expect(ended(new Date(at(3, 8, 0)).toISOString(), now)).toBe('Nov 3 at 8:00 AM') })
+  it('an unreadable time is empty, never "at Invalid Date"', () => { expect(ended('not a time', now)).toBe('') })
+})
+
+// 7.0.54 (F1 09:01): the closed row's first words keep their width beside a long quiet line (the Desktop row made it long).
+describe('7.0.54: the closed row keeps "62% used, resets Fri 8:59 PM" whole beside the quiet line', () => {
+  const CSS = readFileSync(join(HERE, 'panes', 'sessions.css'), 'utf8')
+  it('wide: the quiet line takes only the width left (basis 0) and ellipsizes first; the first words keep theirs', () => {
+    expect(CSS).toContain('@media (min-width: 601px) { .up-lead > .up-others { flex: 1 1 0; min-width: 0; } }')
+    expect(CSS).toContain('.up-others { overflow: hidden; text-overflow: ellipsis; }')
+    expect(CSS).toMatch(/\.up-seg \{ display: inline-flex; align-items: center; gap: 8px; min-width: 0; \}/)   // the first words: flex 0 1 auto, their own width
+  })
+  it('narrow keeps its own row for the quiet line (the wide rule never reaches it)', () => {
+    const narrow = CSS.slice(CSS.indexOf('@media (max-width: 600px) {'))
+    expect(narrow).toContain('.up-others { flex-basis: 100%; }')
+    expect(CSS.indexOf('@media (min-width: 601px) { .up-lead > .up-others')).toBeGreaterThan(-1)
   })
 })

@@ -41,6 +41,14 @@
     if (days === 1) return 'yesterday ' + clock(iso);
     return d.toLocaleDateString('en-US', days < 7 ? { weekday: 'short' } : { month: 'short', day: 'numeric' }) + ' ' + clock(iso);
   }
+  // 7.0.54 (the lead 09:0x): when a pause or limit ended, in spoken order: "at 2:02 AM" today, "yesterday at 11:50 PM",
+  // "Mon at 11:50 PM", "Nov 12 at 11:50 PM" (never "at yesterday 11:50 PM").
+  function endedWhen(iso, nowMs) {
+    var w = readWhen(iso, nowMs), t = clock(iso);
+    if (!w) return '';
+    if (w === t) return 'at ' + t;
+    return w.slice(0, w.length - t.length).replace(/\s+$/, '') + ' at ' + t;
+  }
   // 7.0.54: a line whose pause or limit has ended since the pane was read is not shown as current (Control showed
   // "Paused until 11:50 PM" at 6:55 the next morning). Its words say the pause is over; Refresh reads it again.
   function current(line, nowMs) {
@@ -50,7 +58,7 @@
     // Q1 07:38: a limit that has lifted says so as a limit, not as a pause.
     var what = line.state === 'limit' ? 'limit' : 'pause';
     o.short = what === 'limit' ? 'Limit over' : 'Pause over'; o.shortLong = o.short + '. Refresh to read';
-    o.long = 'The ' + what + ' ended at ' + readWhen(line.until, nowMs) + '. Refresh to read it again.';
+    o.long = 'The ' + what + ' ended ' + endedWhen(line.until, nowMs) + '. Refresh to read it again.';
     o.quiet = line.name + ': ' + what + ' over';
     return o;
   }

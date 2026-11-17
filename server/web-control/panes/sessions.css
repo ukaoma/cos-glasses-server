@@ -790,6 +790,11 @@ button.sx-gh[aria-expanded='false'] .chev { transform: rotate(-45deg); }
 .up-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
 .up-what { color: var(--ink); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
 .up-others { overflow: hidden; text-overflow: ellipsis; }
+/* 7.0.54 (F1 09:01, the lead 09:0x): the closed row's first words (percent used and reset) never give up width to the
+   quiet line beside them: the quiet line takes only what is left (basis 0) and ends in an ellipsis first. Wide only: on a
+   narrow screen the quiet line has a row of its own. "Claude CLI" still breaks in two at 382: kept on one line, it left
+   the words beside it a 34 px column, one word a line, and cut "resets" (measured in WebKit), so it is left as it was. */
+@media (min-width: 601px) { .up-lead > .up-others { flex: 1 1 0; min-width: 0; } }
 .up-quietw { color: var(--sub); }
 .up-warn { color: var(--up-warn); }
 .up-fresh { flex: none; font-size: 12px; color: var(--sub); white-space: nowrap; }
