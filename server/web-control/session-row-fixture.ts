@@ -6,10 +6,12 @@
  */
 import { derivedRowFields, type AgentState, type DerivedSessionState } from '../lib/session-state-derive.js'
 
-export function derivedFields(agentState: AgentState, extra: Partial<DerivedSessionState> = {}): Record<string, unknown> {
-  return derivedRowFields({ agent_state: agentState, state_source: 'hook', state_since: '2026-11-17T06:00:00.000Z', ...extra })
+type Extra = Omit<Partial<DerivedSessionState>, 'agent_state' | 'deadScans' | 'deadSince'>
+
+export function derivedFields(agentState: AgentState, extra: Extra = {}): Record<string, unknown> {
+  return derivedRowFields({ state_source: 'hook', state_since: '2026-11-17T06:00:00.000Z', ...extra, agent_state: agentState, deadScans: 0, deadSince: null })
 }
 
-export function listRow(o: { id: string; provider?: string; state?: 'running' | 'recent'; agentState?: AgentState; derived?: Partial<DerivedSessionState> }): Record<string, unknown> {
+export function listRow(o: { id: string; provider?: string; state?: 'running' | 'recent'; agentState?: AgentState; derived?: Extra }): Record<string, unknown> {
   return { session_id: o.id, provider: o.provider ?? 'claude', alive: true, state: o.state ?? 'running', ...(o.agentState ? derivedFields(o.agentState, o.derived) : {}) }
 }

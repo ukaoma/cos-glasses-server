@@ -687,7 +687,7 @@ describe('7.0.53, the second piece: back from the phone, to the row he left', ()
 describe('the lead 00:5x: X1\'s must-fix and the four smaller items', () => {
   const waiting = (kind: 'permission' | 'plan' | 'question') => ({ ...OK, ['GET ' + P('?turns=1')]: { status: 200, body: derivedFields('waiting', { waiting_kind: kind }) } })
   it('MUST-FIX: an approval that arrived while the box was open: Send reads the session fresh, refuses with the row\'s line, keeps his words, posts nothing', async () => {
-    for (const kind of ['permission', 'plan']) {
+    for (const kind of ['permission', 'plan'] as const) {
       const t = thread({ routes: waiting(kind) })
       t.paint([rr()])
       // The row was drawn idle: Answer is there.
