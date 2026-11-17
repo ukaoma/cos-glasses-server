@@ -133,7 +133,9 @@
   // ── per-turn signing ──
   function providerName(p) { return p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p === 'cursor' ? 'Cursor' : String(p) }
   function scopeLine(scope) {
-    if (!scope || scope.kind === 'message') return 'Message only. It approves no install, publish or push.'
+    // 7.0.53 (Miles 21:13, his words; the desk rule of 19:53): what a passkey-verified message counts as. Display only: the signed
+    // words and packet are read back from sign-words and sign-packet, never from this line. Approve keeps its own line below.
+    if (!scope || scope.kind === 'message') return 'Counts as you typing in this session. It can approve installs and public steps you name. It never approves credentials, payments, deleting data, sending messages or security settings.'
     if (scope.kind === 'approve') return 'Approve ' + scope.action + ': ' + scope.artifact + ' ' + scope.version + ' on ' + scope.channel + ' (' + scope.digest + ')'
     return 'Unknown'
   }

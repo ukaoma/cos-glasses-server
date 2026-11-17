@@ -227,6 +227,8 @@ describe('enrollment: device key and passkey in one step, the code computed on t
   })
 })
 
+const MESSAGE_LINE = 'Counts as you typing in this session. It can approve installs and public steps you name. It never approves credentials, payments, deleting data, sending messages or security settings.'
+
 describe('per-turn signing', () => {
   async function enrolledRig(words = 'Yes, install 6.99.31 on this Mac.  \n', channel?: string, cancelPasskey = false) {
     // The kit names the credential `cred-<kid>`; a real rawId is always canonical base64url, so pick a key whose
@@ -263,7 +265,28 @@ describe('per-turn signing', () => {
     expect(r.el('sign-words').textContent).toBe('Yes, install 6.99.31 on this Mac.')
     expect(r.el('sign-provider').textContent).toBe('Claude')
     expect(r.el('sign-session').textContent).toBe(SID)
-    expect(r.el('sign-scope').textContent).toContain('Message only')
+    expect(r.el('sign-scope').textContent).toBe(MESSAGE_LINE)
+  })
+  // 7.0.53 (Miles 21:13, his words for the 19:53 desk rule): the line a message-scope request shows under 'What it allows'.
+  it('a message shows Miles\'s line as plain text; it is never signed and never in the packet box', async () => {
+    const { r } = await enrolledRig()
+    expect(r.el('sign-scope').textContent).toBe(MESSAGE_LINE)
+    expect(r.el('sign-packet').textContent).toBe('')
+    expect(HTML).toContain('<dt>What it allows</dt><dd id="sign-scope"></dd>')
+    await r.el('sign-approve').tap(true)
+    expect(turnsSeen).toHaveLength(1)
+    expect(JSON.stringify(turnsSeen[0])).not.toContain('Counts as you typing')
+    expect(turnsSeen[0].verdict).toMatchObject({ ok: true, proof: { scope: { kind: 'message' } } })
+  })
+  it('an approve request keeps its own line and never shows the message line', async () => {
+    const { r, packet } = await enrolledRig('Approve this exact release.', 'npm-latest')
+    const line = r.el('sign-scope').textContent
+    expect(line).toBe(`Approve publish: ${packet!.packet.artifact} ${packet!.packet.version} on npm-latest (${packet!.packet.digest})`)
+    expect(line).not.toContain('Counts as you typing')
+    expect(r.el('sign-packet').textContent).not.toContain('Counts as you typing')
+  })
+  it('the old line is gone from the page source', () => {
+    expect(readFileSync(join(HERE, 'signer.js'), 'utf8')).not.toContain('Message only')
   })
   it('a real tap signs: the words on screen are the words hashed, posted and accepted by the server', async () => {
     const { r } = await enrolledRig()
