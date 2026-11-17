@@ -821,6 +821,7 @@
     if (r.pane === 'settings' && changedPane) loadTailnetUrl();
     crumbDetail = '';
     document.querySelectorAll('.pane').forEach(function (sec) { sec.classList.toggle('hidden', sec.id !== 'pane-' + r.pane); });
+    if (typeof mkSoon === 'function') mkSoon();   // 7.0.54: the pane on screen changed, so may the mark that plays
     document.querySelectorAll('#section-menu [data-goto]').forEach(function (b) { if (b.getAttribute('data-goto') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     var railPane = r.pane === 'usage' ? 'sessions' : r.pane;
     document.querySelectorAll('.rail-btn,.rail-settings').forEach(function (b) { if (b.getAttribute('data-pane') === railPane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
@@ -1061,11 +1062,102 @@
         else if (liveOn()) LIVE.freshAt = SL.at;
       }
       noteWaiting(d);
+      if (typeof mkSoon === 'function') mkSoon();
       return d;
-    }, function (err) { SL.inflight = null; SL.failed = true; throw err; });
+    }, function (err) { SL.inflight = null; SL.failed = true; if (typeof mkSoon === 'function') mkSoon(); throw err; });
     return SL.inflight;
   }
   function sessionListCached() { return SL.data ? { data: SL.data, at: SL.at } : null; }
+
+  // ── 7.0.54: the COS mark at work (F1's final files, 23:05; the lead's 06:57 scope) ──
+  // Two places: the rail's mark, and the mark on each Running row on Today. Each is one box the size the flat SVG had
+  // (marks/: the glass still for rest, a 24-frame strip for work). A mark at work holds frame 03; at most ONE on the
+  // whole page plays (2 s, steps(24), a transform), chosen here: the rail's mark when it is on screen, else the first
+  // working Running row on screen. Waiting holds frame 00. Nothing plays while the page is hidden, under reduced
+  // motion (CSS holds 03), or on a list that is not fresh: the rail and the rows say Working only from a list read in
+  // the last 90 s and not failed since, or kept current by the live stream. COS jobs and the Ask box are their own
+  // sources and never start the mark.
+  var MK = { live: null, timer: null, soon: null, wired: false };
+  var MK_MS = 2000, MK_FRESH_MS = 90000, MK_CHECK_MS = 15000;
+  function mkRow(st) {
+    if (!st) return '';
+    return '<span class="mk mk-row" data-mk="' + st + '"' + (st === 'work' ? ' aria-label="working"' : ' aria-hidden="true"') + '><span class="mk-w"><span class="mk-s"></span></span></span>';
+  }
+  function mkReduced() { try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (_e) { return false; } }
+  function mkFresh() {
+    if (!SL.data || SL.failed) return false;
+    return Date.now() - SL.at < MK_FRESH_MS || (typeof liveCanOverlay === 'function' && liveCanOverlay());
+  }
+  /** A session is working now: the Running card's own test (running_active, not waiting) on a fresh list. The rows are
+   *  the shared list's own (SL.data.sessions): the copy whose age mkFresh measures, which every pane's read replaces and
+   *  every live frame writes (liveLists). state.sessions can be an older array a pane still holds (Codex, 07:3x). */
+  function mkWorking() {
+    if (typeof liveSignedIn === 'function' && !liveSignedIn()) return false;
+    if (!mkFresh()) return false;
+    var rows = (SL.data && SL.data.sessions) || [];
+    for (var i = 0; i < rows.length; i++) { var s = rows[i]; if (s && s.running_active && sxState(s) !== 'waiting') return true; }
+    return false;
+  }
+  /** On screen: laid out, inside the window, and not clipped away by a scrolling box around it. */
+  function mkOnScreen(el) {
+    if (!el || !el.isConnected || typeof el.getBoundingClientRect !== 'function') return false;
+    var r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    var top = 0, left = 0, bottom = window.innerHeight || 0, right = window.innerWidth || 0;
+    for (var p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      var cs = window.getComputedStyle ? window.getComputedStyle(p) : null;
+      if (cs && cs.visibility === 'hidden') return false;
+      if (cs && /(auto|scroll|hidden|clip)/.test(cs.overflowX + ' ' + cs.overflowY)) {
+        var pr = p.getBoundingClientRect();
+        top = Math.max(top, pr.top); left = Math.max(left, pr.left); bottom = Math.min(bottom, pr.bottom); right = Math.min(right, pr.right);
+      }
+    }
+    return r.bottom > top && r.top < bottom && r.right > left && r.left < right;
+  }
+  function mkSync() {
+    MK.soon = null;
+    var rail = document.querySelector('.rail-head .mk');
+    var working = mkWorking();
+    if (rail && rail.getAttribute('data-mk') !== (working ? 'work' : 'rest')) rail.setAttribute('data-mk', working ? 'work' : 'rest');
+    var pick = null;
+    if (working && !document.hidden && !mkReduced()) {
+      if (mkOnScreen(rail)) pick = rail;
+      else {
+        var rows = document.querySelectorAll('#run-list .mk[data-mk="work"]');
+        for (var i = 0; i < rows.length && !pick; i++) if (mkOnScreen(rows[i])) pick = rows[i];
+      }
+    }
+    // Let go of the former winner, even if a redraw took it off the page (only mkSync ever sets the class, and only on it).
+    if (MK.live && MK.live !== pick && MK.live.classList) MK.live.classList.remove('mk-live');
+    if (pick && !pick.classList.contains('mk-live')) {
+      // Every mark keeps one clock: a row redrawn under a live mark picks the loop up where it was, never at frame 00.
+      pick.style.setProperty('--mk-delay', -(Date.now() % MK_MS) + 'ms');
+      pick.classList.add('mk-live');
+    }
+    MK.live = pick;
+    // A list goes stale without an event: look again every 15 s while anything says Working, never while hidden.
+    if (working && !document.hidden) { if (!MK.timer) MK.timer = setInterval(mkSoon, MK_CHECK_MS); }
+    else if (MK.timer) { clearInterval(MK.timer); MK.timer = null; }
+  }
+  function mkSoon() {
+    if (!MK.wired) mkWire();
+    if (document.hidden) { clearTimeout(MK.soon); mkSync(); return; }   // hidden: stop at once, no timer
+    if (MK.soon) return;
+    MK.soon = setTimeout(mkSync, 50);
+  }
+  function mkWire() {
+    MK.wired = true;
+    document.addEventListener('visibilitychange', mkSoon);
+    window.addEventListener('pageshow', mkSoon);
+    window.addEventListener('resize', mkSoon);
+    document.addEventListener('scroll', mkSoon, { capture: true, passive: true });
+    try {
+      var mq = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+      if (mq && mq.addEventListener) mq.addEventListener('change', mkSoon); else if (mq && mq.addListener) mq.addListener(mkSoon);
+    } catch (_e) {}
+    // Focus mode, the short screen and the look are classes on <html>: the rail can come and go with them.
+    try { if (window.MutationObserver) new MutationObserver(mkSoon).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] }); } catch (_e) {}
+  }
   // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions"): a session that has just gone to waiting may have
   // parked a question for this page. The question poll (panes/questions.js) reads at once rather than at its next turn.
   function questionsNudge() {
@@ -2086,7 +2178,7 @@
       : esc(meta);
     // A tap opens the peek on Today (panes/today-actions.js); it falls back to the reader if the peek cannot load.
     return '<button type="button" class="run-row" data-today="run" data-key="' + esc(key.provider) + '|' + esc(key.id) + '">' +
-      '<span class="run-who">' + badge(key.provider) + (activeNow ? '<span class="pulse" aria-label="working"></span>' : '') + '</span>' +
+      '<span class="run-who">' + badge(key.provider) + (typeof mkRow === 'function' ? mkRow(sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '') : '') + '</span>' +
       '<span class="run-title">' + esc(sessionTitle(s)) + '</span>' +
       '<span class="run-meta">' + metaHtml + '</span></button>';
   }
@@ -2100,7 +2192,7 @@
     // Today says about it; the panel shows again the moment a session or a COS job runs.
     var panel = list.closest ? list.closest('.run-panel') : null;
     if (panel && panel.classList) panel.classList.toggle('hidden', !jobs.n && (TODAY.sessionsState === 'failed' || (TODAY.sessionsState === 'answered' && !working.length && !open.length)));
-    if (TODAY.sessionsState === 'failed') { list.innerHTML = jobs.html + '<button type="button" class="run-more run-failed" data-today-needs="retry">Couldn\u2019t read sessions. Try again</button>'; return; }
+    if (TODAY.sessionsState === 'failed') { list.innerHTML = jobs.html + '<button type="button" class="run-more run-failed" data-today-needs="retry">Couldn\u2019t read sessions. Try again</button>'; if (typeof mkSoon === 'function') mkSoon(); return; }
     var shown = working.slice(0, 3);
     var html = jobs.html + shown.map(function (s) { return runRow(s, true); }).join('');
     if (!shown.length) {
@@ -2110,6 +2202,7 @@
     var more = (working.length - shown.length) + (shown.length ? open.length : Math.max(0, open.length - 2));
     if (more > 0) html += '<button type="button" class="run-more" data-goto="sessions">' + countWord(more) + ' more open. All sessions</button>';
     list.innerHTML = html;
+    if (typeof mkSoon === 'function') mkSoon();
     if (typeof liveTickStart === 'function' && list.querySelector && list.querySelector('[data-live-since]')) liveTickStart();
   }
   // ── Running beyond sessions (W1, 7.0.x): audit 02 F10, Q1 M6. The same job rows COS Control 0.5.386 draws
@@ -2166,6 +2259,7 @@
   // ── live state on screen (7.0.1): Today's counts and rows, the pet, the Sessions rows, the header line ──
   // The live model (above) calls this, batched, after a frame or a list read moved something.
   function liveRepaint(rows, structural) {
+    if (typeof mkSoon === 'function') mkSoon();
     if (!liveSignedIn()) return;
     if (state.pane === 'today' && TODAY.at && !TODAY.offline && TODAY.sessionsState === 'answered') {
       var sessions = state.sessions || [];
