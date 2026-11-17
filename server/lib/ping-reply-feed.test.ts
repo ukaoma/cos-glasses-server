@@ -17,6 +17,7 @@ import { PingEngine, type PingBanner, type PingState } from './ping-engine.js'
 import { bannerPayload } from './web-push-sender.js'
 import { TimelineStore, TimelineSweeper } from './cos-thread-timeline.js'
 import { taskInstant } from './morning-brief-schedule.js'
+import { excerptText, plainText } from './plain-text.js'
 
 const TZ = 'America/Chicago'
 const WORK = taskInstant('2026-11-17', 10 * 60, TZ)
@@ -35,7 +36,7 @@ describe('the Reply ready candidate', () => {
     expect(c.title).toBe('Reply ready')
     expect(c.line).toBe('Claude has a reply ready.')
     expect(c.links).toEqual([{ kind: 'session', id: A, label: 'The pricing page', provider: 'claude' }])
-    expect(c.excerpt).toBe('Done. Bold code here')
+    expect(c.excerpt).toBe('Done.\n\nBold code here')   // W1 21:1x: paragraph breaks kept
     expect(c.turnAt).toBe(new Date(WORK).toISOString())
     const bare = agentCandidate({ provider: 'claude', sessionId: A, turnEndedAt: WORK, replyReady: true })!
     expect(bare.links[0].label).toBe('Session')
@@ -47,6 +48,35 @@ describe('the Reply ready candidate', () => {
     expect(done).not.toHaveProperty('excerpt')
     expect(done).not.toHaveProperty('turnAt')
     expect(done.links[0].label).toBe('Build')
+  })
+})
+
+describe('excerptText keeps paragraphs and nothing else (W1 21:1x)', () => {
+  it.each([
+    ['CR LF and a lone CR are newlines', 'a\r\nb\rc', 'a\nb\nc'],
+    ['U+2028 and U+2029 are newlines', 'p\u2028q\u2029r', 'p\nq\nr'],
+    ['three or more newlines are one blank line, blank-looking lines too', 'a\n\n\n\nb\n \n\t\nc', 'a\n\nb\n\nc'],
+    ['spaces and tabs collapse inside a line; each line is trimmed', '  one  \t two \n   three   ', 'one two\nthree'],
+    ['other controls (bell, NEL, DEL) are spaces', 'x\u0007y\u0085z\u007fw', 'x y z w'],
+    ['bidi, zero-width, soft hyphen, BOM and tag characters are removed', 'a\u202eb\u200bc\u00add\ufeffe\u{e0041}f\u2066g', 'abcdefg'],
+    ['** and backticks are dropped', '**bold** `code`', 'bold code'],
+    ['leading and trailing blank lines are trimmed', '\n\n  middle  \n\n', 'middle'],
+  ])('%s', (_name, raw, want) => { expect(excerptText(raw, 400)).toBe(want) })
+  it('a cut trims before the ellipsis and never splits a surrogate pair; the one-line title keeps its 7.0.52 cut', () => {
+    expect(excerptText('ab cd', 4)).toBe('ab\u2026')
+    expect(excerptText('ab\n\ncd', 4)).toBe('ab\u2026')
+    expect(excerptText('\ud83d\ude00\ud83d\ude00\ud83d\ude00', 2)).toBe('\ud83d\ude00\u2026')
+    expect(excerptText('abcd', 4)).toBe('abcd')
+    expect(plainText('ab cd', 4)).toBe('ab \u2026')
+    expect(plainText('a\n\nb', 10)).toBe('a b')
+  })
+  it('anything but a string is none', () => {
+    for (const v of [undefined, null, 7, {}, ['x']]) expect(excerptText(v, 400)).toBe('')
+    expect(excerptText(' \n\t\n ', 400)).toBe('')
+  })
+  it('the paragraphs survive the store round trip', () => {
+    const item = parseFeedItem(toFeedItem(reply(A, WORK, 'First.\n\n\n\nSecond.'), WORK))
+    expect(item.excerpt).toBe('First.\n\nSecond.')
   })
 })
 

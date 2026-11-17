@@ -22,7 +22,7 @@ import { PING_RANK, type PingSource } from './ping-budget.js'
 import { parsePrepOccurrence } from './prep-store.js'
 import type { PrepOccurrence } from '../../shared/prep.js'
 import { DROP_LIMITS, SESSION_LINK_PROVIDERS, type SessionLinkProvider } from './drop-store.js'
-import { plainText } from './plain-text.js'
+import { excerptText, plainText } from './plain-text.js'
 
 export interface PingLink { kind: 'card' | 'session' | 'handoff' | 'thread' | 'memory' | 'meeting' | 'file' | 'reminder' | 'ask'; id: string; label: string; domain?: string; provider?: SessionLinkProvider }
 export interface PingCandidate {
@@ -183,7 +183,7 @@ export function agentCandidate(ev: { provider?: unknown; sessionId?: unknown; tu
   const who = PROVIDER_NAME[typeof ev.provider === 'string' ? ev.provider : ''] ?? 'Your agent'
   // 7.0.53 (W1): a Reply ready's link names the session by its listed title (the caller's exact-id lookup), cleaned; else as before.
   const label = (ev.replyReady ? plainText(ev.title, PING_TEXT.title) : '') || clip(ev.label, PING_TEXT.title) || (ev.replyReady ? 'Session' : 'its task')
-  const excerpt = ev.replyReady ? plainText(ev.reply, DROP_LIMITS.excerpt) : ''
+  const excerpt = ev.replyReady ? excerptText(ev.reply, DROP_LIMITS.excerpt) : ''
   // 7.0.52: the session link carries its provider, so "Open result" opens this session's reader, not the list.
   // Only a provider the reader route serves; anything else leaves the field off and the page keeps the old tap.
   const provider = (SESSION_LINK_PROVIDERS as readonly unknown[]).includes(ev.provider) ? ev.provider as SessionLinkProvider : undefined

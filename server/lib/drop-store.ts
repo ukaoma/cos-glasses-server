@@ -120,7 +120,8 @@ export interface FeedItem {
    */
   needsReply?: boolean
   /**
-   * 7.0.53 (W1's Reply ready row; the lead 20:5x): the turn's reply as plain text, at most DROP_LIMITS.excerpt code points. UI data
+   * 7.0.53 (W1's Reply ready row; the lead 20:5x): the turn's reply as plain text with its paragraph breaks kept
+   * (excerptText, W1 21:1x), at most DROP_LIMITS.excerpt code points. UI data
    * only: it is never in `title` or `line`, so it never reaches a timeline crumb, the quiet-hours digest, a banner, phone words or
    * any prompt (X1's rule; ping-reply-feed.test.ts pins each).
    */
