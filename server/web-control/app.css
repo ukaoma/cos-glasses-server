@@ -709,6 +709,28 @@ html { touch-action: manipulation; }
 .sx-te-choices .cx-btn, .ta-te-choices .cx-btn { flex: 1 1 12rem; min-height: 44px; white-space: normal; text-align: center; line-height: 1.25; }
 .sx-mac-q .sx-note { margin: 6px 0 0; }
 
+/* ── 7.0.53 focus mode (F1's direction A; the lead's 23:5x): the COS thread fills the screen below 600 px. app.js
+   focusSync sets html.focus only on the COS thread and only at these widths, so nothing changes elsewhere. The top bar
+   and the way-you-came line go; the folded Duo's strip keeps its width and holds only the round controls; on a phone
+   with no strip they sit at the top right. Tokens only. */
+.focus-stack[hidden], .focus-enter.hidden { display: none !important; }
+@media (max-width: 599px) {
+  html.focus .topbar, html.focus .navbar, html.focus .trail { display: none !important; }
+  html.focus.short-screen .rail > * { display: none !important; }
+  .focus-stack { position: fixed; z-index: 40; top: calc(var(--safe-top) + 10px); right: calc(var(--safe-right) + 10px);
+    display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  html.short-screen .focus-stack { right: calc(var(--safe-right) + (var(--rail-w, 58px) - 44px) / 2); }
+  /* A phone with no strip: at the right edge, at mid height, where the thumb is (F1's phone frame); the thread keeps a
+     gutter for it (cos-chat.css). */
+  html:not(.short-screen) .focus-stack { top: 50%; transform: translateY(-50%); }
+  .focus-rc { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--panel); border: 1px solid var(--panel-border); color: var(--ink); box-shadow: var(--shadow); }
+  .focus-rc .icon { width: 20px; height: 20px; }
+  .focus-rc:active { background: var(--rail-border); }
+  .focus-rc:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+
 /* ── 7.0.29: the folded Duo's side rail (Miles 21:39 "These side buttons are a must on the duo"; 21:42 tall phones keep
    the top menu). theme.js sets html.short-screen from the screen's shape; this draws it only under 600 px on a touch
    screen, so nothing changes from 600 px, on a mouse, or on a tall phone. It is the same nav.rail as the wide rail, so

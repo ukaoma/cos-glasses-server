@@ -5794,6 +5794,9 @@
       }
       var go = phoneComposerOn(r, view, opts);
       phoneBusyApply(r, view);
+      // 7.0.53 (X1's must-fix 01:0x): the COS thread's box sends a message only. It never reads, shows or carries an
+      // install or publish request: approving anything stays in Sessions, where the request card is.
+      if (opts && opts.from === 'thread') return;
       return apiAnswer('/api/web-key/packets?provider=' + encodeURIComponent(r.provider) + '&sessionId=' + encodeURIComponent(r.id)).then(function (a) {
         if (generation !== WEB_KEY.generation || !phoneApprovalViewLive(view) || view.form.querySelector('[data-phone-offer]') !== go) return;
         var rows = a.status === 200 && a.body && a.body.ok === true && Array.isArray(a.body.packets) ? a.body.packets : [];
@@ -5825,6 +5828,11 @@
   var PHONE_TRIP_STORE = 'cos.phoneTrip', PHONE_TRIP_MAX_MS = 30 * 60000;
   function phoneTripSave(t) { try { sessionStorage.setItem(PHONE_TRIP_STORE, JSON.stringify(t)); } catch (_e) { /* no storage: the BFCache return still works */ } }
   function phoneTripDrop() { try { sessionStorage.removeItem(PHONE_TRIP_STORE); } catch (_e) { /* nothing kept */ } }
+  function phoneTripThread(opts) {
+    var t = opts && opts.from === 'thread' && typeof opts.thread === 'function' ? opts.thread() : null;
+    if (!t || !/^[A-Za-z0-9_.:-]{1,160}$/.test(String(t.item || ''))) return {};
+    return { from: 'thread', item: String(t.item), top: typeof t.top === 'number' && isFinite(t.top) ? Math.round(t.top) : null };
+  }
   function phoneTripRead() {
     var raw = null, t = null;
     try { raw = sessionStorage.getItem(PHONE_TRIP_STORE); } catch (_e) { return null; }
@@ -5832,7 +5840,9 @@
     try { t = JSON.parse(raw); } catch (_e) { t = null; }
     var age = t && typeof t.at === 'number' ? Date.now() - t.at : -1;
     if (!t || t.v !== 1 || typeof t.provider !== 'string' || typeof t.id !== 'string' || typeof t.key !== 'string' || typeof t.bindingId !== 'string'
-      || typeof t.text !== 'string' || !t.text || !(age >= 0 && age <= PHONE_TRIP_MAX_MS)) { phoneTripDrop(); return null; }
+      || typeof t.text !== 'string' || !t.text || !(age >= 0 && age <= PHONE_TRIP_MAX_MS)
+      // 7.0.53: a thread record names its row's item; anything else under `from` is not a record this page wrote.
+      || (t.from !== undefined && (t.from !== 'thread' || typeof t.item !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(t.item) || !(t.top === null || (typeof t.top === 'number' && isFinite(t.top)))))) { phoneTripDrop(); return null; }
     return t;
   }
   // The approval page's Back (X1's contract): history.back() when it can, else this fixed address. It carries
@@ -5844,12 +5854,14 @@
   var PHONE_RETURN_LOAD = typeof location === 'object' && !!location && location.hash === '#/phone-return';
   if (PHONE_RETURN_LOAD) {
     var phoneBack = phoneTripRead();
-    try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/') : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
+    try { history.replaceState(history.state, '', location.pathname + location.search + (phoneBack ? (phoneBack.from === 'thread' ? '#/messages/cos' : '#/' + ['sessions', phoneBack.provider, phoneBack.id].map(encodeURIComponent).join('/')) : '#/today')); } catch (_e) { /* the address stays; Today opens */ }
   }
   function phoneTripRestore(r, opts) {
     if (!PHONE_RETURN_LOAD) return;
     var t = phoneTripRead();
     if (!t || t.provider !== r.provider || t.id !== r.id) return;
+    // A record from the thread goes back into the thread's box only, and the reader's into the reader's (7.0.53).
+    if ((t.from === 'thread') !== !!(opts && opts.from === 'thread')) return;
     PHONE_RETURN_LOAD = false;
     phoneTripDrop();
     var view = phoneApprovalView(r, opts);
@@ -5915,7 +5927,10 @@
     form.classList.add('pa-on');
     var go = document.createElement('button');
     go.type = 'button'; go.className = 'pa-go'; go.setAttribute('data-phone-offer', '1');
-    go.setAttribute(view.prefix === 'ta' ? 'data-ta' : 'data-action', view.prefix === 'ta' ? 'approve-phone' : 'approve-on-phone');
+    // Each composer's own delegate routes the tap: Today's sheet (data-ta), the COS thread's Answer box (data-cos, 7.0.53),
+    // else the reader (data-action).
+    var goAttr = { ta: ['data-ta', 'approve-phone'], rr: ['data-cos', 'rr-phone'] }[view.prefix] || ['data-action', 'approve-on-phone'];
+    go.setAttribute(goAttr[0], goAttr[1]);
     phoneGoLabel(go, false);
     if (view.input && view.input.parentNode === form) form.insertBefore(go, view.input.nextSibling); else form.appendChild(go);
     form.__paEntry = { r: r, opts: opts };   // the quiet label and the reason come from phoneBusyApply, called right after
@@ -6012,7 +6027,8 @@
     if (!webKeySetupUrl()) { say('Approval on the phone works only when Control is open at your Mac’s Tailscale name. Send still works here.', 'error'); return Promise.resolve('host'); }
     if (!view.live()) return Promise.resolve('stale');
     var input = view.input, text = input ? input.value.trim() : '';
-    var provider = r.provider, id = r.id, packetSha = r.phonePacketSha256 || '';
+    // 7.0.53 (X1): never a request from the thread, even if one was loaded for this session elsewhere.
+    var provider = r.provider, id = r.id, packetSha = opts.from === 'thread' ? '' : r.phonePacketSha256 || '';
     var packet = packetSha && r.phonePackets && r.phonePackets[packetSha];
     if (packetSha && (!packet || packet.exp < Date.now() || packet.provider !== provider || packet.sessionId !== id)) { say('That release request expired or changed. Reopen this session to load its current request.', 'error'); return Promise.resolve('packet'); }
     // 7.0.51 (lead 07:09, choice 2): with a request, an empty box sends the standard words, which the approval page
@@ -6029,6 +6045,11 @@
       if (typeof opts.askCaution === 'function') opts.askCaution();
       else { r.cautionAsk = true; r.cautionVia = 'phone'; if (typeof renderVerdict === 'function') renderVerdict(r); }
       return Promise.resolve('caution');
+    }
+    // 7.0.53 (X1's must-fix): a caller may ask the Mac something fresh before the trip (the COS thread's box asks whether
+    // the session now waits on an approval); its no stops here, nothing attached or opened, and it says why itself.
+    if (typeof opts.precheck === 'function' && !opts.prechecked) {
+      return Promise.resolve(opts.precheck()).then(function (ok) { return ok ? approveOnPhone(Object.assign({}, opts, { r: r, prechecked: true })) : 'checked'; }, function () { return 'checked'; });
     }
     // 7.0.51 (W1): the SAME draft and turn key a plain Send of these words uses (no files: the phone path refuses
     // them above). A phone-only key let a verified message and a Send of the same words both land.
@@ -6063,7 +6084,9 @@
           say('Opening the approval page.');
           location.assign(body.signerUrl);
           // After the call: a navigation that throws keeps no record. Script runs on after assign, so this lands first.
-          phoneTripSave({ v: 1, provider: provider, id: id, key: draft.key, bindingId: b.bindingId, text: draft.text, at: Date.now() });
+          // 7.0.53 (X1): from the COS thread's Answer box, the record says so, with the row's newest item and its height on
+          // screen, so the way back is that row at that height with this box (phoneTripThread). Others are as before.
+          phoneTripSave(Object.assign({ v: 1, provider: provider, id: id, key: draft.key, bindingId: b.bindingId, text: draft.text, at: Date.now() }, phoneTripThread(opts)));
           operation.completed = true;
           WEB_KEY.navigation = { r: r, token: operation, at: Date.now(), trip: { key: draft.key, bindingId: b.bindingId, text: draft.text, view: view } };
           phoneTripWatch(WEB_KEY.navigation);
@@ -6205,7 +6228,7 @@
   // ── the send gates, written once (7.0.53, the lead's ruling (c), 21:0x; W1) ──
   // The reader's own gates (sendSessionTurn, watchTurn, renderVerdict), for a composer that is not the reader. The COS
   // thread's Answer box is the only caller in 7.0.53: the reader and Today's sheet keep their own code, and
-  // session-gates-parity-web.test.ts pins these words and this order to the reader's, and records where Today's copy
+  // answer-box-web.test.ts (its parity part) pins these words and this order to the reader's, and records where Today's copy
   // differs, so drift in any of the three fails a test until the follow-up moves both onto this. In order:
   //   no words; a file still uploading or failed; the caution (another app holds the session and looks idle: asked
   //   before the first send); one send at a time; then continueSession (attach or reuse the binding, one key per
@@ -6305,6 +6328,8 @@
     return '';
   }
   function gateCaution(r) { var v = r.verdict; return v && v.caution ? (sxProvider(r.provider) === 'codex' ? GATE_COPY.cautionCodex : GATE_COPY.cautionOther) : ''; }
+  /** Stop the watch of this session's sent turn now (its box closed). */
+  function gateStop(r) { if (r && r.watchTimer) { clearInterval(r.watchTimer); r.watchTimer = null; } }
   /** A tap inside the verdict slot ([data-gate]). `resend(opts)` sends the box's words again through gateSend. */
   function gateAction(r, act, resend) {
     var view = viewOf(r);
@@ -9102,6 +9127,8 @@
   };
   window.COSWeb.sessionKit = {
     phoneOffer: paintWebKeyOffer, approvePhone: approveOnPhone,
+    // 7.0.53: on a load back from the approval page for a message sent from the COS thread, which row to put back.
+    phoneReturn: function () { var t = PHONE_RETURN_LOAD ? phoneTripRead() : null; return t && t.from === 'thread' ? { provider: t.provider, id: t.id, item: t.item, top: t.top } : null; },
     // A session object for continueSession, with the overlay's own view (READER_VIEW's methods).
     session: function (provider, id, view) {
       return { provider: provider, id: id, draft: null, held: [], view: view, verdict: null, refusal: null, cautionAck: false, feed: newFeed(), live: null, queued: 0 };
@@ -9116,9 +9143,63 @@
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
-    gates: { send: gateSend, watch: gateWatch, verdictHtml: gateVerdictHtml, caution: gateCaution, action: gateAction, copy: GATE_COPY, watchMs: GATE_WATCH_MS },
+    gates: { send: gateSend, watch: gateWatch, stop: gateStop, verdictHtml: gateVerdictHtml, caution: gateCaution, action: gateAction, copy: GATE_COPY, watchMs: GATE_WATCH_MS },
     parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
+
+  // ── focus mode (7.0.53; Miles 11/16 13:19; F1's direction A, the lead's 23:5x: A on the folded Duo and the phone) ──
+  // The COS thread fills the screen: the top bar, the way-you-came line and the chat's own header go, the folded Duo's
+  // strip keeps its width but holds only the round controls (leave, the newest line), and the composer folds Model and
+  // Effort into one line. It is a class on <html>, never a route change: nothing reloads, the draft stays in its box,
+  // and the first card he can see stays where it was (cos-chat.js holdPlace). Below 600 px only in this piece (the open
+  // Duo's direction C is the next piece); folding past 600 px keeps the choice, and folding back shows it again. One tap
+  // leaves (the stack's first control, or Escape). Kept for this tab only.
+  var FOCUS = { on: false };
+  var FOCUS_MQ = '(max-width: 599px)';
+  function focusWhere() {
+    var r = parseRoute();
+    return r.pane === 'messages' && r.args[0] === 'cos' && !r.args[1];
+  }
+  function focusFits() { try { return !!(window.matchMedia && window.matchMedia(FOCUS_MQ).matches); } catch (_e) { return false; } }
+  function focusSync() {
+    var here = focusWhere() && focusFits(), on = FOCUS.on && here;
+    var de = document.documentElement;
+    if (de.classList.contains('focus') !== on) de.classList.toggle('focus', on);
+    var enter = $('focus-enter'), stack = $('focus-stack');
+    if (enter) enter.classList.toggle('hidden', !here || on);
+    if (stack) stack.hidden = !on;
+    return on;
+  }
+  function focusSet(on) {
+    on = !!on;
+    if (FOCUS.on === on) return;
+    var chat = window.COSWeb.cosChat;
+    var flip = function () { FOCUS.on = on; focusSync(); };
+    if (chat && typeof chat.holdPlace === 'function') chat.holdPlace(flip); else flip();
+    try { if (on) sessionStorage.setItem('cos.focus', '1'); else sessionStorage.removeItem('cos.focus'); } catch (_e) { /* this tab only, best effort */ }
+    // Focus follows the control he used: entering puts it on Leave, leaving puts it back on the enter control.
+    var to = $(on ? 'focus-leave' : 'focus-enter');
+    if (to && to.focus && (!to.classList || !to.classList.contains('hidden'))) { try { to.focus({ preventScroll: true }); } catch (_e) { to.focus(); } }
+  }
+  try { FOCUS.on = sessionStorage.getItem('cos.focus') === '1'; } catch (_e) { FOCUS.on = false; }
+  window.COSWeb.onRoute(function () { focusSync(); });
+  // Fold and unfold: the class follows the width, and the first card he can see is held across that flip too.
+  function focusResync() { var chat = window.COSWeb.cosChat; if (chat && typeof chat.holdPlace === 'function') chat.holdPlace(focusSync); else focusSync(); }
+  try { var focusMql = window.matchMedia(FOCUS_MQ); if (focusMql.addEventListener) focusMql.addEventListener('change', focusResync); } catch (_e) { /* no matchMedia: never shown */ }
+  document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('[data-focus]') : null;
+    if (!t) return;
+    var act = t.getAttribute('data-focus');
+    if (act === 'enter') focusSet(true);
+    else if (act === 'leave') focusSet(false);
+    else if (act === 'newest') { var chat = window.COSWeb.cosChat; if (chat && typeof chat.latest === 'function') chat.latest(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    // Escape leaves focus, unless a sheet over the page takes it first.
+    var sheet = $('ask-sheet');
+    if (e.key === 'Escape' && FOCUS.on && document.documentElement.classList.contains('focus') && (!sheet || sheet.classList.contains('hidden'))) focusSet(false);
+  });
+  window.COSWeb.focus = { set: focusSet, on: function () { return FOCUS.on; }, sync: focusSync };
 
   // ── layout reports and the visible box, every pane (7.0.2) ──
   // The Duo audit (11/07): only Today's session sheet ever sent a layout report, and only when its classes flipped, so

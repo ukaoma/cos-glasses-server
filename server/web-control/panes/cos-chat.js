@@ -317,12 +317,33 @@
     return '<label class="cc-model"><span>Model</span><select class="field" data-cos-model aria-label="Model for Ask">' + opts.join('') + '</select></label>' +
       '<label class="cc-model"><span>Effort</span><select class="field" data-cos-effort aria-label="Effort for Ask">' + efforts.join('') + '</select></label>';
   }
+  // 7.0.53 focus mode: what the folded line says. "default" for both unset; else each choice, the unset one as default.
+  function meLabel() {
+    var m = C.model ? (C.models || []).filter(function (x) { return x.value === C.model; })[0] : null;
+    var e = C.effort ? EFFORTS.filter(function (x) { return x[0] === C.effort; })[0] : null;
+    if (!C.model && !C.effort) return 'Model and effort: default';
+    return 'Model and effort: ' + (m ? m.label : C.model ? C.model : 'default') + ', ' + (e ? e[1].toLowerCase() : 'default');
+  }
+  function paintMe() {
+    document.querySelectorAll('[data-cos="menus"]').forEach(function (b) {
+      var t = meLabel(); if (b.textContent !== t) b.textContent = t;
+      var form = b.closest && b.closest('[data-cos-form]'), open = !!(form && form.classList.contains('menus-open'));
+      b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  }
+  // The folded line opens Model and Effort under the box, and closes them again; the choice itself is unchanged.
+  function toggleMenus(t) {
+    var form = t.closest && t.closest('[data-cos-form]'); if (!form) return;
+    form.classList.toggle('menus-open');
+    paintMe();
+  }
   function paintModelMenu() {
     document.querySelectorAll('[data-cos-model-slot]').forEach(function (slot) {
       // An open menu is never rebuilt under the finger (it would close the iOS picker).
       if (document.activeElement && slot.contains(document.activeElement)) return;
       slot.innerHTML = modelMenuHtml();
     });
+    paintMe();
   }
 
   // ── composers: the chat's and the reader's Reply ──────
@@ -356,6 +377,8 @@
       '<textarea class="field cc-input" id="' + esc(k.inputId) + '" rows="1" maxlength="2000" placeholder="' + esc(o.placeholder) + '" aria-label="' + esc(o.label) + '"></textarea>' +
       '<div class="cc-buttons">' +
         cameraHtml('data-cos-file') + clipHtml('data-cos-file') +
+        // 7.0.53 focus mode: Model and Effort fold into this one line (shown only in focus; app.css). A tap opens them.
+        (k === CHAT ? '<button type="button" class="link-btn cc-me" data-cos="menus" aria-expanded="false">' + esc(meLabel()) + '</button>' : '') +
         '<button type="button" class="cx-btn primary cc-ask" data-cos="ask">Ask</button>' +
         (drop ? '<button type="button" class="cx-btn cc-drop" data-cos="drop">Drop</button>' : '') + '</div>' +
       '<div class="cc-foot"><span class="cc-menus" data-cos-model-slot>' + (C.models ? modelMenuHtml() : '') + '</span>' +
@@ -402,7 +425,7 @@
     var route = W.parseRoute(), routeItem = route.args[0] === 'cos' ? route.args[1] || '' : '';
     // 7.0.52: back from a reader Open result opened, the chat goes to where he tapped. It never scrolls to the newest
     // line on the way, not even for a moment: the tapped card is put back where it was by showFocusItem.
-    var back = takeReturn(route);
+    var back = takeReturn(route) || takePhoneReturn(route);
     if (!TAIL || TAIL.feed !== feed || !TAIL.active) { watchTail(feed); if (back) { TAIL.active = true; TAIL.following = false; } else followLatest(); }
     if (back) TAIL.routeItem = routeItem;
     else if (TAIL && TAIL.routeItem !== routeItem) {
@@ -729,7 +752,9 @@
     }
     return null;
   }
-  function rrNeedsApproval(g) { var r = rrRow(g); return !!(r && r.state === 'waiting' && (r.waiting_kind === 'permission' || r.waiting_kind === 'plan')); }
+  // X1 01:0x: a list row's `state` is running or recent; waiting is in agent_state (routes/agent-sessions.ts toEntry,
+  // lib/session-state-derive.ts derivedRowFields). The tests build their rows from derivedRowFields for that reason.
+  function rrNeedsApproval(g) { var r = rrRow(g); return !!(r && r.agent_state === 'waiting' && (r.waiting_kind === 'permission' || r.waiting_kind === 'plan')); }
   function rrHtml(g) {
     var it = g.newest, n = rrCount(g), open = !!(C.rrOpen && C.rrOpen[g.key]);
     var short = String(g.id).slice(0, 8), when = aboutAgo(rrWhen(it));
@@ -791,6 +816,7 @@
   var RR_SEND = 'Send as message only';
   var RR_PLACEHOLDER = 'Message this session';
   var RR_HOLD = 'COS is still answering in this session. Send again when it finishes; it will not post twice. Or open the session, where it sends on its own.';
+  var RR_UNCHECKED = 'COS could not check whether this session is waiting on an approval. Your words are still here; send again in a moment.';
   C.ans = { key: '', node: null };
   C.ansS = {};
   C.ansDraft = {};
@@ -800,6 +826,8 @@
   function rrSafeKey(key) { return String(key).replace(/["\\]/g, ''); }
   // His own tap (Answer on another row, Close) draws the feed even with focus in the box: the never-under-the-finger
   // rule is for the feed's own repaints.
+  // And it never moves him (Q1): rrAnswer stops "following the newest line" before it paints, so paintFeed takes its own
+  // keepPlace path (the first card he can see is held) and never scrolls to the end for a box opening or closing.
   function rrPaintNow() { C.paintTap = true; try { paintFeed(false); } finally { C.paintTap = false; } }
   var RR_VIEW = {
     status: function (r, text, kind) { r.note = { text: text || '', kind: kind || '' }; rrAnswerPaint(r); },
@@ -818,7 +846,8 @@
     hold: function (r) { RR_VIEW.status(r, RR_HOLD, 'error'); },
     watch: function (r, bindingId, key) { var K = rrKit(); if (K) K.gates.watch(r, bindingId, key); },
     queue: function () {},
-    live: function (r) { return C.ansS[r.rrKey] === r; },
+    // The watch lives while the box is open (Q1): Close stops it.
+    live: function (r) { return C.ans.key === r.rrKey && C.ansS[r.rrKey] === r; },
     sending: function (r, on) {
       var n = rrAnswerEl(r); if (!n) return;
       Array.prototype.forEach.call(n.querySelectorAll('button'), function (b) { b.disabled = !!on; });
@@ -834,13 +863,15 @@
     var id = 'rr-a-' + rrSafeKey(g.key).replace(/[^a-z0-9]/gi, '-');
     var f = document.createElement('form');
     f.className = 'rr-answer';
+    // One box at a time, so these ids are unique: the phone composer finds the box by them (prefix 'rr').
+    f.id = 'rr-form';
     f.setAttribute('data-cos-rr-answer', g.key);
-    f.innerHTML = '<p class="rr-to" id="' + id + '-to">To <strong>' + esc(rrTitle(g)) + '</strong>, ' + esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(String(g.id).slice(0, 8)) + '</span></p>' +
-      '<textarea class="rr-input" rows="2" data-cos-rr-input="' + esc(g.key) + '" aria-labelledby="' + id + '-to" placeholder="' + esc(RR_PLACEHOLDER) + '"></textarea>' +
+    f.innerHTML = '<p class="rr-to" id="' + id + '-to">To <strong><bdi>' + esc(rrTitle(g)) + '</bdi></strong>, ' + esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(String(g.id).slice(0, 8)) + '</span></p>' +
+      '<textarea class="rr-input" id="rr-input" rows="2" data-cos-rr-input="' + esc(g.key) + '" aria-labelledby="' + id + '-to" placeholder="' + esc(RR_PLACEHOLDER) + '"></textarea>' +
       '<p class="rr-caution hidden" data-rr-caution></p>' +
       '<div class="rr-verdict" data-rr-verdict></div>' +
       '<p class="rr-note" data-rr-note role="status" aria-live="polite"></p>' +
-      '<div class="rr-answer-actions"><button type="submit" class="cx-btn" data-rr-send>' + esc(RR_SEND) + '</button>' +
+      '<div class="rr-answer-actions"><button type="submit" class="cx-btn" id="rr-send" data-rr-send>' + esc(RR_SEND) + '</button>' +
       '<button type="button" class="link-btn" data-cos="rr-answer-close" data-rr="' + esc(g.key) + '">Close</button></div>';
     var box = f.querySelector('[data-cos-rr-input]');
     if (box) box.value = C.ansDraft[g.key] || '';
@@ -857,15 +888,84 @@
     if (caution) { caution.textContent = line; caution.classList.toggle('hidden', !line); }
     if (note) { note.textContent = (r.note && r.note.text) || ''; note.classList.toggle('error', !!(r.note && r.note.kind === 'error')); }
   }
+  // ── the phone key from the box (7.0.53, the second piece): the reader's own phone path (sessionKit.phoneOffer and
+  // approvePhone) with this box as its composer. With an enrolled key on the Mac's ts.net name, the box's primary is
+  // Send with the key mark, and "Send as message only" stays the plain send. The trip record says it came from the
+  // thread, with this row's newest item and its height on screen, so the way back is this row at that height with this
+  // box (phoneReturn below). The words wait on the Mac, never in a URL; "Sent from your phone" only from the Mac's turn.
+  function rrPhoneOpts(r) {
+    return { r: r, prefix: 'rr', from: 'thread',
+      live: function () { return C.ans.key === r.rrKey && !!C.ans.node; },
+      askCaution: function () { r.cautionAsk = true; r.cautionVia = 'phone'; rrAnswerPaint(r); },
+      status: function (text, kind) { RR_VIEW.status(r, text, kind); },
+      files: function () { return 'none'; },
+      // X1's must-fix: the approval check is fresh at the moment he sends, not the row as it was drawn.
+      precheck: function () { return rrFresh(r).then(function (st) { return rrFreshSays(r, st); }); },
+      thread: function () {
+        var g = rrFind(r.rrKey), row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(r.rrKey) + '"]');
+        var top = row && row.getBoundingClientRect ? row.getBoundingClientRect().top : null;
+        return g ? { item: g.newest.id, top: top } : null;
+      } };
+  }
+  // ── X1's must-fix (the lead 00:5x): no Answer while the session waits on an approval, checked FRESH at Send. The row's
+  // own check is as of when it was drawn; the feed is not drawn again while he types and the session rows are kept up to
+  // 60 s, so a permission or plan request that arrived with the box open would leave Send live, and his "yes, go ahead"
+  // would park and land after the request settled. So Send (and the key's Send) first reads that one session from the
+  // Mac. Waiting on an approval: the row's own line, his words kept, nothing posted. No answer: nothing posted either.
+  function rrFresh(r) {
+    var K = rrKit();
+    if (!K || typeof K.answer !== 'function' || typeof K.path !== 'function') return Promise.resolve('unknown');
+    return K.answer(K.path(r.provider, r.id, '?turns=1'), { timeoutMs: 15000 }).then(function (a) {
+      var d = a && a.status === 200 && a.body && typeof a.body === 'object' ? a.body : null;
+      if (!d) return 'unknown';
+      return d.agent_state === 'waiting' && (d.waiting_kind === 'permission' || d.waiting_kind === 'plan') ? 'approval' : 'ok';
+    }, function () { return 'unknown'; });
+  }
+  function rrFreshSays(r, st) {
+    if (st === 'approval') { RR_VIEW.status(r, RR_APPROVAL, 'error'); return false; }
+    if (st !== 'ok') { RR_VIEW.status(r, RR_UNCHECKED, 'error'); return false; }
+    return true;
+  }
+  function rrPhoneOffer(r) { var K = rrKit(); if (K && typeof K.phoneOffer === 'function' && rrAnswerEl(r)) K.phoneOffer(r, rrPhoneOpts(r)); }
+  function rrPhone(key) {
+    var K = rrKit(), r = C.ansS[key];
+    if (!K || !r || !key || C.ans.key !== key || typeof K.approvePhone !== 'function') return Promise.resolve('');
+    return K.approvePhone(rrPhoneOpts(r));
+  }
+  // A load back from the approval page for a message sent from this thread: the row he left goes back to its height
+  // (the 7.0.52 Back placement), and its box opens with his words, through the reader's own restore. Taken once.
+  function takePhoneReturn(route) {
+    var K = rrKit(), p = !C.phoneBackTaken && K && typeof K.phoneReturn === 'function' && route.args[0] === 'cos' && !route.args[1] ? K.phoneReturn() : null;
+    if (!p) return false;
+    C.phoneBackTaken = true;
+    C.focusItem = p.item; C.focusTop = typeof p.top === 'number' ? { item: p.item, top: p.top, at: Date.now() } : null; C.focusQuiet = true;
+    C.phoneBack = { key: p.provider + '|' + String(p.id).toLowerCase() };
+    return true;
+  }
+  // In paintFeed, once the chat is read: the box for that row, before the rows are drawn (so its slot is there).
+  function phoneBackOpen() {
+    if (!C.phoneBack || C.items === null || C.feedState !== 'ready') return null;
+    var g = rrFind(C.phoneBack.key);
+    C.phoneBack = null;
+    if (!g || !rrKit()) return null;
+    var r = rrSessionFor(g);
+    C.ans = { key: g.key, node: rrAnswerNode(g) };
+    C.phoneBackR = r;
+    return r;
+  }
   function rrAnswer(key) {
     var g = rrFind(key), K = rrKit();
     if (!g || !K) return;
+    // A second tap on the same row's Answer keeps the open box and his words (Q1): only focus goes back into it.
     if (C.ans.key !== key) {
       rrAnswerKeep();
+      // He is answering this row now, not following the newest line: a later quiet repaint must not scroll to the end.
+      if (TAIL) TAIL.following = false;
       var r = rrSessionFor(g);
       C.ans = { key: key, node: rrAnswerNode(g) };
       rrPaintNow();
       rrAnswerPaint(r);
+      rrPhoneOffer(r);
       // What the session takes right now (the caution, or why it cannot): the reader's own probe, painted here.
       if (!r.probing) K.probe(r);
     }
@@ -880,6 +980,8 @@
   function rrAnswerClose(key) {
     if (!key || C.ans.key !== key) return;
     rrAnswerKeep();
+    // Close stops the watch now (Q1), not on its next tick.
+    var r = C.ansS[key], kit = rrKit(); if (r && kit && typeof kit.gates.stop === 'function') kit.gates.stop(r);
     C.ans = { key: '', node: null };
     rrPaintNow();
     var row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(key) + '"]'), go = row && row.querySelector('.rr-answer-go');
@@ -888,12 +990,23 @@
   function rrAnswerSend(key, extra) {
     var K = rrKit(), r = C.ansS[key], n = key && C.ans.key === key ? C.ans.node : null;
     if (!K || !r || !n) return Promise.resolve('');
-    var box = n.querySelector('[data-cos-rr-input]');
-    return K.gates.send(r, box ? box.value : '', extra || {});
+    var box = n.querySelector('[data-cos-rr-input]'), text = box ? box.value : '';
+    // No words: the gates say so, with no read of the Mac.
+    if (!String(text).trim()) return K.gates.send(r, text, extra || {});
+    if (r.checking || r.sending) return Promise.resolve('busy');
+    r.checking = true; RR_VIEW.sending(r, true);
+    return rrFresh(r).then(function (st) {
+      r.checking = false; RR_VIEW.sending(r, false);
+      if (!rrFreshSays(r, st)) return st === 'approval' ? 'approval' : 'unchecked';
+      return K.gates.send(r, text, extra || {});
+    });
   }
   function rrGate(key, act) {
     var K = rrKit(), r = C.ansS[key];
     if (!K || !r || !key || C.ans.key !== key) return Promise.resolve('');
+    // The caution asked on the way to the phone: its Send anyway continues there, as the reader's does.
+    if (act === 'caution-send' && r.cautionVia === 'phone') { r.cautionAck = true; r.cautionAsk = false; r.cautionVia = null; rrAnswerPaint(r); return rrPhone(key); }
+    if (act === 'caution-cancel') r.cautionVia = null;
     return K.gates.action(r, act, function (extra) { return rrAnswerSend(key, extra); });
   }
   // After the feed is drawn again: the open box goes into its row's new slot, as the same element. No slot (the row
@@ -1127,6 +1240,7 @@
       // 7.0.9: a question asked 7 days ago or more (the server marks it `archived`) lives under older questions.
       // 7.0.53 Part A: Reply ready items are one row per session, at its newest reply; every item of a group counts as
       // drawn, so the history never adds a note for one folded into its row.
+      phoneBackOpen();
       var groups = rrGroups(C.items), inRow = {};
       groups.forEach(function (g) { g.items.forEach(function (it) { inRow[it.id] = 1; }); });
       var rows = (C.items || []).filter(function (it) { return !it.archived && !inRow[it.id]; }).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
@@ -1172,6 +1286,9 @@
     var focused = C.ans.node && document.activeElement && C.ans.node.contains(document.activeElement) ? document.activeElement : null;
     feed.innerHTML = '<div data-cos-content>' + html + '</div>';
     rrAnswerPlace(feed, focused);
+    // The box opened for the way back from the phone, once it is in the page (a held paint may have drawn it first).
+    var backR = C.phoneBackR;
+    if (backR && rrAnswerEl(backR)) { C.phoneBackR = null; rrAnswerPaint(backR); rrPhoneOffer(backR); var bkit = rrKit(); if (bkit && !backR.probing) bkit.probe(backR); }
     if (historyOn()) paintTrim(feed);
     watchTail(feed);
     if (stick) followLatest();
@@ -3236,7 +3353,8 @@
     if (what === 'ask') return doAsk(kOf(t));
     if (what === 'drop') return doDrop();
     if (what === 'all') return W.go('messages');
-    if (what === 'latest') { var feed = C.host && C.host.querySelector('[data-cos-feed]'); watchTail(feed); followLatest(); return; }
+    if (what === 'latest') return latest();
+    if (what === 'menus') return toggleMenus(t);
     if (what === 'read-all') return markReadIfShown(true);
     if (what === 'new-thread') return newThread();
     if (what === 'hist-full') return loadFull(t.getAttribute('data-id'));
@@ -3249,6 +3367,7 @@
     if (what === 'rr-more') return rrToggle(t.getAttribute('data-rr'), t.tagName === 'BUTTON' ? 'count' : 'words');
     if (what === 'rr-answer') return rrAnswer(t.getAttribute('data-rr'));
     if (what === 'rr-answer-close') return rrAnswerClose(t.getAttribute('data-rr'));
+    if (what === 'rr-phone') return rrPhone(C.ans.key);
     if (what === 'rr-gate') return rrGate(t.getAttribute('data-rr'), t.getAttribute('data-gate'));
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
@@ -3278,6 +3397,15 @@
       var drop = C.host.querySelector('[data-drop-thread="' + t.getAttribute('data-thread') + '"]');
       if (drop) drop.scrollIntoView({ block: 'center' });
     }
+  }
+  function latest() { var feed = C.host && C.host.querySelector('[data-cos-feed]'); watchTail(feed); followLatest(); }
+  // 7.0.53 focus mode (app.js focusSet): the class change is the "paint". Reading the newest line, he stays at the newest
+  // line; else the first card he can see stays where it was (keepPlace, the same hold a quiet repaint uses).
+  function holdPlace(flip) {
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    if (!feed || !chatVisible()) { flip(); return; }
+    if (TAIL && TAIL.following) { flip(); scrollToEnd(feed); return; }
+    keepPlace(flip, true);
   }
   function isComposerInput(el) { return !!(el && el.classList && el.classList.contains('cc-input')); }
   function onKey(e) {
@@ -3313,6 +3441,7 @@
   function syncMenus() {
     document.querySelectorAll('[data-cos-model]').forEach(function (s) { if (s !== document.activeElement) s.value = C.model; });
     document.querySelectorAll('[data-cos-effort]').forEach(function (s) { if (s !== document.activeElement) s.value = C.effort; });
+    paintMe();
   }
   function onSubmit(e) {
     var f = e.target.closest && e.target.closest('[data-cos-steer]');
@@ -3444,6 +3573,7 @@
     replyHtml: replyHtml, mountReply: mountReply, askFromSheet: askFromSheet,
     // Today round 2: "Ask about this" under the Today summary (app.js sendTodayAsk).
     askAbout: askAbout, aboutContextText: aboutContextText,
+    holdPlace: holdPlace, latest: latest,
     onClick: onClick, onKey: onKey, onInput: onInput, onChange: onChangeEvent, onSubmit: onSubmit, onPaste: onPaste, onDrag: onDrag,
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
@@ -3534,7 +3664,7 @@
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
-    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
+    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _rrPhoneOpts: rrPhoneOpts, _takePhoneReturn: takePhoneReturn, _syncMenus: syncMenus, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
     _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
     _steer: steer, _cancel: cancel,

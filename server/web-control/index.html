@@ -117,6 +117,10 @@
     <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M5.5 18.5l1.8-1.8M16.7 7.3l1.8-1.8"/></symbol>
     <symbol id="i-ask" viewBox="0 0 24 24"><path d="m12 3 1.9 6.1L20 11l-6.1 1.9L12 19l-1.9-6.1L4 11l6.1-1.9z"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+    <!-- 7.0.53 focus mode (F1's direction A): enter, leave, and the newest line. -->
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/></symbol>
+    <symbol id="i-collapse" viewBox="0 0 24 24"><path d="M20 10h-6V4M4 14h6v6M14 10l6.5-6.5M10 14l-6.5 6.5"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v13M6.5 12.5 12 18l5.5-5.5"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V6M6.5 11.5 12 6l5.5 5.5"/></symbol>
     <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
   </svg>
@@ -178,6 +182,12 @@
       <button type="button" class="rail-back" id="rail-back" aria-label="Back" hidden><svg class="icon"><use href="#i-back"/></svg></button>
     </nav>
 
+    <!-- 7.0.53 focus mode: the controls on the content's edge, in the folded Duo's strip or at the phone's top right. -->
+    <div class="focus-stack" id="focus-stack" hidden>
+      <button type="button" class="focus-rc" id="focus-leave" data-focus="leave" aria-label="Leave focus"><svg class="icon"><use href="#i-collapse"/></svg></button>
+      <button type="button" class="focus-rc" data-focus="newest" aria-label="Go to the newest line"><svg class="icon"><use href="#i-down"/></svg></button>
+    </div>
+
     <div class="main-col">
       <!-- Control's navigation bar (ActivityWindow navigationBar): shown off Today, from 600px. -->
       <!-- 7.0.33 A10 and A11 (Anand round 2, slides 5 and 28): Back and the way you came, as on the phone. Home and
@@ -194,6 +204,8 @@
             <svg class="mark" width="28" height="28" aria-hidden="true"><use href="#i-mark"/></svg><span id="section-name">Today</span><span class="caret" aria-hidden="true"></span>
           </button>
         </div>
+        <!-- 7.0.53 focus mode (F1 direction A, the lead's 23:5x): the thread fills the screen; app.js focusSync shows it. -->
+        <button type="button" class="icon-btn focus-enter hidden" id="focus-enter" data-focus="enter" aria-label="Focus: the thread fills the screen"><svg class="icon"><use href="#i-expand"/></svg></button>
         <button type="button" class="icon-btn" data-open-ask aria-label="Ask COS or find a session"><svg class="icon"><use href="#i-ask"/></svg></button>
       </header>
 

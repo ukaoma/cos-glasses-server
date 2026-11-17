@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import { derivedFields, listRow } from './session-row-fixture.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
@@ -51,7 +52,7 @@ function fakeFetch(routes: Routes) {
 }
 
 /** The reader's send region and the sessionKit export, run as written. `doc.hidden` and the interval are the test's. */
-function realKit(fetch: unknown) {
+function realKit(fetch: unknown, env: { hash?: string; trip?: unknown; ids?: () => Record<string, unknown> } = {}) {
   const start = APP.indexOf('  // ── Sessions: read, send, queue, fork, stop')
   const end = APP.indexOf("  // Copy session (Control's Kickstart brief")
   const ks = APP.indexOf('  window.COSWeb.sessionKit = {'), ke = APP.indexOf('\n  };', ks)
@@ -64,28 +65,38 @@ function realKit(fetch: unknown) {
   const mdRegion = APP.slice(APP.indexOf('  // Markdown for an assistant turn'), APP.indexOf('  function renderTurns('))
   const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0] + '\n' + TRANSPORT
   const store = new Map<string, string>()
+  const tabStore = new Map<string, string>()
+  if (env.trip !== undefined) tabStore.set('cos.phoneTrip', JSON.stringify(env.trip))
+  const replaced: string[] = []
   const ticks: Array<() => void> = []
   const doc = { hidden: false }
   const clock = { now: Date.now() }
   const FakeDate = class extends Date { static now() { return clock.now } }
   const deps: Record<string, unknown> = {
     state: { reading: null, turnPoll: null },
-    $: () => null, esc, md: (s: unknown) => String(s), toDate: (v: unknown) => (v ? new Date(String(v)) : null), autoGrow: () => {}, showAuth: () => {},
+    $: (id: string) => (env.ids ? env.ids()[id] ?? null : null), esc, md: (s: unknown) => String(s), toDate: (v: unknown) => (v ? new Date(String(v)) : null), autoGrow: () => {}, showAuth: () => {},
     clock: (d: Date) => d.toISOString().slice(11, 16),
     fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: () => 0, clearTimeout: () => {},
     setInterval: (fn: () => void) => { ticks.push(fn); return ticks.length }, clearInterval: (i: number) => { if (i) ticks[i - 1] = () => {} },
-    requestAnimationFrame: () => 0, document: doc, window: { COSWeb: {}, scrollTo: () => {} }, Date: FakeDate,
+    requestAnimationFrame: () => 0, document: doc,
+    location: { hash: env.hash ?? '', pathname: '/control/', search: '', hostname: 'localhost', assign: () => {} },
+    history: { state: null, replaceState: (_s: unknown, _t: string, u: string) => { replaced.push(u) } },
+    sessionStorage: { getItem: (k: string) => tabStore.get(k) ?? null, setItem: (k: string, v: string) => { tabStore.set(k, v) }, removeItem: (k: string) => { tabStore.delete(k) } },
+    readerKit: () => ({ webKeySigner: () => 0 }), window: { COSWeb: {}, scrollTo: () => {} }, Date: FakeDate,
     TURN_END_QUOTE: TE.TURN_END_QUOTE, TURN_END_PREFIX: TE.TURN_END_PREFIX, isTurnEndAnswer: TE.isTurnEndAnswer,
   }
   // eslint-disable-next-line no-new-func
   const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
-  return { kit, doc, clock, tick: () => ticks.slice().forEach(f => f()) }
+  return { kit, doc, clock, tick: () => ticks.slice().forEach(f => f()), replaced, tabStore }
 }
 
 const SID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d', SID2 = '019a7b2c-3d4e-7f60-8a1b-2c3d4e5f6a7b'
 const P = (tail: string, id = SID) => `/api/agent-sessions/claude/${encodeURIComponent(id)}${tail}`
 const OK: Routes = {
+  // X1's must-fix: the box reads the session fresh at Send (idle here).
+  ['GET ' + P('?turns=1')]: { status: 200, body: derivedFields('idle') },
+  ['GET ' + P('?turns=1', SID2)]: { status: 200, body: derivedFields('idle') },
   ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 0 } },
   ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
   ['POST /api/agent-sessions/bindings/b1/turns']: { status: 202, body: { outcome: 'queued' } },
@@ -266,7 +277,7 @@ describe('the 3-minute watch: the reader\'s outcomes, paused while the page is h
 
 // ── Part 2: the box in the thread, the real cos-chat.js on the real gates ───────────────────────────────────────────
 class El {
-  attrs: Record<string, string> = {}; value = ''; textContent = ''; innerHTML = ''; disabled = false; readOnly = false
+  attrs: Record<string, string> = {}; id = ''; value = ''; textContent = ''; innerHTML = ''; disabled = false; readOnly = false
   cls = new Set<string>()
   classList = { add: (c: string) => this.cls.add(c), remove: (c: string) => this.cls.delete(c), contains: (c: string) => this.cls.has(c), toggle: (c: string, on?: boolean) => ((on ?? !this.cls.has(c)) ? this.cls.add(c) : this.cls.delete(c)) }
   constructor(public tag = 'DIV', public doc?: { activeElement: unknown }) {}
@@ -274,7 +285,8 @@ class El {
   setAttribute(k: string, v: unknown) { this.attrs[k] = String(v) }
   getAttribute(k: string) { return k in this.attrs ? this.attrs[k]! : null }
   hasAttribute(k: string) { return k in this.attrs }
-  focus() { if (this.doc) this.doc.activeElement = this }
+  focusOpts: unknown = undefined
+  focus(o?: unknown) { this.focusOpts = o; if (this.doc) this.doc.activeElement = this }
 }
 class FormEl extends El {
   input: El; note: El; verdict: El; caution: El; send: El; close: El
@@ -305,25 +317,31 @@ function rr(o: { sid?: string; excerpt?: string; at?: string } = {}) {
     state: 'live', key: `agent:${sid}:turn:${'a'.repeat(63)}${itemN % 10}`, excerpt: o.excerpt ?? 'All gates passed. Publish to next?', turnAt: o.at ?? new Date(Date.now() - 240000).toISOString() }
 }
 
-function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[] } = {}) {
-  const f = fakeFetch(o.routes ?? OK), K = realKit(f.fetch)
-  const document: any = { activeElement: null, hidden: false, addEventListener: () => {}, querySelectorAll: () => [], getElementById: () => null, body: { scrollHeight: 0 }, scrollingElement: {} }
+function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; hash?: string; trip?: unknown; card?: { id: string; top: number; shift: number } } = {}) {
   const forms: FormEl[] = []
+  const ids = () => { const fe = forms[forms.length - 1]; return fe ? { 'rr-form': fe, 'rr-input': fe.input, 'rr-send': fe.send } : {} }
+  const f = fakeFetch(o.routes ?? OK), K = realKit(f.fetch, { hash: o.hash, trip: o.trip, ids })
+  const document: any = { activeElement: null, hidden: false, addEventListener: () => {}, querySelectorAll: () => [], getElementById: () => null, body: { scrollHeight: 0 }, scrollingElement: {} }
   document.createElement = (tag: string) => { if (tag === 'form') { const fe = new FormEl(document); forms.push(fe); return fe } return { setAttribute() {}, classList: { add() {} } } }
   let html = '', paints = 0
   const placed: Record<string, unknown> = {}
   const goBtn = new El('BUTTON', document)
+  let cardTop = o.card ? o.card.top : 0
+  const card = { getAttribute: (k: string) => (k === 'data-item-id' && o.card ? o.card.id : null), hasAttribute: (k: string) => k === 'data-item-id',
+    getBoundingClientRect: () => ({ top: cardTop, bottom: cardTop + 100 }) }
   const feed = {
     get innerHTML() { return html },
+    // o.card: one card on screen at o.card.top; each paint after the first moves it by o.card.shift (a box above it went).
     // As in a browser: the old feed goes, and focus inside it is lost.
-    set innerHTML(v: string) { html = v; paints++; for (const k of Object.keys(placed)) { if ((placed[k] as FormEl).contains(document.activeElement)) document.activeElement = null; delete placed[k] } },
+    set innerHTML(v: string) { html = v; paints++; if (o.card && paints > 1) cardTop += o.card.shift; for (const k of Object.keys(placed)) { if ((placed[k] as FormEl).contains(document.activeElement)) document.activeElement = null; delete placed[k] } },
     contains: (el: unknown) => Object.values(placed).some(n => (n as FormEl).contains(el)),
     querySelector: (s: string) => {
       const m = /^\[data-rr-answer-slot="(.+)"\]$/.exec(s)
       if (m && html.includes('data-rr-answer-slot="' + esc(m[1]) + '"')) return { appendChild: (n: unknown) => { placed[m[1]!] = n } }
+      if (o.card && s === '[data-item-id="' + o.card.id + '"]') return card
       return null
     },
-    querySelectorAll: () => [], scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+    querySelectorAll: (s: string) => (o.card && s.includes('[data-item-id]') ? [card] : []), scrollTop: 0, scrollHeight: 0, clientHeight: 0,
   }
   const host = { querySelector: (s: string) => (s === '[data-cos-feed]' ? feed : /^\[data-rr-row=/.test(s) ? { querySelector: () => goBtn } : null) }
   const W: Record<string, unknown> = {
@@ -332,7 +350,8 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[] } = 
     parseRoute: () => ({ pane: 'messages', args: ['cos'] }), go: () => {}, api: () => Promise.resolve({}),
     ...(o.noKit ? {} : { sessionKit: K.kit }),
   }
-  const window = { COSWeb: W, matchMedia: () => ({ matches: false, addEventListener: () => {} }), scrollTo: () => {}, scrollBy: () => {}, localStorage: { getItem: () => null, setItem: () => {} } }
+  const scrolls: unknown[][] = []
+  const window = { COSWeb: W, matchMedia: () => ({ matches: false, addEventListener: () => {} }), scrollTo: (...a: unknown[]) => { scrolls.push(a) }, scrollBy: (...a: unknown[]) => { scrolls.push(['by', ...a]) }, localStorage: { getItem: () => null, setItem: () => {} } }
   const ctx = vm.createContext({ window, document, setTimeout, clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto })
   vm.runInContext(CHAT, ctx)
   const chat = W.cosChat as any
@@ -341,7 +360,7 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[] } = 
   const tap = (attrs: Record<string, string>) => chat.onClick({ getAttribute: (k: string) => attrs[k] ?? null, tagName: 'BUTTON' })
   const submit = (form: FormEl) => { let prevented = false; const handled = chat.onSubmit({ target: form, preventDefault: () => { prevented = true } }); return { handled, prevented } }
   const type = (form: FormEl, words: string) => { form.input.value = words; chat.onInput({ target: { ...form.input, hasAttribute: (k: string) => k === 'data-cos-rr-input', getAttribute: (k: string) => (k === 'data-cos-rr-input' ? form.getAttribute('data-cos-rr-answer') : null), value: words } }) }
-  return { chat, paint, tap, submit, type, forms, placed, html: () => html, paints: () => paints, document, goBtn, ...f, K }
+  return { chat, paint, tap, submit, type, forms, placed, html: () => html, paints: () => paints, document, goBtn, scrolls, ...f, K }
 }
 
 describe('Answer on a Reply ready row', () => {
@@ -349,7 +368,7 @@ describe('Answer on a Reply ready row', () => {
     expect(thread({ noKit: true }).paint([rr()])).not.toContain('data-cos="rr-answer"')
     const t = thread()
     expect(t.paint([rr()])).toContain('<button type="button" class="link-btn rr-answer-go" data-cos="rr-answer" data-rr="' + esc(A_KEY) + '" aria-expanded="false">Answer</button>')
-    t.chat._state.sessionRows = [{ provider: 'claude', session_id: SID, state: 'waiting', waiting_kind: 'permission' }]
+    t.chat._state.sessionRows = [listRow({ id: SID, agentState: 'waiting', derived: { waiting_kind: 'permission' } })]
     const waiting = t.paint([rr()])
     expect(waiting).not.toContain('data-cos="rr-answer"')
     expect(waiting).toContain('It asked for approval.')
@@ -361,8 +380,12 @@ describe('Answer on a Reply ready row', () => {
     expect(t.forms).toHaveLength(1)
     const f = t.forms[0]!
     expect(f.input.value).toBe('')
-    expect(f.innerHTML).toContain('To <strong>Release checks</strong>, Claude, <span class="rr-id">0a1b2c3d</span>')
+    expect(f.innerHTML).toContain('To <strong><bdi>Release checks</bdi></strong>, Claude, <span class="rr-id">0a1b2c3d</span>')
     expect(f.innerHTML).toContain('>Send as message only</button>')
+    // The phone composer finds the box by these (prefix rr): one box at a time keeps them unique.
+    expect(f.id).toBe('rr-form')
+    expect(f.innerHTML).toContain('id="rr-input"')
+    expect(f.innerHTML).toContain('<button type="submit" class="cx-btn" id="rr-send" data-rr-send>')
     expect(f.innerHTML).toContain('placeholder="Message this session"')
     // No prefill and no chips: nothing of the reply's text is in the box.
     expect(f.innerHTML).not.toContain('Publish 7.0.53')
@@ -423,6 +446,8 @@ describe('Answer on a Reply ready row', () => {
     expect(turnPosts(t.calls)).toHaveLength(0)
     expect(t.forms[0]!.note.textContent).toBe('Write a message first.')
     expect(t.forms[0]!.note.cls.has('error')).toBe(true)
+    // No words, no read of the Mac.
+    expect(t.calls.filter(c => c.path === P('?turns=1'))).toHaveLength(0)
   })
   it('the caution from the Mac shows its line, then asks at Send; Send anyway (routed by data-cos) sends once', async () => {
     const routes: Routes = { ...OK, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 1 } } }
@@ -476,7 +501,7 @@ describe('Answer on a Reply ready row', () => {
     t.paint([rr()])
     t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
     t.forms[0]!.input.value = 'Kept.'
-    t.chat._state.sessionRows = [{ provider: 'claude', session_id: SID, state: 'waiting', waiting_kind: 'plan' }]
+    t.chat._state.sessionRows = [listRow({ id: SID, agentState: 'waiting', derived: { waiting_kind: 'plan' } })]
     t.chat._paintFeed(false)
     expect(t.chat._state.ans.key).toBe(A_KEY)
     t.document.activeElement = null
@@ -567,5 +592,232 @@ describe('parity: the gates speak the reader\'s words; Today\'s differences are 
     expect(gates).toContain('if (document.hidden) { started += GATE_WATCH_EVERY; return; }')
     expect(gates).not.toMatch(/turnEnd|seen:|sxPressSeen/)
     expect(READER).not.toContain('document.hidden')
+  })
+})
+
+describe('7.0.53, the second piece: back from the phone, to the row he left', () => {
+  const trip = (over: Record<string, unknown> = {}) => ({ v: 1, provider: 'claude', id: SID, key: 'ct-key-trip01', bindingId: 'b1', text: 'Ship it.', at: Date.now(), from: 'thread', item: 'ITEM', top: 140, ...over })
+  it('a #/phone-return load from the thread: the address becomes #/messages/cos, the row goes back to its height, its box opens with his words under the same key, and the Mac is asked whether it landed', async () => {
+    const item = rr()
+    const routes: Routes = { ...OK, ['GET /api/agent-sessions/bindings/b1/turns/ct-key-trip01']: { status: 200, body: { outcome: 'completed' } } }
+    const t = thread({ routes, hash: '#/phone-return', trip: trip({ item: item.id }) })
+    expect(t.K.replaced).toEqual(['/control/#/messages/cos'])
+    expect(t.chat._takePhoneReturn({ pane: 'messages', args: ['cos'] })).toBe(true)
+    expect(t.chat._state.focusItem).toBe(item.id)
+    expect(t.chat._state.focusTop).toMatchObject({ item: item.id, top: 140 })
+    // Quiet, like Back: if the row is gone, the chat says nothing and opens nothing older.
+    expect(t.chat._state.focusQuiet).toBe(true)
+    // Once per load.
+    expect(t.chat._takePhoneReturn({ pane: 'messages', args: ['cos'] })).toBe(false)
+    t.paint([item])
+    expect(t.chat._state.ans.key).toBe(A_KEY)
+    expect(t.placed[A_KEY]).toBe(t.forms[0])
+    expect(t.forms[0]!.input.value).toBe('Ship it.')
+    expect(t.chat._state.ansS[A_KEY].draft).toMatchObject({ text: 'Ship it.', key: 'ct-key-trip01' })
+    await flush()
+    expect(t.calls.some(c => c.path === '/api/agent-sessions/bindings/b1/turns/ct-key-trip01')).toBe(true)
+    // It landed: the words leave the box, the record is gone, and the box says so in the reader's words.
+    expect(t.forms[0]!.input.value).toBe('')
+    expect(t.forms[0]!.note.textContent).toBe('Sent from your phone.')
+    expect(t.K.tabStore.size).toBe(0)
+    // Never moved into the box by itself: no focus taken.
+    expect(t.document.activeElement).toBe(null)
+  })
+  it('a record from the reader, an ordinary load, or another pane: the thread takes nothing', () => {
+    expect(thread({ hash: '#/phone-return', trip: trip({ from: undefined, item: undefined, top: undefined }) }).chat._takePhoneReturn({ pane: 'messages', args: ['cos'] })).toBe(false)
+    expect(thread({ hash: '', trip: trip() }).chat._takePhoneReturn({ pane: 'messages', args: ['cos'] })).toBe(false)
+    expect(thread({ hash: '#/phone-return', trip: trip() }).chat._takePhoneReturn({ pane: 'messages', args: ['cos', 'fi_9'] })).toBe(false)
+  })
+  it('the row is gone by the time the chat is read: no box opens', () => {
+    const t = thread({ hash: '#/phone-return', trip: trip({ item: 'fi_gone' }) })
+    t.chat._takePhoneReturn({ pane: 'messages', args: ['cos'] })
+    t.paint([rr({ sid: SID2 })])
+    expect(t.chat._state.ans.key).toBe('')
+    expect(t.forms).toHaveLength(0)
+  })
+  it('opening a box offers the phone key through the reader\'s own offer, with this box as its composer', () => {
+    const t = thread()
+    t.paint([rr()])
+    const offers: any[] = []
+    const real = t.K.kit.phoneOffer
+    t.K.kit.phoneOffer = (r: unknown, o: any) => { offers.push([r, o]); return real(r, o) }
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(offers).toHaveLength(1)
+    expect(offers[0][0]).toBe(t.chat._state.ansS[A_KEY])
+    expect(offers[0][1]).toMatchObject({ prefix: 'rr', from: 'thread' })
+  })
+  it('Send with the key from the box: the reader\'s own phone path, told it is the thread, with this row\'s newest item and height', async () => {
+    const t = thread()
+    const items = [rr({ at: new Date(Date.now() - 600000).toISOString() }), rr()]
+    t.paint(items)
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const seen: any[] = []
+    t.K.kit.approvePhone = (o: any) => { seen.push(o); return Promise.resolve('opened') }
+    t.tap({ 'data-cos': 'rr-phone' })
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatchObject({ prefix: 'rr', from: 'thread' })
+    expect(seen[0].r).toBe(t.chat._state.ansS[A_KEY])
+    expect(seen[0].thread()).toMatchObject({ item: items[1]!.id })
+    expect(seen[0].files()).toBe('none')
+    expect(seen[0].live()).toBe(true)
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(seen[0].live()).toBe(false)
+  })
+  it('the caution asked on the way to the phone: its Send anyway continues on the phone, and Cancel sends nothing', async () => {
+    const t = thread()
+    t.paint([rr()])
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const r = t.chat._state.ansS[A_KEY]
+    const seen: any[] = []
+    t.K.kit.approvePhone = (o: any) => { seen.push(o); return Promise.resolve('opened') }
+    t.chat._rrPhoneOpts(r).askCaution()
+    expect(r.cautionVia).toBe('phone')
+    expect(t.forms[0]!.verdict.innerHTML).toContain('Send into an open session?')
+    t.tap({ 'data-cos': 'rr-gate', 'data-rr': A_KEY, 'data-gate': 'caution-send' })
+    expect(seen).toHaveLength(1)
+    expect(r.cautionAck).toBe(true)
+    expect(turnPosts(t.calls)).toHaveLength(0)
+    t.chat._rrPhoneOpts(r).askCaution()
+    t.tap({ 'data-cos': 'rr-gate', 'data-rr': A_KEY, 'data-gate': 'caution-cancel' })
+    expect(r.cautionVia).toBe(null)
+    expect(seen).toHaveLength(1)
+  })
+})
+
+describe('the lead 00:5x: X1\'s must-fix and the four smaller items', () => {
+  const waiting = (kind: 'permission' | 'plan' | 'question') => ({ ...OK, ['GET ' + P('?turns=1')]: { status: 200, body: derivedFields('waiting', { waiting_kind: kind }) } })
+  it('MUST-FIX: an approval that arrived while the box was open: Send reads the session fresh, refuses with the row\'s line, keeps his words, posts nothing', async () => {
+    for (const kind of ['permission', 'plan'] as const) {
+      const t = thread({ routes: waiting(kind) })
+      t.paint([rr()])
+      // The row was drawn idle: Answer is there.
+      expect(t.html()).toContain('data-cos="rr-answer"')
+      t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+      const f = t.forms[0]!
+      t.type(f, 'Yes, go ahead.')
+      t.submit(f); await flush()
+      expect(t.calls.filter(c => c.method === 'GET' && c.path === P('?turns=1'))).toHaveLength(1)
+      expect(turnPosts(t.calls)).toHaveLength(0)
+      expect(t.calls.some(c => c.method === 'POST')).toBe(false)
+      expect(f.note.textContent).toBe('It asked for approval. Approve it in Sessions, where the request card is.')
+      expect(f.input.value).toBe('Yes, go ahead.')
+      expect([f.send.disabled, f.input.readOnly]).toEqual([false, false])
+    }
+  })
+  it('a session waiting on a question (not an approval) still takes the message', async () => {
+    const t = thread({ routes: waiting('question') })
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Here is my answer.'); t.submit(t.forms[0]!); await flush()
+    expect(turnPosts(t.calls)).toHaveLength(1)
+  })
+  it('no answer to the fresh read: nothing posted, his words kept, and the box says so', async () => {
+    for (const r of [{ status: 500, body: {} }, new TypeError('Load failed')]) {
+      const t = thread({ routes: { ...OK, ['GET ' + P('?turns=1')]: () => r as Reply } })
+      t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+      t.type(t.forms[0]!, 'Go.'); t.submit(t.forms[0]!); await flush()
+      expect(t.calls.some(c => c.method === 'POST')).toBe(false)
+      expect(t.forms[0]!.note.textContent).toBe('COS could not check whether this session is waiting on an approval. Your words are still here; send again in a moment.')
+      expect(t.forms[0]!.input.value).toBe('Go.')
+    }
+  })
+  it('the key\'s Send gets the same fresh check: no while an approval waits (with the line), yes when idle', async () => {
+    const t = thread({ routes: waiting('permission') })
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const r = t.chat._state.ansS[A_KEY]
+    expect(await t.chat._rrPhoneOpts(r).precheck()).toBe(false)
+    expect(t.forms[0]!.note.textContent).toBe('It asked for approval. Approve it in Sessions, where the request card is.')
+    const u = thread()
+    u.paint([rr()]); u.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(await u.chat._rrPhoneOpts(u.chat._state.ansS[A_KEY]).precheck()).toBe(true)
+  })
+  it('a second Send while the fresh read is out posts nothing more', async () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Once.')
+    t.submit(t.forms[0]!); t.submit(t.forms[0]!); await flush()
+    expect(t.calls.filter(c => c.path === P('?turns=1'))).toHaveLength(1)
+    expect(turnPosts(t.calls)).toHaveLength(1)
+  })
+  it('(a) the "To" line isolates the session-written name, so a right-to-left override cannot reorder the provider and short id', () => {
+    const t = thread()
+    const item = rr(); (item.links[0] as any).label = 'Ship ‮di trohs ,edualC'
+    t.paint([item]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.forms[0]!.innerHTML).toMatch(/To <strong><bdi>Ship ‮di trohs ,edualC<\/bdi><\/strong>, Claude, <span class="rr-id">0a1b2c3d<\/span>/)
+  })
+  it('(b) the box takes focus without scrolling, and opening it while following the newest line does not scroll to the end', () => {
+    const t = thread()
+    t.paint([rr()])           // a stick paint: following the newest line
+    const before = t.scrolls.length
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.forms[0]!.input.focusOpts).toEqual({ preventScroll: true })
+    expect(t.scrolls.slice(before)).toEqual([])
+    // A later quiet repaint does not either: he is answering this row now, not following.
+    t.document.activeElement = null
+    t.chat._paintFeed(false)
+    expect(t.scrolls.slice(before)).toEqual([])
+    // Close does not either.
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(t.scrolls.slice(before)).toEqual([])
+  })
+  it('(c) a second tap on the same Answer keeps the open box and his words (no new box)', () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.forms[0]!.input.value = 'Half way.'
+    t.document.activeElement = null
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.forms).toHaveLength(1)
+    expect(t.placed[A_KEY]).toBe(t.forms[0])
+    expect(t.forms[0]!.input.value).toBe('Half way.')
+    expect(t.document.activeElement).toBe(t.forms[0]!.input)
+  })
+  it('(d) Close stops the watch at once: no read of the turn after it', async () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Go.'); t.submit(t.forms[0]!); await flush()
+    expect(turnPosts(t.calls)).toHaveLength(1)
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    const n = t.calls.length
+    t.K.tick(); t.K.tick(); await flush()
+    expect(t.calls.length).toBe(n)
+    expect(t.chat._state.ansS[A_KEY].watchTimer).toBe(null)
+  })
+})
+
+describe('the two survivors of the 00:5x mutants (Q1 asks for each to have its test)', () => {
+  it('M11: closing a box that sits above what he reads holds the first card he can see (the page scrolls back by what the box took)', () => {
+    const t = thread({ card: { id: 'fi_seen', top: 40, shift: -120 } })
+    t.paint([rr()])
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.document.activeElement = null
+    const before = t.scrolls.length
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(t.scrolls.slice(before)).toEqual([['by', 0, -120]])
+  })
+  it('M14: when the box goes because its row went (not Close), the watch stops at its next tick', async () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Go.'); t.submit(t.forms[0]!); await flush()
+    expect(turnPosts(t.calls)).toHaveLength(1)
+    t.document.activeElement = null
+    t.paint([rr({ sid: SID2 })])
+    expect(t.chat._state.ans.key).toBe('')
+    const n = t.calls.length
+    t.K.tick(); await flush()
+    expect(t.calls.length).toBe(n)
+  })
+})
+
+describe('X1 01:0x: the list row\'s real shape, and no approval from the thread', () => {
+  it('a row as the server sends it (state running, agent_state waiting on a permission) hides Answer and shows the line; the old wrong field does nothing', () => {
+    const t = thread()
+    t.chat._state.sessionRows = [listRow({ id: SID, agentState: 'waiting', derived: { waiting_kind: 'permission' } })]
+    const real = t.paint([rr()])
+    expect(real).not.toContain('data-cos="rr-answer"')
+    expect(real).toContain('It asked for approval.')
+    // `state` is running or recent on a real row; a fixture that put "waiting" there is a field the server never sends.
+    t.chat._state.sessionRows = [{ ...listRow({ id: SID, agentState: 'running' }), state: 'waiting', waiting_kind: 'permission' }]
+    const wrong = t.paint([rr()])
+    expect(wrong).toContain('data-cos="rr-answer"')
+    expect(wrong).not.toContain('It asked for approval.')
   })
 })
