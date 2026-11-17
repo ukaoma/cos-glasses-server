@@ -40,11 +40,42 @@ export function cosRouteToken(meetingId: string): string | null {
 /** This server, as a reader could have reached it: host names and IPs (lower case, IPv6 bracketed) and ports. */
 export interface SelfHosts { hosts: ReadonlySet<string>; ports: ReadonlySet<string> }
 
-/** Query or fragment names that carry a credential. A link with one never keeps its address. */
-const CREDENTIAL_NAME = /(?:^|[?&#;/])(?:token|access[_-]?token|id[_-]?token|auth|authorization|code|pair|pairing|pairing[_-]?code|key|api[_-]?key|secret|password|passwd|pass|sig|signature|session|sid|cookie|otp|pin)=/i
+/** Query or fragment parameter names that carry a credential, as a whole name, any case. */
+const CREDENTIAL_NAME = /^(?:token|access[_-]?token|id[_-]?token|auth|authorization|code|pair|pairing|pairing[_-]?code|key|api[_-]?key|secret|password|passwd|pass|sig|signature|session|sid|cookie|otp|pin)$/i
+/** How many rounds of percent-decoding a name may need (double-encoded is two). More than this is refused. */
+const NAME_DECODE_ROUNDS = 4
 
+/**
+ * A parameter name as a reader's browser or server would finally read it: percent-decoded until it stops changing
+ * (`%74oken` and `%2574oken` are both `token`), `+` as a space. Null when it cannot be decoded, or is still changing
+ * after NAME_DECODE_ROUNDS: such a name counts as credential-shaped (Codex's review of 97df1489, the lead's 11:4x).
+ */
+function decodedName(raw: string): string | null {
+  let name = raw.replace(/\+/g, ' ')
+  for (let i = 0; i < NAME_DECODE_ROUNDS; i++) {
+    let next: string
+    try { next = decodeURIComponent(name) } catch { return null }
+    if (next === name) return name.trim()
+    name = next
+  }
+  return null
+}
+
+/**
+ * Does the query or the fragment name a credential? Every `name=` segment, split at ? & ; # and /, is decoded before
+ * it is compared, so an encoded or mixed-case name cannot slip past. User info in the address counts too.
+ */
 function credentialShaped(u: URL): boolean {
-  return !!(u.username || u.password) || CREDENTIAL_NAME.test(u.search) || CREDENTIAL_NAME.test(u.hash)
+  if (u.username || u.password) return true
+  for (const part of [u.search, u.hash]) {
+    for (const segment of part.split(/[?&;#/]/)) {
+      const eq = segment.indexOf('=')
+      if (eq < 0) continue
+      const name = decodedName(segment.slice(0, eq))
+      if (name === null || CREDENTIAL_NAME.test(name)) return true
+    }
+  }
+  return false
 }
 
 function isSelf(u: URL, self: SelfHosts): boolean {

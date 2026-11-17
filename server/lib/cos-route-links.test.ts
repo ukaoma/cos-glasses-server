@@ -84,6 +84,25 @@ describe('projectCosRouteLinks', () => {
     expect(p(`[x](http://127.0.0.1:3141/control#/meetings/live/${ID}&token=abc)`)).toBe('x')
   })
 
+  it('a credential name hidden by percent-encoding, double encoding, case or the fragment is still caught (Codex 11:4x)', () => {
+    const t5 = 't'.charCodeAt(0).toString(16)
+    // 't' percent-encoded six times: more rounds than a name may need (NAME_DECODE_ROUNDS is 4).
+    let five = 't'
+    for (let i = 0; i < 5; i++) five = encodeURIComponent(five === 't' ? `%${t5}` : five)
+    for (const q of ['?%74oken=abc', '?%2574oken=abc', '?ToKeN=abc', '?%54oKeN=abc', '?x=1&%61ccess_token=y', '?%70air=K7P3',
+      '#/x?%70air=K7P3', '#%74oken=abc', '?%E0%A4%A=1', `?${five}oken=abc`, '?a=1;%73ig=z', '?%20token%20=1']) {
+      expect(p(`[report](https://example.com/r${q})`), q).toBe('report')
+    }
+    expect(decodeURIComponent(decodeURIComponent(decodeURIComponent(decodeURIComponent(five))))).not.toBe('t')
+  })
+
+  it('a name that only looks like one, or a credential word as a value, keeps its link', () => {
+    for (const q of ['?page=2&q=token', '?tokens=1', '?my_token=1', '?%74okens=1', '?q=%74oken', '#section-token', '?code_review=1']) {
+      const text = `[report](https://example.com/r${q})`
+      expect(p(text), q).toBe(text)
+    }
+  })
+
   it('any other page of this server loses its address in a link and stays text when bare', () => {
     expect(p('[Settings](http://127.0.0.1:3141/control#/settings)')).toBe('Settings')
     expect(p('[the API](http://127.0.0.1:3141/api/health)')).toBe('the API')
