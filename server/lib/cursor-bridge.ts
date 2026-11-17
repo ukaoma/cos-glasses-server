@@ -2,6 +2,7 @@
 // Fail-closed: never fall through to Claude.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { cosRoutePromptLine } from './cos-route-links.js'
 import { logTokenAudit } from './token-audit.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-builder.js'
@@ -219,7 +220,8 @@ export async function callCursorStreaming(
   const contextBreaks = session?.contextBreaks ?? []
   const historyPrompt = formatHistoryForPrompt(history, contextBreaks, reference)
   const handoffPrompt = options?.handoffContext?.promptBlock ? `\n\n${options.handoffContext.promptBlock}` : ''
-  const contextPrompt = `${historyPrompt}${handoffPrompt}`
+  // 7.0.55: a COS thread conversation is told how to point at a COS page (lib/cos-route-links.ts).
+  const contextPrompt = `${historyPrompt}${handoffPrompt}${cosRoutePromptLine(session)}`
   const persistentCursorSession = isCursorPersistenceEnabled()
   const cursorCwd = getCursorExecutionCwd()
   const executionMode = normalizeCursorExecutionMode(options?.cursorExecutionMode)

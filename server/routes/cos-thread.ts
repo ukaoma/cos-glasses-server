@@ -186,7 +186,7 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
       const stored = t.storedAnswer(lookup.clientId)
       if (typeof stored === 'string') {
         const cut = stored.length > ENTRY_MAX_ANSWER_CHARS
-        return res.json({ entry: { ...entry, answer: cut ? stored.slice(0, ENTRY_MAX_ANSWER_CHARS) : stored, answerChars: stored.length, full: !cut }, source: 'ledger' })
+        return res.json({ entry: { ...entry, answer: t.projectAnswer(cut ? stored.slice(0, ENTRY_MAX_ANSWER_CHARS) : stored), answerChars: stored.length, full: !cut }, source: 'ledger' })
       }
       if (entry.status !== 'completed') return res.json({ entry, source: 'preview' })
       let source: 'live' | 'archive' = 'live'
@@ -198,7 +198,7 @@ export function createCosThreadRouter(deps: CosThreadRouterDependencies): Router
       if (typeof whole !== 'string' || !whole) return res.json({ entry, source: 'preview' })
       const cut = whole.length > ENTRY_MAX_ANSWER_CHARS
       return res.json({
-        entry: { ...entry, answer: cut ? whole.slice(0, ENTRY_MAX_ANSWER_CHARS) : whole, answerChars: whole.length, full: !cut },
+        entry: { ...entry, answer: t.projectAnswer(cut ? whole.slice(0, ENTRY_MAX_ANSWER_CHARS) : whole), answerChars: whole.length, full: !cut },
         source,
       })
     })

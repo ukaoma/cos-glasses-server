@@ -2,6 +2,7 @@
 // Concrete GPT ids resolve from Codex's live model catalog at run time.
 
 import { spawn, spawnSync } from 'node:child_process'
+import { cosRoutePromptLine } from './cos-route-links.js'
 // Resolved, never bare. `codex` on PATH is a shell alias to /Applications/Codex.app,
 // which does not exist; the real binary is in ChatGPT.app. A bare argv works here only
 // because COS Control injects that directory into the managed plist PATH -- it is ENOENT
@@ -453,7 +454,8 @@ export async function callCodexStreaming(
   const session = getSessionRaw(sid)
   const contextBreaks = session?.contextBreaks ?? []
   const historyPrompt = formatHistoryForPrompt(history, contextBreaks, reference)
-  const contextPrompt = historyPrompt
+  // 7.0.55: a COS thread conversation is told how to point at a COS page (lib/cos-route-links.ts).
+  const contextPrompt = historyPrompt + cosRoutePromptLine(session)
   const persistentCodexSession = isCodexPersistenceEnabled()
   const codexCwd = getCodexExecutionCwd()
   const codexTrustMode = getCodexTrustMode()

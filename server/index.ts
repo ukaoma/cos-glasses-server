@@ -202,6 +202,7 @@ import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
 import { createDropsRouter, lazyDropService, openDropService } from './routes/drops.js'
 import { createCosThreadRouter } from './routes/cos-thread.js'
+import { projectCosRouteLinks, type SelfHosts } from './lib/cos-route-links.js'
 import { claudeContextReader, CosThread, describeDropFiling, lazyCosThread } from './lib/cos-thread.js'
 import { mediaDropAttachments } from './lib/drop-attachments.js'
 import { createDropRouter, sharedDropJevClient, dropDailyCap, dropRouterEnabled } from './lib/drop-router.js'
@@ -1203,8 +1204,24 @@ app.use('/api', createDropsRouter({
 // 6.99.16: the COS thread (routes/cos-thread.ts): one size-capped conversation behind the COS chat's Ask, with a
 // ledger to recover and search it. Gated with Drop it; its store opens on first use, so an install with it off writes
 // nothing. It reads the Claude Code log tail of the thread's session and the drop store; it calls no model.
+// 7.0.55 (lib/cos-route-links.ts): this server as a reader could have reached it: loopback, its own addresses (LAN and
+// tailnet), its host name and its tailnet name, on its two ports. Read again at most once a minute.
+let cosSelfHostsCache: { at: number; value: SelfHosts } | null = null
+function cosSelfHosts(): SelfHosts {
+  const now = Date.now()
+  if (cosSelfHostsCache && now - cosSelfHostsCache.at < 60_000) return cosSelfHostsCache.value
+  const hosts = new Set<string>(['127.0.0.1', 'localhost', '[::1]'])
+  try { for (const list of Object.values(networkInterfaces())) for (const a of list ?? []) hosts.add(a.family === 'IPv6' ? `[${a.address.toLowerCase()}]` : a.address) } catch { /* loopback only */ }
+  try { const h = hostname().toLowerCase().replace(/\.$/, ''); if (h) { hosts.add(h); if (!h.endsWith('.local')) hosts.add(`${h}.local`) } } catch { /* no host name */ }
+  const name = tailnetSelf.currentSelfDnsName()
+  if (name) hosts.add(name.toLowerCase().replace(/\.$/, ''))
+  const value = { hosts, ports: new Set([String(PORT), String(HTTPS_PORT)]) }
+  cosSelfHostsCache = { at: now, value }
+  return value
+}
 const cosThread = lazyCosThread(() => new CosThread({
   dir: dataPath('cos-thread'),
+  projectAnswer: answer => projectCosRouteLinks(answer, cosSelfHosts()),
   context: claudeContextReader({ sessionExists: id => !!getSessionRaw(id), nativeFor: id => getCliSessionId(id) }),
   nativeFor: id => getCliSessionId(id),
   drops: (since, limit) => (dropService()?.recentDrops(since, limit) ?? []).map(d => ({ text: d.text, createdAt: d.createdAt, filed: describeDropFiling(d) })),

@@ -468,6 +468,12 @@ export interface CosThreadDeps {
   /** A turn recorded without its answer: the answer from the live conversation, when it is still there. */
   answerFor?: (sessionId: string, clientId: string, messageNo: number | null) => string | undefined
   newId?: () => string
+  /**
+   * 7.0.55 (lib/cos-route-links.ts): COS's answer as a reader gets it. This server's own page links become route tokens
+   * and addresses that must not be links lose them, when the thread is READ, so a stored reply is fixed too. The stored
+   * text never changes. Absent: answers are served as stored.
+   */
+  projectAnswer?: (answer: string) => string
 }
 
 export class CosThread {
@@ -959,6 +965,12 @@ export class CosThread {
     } finally { closeSync(fd) }
   }
 
+  /** COS's answer as a reader gets it (deps.projectAnswer); never throws, and the stored text is the fallback. */
+  projectAnswer(answer: string): string {
+    if (!answer || !this.deps.projectAnswer) return answer
+    try { const out = this.deps.projectAnswer(answer); return typeof out === 'string' ? out : answer } catch { return answer }
+  }
+
   private chatEntry(row: TurnRow): CosThreadChatEntry {
     const base = { id: `t:${row.clientId}`, at: row.at, kind: 'chat' as const, question: row.query, threadId: row.threadId, messageNo: row.messageNo }
     const ended = this.answers.get(row.clientId)
@@ -970,12 +982,12 @@ export class CosThread {
         return { ...base, answer: '', answerChars: null, full: false, status: stale ? 'interrupted' : 'running', ...job }
       }
       const whole = ended.status === 'completed' && ended.answerChars === ended.answerHead.length
-      return { ...base, answer: ended.answerHead, answerChars: ended.answerChars, full: whole, status: ended.status, ...job }
+      return { ...base, answer: this.projectAnswer(ended.answerHead), answerChars: ended.answerChars, full: whole, status: ended.status, ...job }
     }
     // The ledger keeps the first ANSWER_HEAD_CHARS of the answer. Shorter than that, it is the whole answer; at the cap
     // or empty (a turn recorded without its answer), the whole one has to be looked up (entry()).
     const whole = row.answerHead.length > 0 && row.answerHead.length < ANSWER_HEAD_CHARS
-    return { ...base, answer: row.answerHead, answerChars: whole ? row.answerHead.length : null, full: whole, status: 'completed' }
+    return { ...base, answer: this.projectAnswer(row.answerHead), answerChars: whole ? row.answerHead.length : null, full: whole, status: 'completed' }
   }
 
   /** The whole answer the thread store itself holds for a chat (a completed cosThread job), when it has one. */

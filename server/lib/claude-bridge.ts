@@ -7,6 +7,7 @@
 //   HEARTBEAT — emits progress events during silence so the display stays alive
 
 import { spawn } from 'node:child_process'
+import { cosRoutePromptLine } from './cos-route-links.js'
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs'
 import { appendFileSync } from 'node:fs'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
@@ -504,7 +505,8 @@ export async function callClaudeStreaming(
   const session = getSessionRaw(sid)
   const contextBreaks = session?.contextBreaks ?? []
   const historyPrompt = formatHistoryForPrompt(history, contextBreaks, reference)
-  const contextPrompt = historyPrompt
+  // 7.0.55: a COS thread conversation is told how to point at a COS page (lib/cos-route-links.ts).
+  const contextPrompt = historyPrompt + cosRoutePromptLine(session)
 
   // Resolve model: per-message > session preference > public-server default.
   const sessionModel = getSessionModel(sid)

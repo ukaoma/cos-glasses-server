@@ -14,11 +14,32 @@
   }
   // Agent turns and task text are markdown. Escape first, then style a small subset, so the
   // result can never contain markup the server sent.
+  // 7.0.55 COS route links (server lib/cos-route-links.ts; Miles 08:29, X1): a COS answer points at a COS page with
+  // [words](cos-route:meetings/live/<id>), never a URL. Here it opens that page in the same tab: same origin, same
+  // sign-in, only on his tap. The href is built from the checked parts, never copied from the text, and the words are
+  // fixed (the model's are never shown). A route off the allowlist is just its words. Never inside `code` or a fence.
+  // MD_COS_ROUTE and MD_COS_ROUTE_LABEL are the server's COS_ROUTE_RE and COS_ROUTE_LABEL (cos-route-link-web.test.ts).
+  var MD_COS_ROUTE = /^meetings\/live\/(meeting_[A-Za-z0-9_-]{1,89})$/, MD_COS_ROUTE_LABEL = 'Open the live meeting';
+  var MD_COS_ROUTE_TOKEN = /\[([^\]\n]+)\]\(cos-route:([^\s)]+)\)/g;
+  function mdRoutes(l) {
+    return l.split(/(<code>[^<]*<\/code>)/).map(function (part, i) {
+      if (i % 2) return part;
+      return part.replace(MD_COS_ROUTE_TOKEN, function (_m, words, route) {
+        var r = MD_COS_ROUTE.exec(route);
+        return r ? '<a class="cos-route" href="#/' + ['meetings', 'live', r[1]].map(encodeURIComponent).join('/') + '" data-cos-route="live-meeting">' + MD_COS_ROUTE_LABEL + '</a>' : words;
+      });
+    }).join('');
+  }
   function md(text) {
+    var fence = false;
     return esc(text).split('\n').map(function (line) {
+      // A fence line opens or closes a block whose lines keep any route token as written.
+      var fenceLine = /^\s*(```|~~~)/.test(line);
+      if (fenceLine) fence = !fence;
       var l = line
         .replace(/`([^`\n]+)`/g, '<code>$1</code>')
         .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      if (!fence && !fenceLine) l = mdRoutes(l);
       if (/^#{1,4}\s+/.test(l)) return '<strong>' + l.replace(/^#{1,4}\s+/, '') + '</strong>';
       if (/^&gt;\s?/.test(l)) return '<span class="quote">' + l.replace(/^&gt;\s?/, '') + '</span>';
       if (/^\s*[-*]\s+/.test(l)) return l.replace(/^(\s*)[-*]\s+/, '$1• ');
