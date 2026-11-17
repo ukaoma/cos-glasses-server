@@ -17,7 +17,9 @@ import { manifestFor } from '../scripts/write-web-control-manifest.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SRC = readFileSync(join(HERE, 'run-glass.js'), 'utf8')
-const CSS = readFileSync(join(HERE, 'run-glass.css'), 'utf8')
+// W1's adoption (7.0.55): the three rules live in app.css (the boot style list is fixed), in the 7.0.55 block.
+const APPCSS = readFileSync(join(HERE, 'app.css'), 'utf8')
+const CSS = APPCSS.slice(APPCSS.indexOf('/* 7.0.55: live glass on the Running rows'), APPCSS.indexOf("/* ── 7.0.29: the folded Duo's side rail"))
 
 type Draw = { necks: number[]; drops: number }
 interface Opts { gl?: 'ok' | 'none' | 'compile'; reduced?: boolean; hidden?: boolean; noIO?: boolean }
@@ -269,13 +271,14 @@ describe('run-glass: what moves, and when', () => {
 })
 
 describe('run-glass: shipped', () => {
-  it('the server serves both files, hashed', () => {
+  it('the server serves the script, hashed, and the page names it in the lazy list (so its reference is stamped)', () => {
     const table = buildWebAssetTable(HERE)
     expect(table.get('/run-glass.js')!.type).toMatch(/javascript/)
-    expect(table.get('/run-glass.css')!.type).toMatch(/css/)
+    expect(table.get('/index.html')!.body.toString('utf8')).toContain('"runGlass": "/control/run-glass.js?v=' + table.get('/run-glass.js')!.hash + '"')
+    expect(table.has('/run-glass.css')).toBe(false)   // folded into app.css
   })
-  it('the pack manifest (integrity mode) lists both', () => {
+  it('the pack manifest (integrity mode) lists the script', () => {
     const files = manifestFor(HERE).files as Record<string, string>
-    for (const f of ['run-glass.js', 'run-glass.css']) expect(files['/' + f], f).toBe(createHash('sha256').update(readFileSync(join(HERE, f))).digest('hex'))
+    expect(files['/run-glass.js']).toBe(createHash('sha256').update(readFileSync(join(HERE, 'run-glass.js'))).digest('hex'))
   })
 })

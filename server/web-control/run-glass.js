@@ -325,4 +325,6 @@
     },
     LIMITS: { LIVE_MAX: LIVE_MAX, FRAME_MS: FRAME_MS, BEAD_GAP_MS: BEAD_GAP_MS, SIZE: SIZE, MID: MID, NECK: NECK }
   };
+  // Loaded lazily by app.js (index.html #lazy-panes: runGlass); ensurePane resolves when the name is registered.
+  if (window.COSWeb && typeof window.COSWeb.registerPane === 'function') window.COSWeb.registerPane('runGlass', window.CosRunGlass);
 })();

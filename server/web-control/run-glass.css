@@ -1,5 +1,0 @@
-/* 7.0.55: live glass on Today's Running rows (run-glass.js). The canvas lies over the panel and draws only in the slots;
-   the slot is the badge line's own height, so no row grows (A1 measured 382, 449 and 951 against 7.0.54: identical). */
-.run-panel { position: relative; }
-.rg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
-.rg-slot { display: inline-block; width: 36px; height: 20px; flex: none; }

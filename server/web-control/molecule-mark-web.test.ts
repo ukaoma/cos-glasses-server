@@ -44,10 +44,19 @@ function node(rect: Rect, attrs: Record<string, string> = {}, parent: Node | nul
   return n
 }
 
-interface Opts { signedIn?: boolean; reduced?: boolean; hidden?: boolean; live?: boolean; listAgeMs?: number; failed?: boolean; noList?: boolean; now?: number }
+interface Glass { mount: (p: unknown, o: { onFail: (why: string) => void }) => boolean; sync: (rows: unknown[]) => void; wake: () => void; animating: () => boolean; mounts: number; synced: unknown[][]; wakes: number; onFail?: (why: string) => void; anim: boolean; ok: boolean }
+function fakeGlass(ok = true): Glass {
+  const g: Glass = { mounts: 0, synced: [], wakes: 0, anim: false, ok,
+    mount(_p, o) { g.mounts++; g.onFail = o.onFail; return g.ok }, sync(rows) { g.synced.push(rows) }, wake() { g.wakes++ }, animating() { return g.anim } }
+  return g
+}
+interface Opts { glass?: Glass | null; lazyGlass?: Glass | 'fails'; signedIn?: boolean; reduced?: boolean; hidden?: boolean; live?: boolean; listAgeMs?: number; failed?: boolean; noList?: boolean; now?: number }
 function page(o: Opts = {}) {
   const now = { t: o.now ?? 1_700_000_001_234 }
   const rail = node(box(20, 30), { 'data-mk': 'rest' })
+  const panel = node(box(100, 300, 16, 350)); panel.cls = new Set(['run-panel'])
+  const list = { closest: (s: string) => (s === '.run-panel' ? panel : null) }
+  const ensured: string[] = []
   const bar = node(NONE, { 'data-mk': 'rest' })   // the top bar's mark: not laid out where the rail shows
   let rows: Node[] = []
   const listeners: Record<string, Array<() => void>> = {}
@@ -57,6 +66,7 @@ function page(o: Opts = {}) {
     querySelector: (sel: string) => (sel === '.rail-head .mk' ? rail : sel === '#section-btn .mk' ? bar : null),
     querySelectorAll: (sel: string) => {
       if (sel === '#run-list .mk[data-mk="work"]') return rows.filter(r => r.isConnected && r.attrs['data-mk'] === 'work')
+      if (sel === '.run-panel.rg-on') return panel.cls.has('rg-on') ? [panel] : []
       throw new Error('unexpected selector ' + sel)
     },
     addEventListener: (t: string, f: () => void) => { (listeners[t] ||= []).push(f) },
@@ -70,7 +80,8 @@ function page(o: Opts = {}) {
     getComputedStyle: (n: Node) => ({ visibility: n.vis || 'visible', overflowX: n.overflow || 'visible', overflowY: n.overflow || 'visible' }),
     addEventListener: (t: string, f: () => void) => { (listeners['w:' + t] ||= []).push(f) },
     MutationObserver: class { observe() {} },
-  }
+    CosRunGlass: o.glass || undefined,
+  } as Record<string, unknown>
   const ctx: Record<string, unknown> = {
     document: doc, window: win, state, SL,
     Date: { now: () => now.t },
@@ -81,12 +92,18 @@ function page(o: Opts = {}) {
     liveSignedIn: () => o.signedIn !== false,
     liveCanOverlay: () => !!o.live,
     sxState: (s: { agent_state?: string; running_active?: boolean }) => (s.agent_state === 'waiting' ? 'waiting' : s.running_active ? 'running' : 'recent'),
+    esc: (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
+    splitSessionId: (provider: string, id: string) => ({ provider: provider || 'claude', id }),
+    ensurePane: (name: string) => { ensured.push(name)
+      if (o.lazyGlass === 'fails') return Promise.reject(new Error('no'))
+      if (o.lazyGlass) win.CosRunGlass = o.lazyGlass
+      return Promise.resolve(o.lazyGlass || null) },
   }
   vm.createContext(ctx)
-  vm.runInContext(BLOCK + '\n;this.api = { mkRow: mkRow, mkSync: mkSync, mkSoon: mkSoon, MK: MK };', ctx)
-  const api = (ctx as { api: { mkRow(st: string): string; mkSync(): void; mkSoon(): void; MK: { live: unknown; timer: unknown } } }).api
+  vm.runInContext(BLOCK + '\n;this.api = { mkRow: mkRow, mkSync: mkSync, mkSoon: mkSoon, MK: MK, rgRender: rgRender, rgRow: rgRow, rgSlot: rgSlot, RG: RG };', ctx)
+  const api = (ctx as { api: { mkRow(st: string): string; mkSync(): void; mkSoon(): void; MK: { live: unknown; timer: unknown }; rgRender(l: unknown, r: unknown[]): void; rgRow(s: unknown, a: boolean): unknown; rgSlot(st: string, k: string): string; RG: { failed: boolean; panel: unknown } } }).api
   return {
-    api, rail, bar, now, doc, SL, state, sessions, timers, listeners,
+    api, rail, bar, panel, list, ensured, win, now, doc, SL, state, sessions, timers, listeners,
     working(n = 1) { for (let i = 0; i < n; i++) sessions.push({ session_id: 's' + i, running_active: true }) },
     rowsAt(...tops: number[]) { rows = tops.map(t => node(t < 0 ? NONE : box(t), { 'data-mk': 'work' })); return rows },
     setRows(r: Node[]) { rows = r },
@@ -347,5 +364,108 @@ describe('the files ship and are the accepted ones', () => {
   it('the pack manifest (integrity mode) lists them', () => {
     const files = manifestFor(HERE).files as Record<string, string>
     for (const f of Object.keys(ACCEPTED)) expect(files['/marks/' + f], f).toBe(createHash('sha256').update(readFileSync(join(MARKS, f))).digest('hex'))
+  })
+})
+
+// 7.0.55: A1's live glass on the Running rows, adopted (the lead 09:32 and 09:4x). The one-live rule Q1 pinned this
+// morning CHANGES, on purpose: live glass rows on screen take the motion, else the rail, else the top bar, else (the
+// glass off or failed) the first working strip row.
+describe('7.0.55: the live glass takes the motion', () => {
+  it('glass rows moving on screen: the rail and top-bar marks rest (the still) and no strip plays', () => {
+    const g = fakeGlass(); g.anim = true
+    const p = page({ glass: g }); p.working(); p.rowsAt(200)
+    p.api.rgRender(p.list, [{ key: 'claude|s0', state: 'work' }])
+    p.api.mkSync()
+    expect(p.live()).toEqual([])
+    expect(p.rail.attrs['data-mk']).toBe('rest'); expect(p.bar.attrs['data-mk']).toBe('rest')
+  })
+  it('the glass mounted but not moving (off screen, hidden, Reduce Motion): the rail takes it, as in 7.0.54', () => {
+    const g = fakeGlass(); g.anim = false
+    const p = page({ glass: g }); p.working()
+    p.api.rgRender(p.list, [{ key: 'claude|s0', state: 'work' }])
+    p.api.mkSync()
+    expect(p.live()).toEqual([p.rail]); expect(p.rail.attrs['data-mk']).toBe('work')
+  })
+  it('a glass that says it moves but never mounted (or failed) is not believed', () => {
+    const g = fakeGlass(false); g.anim = true
+    const p = page({ glass: g }); p.working()
+    p.api.rgRender(p.list, [{ key: 'claude|s0', state: 'work' }])
+    expect(p.api.RG.failed).toBe(true)
+    p.api.mkSync()
+    expect(p.live()).toEqual([p.rail])
+  })
+  it('every look asks the glass to look again (scroll, resize, visibility, route)', () => {
+    const g = fakeGlass(); const p = page({ glass: g }); p.working()
+    p.api.rgRender(p.list, [{ key: 'claude|s0', state: 'work' }])
+    const before = g.wakes; p.api.mkSoon()
+    expect(g.wakes).toBe(before + 1)
+  })
+})
+
+describe('7.0.55: rgRender mounts once and tells the glass only what the rows say', () => {
+  it('mounts once on the panel, marks it .rg-on, then only syncs', () => {
+    const g = fakeGlass(); const p = page({ glass: g })
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }, null])
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'wait' }])
+    expect(g.mounts).toBe(1); expect(p.panel.cls.has('rg-on')).toBe(true)
+    expect(g.synced).toEqual([[{ key: 'claude|a', state: 'work' }], [{ key: 'claude|a', state: 'wait' }]])   // nulls dropped
+  })
+  it('no WebGL here (mount says false): no .rg-on, the strips stay, and it never tries again', () => {
+    const g = fakeGlass(false); const p = page({ glass: g })
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    expect(p.panel.cls.has('rg-on')).toBe(false); expect(g.mounts).toBe(1); expect(g.synced).toEqual([])
+  })
+  it('a lost context later (onFail): .rg-on goes, the strips come back, the mark looks again', () => {
+    const g = fakeGlass(); const p = page({ glass: g }); p.working()
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    g.onFail!('context-lost')
+    expect(p.panel.cls.has('rg-on')).toBe(false); expect(p.api.RG.failed).toBe(true)
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    expect(g.mounts).toBe(1)
+  })
+  it('loads the script only when a row works or waits, once, through the lazy list', async () => {
+    const g = fakeGlass(); const p = page({ lazyGlass: g })
+    p.api.rgRender(p.list, [])
+    expect(p.ensured).toEqual([])
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }]); p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    expect(p.ensured).toEqual(['runGlass'])
+    await new Promise(r => setTimeout(r, 0))
+    expect(g.mounts).toBe(1); expect(g.synced.at(-1)).toEqual([{ key: 'claude|a', state: 'work' }])
+  })
+  it('a script that will not load leaves the strips', async () => {
+    const p = page({ lazyGlass: 'fails' })
+    p.api.rgRender(p.list, [{ key: 'claude|a', state: 'work' }])
+    await new Promise(r => setTimeout(r, 0))
+    expect(p.api.RG.failed).toBe(true); expect(p.panel.cls.has('rg-on')).toBe(false)
+  })
+  it('a row: Working or Waiting as the row says; done and total only from subagent_activity; activity from last_activity_at', () => {
+    const p = page()
+    const at = '2026-11-17T15:00:05.000Z'
+    expect(p.api.rgRow({ provider: 'claude', session_id: 'a', running_active: true, last_activity_at: at, subagent_activity: { active: 1, completed: 2, total: 3 } }, true))
+      .toEqual({ key: 'claude|a', state: 'work', done: 2, total: 3, activityAt: Date.parse(at) })
+    expect(p.api.rgRow({ provider: 'codex', session_id: 'b', running_active: true, agent_state: 'waiting' }, true))
+      .toEqual({ key: 'codex|b', state: 'wait', done: null, total: null, activityAt: null })
+    expect(p.api.rgRow({ provider: 'claude', session_id: 'c', subagent_activity: { active: 0, unknown: 1 } }, true))
+      .toEqual({ key: 'claude|c', state: 'work', done: null, total: null, activityAt: null })   // no real count: none invented
+    expect(p.api.rgRow({ provider: 'claude', session_id: 'd' }, false)).toBe(null)   // a quiet open row: no glass
+  })
+  it('the slot: escaped key, only on a row that works or waits', () => {
+    const p = page()
+    expect(p.api.rgSlot('work', 'claude|a"b')).toBe('<span class="rg-slot" data-rg-key="claude|a&quot;b"></span>')
+    expect(p.api.rgSlot('', 'claude|a')).toBe('')
+  })
+  it('wired: runRow puts the slot before the strip; renderRunning syncs the rows it drew; a failed read syncs none', () => {
+    const run = between(APP, '  function runRow(s, activeNow) {', '  function renderRunning(')
+    expect(run).toContain("(typeof rgSlot === 'function' ? rgSlot(mkSt, key.provider + '|' + key.id) : '') + (typeof mkRow === 'function' ? mkRow(mkSt) : '')")
+    const rr = between(APP, '  function renderRunning(working, open) {', '  function runJobsHtml()')
+    expect(rr).toContain("rgRender(list, shown.length ? shown.map(function (s) { return rgRow(s, true); }) : open.slice(0, 2).map(function (s) { return rgRow(s, false); }));")
+    expect(rr).toContain("if (typeof rgRender === 'function') rgRender(list, []); if (typeof mkSoon === 'function') mkSoon(); return; }")
+    expect(HTML).toContain('"runGlass": "/control/run-glass.js"')
+  })
+  it('the CSS: slots only while mounted, strips hidden only then', () => {
+    expect(CSS).toContain('.rg-slot { display: none; width: 36px; height: 20px; flex: none; }')
+    expect(CSS).toContain('.run-panel.rg-on .rg-slot { display: inline-block; }')
+    expect(CSS).toContain('.run-panel.rg-on .mk-row { display: none; }')
   })
 })
