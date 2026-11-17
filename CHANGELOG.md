@@ -25,7 +25,7 @@
 - With it on, Reply ready pings banner as one notification at most once per gapMinutes, and never more often than once per 45 minutes whatever that setting says, on the Mac and the phone alike. Replies that land inside the gap wait and come out together on the first minute tick after the gap ends (up to 60 seconds late).
 - What the Mac shows: "Reply ready" and the session's own line ("Claude has a reply ready.") for one session; "N sessions replied" and "N sessions have a reply ready." for several. Several replies from one session count once.
 - These notifications do not count against the daily cap, the per-source cap or the other kinds' gap, and they never move another kind's gap; another kind's notification never moves theirs either. That is Miles's choice (16:29).
-- Quiet hours (18:00 to 06:00 and weekends) and the 08:00 first notification still hold. "Stopped on", finished pings and reminders never wait.
+- Quiet hours and the first-notification time from the settings still hold (the defaults are 18:00 to 06:00 with quiet weekends and first at 08:00; Miles's own are 21:00 to 06:00, weekends not quiet, first at 08:00). "Stopped on", finished pings and reminders never wait.
 - Control 0.5.400 and 0.5.401 neither show nor change this setting; it is switched through the settings route, and a save from Control keeps it as it is.
 
 **Not covered, said plainly:**
@@ -34,12 +34,15 @@
 - Merged reply notifications: replies still waiting when quiet hours begin are not announced later. They are in the chat, as an ordinary reply inside the gap was before (the lead, 16:47).
 - The merged reply notification is new on the Mac and the phone, and was exercised with fakes only, not on his phone.
 - Merged reply notifications have no Settings control yet, in Control Web or on the Mac (a Settings switch is a visible change and waits for Miles). It is switched through the settings route; the existing session-update banner switch and the pings switch still turn it off from Settings.
-- The layout sweep (F1) and Q1's mutants on the merged head have not run yet.
 
-**Tested on this build** (the full suite on its parent b1ff9b90; this commit adds only these lines):
-- **The pre-suite and the counted suite, alone, swift-slot lease held start to end (14:41 to 14:58):** the web set 2,210 of 2,210; the 12 server tests that read web source, the key-lane and spawn censuses, the Cursor spawn census, the hazard invariants and the route suites 3,181 of 3,181; type check exit 0; `npm test` 975 files passed, 2 skipped, 17,900 tests passed, 6 skipped, exit 0 (S1_evidence/7052/suite_b1ff9b90).
+**Tested on this build** (the full suite on its parent 7452d3b2; this commit adds only these lines):
+- **The pre-suite and the counted suite, alone, swift-slot lease held start to end (17:45 to 18:03):** the web set 2,262 of 2,262; the 12 server tests that read web source, the key-lane and spawn censuses, the Cursor spawn census, the hazard invariants and the route suites 3,183 of 3,183; type check exit 0; `npm test` 979 files passed, 2 skipped, 17,996 tests passed, 6 skipped, exit 0 (S1_evidence/7052/suite_7452d3b2).
+- **F1's keyed layout sweep on 7452d3b2:** RESULT 0 defect keys (15 known, not failing) over 690 states (65 new keys, all the Open result round trip; 0 missing against 308a3154); must-fail proofs met (308a3154 fails 6 round-trip keys, 1e484207 fails Back); swipe 51 of 51; web tree eb0a68ea (F1, 18:04 to 18:32, alone; F1_evidence/sweep_gate_7452d3b2.log).
+- **Every changed file (30) is byte-identical to the reviewed commit that last set it** (release-7.0.52/merges.txt).
 
 **Tests (each branch, before the merge):**
+- **S1, the phone notifications (A, B, C, D; e20ac91f to 7452d3b2), focused files at one worker under the lease, Uncounted:** type check 0 and 182 of 182 at e46f9f86; mutants killed from runs read: 35 of 37 on 41fd2716, then the two survivors (E1, B7) and A3's (A5) after their tests; Q1 30 of 35 on 41fd2716 (C8 and B11 equivalent), its asks B12, A1 and A3 answered by tests; X1 PASS on A, B and C (16:50), with its two C fixes and the 45-minute floor in. Fail-before: A's test 8 of 10 failed on 1e484207.
+- **W1, the Back fix 7cf927b0:** Q1 16 of 16 Back mutants killed with the old keepPlace as must-fail; F1's corrected WebKit proof holds at all 11 sizes, and Back fails on 1e484207 at 8 of 11 (must-fail met). Q1 PASS 17:33.
 - **S1, claude/server-7052-ask-reload (38b7fc2b), focused files at one worker, Uncounted:** the reload test 15 of 15 (6 of 10 failed on 7.0.51 before the fix), 1,210 passed in the 30 web test files that read cos-chat.js, 17 of 17 web mutants killed; the Work test 19 of 19 (5 of 16 failed before), 722 passed in the 20 server neighbour files, 13 of 13 server mutants killed. W1 PASS on the web part; Q1 PASS 10:20 (17 of 17 of Q1's mutants killed).
 - **sfdc-ask, claude/server-ask-sfdc-funnel (a2885509):** on its diff alone (sha256 4e607b2264d0), tsc exit 0 and npm test 973 files, 17,865 passed, 6 skipped; 20 of 20 mutants killed. That run started outside the lease order (sfdc-ask's 13:07 correction). Q1 PASS on read 14:06 (a2885509) and 14:08 (7b7ab938 on 3ad2887e); no Q1 mutants yet.
 - **The cut:** cherry-picks onto 23d60dee with no conflicts, then sfdc-ask's queriedAt fix 7b7ab938 (the cited Salesforce time is when it was queried, not when the 10:45 job re-joined the file; 133 passed in its focused files, 5 of 5 mutants killed). The two sets share no file, and all 14 files are byte-identical to 38b7fc2b and 7b7ab938.
