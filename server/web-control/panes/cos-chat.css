@@ -462,3 +462,18 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .rr-answer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .rr-answer-actions .cx-btn { min-height: 40px; }
 .rr-answer-actions .link-btn { color: var(--sub); }
+
+/* 7.0.53 focus mode (app.css has the shell): the chat's header and "Jump to latest" go (the stack has the newest line),
+   and Model and Effort fold into one line beside the camera and clip. A tap on it opens them under the box again. */
+.cc-me { display: none; }
+@media (max-width: 599px) {
+  html.focus .cc-head, html.focus .cc-latest-row { display: none; }
+  html.focus:not(.short-screen) .cc-feed { padding-right: 56px; }
+  html.focus .cc-composer[data-cos-form="chat"]:not(.menus-open) > .cc-foot { display: none; }
+  html.focus .cc-me { display: inline-flex; align-items: center; flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 4px;
+    font-size: 13px; font-weight: 500; line-height: 1.25; color: var(--sub); text-align: left; }
+  html.focus .cc-buttons .cx-btn { flex: none; padding: 0 16px; }
+  /* With Drop beside Ask there is no room for it in the row: the line goes under the buttons, one short line. */
+  html.focus .cc-buttons:has(.cc-drop) { flex-wrap: wrap; }
+  html.focus .cc-buttons:has(.cc-drop) .cc-me { order: 9; flex: 1 1 100%; min-height: 32px; }
+}

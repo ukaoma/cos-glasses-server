@@ -317,12 +317,33 @@
     return '<label class="cc-model"><span>Model</span><select class="field" data-cos-model aria-label="Model for Ask">' + opts.join('') + '</select></label>' +
       '<label class="cc-model"><span>Effort</span><select class="field" data-cos-effort aria-label="Effort for Ask">' + efforts.join('') + '</select></label>';
   }
+  // 7.0.53 focus mode: what the folded line says. "default" for both unset; else each choice, the unset one as default.
+  function meLabel() {
+    var m = C.model ? (C.models || []).filter(function (x) { return x.value === C.model; })[0] : null;
+    var e = C.effort ? EFFORTS.filter(function (x) { return x[0] === C.effort; })[0] : null;
+    if (!C.model && !C.effort) return 'Model and effort: default';
+    return 'Model and effort: ' + (m ? m.label : C.model ? C.model : 'default') + ', ' + (e ? e[1].toLowerCase() : 'default');
+  }
+  function paintMe() {
+    document.querySelectorAll('[data-cos="menus"]').forEach(function (b) {
+      var t = meLabel(); if (b.textContent !== t) b.textContent = t;
+      var form = b.closest && b.closest('[data-cos-form]'), open = !!(form && form.classList.contains('menus-open'));
+      b.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  }
+  // The folded line opens Model and Effort under the box, and closes them again; the choice itself is unchanged.
+  function toggleMenus(t) {
+    var form = t.closest && t.closest('[data-cos-form]'); if (!form) return;
+    form.classList.toggle('menus-open');
+    paintMe();
+  }
   function paintModelMenu() {
     document.querySelectorAll('[data-cos-model-slot]').forEach(function (slot) {
       // An open menu is never rebuilt under the finger (it would close the iOS picker).
       if (document.activeElement && slot.contains(document.activeElement)) return;
       slot.innerHTML = modelMenuHtml();
     });
+    paintMe();
   }
 
   // ── composers: the chat's and the reader's Reply ──────
@@ -356,6 +377,8 @@
       '<textarea class="field cc-input" id="' + esc(k.inputId) + '" rows="1" maxlength="2000" placeholder="' + esc(o.placeholder) + '" aria-label="' + esc(o.label) + '"></textarea>' +
       '<div class="cc-buttons">' +
         cameraHtml('data-cos-file') + clipHtml('data-cos-file') +
+        // 7.0.53 focus mode: Model and Effort fold into this one line (shown only in focus; app.css). A tap opens them.
+        (k === CHAT ? '<button type="button" class="link-btn cc-me" data-cos="menus" aria-expanded="false">' + esc(meLabel()) + '</button>' : '') +
         '<button type="button" class="cx-btn primary cc-ask" data-cos="ask">Ask</button>' +
         (drop ? '<button type="button" class="cx-btn cc-drop" data-cos="drop">Drop</button>' : '') + '</div>' +
       '<div class="cc-foot"><span class="cc-menus" data-cos-model-slot>' + (C.models ? modelMenuHtml() : '') + '</span>' +
@@ -3330,7 +3353,8 @@
     if (what === 'ask') return doAsk(kOf(t));
     if (what === 'drop') return doDrop();
     if (what === 'all') return W.go('messages');
-    if (what === 'latest') { var feed = C.host && C.host.querySelector('[data-cos-feed]'); watchTail(feed); followLatest(); return; }
+    if (what === 'latest') return latest();
+    if (what === 'menus') return toggleMenus(t);
     if (what === 'read-all') return markReadIfShown(true);
     if (what === 'new-thread') return newThread();
     if (what === 'hist-full') return loadFull(t.getAttribute('data-id'));
@@ -3374,6 +3398,15 @@
       if (drop) drop.scrollIntoView({ block: 'center' });
     }
   }
+  function latest() { var feed = C.host && C.host.querySelector('[data-cos-feed]'); watchTail(feed); followLatest(); }
+  // 7.0.53 focus mode (app.js focusSet): the class change is the "paint". Reading the newest line, he stays at the newest
+  // line; else the first card he can see stays where it was (keepPlace, the same hold a quiet repaint uses).
+  function holdPlace(flip) {
+    var feed = C.host && C.host.querySelector('[data-cos-feed]');
+    if (!feed || !chatVisible()) { flip(); return; }
+    if (TAIL && TAIL.following) { flip(); scrollToEnd(feed); return; }
+    keepPlace(flip, true);
+  }
   function isComposerInput(el) { return !!(el && el.classList && el.classList.contains('cc-input')); }
   function onKey(e) {
     // 7.0.53: a Reply ready row's clipped words open with Enter or Space, as a button does (it is a div, so its words can
@@ -3408,6 +3441,7 @@
   function syncMenus() {
     document.querySelectorAll('[data-cos-model]').forEach(function (s) { if (s !== document.activeElement) s.value = C.model; });
     document.querySelectorAll('[data-cos-effort]').forEach(function (s) { if (s !== document.activeElement) s.value = C.effort; });
+    paintMe();
   }
   function onSubmit(e) {
     var f = e.target.closest && e.target.closest('[data-cos-steer]');
@@ -3539,6 +3573,7 @@
     replyHtml: replyHtml, mountReply: mountReply, askFromSheet: askFromSheet,
     // Today round 2: "Ask about this" under the Today summary (app.js sendTodayAsk).
     askAbout: askAbout, aboutContextText: aboutContextText,
+    holdPlace: holdPlace, latest: latest,
     onClick: onClick, onKey: onKey, onInput: onInput, onChange: onChangeEvent, onSubmit: onSubmit, onPaste: onPaste, onDrag: onDrag,
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
@@ -3629,7 +3664,7 @@
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
-    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _rrPhoneOpts: rrPhoneOpts, _takePhoneReturn: takePhoneReturn, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
+    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _rrAnswer: rrAnswer, _rrAnswerClose: rrAnswerClose, _rrAnswerSend: rrAnswerSend, _rrGate: rrGate, _rrView: RR_VIEW, _rrPhoneOpts: rrPhoneOpts, _takePhoneReturn: takePhoneReturn, _syncMenus: syncMenus, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
     _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
     _steer: steer, _cancel: cancel,

@@ -9147,6 +9147,60 @@
     parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
 
+  // ── focus mode (7.0.53; Miles 11/16 13:19; F1's direction A, the lead's 23:5x: A on the folded Duo and the phone) ──
+  // The COS thread fills the screen: the top bar, the way-you-came line and the chat's own header go, the folded Duo's
+  // strip keeps its width but holds only the round controls (leave, the newest line), and the composer folds Model and
+  // Effort into one line. It is a class on <html>, never a route change: nothing reloads, the draft stays in its box,
+  // and the first card he can see stays where it was (cos-chat.js holdPlace). Below 600 px only in this piece (the open
+  // Duo's direction C is the next piece); folding past 600 px keeps the choice, and folding back shows it again. One tap
+  // leaves (the stack's first control, or Escape). Kept for this tab only.
+  var FOCUS = { on: false };
+  var FOCUS_MQ = '(max-width: 599px)';
+  function focusWhere() {
+    var r = parseRoute();
+    return r.pane === 'messages' && r.args[0] === 'cos' && !r.args[1];
+  }
+  function focusFits() { try { return !!(window.matchMedia && window.matchMedia(FOCUS_MQ).matches); } catch (_e) { return false; } }
+  function focusSync() {
+    var here = focusWhere() && focusFits(), on = FOCUS.on && here;
+    var de = document.documentElement;
+    if (de.classList.contains('focus') !== on) de.classList.toggle('focus', on);
+    var enter = $('focus-enter'), stack = $('focus-stack');
+    if (enter) enter.classList.toggle('hidden', !here || on);
+    if (stack) stack.hidden = !on;
+    return on;
+  }
+  function focusSet(on) {
+    on = !!on;
+    if (FOCUS.on === on) return;
+    var chat = window.COSWeb.cosChat;
+    var flip = function () { FOCUS.on = on; focusSync(); };
+    if (chat && typeof chat.holdPlace === 'function') chat.holdPlace(flip); else flip();
+    try { if (on) sessionStorage.setItem('cos.focus', '1'); else sessionStorage.removeItem('cos.focus'); } catch (_e) { /* this tab only, best effort */ }
+    // Focus follows the control he used: entering puts it on Leave, leaving puts it back on the enter control.
+    var to = $(on ? 'focus-leave' : 'focus-enter');
+    if (to && to.focus && (!to.classList || !to.classList.contains('hidden'))) { try { to.focus({ preventScroll: true }); } catch (_e) { to.focus(); } }
+  }
+  try { FOCUS.on = sessionStorage.getItem('cos.focus') === '1'; } catch (_e) { FOCUS.on = false; }
+  window.COSWeb.onRoute(function () { focusSync(); });
+  // Fold and unfold: the class follows the width, and the first card he can see is held across that flip too.
+  function focusResync() { var chat = window.COSWeb.cosChat; if (chat && typeof chat.holdPlace === 'function') chat.holdPlace(focusSync); else focusSync(); }
+  try { var focusMql = window.matchMedia(FOCUS_MQ); if (focusMql.addEventListener) focusMql.addEventListener('change', focusResync); } catch (_e) { /* no matchMedia: never shown */ }
+  document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('[data-focus]') : null;
+    if (!t) return;
+    var act = t.getAttribute('data-focus');
+    if (act === 'enter') focusSet(true);
+    else if (act === 'leave') focusSet(false);
+    else if (act === 'newest') { var chat = window.COSWeb.cosChat; if (chat && typeof chat.latest === 'function') chat.latest(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    // Escape leaves focus, unless a sheet over the page takes it first.
+    var sheet = $('ask-sheet');
+    if (e.key === 'Escape' && FOCUS.on && document.documentElement.classList.contains('focus') && (!sheet || sheet.classList.contains('hidden'))) focusSet(false);
+  });
+  window.COSWeb.focus = { set: focusSet, on: function () { return FOCUS.on; }, sync: focusSync };
+
   // ── layout reports and the visible box, every pane (7.0.2) ──
   // The Duo audit (11/07): only Today's session sheet ever sent a layout report, and only when its classes flipped, so
   // the COS chat composer, the front screen Miles types on most, never sent one, and a keyboard the code failed to see
