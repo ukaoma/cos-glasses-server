@@ -779,7 +779,8 @@
   // caught mid-change. Numbers and fixed labels only (layoutCrumb keeps them so): never text, ids or a title.
   // At most RAIL_REC_PER_MIN in any minute and RAIL_REC_MAX a page load, so a desktop window dragged about can never use up
   // layoutCrumb's page budget (80) that the keyboard and frame reports share.
-  var RAIL_REC = { n: 0, minute: [], timer: null }, RAIL_SETTLE_MS = 600, RAIL_REC_PER_MIN = 6, RAIL_REC_MAX = 24;
+  var RAIL_REC = { n: 0, minute: [], timer: null, vv: '', vvHooked: false, must: false }, RAIL_SETTLE_MS = 600, RAIL_REC_PER_MIN = 6, RAIL_REC_MAX = 24;
+  function railVv() { var v = window.visualViewport; return v ? [Math.round(v.width), Math.round(v.height), Math.round(v.offsetTop)].join(',') : ''; }
   function railRecord(at, on) {
     try {
       if (typeof layoutCrumb !== 'function') return false;
@@ -796,15 +797,35 @@
         cw: de ? de.clientWidth : null, sy: window.scrollY || 0,
         stripTop: sb ? sb.top : null, stripH: sb ? sb.height : null, stripPos: /^(static|relative|absolute|fixed|sticky)$/.test(pos) ? pos : 'other',
         shellH: ab ? ab.height : null });
-      if (ok) { RAIL_REC.n++; RAIL_REC.minute.push(now); }
+      if (ok) { RAIL_REC.n++; RAIL_REC.minute.push(now); RAIL_REC.vv = railVv(); }
       return ok;
     } catch (_e) { return false; }
   }
   /** A resize, a fold or the strip's media test changed: sync now, and report how it settled 600 ms after the last one. */
   function railMoved() {
     railSync();
+    railSettle(false);
+  }
+  /** One settled record 600 ms after the last change. From the visual viewport (the lead 11:4x, Codex: his fault shows it
+   *  stranded at height 0, and a recovery may arrive only as a viewport resize or scroll) it reports only when the
+   *  viewport's width, height or top moved since the last record, and it never calls railSync: reporting, not behaviour. */
+  function railSettle(fromVv) {
     clearTimeout(RAIL_REC.timer);
-    RAIL_REC.timer = setTimeout(function () { RAIL_REC.timer = null; railRecord('settled', sideRail()); }, RAIL_SETTLE_MS);
+    if (!fromVv) RAIL_REC.must = true;   // a resize, fold or media change in the burst always reports
+    RAIL_REC.timer = setTimeout(function () {
+      var must = RAIL_REC.must;
+      RAIL_REC.timer = null; RAIL_REC.must = false;
+      if (!must && railVv() === RAIL_REC.vv) return;
+      railRecord('settled', sideRail());
+    }, RAIL_SETTLE_MS);
+  }
+  function railVvHook() {
+    var v = window.visualViewport;
+    if (RAIL_REC.vvHooked || !v || typeof v.addEventListener !== 'function') return;
+    RAIL_REC.vvHooked = true;
+    var on = function () { railSettle(true); };
+    v.addEventListener('resize', on);
+    v.addEventListener('scroll', on);
   }
   function railSync() {
     var on = false;
@@ -829,6 +850,7 @@
         if (mq && mq.addEventListener) mq.addEventListener('change', railMoved); else if (mq && mq.addListener) mq.addListener(railMoved);
         window.addEventListener('resize', railMoved);
         window.addEventListener('orientationchange', railMoved);
+        railVvHook();
       }
     } catch (_e) { /* a harness without a page: no rail */ }
     return on;

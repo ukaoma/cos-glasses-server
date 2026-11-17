@@ -27,11 +27,13 @@ function kit(o: { refuse?: boolean; pos?: string; short?: boolean; noStrip?: boo
   let syncs = 0, side = true
   const strip = { getBoundingClientRect: () => ({ top: -240, height: 797 }) }
   const de = { clientWidth: 449, classList: { contains: (c: string) => c === 'short-screen' && o.short !== false } }
+  const vvL: Record<string, Array<() => void>> = {}
+  const vv = { width: 449, height: 797, offsetTop: 0, addEventListener: (t: string, f: () => void) => { (vvL[t] ||= []).push(f) } }
   const ctx: Record<string, unknown> = {
     Date: { now: () => now.t },
     setTimeout: (f: () => void) => { timers.set(++id, f); return id }, clearTimeout: (i: number) => { timers.delete(i) },
     document: { documentElement: de, querySelector: (s: string) => (s === '.rail' && !o.noStrip ? strip : null) },
-    window: { screen: { width: 466, height: 678 }, scrollY: 1200.5, matchMedia: (q: string) => ({ matches: q === '(max-width: 599px)' || q === '(max-width: 599px) and (pointer: coarse)' }),
+    window: { visualViewport: vv, screen: { width: 466, height: 678 }, scrollY: 1200.5, matchMedia: (q: string) => ({ matches: q === '(max-width: 599px)' || q === '(max-width: 599px) and (pointer: coarse)' }),
       getComputedStyle: () => ({ position: o.pos ?? 'sticky' }) },
     $: (i: string) => (i === 'app-shell' ? { getBoundingClientRect: () => ({ height: 1668 }) } : null),
     layoutCrumb: (what: string, data: Record<string, unknown>) => { if (o.refuse) return false; sent.push({ what, data }); return true },
@@ -39,9 +41,9 @@ function kit(o: { refuse?: boolean; pos?: string; short?: boolean; noStrip?: boo
     sideRail: () => side, railSync: () => { syncs++ },
   }
   vm.createContext(ctx)
-  vm.runInContext(BLOCK + '\n;this.api = { railRecord: railRecord, railMoved: railMoved, RAIL_REC: RAIL_REC };', ctx)
-  const api = (ctx as { api: { railRecord(at: string, on: boolean): boolean; railMoved(): void; RAIL_REC: { n: number } } }).api
-  return { api, sent, now, timers, syncs: () => syncs, setSide: (v: boolean) => { side = v }, fire() { const fs = [...timers.values()]; timers.clear(); fs.forEach(f => f()) } }
+  vm.runInContext(BLOCK + '\n;this.api = { railRecord: railRecord, railMoved: railMoved, railVvHook: railVvHook, RAIL_REC: RAIL_REC };', ctx)
+  const api = (ctx as { api: { railRecord(at: string, on: boolean): boolean; railMoved(): void; railVvHook(): void; RAIL_REC: { n: number } } }).api
+  return { api, sent, now, timers, vv, vvL, vvFire(t = 'resize') { (vvL[t] || []).forEach(f => f()) }, syncs: () => syncs, setSide: (v: boolean) => { side = v }, fire() { const fs = [...timers.values()]; timers.clear(); fs.forEach(f => f()) } }
 }
 
 describe('the rail record: what the strip was drawn against', () => {
@@ -101,6 +103,34 @@ describe('numbered, settled, capped', () => {
   })
 })
 
+describe('the visual viewport (the lead 11:4x, Codex): his fault shows it stranded at height 0', () => {
+  it('a viewport resize or scroll reports once, 600 ms after the last, only when its width, height or top moved', () => {
+    const k = kit(); k.api.railVvHook()
+    k.api.railRecord('change', true)                        // the last record saw 449,797,0
+    k.vvFire('resize'); k.fire(); expect(k.sent).toHaveLength(1)   // nothing moved: nothing sent
+    k.vv.height = 0; k.vv.offsetTop = 797                   // stranded
+    k.vvFire('resize'); k.vvFire('scroll'); k.vvFire('resize'); expect(k.timers.size).toBe(1)
+    k.fire(); expect(k.sent).toHaveLength(2); expect(k.sent[1].data).toMatchObject({ n: 2, at: 'settled' })
+    k.vv.height = 797; k.vv.offsetTop = 0                   // recovered, seen only as a scroll
+    k.vvFire('scroll'); k.fire(); expect(k.sent).toHaveLength(3)
+  })
+  it('never changes behaviour: a viewport event never syncs the strip', () => {
+    const k = kit(); k.api.railVvHook(); k.vv.height = 10; k.vvFire('resize'); k.vvFire('scroll'); k.fire()
+    expect(k.syncs()).toBe(0)
+  })
+  it('a resize in the same burst still reports, even if the viewport ends where it was', () => {
+    const k = kit(); k.api.railVvHook(); k.api.railRecord('change', true)
+    k.api.railMoved(); k.vvFire('resize'); k.fire()
+    expect(k.sent).toHaveLength(2); expect(k.sent[1].data.at).toBe('settled')
+  })
+  it('hooked once, resize and scroll; the same caps (6 a minute)', () => {
+    const k = kit(); k.api.railVvHook(); k.api.railVvHook()
+    expect(k.vvL.resize).toHaveLength(1); expect(k.vvL.scroll).toHaveLength(1)
+    for (let i = 0; i < 9; i++) { k.vv.height = 100 + i; k.vvFire('resize'); k.fire() }
+    expect(k.sent).toHaveLength(6)
+  })
+})
+
 describe('wired', () => {
   it('railSync reports a change through railRecord; resize, orientation and the strip\'s media test go through railMoved', () => {
     const rs = between(APP, '  function railSync() {', '\n  }\n')
@@ -109,5 +139,6 @@ describe('wired', () => {
     expect(rs).toContain("window.addEventListener('resize', railMoved);")
     expect(rs).toContain("window.addEventListener('orientationchange', railMoved);")
     expect(rs).not.toContain("layoutCrumb('rail'")
+    expect(rs).toContain("window.addEventListener('orientationchange', railMoved);\n        railVvHook();")
   })
 })
