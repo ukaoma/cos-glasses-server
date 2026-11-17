@@ -657,6 +657,118 @@
       paintFeed(false);
     }, function () {});
   }
+  // ── Reply ready, one row per session (7.0.53 Part A: Miles 20:52 on F1's partR "a1" frames, the lead's build order) ──
+  // The session speaks: its name (a link to it), provider, short id, how many replies and when; then its reply in plain
+  // words, three lines until he opens it. One row per session, the newest reply shown and the rest under "N earlier
+  // replies", opened in place. A row on the thread's hairline, no card. The server's newer items carry the words
+  // (excerpt), the time the turn ended (turnAt) and, grouped, a count and earlier replies; an item from before carries
+  // none, so the page groups those itself and says the words are in the session. Nothing about the stored item changes:
+  // its title, line, banners, lens and what COS reads stay "Reply ready". Plain text throughout: no Markdown, no links.
+  var RR_WHO = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' };
+  var RR_EARLIER_MAX = 5, RR_OLD = 'This reply came before COS kept reply text. Open the session to read it.';
+  // A newer item with no words (Cursor's observer keeps none, S1 21:0x): not "before", just not here.
+  var RR_NOTEXT = 'Open the session to read the reply.';
+  var RR_APPROVAL = 'It asked for approval. Approve it in Sessions, where the request card is.';
+  function rrSession(item) {
+    var l = (item.links || []).filter(function (x) { return x && x.kind === 'session'; })[0];
+    var at = resultSession(item, l);
+    return at ? { provider: at[0], id: at[1], link: l } : null;
+  }
+  // Reply ready items that name their session, grouped by provider and id, oldest first in each group; the order of the
+  // groups is the order their newest reply came in.
+  function rrGroups(items) {
+    var by = {}, out = [];
+    (items || []).forEach(function (it) {
+      if (!it || it.archived || it.title !== REPLY_READY || it.source !== 'cos') return;
+      var s = rrSession(it);
+      if (!s) return;
+      var k = s.provider + '|' + String(s.id).toLowerCase();
+      if (!by[k]) { by[k] = { key: k, provider: s.provider, id: s.id, items: [] }; out.push(by[k]); }
+      by[k].items.push(it);
+    });
+    out.forEach(function (g) {
+      g.items.sort(function (a, b) { return String(a.createdAt).localeCompare(String(b.createdAt)); });
+      g.newest = g.items[g.items.length - 1];
+    });
+    return out;
+  }
+  function rrText(v) { return typeof v === 'string' ? v.replace(/\r\n?/g, '\n').trim() : ''; }
+  function rrWhen(it) { return it.turnAt || it.createdAt; }
+  function rrTitle(g) {
+    var l = rrSession(g.newest).link, lab = l && typeof l.label === 'string' ? l.label.replace(/\*\*|`/g, '').replace(/\s+/g, ' ').trim() : '';
+    return lab && lab !== 'Session' ? clip(lab, 80) : replySessionName(g.newest) || REPLY_READY;
+  }
+  function rrCount(g) { var n = Number(g.newest.count); return Math.max(Number.isInteger(n) && n > 0 ? n : 0, g.items.length); }
+  // Earlier replies, newest first: the server's own list on the newest item, then any older items of the group.
+  function rrEarlier(g) {
+    var list = [], seen = {};
+    (Array.isArray(g.newest.earlier) ? g.newest.earlier : []).forEach(function (e) {
+      if (!e || typeof e !== 'object') return;
+      var at = typeof e.at === 'string' ? e.at : '';
+      if (at && seen[at]) return;
+      if (at) seen[at] = 1;
+      list.push({ at: at, text: rrText(e.excerpt) });
+    });
+    g.items.slice(0, -1).reverse().forEach(function (it) {
+      var at = String(rrWhen(it) || '');
+      if (at && seen[at]) return;
+      if (at) seen[at] = 1;
+      list.push({ at: at, text: rrText(it.excerpt) });
+    });
+    return list;
+  }
+  function rrParas(text) {
+    return text.split(/\n{2,}/).map(function (p) { return '<p>' + esc(p.trim()) + '</p>'; }).join('');
+  }
+  // The session row on the shell's list, when it is there: whether it waits on an approval now.
+  function rrRow(g) {
+    if (!Array.isArray(C.sessionRows)) return null;
+    for (var i = 0; i < C.sessionRows.length; i++) {
+      var r = C.sessionRows[i] || {}, id = String(r.session_id || r.id || '').replace(/^(claude|codex|cursor):/, '').toLowerCase();
+      if (r.provider === g.provider && id === String(g.id).toLowerCase()) return r;
+    }
+    return null;
+  }
+  function rrNeedsApproval(g) { var r = rrRow(g); return !!(r && r.state === 'waiting' && (r.waiting_kind === 'permission' || r.waiting_kind === 'plan')); }
+  function rrHtml(g) {
+    var it = g.newest, n = rrCount(g), open = !!(C.rrOpen && C.rrOpen[g.key]);
+    var short = String(g.id).slice(0, 8), when = aboutAgo(rrWhen(it));
+    var meta = esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(short) + '</span>' + (n > 1 ? ', ' + n + ' replies' : '') + (when ? ', ' + esc(when) : '');
+    var said = rrText(it.excerpt);
+    var saidHtml = said ? '<div class="rr-said' + (open ? '' : ' clip') + '" data-cos="rr-more" data-rr="' + esc(g.key) + '" role="button" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '">' + rrParas(said) + '</div>'
+      : '<div class="rr-said"><p class="rr-tert">' + esc(it.turnAt ? RR_NOTEXT : RR_OLD) + '</p></div>';
+    var earlier = '';
+    if (open && n > 1) {
+      var list = rrEarlier(g), shown = list.slice(0, RR_EARLIER_MAX), more = n - 1 - shown.length;
+      earlier = '<div class="rr-earlier">' + shown.map(function (e) {
+        return '<div class="rr-e"><span class="rr-e-when">' + esc(aboutAgo(e.at) || '') + '</span><span class="rr-e-said">' + (e.text ? esc(clip(e.text, 240)) : '<span class="rr-tert">' + esc(RR_OLD) + '</span>') + '</span></div>';
+      }).join('') + (more > 0 ? '<div class="rr-e"><span class="rr-e-when"></span><span class="rr-tert">' + more + ' more in the session</span></div>' : '') + '</div>';
+    }
+    var approval = rrNeedsApproval(g);
+    var foot = '<div class="rr-foot">' +
+      '<button type="button" class="' + (approval ? 'cx-btn primary' : 'link-btn rr-go') + '" data-cos="rr-open" data-rr="' + esc(g.key) + '">Open the session</button>' +
+      (n > 1 ? '<button type="button" class="link-btn rr-count" data-cos="rr-more" data-rr="' + esc(g.key) + '" aria-expanded="' + (open ? 'true' : 'false') + '">' + (open ? 'Hide earlier replies' : (n - 1) + ' earlier ' + (n - 1 === 1 ? 'reply' : 'replies')) + '</button>' : '') +
+      '</div>';
+    return '<div class="rr" data-rr-row="' + esc(g.key) + '" data-item-id="' + esc(it.id) + '">' +
+      '<span class="rr-glyph" aria-hidden="true"><svg class="icon"><use href="#i-sessions"/></svg></span><div class="rr-main">' +
+      '<div class="rr-who"><button type="button" class="rr-name" data-cos="rr-open" data-rr="' + esc(g.key) + '">' + esc(rrTitle(g)) + '</button><span class="rr-meta">' + meta + '</span></div>' +
+      saidHtml + earlier + (approval ? '<p class="rr-status">' + esc(RR_APPROVAL) + '</p>' : '') + foot + '</div></div>';
+  }
+  function rrFind(key) { return rrGroups(C.items).filter(function (g) { return g.key === key; })[0] || null; }
+  // Open the session from its row: the reader of that session, and Back returns here (as Open result does).
+  function rrOpen(key) {
+    var g = rrFind(key);
+    if (!g) return;
+    var at = [g.provider, g.id];
+    rememberReturn(g.newest, at);
+    W.go('sessions', at);
+  }
+  function rrToggle(key) {
+    if (!rrFind(key)) return;
+    C.rrOpen = C.rrOpen || {};
+    if (C.rrOpen[key]) delete C.rrOpen[key]; else C.rrOpen[key] = 1;
+    paintFeed(false);
+  }
   function itemHtml(item) {
     if (item.kind === 'drop' || item.kind === 'answer') {
       return '<div class="cc-line you' + (item.kind === 'answer' ? ' answer' : '') + '"' + (item.kind === 'drop' ? ' data-drop-thread="' + esc(item.threadId) + '"' : '') + '><div class="cc-bubble">' + esc(item.line) + '</div>' +
@@ -876,7 +988,12 @@
     else if (C.feedState === 'error' && C.items === null) html = '<div class="cx-notice warn"><span>' + esc(C.feedError) + '</span></div><button type="button" class="cx-btn quiet" data-cos="retry">Try again</button>';
     else {
       // 7.0.9: a question asked 7 days ago or more (the server marks it `archived`) lives under older questions.
-      var rows = (C.items || []).filter(function (it) { return !it.archived; }).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
+      // 7.0.53 Part A: Reply ready items are one row per session, at its newest reply; every item of a group counts as
+      // drawn, so the history never adds a note for one folded into its row.
+      var groups = rrGroups(C.items), inRow = {};
+      groups.forEach(function (g) { g.items.forEach(function (it) { inRow[it.id] = 1; }); });
+      var rows = (C.items || []).filter(function (it) { return !it.archived && !inRow[it.id]; }).map(function (it) { return { at: it.createdAt, html: itemHtml(it) }; });
+      groups.forEach(function (g) { rows.push({ at: g.newest.createdAt, html: rrHtml(g) }); });
       C.asks.forEach(function (a) { if (!a.replyKey) rows.push({ at: new Date(a.at + (a.dropId ? 1 : 0)).toISOString(), html: askHtml(a, !!a.dropId) }); });
       // 7.0.39: the thread's history, its chats in time with the rest; one this page is still showing as an Ask is drawn once.
       var hist = historyOn();
@@ -1722,6 +1839,9 @@
     returnPending();
     var id = C.focusItem;
     var el = id && C.host && C.host.querySelector('[data-item-id="' + String(id).replace(/["\\]/g, '') + '"]');
+    // 7.0.53: an earlier Reply ready folded into its session's row is shown as that row (a notification or phone link
+    // can name it).
+    if (!el && id) { var grp = rrGroups(C.items).filter(function (g) { return g.items.some(function (x) { return x.id === id; }); })[0]; if (grp) el = C.host.querySelector('[data-rr-row="' + String(grp.key).replace(/["\\]/g, '') + '"]'); }
     if (!el) return false;
     var ft = C.focusTop;
     C.focusItem = '';
@@ -2984,6 +3104,8 @@
     if (what === 'asks-retry') { C.back.state = 'idle'; loadBack(); return paintFeed(false); }
     if (what === 'hist-again') return retryEntry(t.getAttribute('data-id'));
     if (what === 'tl-open') return openNote(t);
+    if (what === 'rr-open') return rrOpen(t.getAttribute('data-rr'));
+    if (what === 'rr-more') return rrToggle(t.getAttribute('data-rr'));
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -3015,6 +3137,10 @@
   }
   function isComposerInput(el) { return !!(el && el.classList && el.classList.contains('cc-input')); }
   function onKey(e) {
+    // 7.0.53: a Reply ready row's clipped words open with Enter or Space, as a button does (it is a div, so its words can
+    // be selected).
+    var t = e.target;
+    if (t && t.getAttribute && t.getAttribute('data-cos') === 'rr-more' && t.tagName !== 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return rrToggle(t.getAttribute('data-rr')); }
     if (!isComposerInput(e.target) || e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.shiftKey) return;
     e.preventDefault();
     var k = kOf(e.target);
@@ -3256,7 +3382,7 @@
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _paintFeed: paintFeed, _paintAsk: paintAsk, _poll: poll, _finished: finished, _stepsHtml: stepsHtml, _relayHtml: relayHtml, _scrubPaths: scrubPaths, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
-    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
+    _state: C, _rrGroups: rrGroups, _rrHtml: rrHtml, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn,
     _loadHistory: loadHistory, _loadOlder: loadOlder, _loadNewer: loadNewer, _histHtml: histHtml, _dayLabel: dayLabel, _onHistScroll: onHistScroll, _paintFeed: paintFeed, _chatSkeleton: chatSkeleton, _historyOn: historyOn,
     _threadOnlyOn: threadOnlyOn, _submitAsk: submitAsk, _reattach: reattach, _retryEntry: retryEntry, _loadThread: loadThread,
     _steer: steer, _cancel: cancel,

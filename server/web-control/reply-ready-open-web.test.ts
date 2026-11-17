@@ -255,7 +255,9 @@ describe('a Reply ready card is headed by its session\'s name (7.0.52, Miles 14:
     h.chat._state.items = [oldItem('Codex has a reply ready.', IDS.codex)]
     h.chat._paintFeed(false)
     for (let i = 0; i < 8; i++) await Promise.resolve()
-    expect(feed.innerHTML).toContain('<p class="cc-card-title">Fix the importer</p>')
+    // 7.0.53 Part A: a Reply ready item is now the session's row; its name is the row's link.
+    expect(feed.innerHTML).toContain('class="rr-name" data-cos="rr-open"')
+    expect(feed.innerHTML).toContain('>Fix the importer</button>')
     h.chat._paintFeed(false); h.chat._paintFeed(false)
     expect(h.listReads, 'one read, then a minute of quiet').toEqual([60000])
   })

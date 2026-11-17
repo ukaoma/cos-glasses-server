@@ -419,3 +419,30 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
   text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
 .cc .cc-note-link.quiet, .cc .cc-note-no { color: var(--tertiary); }
 @media (any-pointer: coarse) { .cc .cc-note-link::after { content: ''; position: absolute; inset: -12px -6px; } }
+
+/* 7.0.53 Part A (Miles 20:52 on F1's partR "a1" frames): a Reply ready row is the session speaking, one row per session,
+   on the thread's hairline with no card around its words. Tokens only (amber.css restyles them); no glass, held. */
+.rr { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; margin: 0; padding: 12px 0; border-top: 1px solid var(--row-border); }
+.rr + .cc-line, .cc-line + .rr { margin-top: 14px; }
+.rr:last-child { border-bottom: 1px solid var(--row-border); }
+.rr-glyph { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--gold-bg); color: var(--accent); }
+.rr-glyph .icon { width: 17px; height: 17px; }
+.rr-main { min-width: 0; max-width: 560px; }
+.rr-who { display: flex; align-items: baseline; gap: 2px 8px; min-height: 30px; padding-top: 4px; flex-wrap: wrap; }
+.rr-name { font: 600 15px/1.25 var(--body); color: var(--ink); text-align: left; text-decoration: underline; text-decoration-color: var(--panel-border); text-underline-offset: 3px; overflow-wrap: anywhere; min-height: 30px; }
+.rr-meta { font-size: 12.5px; color: var(--tertiary); }
+.rr-id { font-family: var(--mono); }
+.rr-said { margin-top: 2px; font-size: 15px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; cursor: pointer; }
+.rr-said p { margin: 0 0 0.55em; white-space: pre-line; }
+.rr-said p:last-child { margin-bottom: 0; }
+.rr-said.clip p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.rr-tert { color: var(--tertiary); }
+.rr-status { margin: 6px 0 0; font-size: 13.5px; color: var(--hot); }
+.rr-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; margin-top: 2px; }
+.rr-foot .link-btn { font-weight: 500; color: var(--ink); }
+.rr-foot .rr-count { color: var(--sub); }
+.rr-foot .cx-btn { min-height: 36px; }
+.rr-earlier { margin: 8px 0 0; padding: 6px 0 0 12px; border-left: 2px solid var(--row-border); display: grid; gap: 2px; }
+.rr-e { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; font-size: 13.5px; color: var(--sub); min-height: 32px; align-items: center; }
+.rr-e-when { font-size: 12.5px; color: var(--tertiary); }
+.rr-e-said { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
