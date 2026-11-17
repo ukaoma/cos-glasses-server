@@ -1,6 +1,6 @@
-## 7.0.53 (unreleased) - Reply ready rows that name their session, a re-checked merged banner, the desk rule in the turn report, phone approvals that survive a late Tailscale name, and the approval page's message line
+## 7.0.53 - Reply ready rows that name their session, a re-checked merged banner, the desk rule in the turn report, phone approvals that survive a late Tailscale name, and the approval page's message line
 
-2026-11-16, on claude/server-7053; not yet released. 7.0.52 plus the changes below. The lead's 20:5x order after Miles, 20:52: "start update gotcos.com and the desktop with these newer elements"; the message line in Miles's words, 21:13.
+2026-11-17. A PRIVATE candidate (claude/server-integration-7053): 7.0.52 plus the changes below. Private: installed only on a line Miles types, not on npm. The lead's 20:5x order after Miles, 20:52: "start update gotcos.com and the desktop with these newer elements"; the message line in Miles's words, 21:13.
 
 **On for everyone, one line each:**
 - Control Web's look (Miles, 23:39): Amber is the default for every browser. Settings, This browser, Appearance has a new Look group, Amber or Espresso; Espresso is the look from before Amber, exactly, and switches at once with no reload. The choice is kept in that browser only: no request, no server setting, no log line, nothing counted. A browser that chooses nothing, or whose storage cannot be read, is Amber. With scripts off the page is Espresso. The Memories graph keeps its Espresso colours in both looks, on purpose (its palette is deferred).
