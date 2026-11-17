@@ -255,6 +255,12 @@ const mutations = [
   ["shape-on-every-failure", US, "error instanceof UsageProbeError && code === 'unknown_shape' && error.keyShape ?", "error instanceof UsageProbeError && error.keyShape ?"],
   ["shape-claude-not-attached", US, "'unknown get_usage shape', replyKeyShape(o.response.response))", "'unknown get_usage shape')"],
   ["shape-codex-not-attached", US, "'unknown rateLimits shape', replyKeyShape(o.result))", "'unknown rateLimits shape')"],
+  // Q1 08:05: the walk's bounds (its three survivors S7, S8, S9) and the array depth and node budget it asked for.
+  ["shape-keys-unbounded", US, "for (const k of keys.slice(0, 20)) {", "for (const k of keys.slice(0, 2000)) {"],
+  ["shape-object-depth-unbounded", US, "      if (depth > 4) return '{\u2026}'", "      if (depth > 400) return '{\u2026}'"],
+  ["shape-array-depth-unbounded", US, "      if (depth > 4) return '[\u2026]'", "      if (depth > 400) return '[\u2026]'"],
+  ["shape-long-keys-shown", US, "/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(k)", "/^[A-Za-z_][A-Za-z0-9_]{0,4000}$/.test(k)"],
+  ["shape-keeps-reading-past-budget", US, "        if (nodes > max) { parts.push('\u2026'); break }", "        if (false) { parts.push('\u2026'); break }"],
   ["cur-refused-said-generically", PP, "  if (e.provider === 'cursor' && e.lastFailure === 'keychain_refused') {", "  if (false) {"],
   ["cur-refused-message-generic", CP, "throw new UsageProbeError('keychain_refused', \"Cursor's sign-in was not shared with COS\")", "throw new UsageProbeError('keychain_refused', 'Keychain read refused')"],
   ["cur-first-read-says-nothing", PP, "        : e.provider === 'cursor' ? CURSOR_FIRST_READ_WORDS : 'Not read yet. Refresh to read it.',", "        : 'Not read yet. Refresh to read it.',"],

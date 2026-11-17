@@ -367,6 +367,26 @@ describe('an unrecognised usage reply is logged by its key shape, never its valu
     expect(replyKeyShape(wide).length).toBeLessThanOrEqual(REPLY_SHAPE_MAX)
     expect(replyKeyShape(wide)).toMatch(/…/)
   })
+  it('Q1 08:05 bounds: 20 keys per object, depth 5 for objects and arrays, keys up to 41 characters', () => {
+    const many = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`k${i}`, 1]))
+    const s = replyKeyShape(many)
+    expect(s.endsWith(',…+5}')).toBe(true); expect(s).toContain('k19:number'); expect(s).not.toContain('k20')
+    expect(replyKeyShape({ a: { b: { c: { d: { e: { f: 1 } } } } } })).toBe('{a:{b:{c:{d:{e:{…}}}}}}')
+    expect(replyKeyShape([[[[[[[1]]]]]]])).toBe('[[[[[[…]]x1]x1]x1]x1]x1')
+    expect(replyKeyShape({ ['x'.repeat(41)]: 1, ['y'.repeat(42)]: 2 })).toBe(`{${'x'.repeat(41)}:number,?:number}`)
+  })
+  it('a huge reply is walked only as far as the cap can show (Q1 08:05 advisory)', () => {
+    let reads = 0
+    const level = (d: number): unknown => {
+      if (d === 0) return 1
+      const child = level(d - 1), o: Record<string, unknown> = {}
+      for (let i = 0; i < 20; i++) Object.defineProperty(o, `k${i}`, { enumerable: true, get: () => { reads++; return child } })
+      return o
+    }
+    const s = replyKeyShape(level(6)) // 20^6 leaves if walked whole
+    expect(s.length).toBeLessThanOrEqual(REPLY_SHAPE_MAX)
+    expect(reads).toBeLessThanOrEqual(REPLY_SHAPE_MAX + 1)
+  })
   it('both probes attach the shape to their unknown_shape failure; the message stays the fixed words', async () => {
     const f = fakeSpawn((line, emit) => { if (line.request?.subtype === 'get_usage') emit({ type: 'control_response', response: { subtype: 'success', request_id: 'cos_usage', response: odd } }) })
     const e = await probeClaudeUsage(f.spawnFn, 2000).catch(x => x)

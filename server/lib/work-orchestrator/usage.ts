@@ -70,13 +70,25 @@ export class UsageProbeError extends Error {
  *  shown as "?", so a map keyed by anything personal cannot leak through its keys. Arrays show their first item and length. */
 export const REPLY_SHAPE_MAX = 400
 export function replyKeyShape(value: unknown, max = REPLY_SHAPE_MAX): string {
+  // Q1 08:05: arrays stop at the same depth as objects, and an object stops reading its values once more nodes have been
+  // visited than the cap could ever show (every node prints at least one character, in visit order, so what is cut off
+  // could never reach the first REPLY_SHAPE_MAX characters). A huge reply costs no more than a small one.
+  let nodes = 0
   const walk = (v: unknown, depth: number): string => {
+    nodes++
     if (v === null) return 'null'
-    if (Array.isArray(v)) return v.length ? `[${walk(v[0], depth + 1)}]x${v.length}` : '[]'
+    if (Array.isArray(v)) {
+      if (depth > 4) return '[…]'
+      return v.length ? `[${walk(v[0], depth + 1)}]x${v.length}` : '[]'
+    }
     if (typeof v === 'object') {
       if (depth > 4) return '{…}'
-      const keys = Object.keys(v as object)
-      return `{${keys.slice(0, 20).map(k => `${/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(k) ? k : '?'}:${walk((v as Record<string, unknown>)[k], depth + 1)}`).join(',')}${keys.length > 20 ? `,…+${keys.length - 20}` : ''}}`
+      const keys = Object.keys(v as object), parts: string[] = []
+      for (const k of keys.slice(0, 20)) {
+        if (nodes > max) { parts.push('…'); break } // out of budget: stop reading this object's values too
+        parts.push(`${/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(k) ? k : '?'}:${walk((v as Record<string, unknown>)[k], depth + 1)}`)
+      }
+      return `{${parts.join(',')}${keys.length > 20 ? `,…+${keys.length - 20}` : ''}}`
     }
     return typeof v
   }
