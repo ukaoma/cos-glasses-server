@@ -1,5 +1,5 @@
 /** Source-extracted behavioural harness. No browser geometry claim: F1 still owes the physical Duo/fold/keyboard run. */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,11 +30,11 @@ function frame() {
     querySelector: (s: string) => s === '.rail' ? rail : s === '.topbar' ? bar : null, elementFromPoint: () => node }
   const src = APP.slice(APP.indexOf('  var PG_FRAME_PANES'), APP.indexOf('  var RD_FRAME = { hooked: false, n: 0 };'))
   const make = new Function('document', 'window', '$', 'getComputedStyle', 'parseRoute', 'sideRail', 'viewportFit', 'layoutCrumb', 'requestAnimationFrame', src +
-    '\nreturn { sync: pgFrameSync, on: pgFrameOn, remember: typeof pgPlaceRemember === "function" ? pgPlaceRemember : function () {}, drop: typeof pgPlaceDrop === "function" ? pgPlaceDrop : function () {} };')
+    '\nreturn { sync: pgFrameSync, on: pgFrameOn, remember: typeof pgPlaceRemember === "function" ? pgPlaceRemember : function () {}, drop: typeof pgPlaceDrop === "function" ? pgPlaceDrop : function () {}, capture: pgPlaceCapture, place: PG_PLACE };')
   const api = make(doc, win, (id: string) => id === 'workspace' ? ws : id === 'app-shell' ? shell : id === 'pane-' + route.pane ? pane : null,
     win.getComputedStyle, () => route, () => width < 600 && coarse && classes.has('short-screen'),
     () => ({ top: 0, height: 787, bad: true }), () => true, (fn: Function) => frames.push(fn))
-  return { ...api, classes, ws, node, writes, emit, flush: () => { const q = frames.splice(0); q.forEach(fn => fn()) },
+  return { ...api, doc, pane, classes, ws, node, writes, emit, flush: () => { const q = frames.splice(0); q.forEach(fn => fn()) },
     resize: (w: number, shift = 0) => { width = w; nodeY += shift; emit('resize') },
     setCoarse: (on: boolean) => { coarse = on }, setPage: (y: number) => { page = y }, page: () => page,
     setHidden: (on: boolean) => { hidden = on }, route: (pane: string, args: string[] = []) => { route = { pane, args }; api.sync(route) } }
@@ -104,4 +104,72 @@ describe('Duo page-frame ownership and live place migration', () => {
     const auth = frame(); auth.sync(); auth.remember(); auth.resize(1019, 250); auth.drop(); auth.writes.length = 0; auth.flush(); expect(auth.writes).toHaveLength(0)
     expect(APP).toContain("if (typeof pgPlaceDrop === 'function') pgPlaceDrop();")
   })
+
+  // W1 (F1 12:48: at 449 Running 121 px down, 1019 fine, back at 449 the page sat at its end with Running at -185).
+  it('a restore the browser clamps is not taken as his place: the round trip comes back to where he was', () => {
+    const f = frame(); f.sync(); f.remember()
+    f.resize(1019, 3800); f.flush(); expect(f.ws.scrollTop).toBe(4000)   // asked 4300: clamped at the end
+    f.emit('scroll')                                                     // the browser's own scroll for the clamp
+    f.resize(449, -3800); f.flush()
+    expect(f.ws.scrollTop).toBe(500)                                     // where he was, not 200 from the clamped place
+  })
+  it('after a restore, his next gesture and scroll take the place again', () => {
+    const f = frame(); f.sync(); f.remember(); f.resize(1019, 250); f.flush()
+    f.emit('touchstart'); f.emit('touchend'); f.ws.scrollTop = 900; f.emit('scroll')
+    expect(f.place.auto).toBe(false)
+    expect(f.place.a.node).toBe(f.node); expect(f.place.a.dy).toBe(250)   // taken fresh at 1019 (it was 400 before the fold)
+  })
+  it('the main column first: the left point down the whole band before the centre (the right column stacks below at 449)', () => {
+    const f = frame(); f.sync()
+    const left = { isConnected: true, getBoundingClientRect: () => ({ top: 130, height: 24 }) }, right = { isConnected: true, getBoundingClientRect: () => ({ top: 116, height: 24 }) }
+    f.pane.contains = (n: unknown) => n === left || n === right
+    f.doc.elementFromPoint = (x: number, y: number) => (x < 100 ? (y >= 130 ? left : null) : right)   // the centre hits the right column first
+    const a = f.capture({ pane: 'today', args: [] }, true)
+    expect(a.node).toBe(left)
+  })
+  it('never a container taller than half the visible box (the columns, the pane): the next probe, else the pane top', () => {
+    const f = frame(); f.sync()
+    const big = { isConnected: true, getBoundingClientRect: () => ({ top: 0, height: 3000 }) }, small = { isConnected: true, getBoundingClientRect: () => ({ top: 160, height: 24 }) }
+    f.pane.contains = (n: unknown) => n === big || n === small
+    f.doc.elementFromPoint = (x: number, y: number) => (x < 100 ? big : y >= 140 ? small : big)
+    expect(f.capture({ pane: 'today', args: [] }, true).node).toBe(small)
+    f.doc.elementFromPoint = () => big
+    expect(f.capture({ pane: 'today', args: [] }, true).node).toBe(f.pane)
+  })
+  it('a caret whose text is not inside the element hit there, or not on the probe line, is ignored', () => {
+    const f = frame(); f.sync()
+    const hit = { isConnected: true, contains: () => false, getBoundingClientRect: () => ({ top: 116, height: 24 }) }
+    const stray = { nodeType: 3, isConnected: true }
+    f.pane.contains = (n: unknown) => n === hit || n === stray
+    f.doc.elementFromPoint = () => hit
+    f.doc.caretRangeFromPoint = () => ({ startContainer: stray, startOffset: 0 })
+    const a = f.capture({ pane: 'today', args: [] }, true)
+    expect(a.node).toBe(hit); expect(a.text).toBeUndefined()
+  })
+  it('a fold with a finger down queues no restore: his own motion owns the place', () => {
+    const f = frame(); f.sync(); f.remember(); f.emit('touchstart'); f.writes.length = 0
+    f.resize(1019, 250); f.flush()
+    expect(f.writes).toHaveLength(0)
+  })
+  it('a fold during a fling, however long it has run, queues no restore; once the fling has stopped, a fold restores (Codex 12:5x)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const t0 = Date.now(), f = frame(); f.sync(); f.remember(); f.emit('touchstart'); f.emit('touchend')
+      for (let ms = 100; ms <= 1200; ms += 100) { vi.setSystemTime(t0 + ms); f.emit('scroll') }   // a 1.2 s fling, a scroll every 100 ms
+      vi.setSystemTime(t0 + 1220); f.writes.length = 0
+      f.resize(1019, 250); f.flush()
+      expect(f.writes).toHaveLength(0)
+      const g = frame(); g.sync(); g.remember(); g.emit('touchstart'); g.emit('touchend'); g.emit('scroll')
+      vi.setSystemTime(t0 + 5000); g.emit('scroll')            // a gap: the fling is over, this scroll is the browser's or his next
+      g.writes.length = 0; g.resize(1019, 250); g.flush()
+      expect(g.writes).toHaveLength(1)
+    } finally { vi.useRealTimers() }
+  })
+  it('a still page restores on a fold; sign-out or a new route clears the restore mark', () => {
+    const g = frame(); g.sync(); g.remember(); g.writes.length = 0
+    g.resize(1019, 250); g.flush()
+    expect(g.writes).toHaveLength(1); expect(g.place.auto).toBe(true)
+    g.drop(); expect(g.place.auto).toBe(false)
+  })
 })
+

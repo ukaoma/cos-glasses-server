@@ -3404,7 +3404,14 @@
   // restore window scroll explicitly; no blanket pane opt-in. These exact viewport gates are paired with app.css.
   var PG_FRAME_PANES = { today: 1, settings: 1 };
   var PG_FRAME_WIDE = '(min-width: 600px) and (pointer: coarse)';
-  var PG_PLACE = { key: '', width: 0, a: null, seq: 0, pending: false, hooked: false };
+  // auto: the last scroll was ours (a restore) or the browser's clamp of it, so nothing re-captures until he moves again
+  // (a touch, wheel, key or pointer). touching / lastTouchEnd / lastScroll: a fold with a finger down or during a fling
+  // skips the restore, so it never fights his own motion (F1 12:48; Codex 12:5x).
+  var PG_PLACE = { key: '', width: 0, a: null, seq: 0, pending: false, hooked: false, auto: false, touching: false, flinging: false, lastFling: 0 };
+  // A fling: from the finger lifting, a chain of his scrolls with no gap of PG_SCROLLING_MS or more (Codex 12:5x: no cap
+  // on its length; a long fling is still his). It ends at the first gap, so a scroll the browser makes for a later fold is
+  // never taken for one. Our restore's scrolls (auto) never extend it.
+  var PG_SCROLLING_MS = 150;
   function pgFrameViewport() { return !!(window.matchMedia && (window.matchMedia(PG_FRAME_WIDE).matches || (typeof sideRail === 'function' && sideRail()))); }
   // The route allowlist excludes COS/Focus. Do not test a stale focus class: focusSync clears it after route() frames Today.
   function pgFrameOn(r) {
@@ -3414,7 +3421,7 @@
       !(de && de.classList && (de.classList.contains('sx-frame') || de.classList.contains('rd-frame'))));
   }
   function pgPlaceKey(r) { return r ? r.pane + '|' + (r.args || []).join('|') : ''; }
-  function pgPlaceDrop() { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; PG_PLACE.key = ''; }
+  function pgPlaceDrop() { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; PG_PLACE.key = ''; PG_PLACE.auto = false; }
   function pgPlaceTop(framed) {
     var ws = $('workspace');
     if (framed && ws && ws.getBoundingClientRect) return ws.getBoundingClientRect().top;
@@ -3432,17 +3439,27 @@
   }
   // Remember a live text/element anchor while he scrolls, BEFORE a width change reflows it. Never persist raw offsets
   // across panes. A replaced/disconnected anchor is discarded rather than restoring an old page position or bottom.
+  // W1 (F1 12:48: at 1019 the anchor came from Today's right column, which stacks BELOW Running at 449, so the fold back
+  // clamped to the bottom): the main column first (the left point down the whole band, then the centre); a probe takes
+  // the element actually there (elementFromPoint), and a caret only when its text is inside that element and its
+  // character crosses the probe line; never a container taller than half the visible box (the columns, the pane).
   function pgPlaceCapture(r, framed) {
     var ws = $('workspace'), pane = $('pane-' + r.pane), top = pgPlaceTop(framed);
     if (!ws || !pane || !pane.getBoundingClientRect) return null;
     if ((framed ? ws.scrollTop : window.scrollY || 0) <= 2) return { key: pgPlaceKey(r), atTop: true };
     var b = pane.getBoundingClientRect(), xs = [b.left + 12, b.left + b.width / 2];
-    for (var dy = 4; dy <= 64; dy += 12) {
-      for (var i = 0; i < xs.length; i++) {
-        var hit = document.caretRangeFromPoint ? document.caretRangeFromPoint(xs[i], top + dy) : null, n = hit && hit.startContainer;
-        var a = n && n.nodeType === 3 && pane.contains(n) && !(n.parentElement && n.parentElement.closest('input,textarea,[contenteditable]')) ?
-          { key: pgPlaceKey(r), node: n, text: true, offset: hit.startOffset } : null;
-        if (!a && document.elementFromPoint) { n = document.elementFromPoint(xs[i], top + dy); if (n && n !== pane && pane.contains(n)) a = { key: pgPlaceKey(r), node: n }; }
+    var visH = framed && ws.getBoundingClientRect ? ws.getBoundingClientRect().height : (window.innerHeight || 0) - top;
+    for (var i = 0; i < xs.length; i++) {
+      for (var dy = 4; dy <= 64; dy += 12) {
+        var y = top + dy, h = document.elementFromPoint ? document.elementFromPoint(xs[i], y) : null;
+        if (!h || h === pane || !pane.contains(h)) continue;
+        if (h.closest && h.closest('input,textarea,[contenteditable]')) continue;
+        var a = null, hit = document.caretRangeFromPoint ? document.caretRangeFromPoint(xs[i], y) : null, n = hit && hit.startContainer;
+        if (n && n.nodeType === 3 && h.contains(n)) {
+          var t = { key: pgPlaceKey(r), node: n, text: true, offset: hit.startOffset }, tr = pgPlaceRect(t);
+          if (tr && tr.height > 0 && tr.top <= y && tr.top + tr.height >= y - 2) a = t;
+        }
+        if (!a) { var hr = h.getBoundingClientRect ? h.getBoundingClientRect() : null; if (hr && hr.height > 0 && !(visH > 0 && hr.height > visH / 2)) a = { key: pgPlaceKey(r), node: h }; }
         var rect = pgPlaceRect(a);
         if (rect && rect.height > 0) { a.dy = rect.top - top; return a; }
       }
@@ -3461,17 +3478,25 @@
     return true;
   }
   function pgPlaceRemember() {
-    if (PG_PLACE.pending) return;
+    if (PG_PLACE.pending || PG_PLACE.auto) return;   // our restore, or the browser clamping it, is not his place
     var r = parseRoute();
     if (r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && PG_PLACE.key === pgPlaceKey(r)) PG_PLACE.a = pgPlaceCapture(r, pgFrameApplies());
   }
   function pgPlaceHook() {
     if (PG_PLACE.hooked || !window.addEventListener || !document.addEventListener) return;
     PG_PLACE.hooked = true;
-    document.addEventListener('scroll', pgPlaceRemember, { capture: true, passive: true });
+    document.addEventListener('scroll', function () {
+      if (PG_PLACE.flinging) { var t = Date.now(); if (PG_PLACE.auto || t - PG_PLACE.lastFling >= PG_SCROLLING_MS) PG_PLACE.flinging = false; else PG_PLACE.lastFling = t; }
+      pgPlaceRemember();
+    }, { capture: true, passive: true });
     // A new deliberate gesture supersedes a queued fold restoration. Its next scroll becomes the fresh anchor.
-    ['touchstart', 'wheel', 'keydown'].forEach(function (name) { document.addEventListener(name, function () {
+    ['touchstart', 'wheel', 'keydown', 'pointerdown'].forEach(function (name) { document.addEventListener(name, function () {
+      PG_PLACE.auto = false;
+      if (name === 'touchstart') PG_PLACE.touching = true;
       if (PG_PLACE.pending) { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; }
+    }, { capture: true, passive: true }); });
+    ['touchend', 'touchcancel'].forEach(function (name) { document.addEventListener(name, function () {
+      PG_PLACE.touching = false; PG_PLACE.flinging = true; PG_PLACE.lastFling = Date.now();
     }, { capture: true, passive: true }); });
     window.addEventListener('resize', function () { pgFrameSync(); });
     window.addEventListener('orientationchange', function () { pgFrameSync(); });
@@ -3482,7 +3507,12 @@
     var de = document.documentElement, on = pgFrameOn(r), was = !!(de && de.classList && de.classList.contains('pg-frame'));
     var key = pgPlaceKey(r), same = key === PG_PLACE.key, width = window.innerWidth || (de && de.clientWidth) || 0;
     var moving = same && (on || was) && (on !== was || width !== PG_PLACE.width);
-    var anchor = moving ? PG_PLACE.a || pgPlaceCapture(r, was) : null;
+    // A finger down, or a fling still moving the page (a scroll in the last 150 ms within a second of lifting it): his own
+    // motion owns the place, so no restore is queued (it would fight him).
+    var inMotion = PG_PLACE.touching || (PG_PLACE.flinging && Date.now() - PG_PLACE.lastFling < PG_SCROLLING_MS);
+    var anchor = moving && !inMotion ? PG_PLACE.a || pgPlaceCapture(r, was) : null;
+    if (moving && inMotion) { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; moving = false; }
+    if (anchor) PG_PLACE.a = anchor;   // kept across the round trip: a clamped restore must not replace it
     if (!same) { pgPlaceDrop(); PG_PLACE.key = key; }
     PG_PLACE.width = width;
     if (de && de.classList) de.classList.toggle('pg-frame', on);
@@ -3497,7 +3527,8 @@
         if (seq !== PG_PLACE.seq) return;
         PG_PLACE.pending = false;
         if (key !== pgPlaceKey(parseRoute()) || pgFrameOn(parseRoute()) !== on) return;
-        pgPlaceApply(anchor, on); pgPlaceRemember();
+        // Ours, and the browser's clamp of it, are not his place: the anchor stays until he moves (auto, cleared by a gesture).
+        if (pgPlaceApply(anchor, on)) PG_PLACE.auto = true;
       });
     } else pgPlaceRemember();
     return on;
