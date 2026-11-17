@@ -32,17 +32,45 @@
   }
 
   function clock(iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); }
-  var COLOR = { claude: 'var(--u-gold)', codex: 'var(--u-codex)', cursor: 'var(--u-cursor)' };
+  // 7.0.54: a read time names its day when it is not today ("Read yesterday 10:50 PM"), so an old pane cannot pass as new.
+  function readWhen(iso, nowMs) {
+    var d = new Date(iso); if (isNaN(d)) return '';
+    var n = new Date(nowMs), key = function (x) { return x.getFullYear() * 10000 + x.getMonth() * 100 + x.getDate(); };
+    var days = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+    if (key(d) === key(n)) return clock(iso);
+    if (days === 1) return 'yesterday ' + clock(iso);
+    return d.toLocaleDateString('en-US', days < 7 ? { weekday: 'short' } : { month: 'short', day: 'numeric' }) + ' ' + clock(iso);
+  }
+  // 7.0.54: a line whose pause or limit has ended since the pane was read is not shown as current (Control showed
+  // "Paused until 11:50 PM" at 6:55 the next morning). Its words say the pause is over; Refresh reads it again.
+  function current(line, nowMs) {
+    if (!line || !line.until || isNaN(Date.parse(line.until)) || Date.parse(line.until) > nowMs) return line;
+    var o = {}; for (var k in line) o[k] = line[k];
+    o.state = 'not_read'; o.usedPct = null; o.gonePct = null; o.estimate = null;
+    o.short = 'Pause over'; o.shortLong = 'Pause over. Refresh to read';
+    o.long = 'The pause ended at ' + readWhen(line.until, nowMs) + '. Refresh to read it again.';
+    o.quiet = line.name + ': pause over';
+    return o;
+  }
+  // The closed row's quiet words, rebuilt from the guarded lines when one of them has expired (else the server's words).
+  function others(p) {
+    var now = Date.now(), lines = p.lines || [];
+    if (!lines.some(function (l) { return current(l, now) !== l; })) return p.others;
+    var rest = lines.filter(function (l) { return l.provider !== p.closest; }).map(function (l) { return current(l, now).quiet; });
+    return rest.length ? rest.join('. ') + '.' : '';
+  }
+  var COLOR = { claude: 'var(--u-gold)', claude_desktop: 'var(--u-gold)', codex: 'var(--u-codex)', cursor: 'var(--u-cursor)' };
+  function colorOf(provider) { return COLOR[provider] || 'var(--sub)'; } // an unknown row is drawn, never colourless
 
   // The short ruler in the closed row and the long one in an open row. No ruler at all when usedPct is null.
   function ruler(line, long) {
     if (line.usedPct === null || line.usedPct === undefined) return '';
-    var fill = line.state === 'limit' ? 'var(--up-warn)' : line.state === 'older' ? 'var(--sub)' : COLOR[line.provider];
+    var fill = line.state === 'limit' ? 'var(--up-warn)' : line.state === 'older' ? 'var(--sub)' : colorOf(line.provider);
     var now = line.gonePct === null || line.gonePct === undefined ? '' : '<span class="up-now" style="left:' + Number(line.gonePct) + '%"></span>';
     return '<span class="' + (long ? 'up-track' : 'up-mini') + '" aria-hidden="true"><span class="up-rail"></span><span class="up-fill" style="width:' +
       Math.max(0, Math.min(100, Number(line.usedPct))) + '%;background:' + fill + '"></span>' + now + '</span>';
   }
-  function who(line) { return '<span class="up-who"><i class="up-dot" style="background:' + COLOR[line.provider] + '"></i>' + esc(line.name) + '</span>'; }
+  function who(line) { return '<span class="up-who"><i class="up-dot" style="background:' + colorOf(line.provider) + '"></i>' + esc(line.name) + '</span>'; }
   function wordsClass(line) { return line.state === 'failed' || line.state === 'not_read' || line.state === 'limit' ? 'up-warn' : line.state === 'fresh' ? '' : 'up-quietw'; }
 
   function headHtml() {
@@ -50,18 +78,18 @@
     if (S.loading) lead = '<span class="up-quietw">Reading…</span>';
     else if (!p) lead = '<span class="up-warn">' + esc(S.error || 'Plan use was not read.') + '</span>';
     else {
-      var top = p.closest && p.lines.filter(function (l) { return l.provider === p.closest; })[0];
+      var top = current(p.closest && p.lines.filter(function (l) { return l.provider === p.closest; })[0], Date.now());
       lead = (top ? '<span class="up-seg">' + who(top) + ruler(top, false) + '<span class="up-what ' + wordsClass(top) + '"><span class="up-what-l">' + esc(top.shortLong) + '</span><span class="up-what-s">' + esc(top.short) + '</span></span></span>' : '') +
-        (p.others ? '<span class="up-quietw up-others">' + esc(p.others) + '</span>' : '');
+        (others(p) ? '<span class="up-quietw up-others">' + esc(others(p)) + '</span>' : '');
     }
-    if (p && p.readAt && !S.loading) fresh = 'Read ' + esc(clock(p.readAt)) + '. ';
+    if (p && p.readAt && !S.loading) fresh = 'Read ' + esc(readWhen(p.readAt, Date.now())) + '. ';
     return '<div class="up-head"><button class="up-toggle" type="button" aria-expanded="' + (S.open ? 'true' : 'false') + '" aria-controls="usage-plan-rows">' +
       '<span class="up-chev" aria-hidden="true">›</span>Plan use</button>' + '<span class="up-lead">' + lead + '</span>' +
       '<span class="up-fresh">' + fresh + '<button class="up-refresh" type="button"' + (S.loading ? ' disabled' : '') + '>Refresh</button></span></div>';
   }
   function rowsHtml() {
     var p = S.pane;
-    var lines = p && !S.loading ? p.lines : ['claude', 'codex', 'cursor'].map(function (id) { return { provider: id, name: id === 'claude' ? 'Claude' : id === 'codex' ? 'Codex' : 'Cursor', usedPct: null, windowWords: '', long: S.loading ? 'Reading…' : 'Not read.', state: 'not_read', estimate: null }; });
+    var lines = p && !S.loading ? p.lines.map(function (l) { return current(l, Date.now()); }) : (S.pane && S.pane.lines && S.pane.lines.length ? S.pane.lines.map(function (l) { return l.provider; }) : ['claude', 'claude_desktop', 'codex', 'cursor']).map(function (id) { return { provider: id, name: { claude: 'Claude CLI', claude_desktop: 'Claude Desktop', codex: 'Codex', cursor: 'Cursor' }[id] || id, usedPct: null, windowWords: '', long: S.loading ? 'Reading…' : 'Not read.', state: 'not_read', estimate: null }; });
     var rows = lines.map(function (l) {
       return '<div class="up-lane"><div class="up-lname">' + who(l) + (l.windowWords ? '<small>' + esc(l.windowWords) + '</small>' : '') + '</div>' +
         ruler(l, true) +

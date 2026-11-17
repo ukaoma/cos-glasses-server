@@ -59,6 +59,43 @@ const PANE = { protocolVersion: 1, now: '2026-11-14T16:03:55.000Z', readAt: '202
     line('cursor', 'Cursor', { state: 'no_plan', short: 'No plan reading', shortLong: 'No plan reading', long: 'No plan reading. Cursor does not report its plan to COS.', quiet: 'Cursor no plan reading' }),
   ] }
 
+describe('7.0.54: two Claude rows, and a pane kept past its pause (Control at 6:55 showed a 10:50 PM pause as current)', () => {
+  it('a line whose pause has ended is not shown as current; the read time names its day; every row has a colour', async () => {
+    const now = Date.now(), iso = (ms: number) => new Date(ms).toISOString()
+    const readAt = iso(now - 32 * 3_600_000)
+    const pane = { protocolVersion: 1, now: readAt, readAt, closest: 'claude_desktop', others: 'Claude CLI paused. Codex 30% used.',
+      lines: [
+        line('claude', 'Claude CLI', { state: 'paused', short: 'Paused until tonight 11:50 PM', shortLong: 'Paused until tonight 11:50 PM',
+          long: 'Paused until tonight 11:50 PM. COS waits before asking Claude CLI again.', quiet: 'Claude CLI paused', until: iso(now - 31 * 3_600_000) }),
+        line('claude_desktop', 'Claude Desktop', { usedPct: 48, gonePct: 18, short: '48% used, resets Sun', shortLong: '48% used, resets Sun 2:00 AM', long: '48% used. Ultra plan.', quiet: 'Claude Desktop 48% used', until: null }),
+        line('some_new_tool', 'Some new tool', { usedPct: 30, short: '30% used', shortLong: '30% used', long: '30% used.', quiet: 'Some new tool 30% used', until: null }),
+      ] }
+    const t = load({ 'cos.usage.planOpen': '1' })
+    void t.p.open(false); t.answer(pane); await flush()
+    const html = t.el().innerHTML
+    expect(html).not.toContain('Paused until')
+    expect(html).not.toContain('Claude CLI paused')
+    expect(html).toContain('Claude CLI: pause over.')
+    expect(html).toContain('The pause ended at ')
+    expect(html).toContain('Claude Desktop')
+    expect(html).not.toContain('background:undefined')
+    expect(html).toContain('background:var(--u-gold)')
+    expect(html).toContain('background:var(--sub)')
+    const d = new Date(Date.parse(readAt)), n = new Date(now)
+    const days = Math.round((new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86_400_000)
+    expect(html).toContain(days === 1 ? 'Read yesterday ' : 'Read ' + d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ')
+  })
+  it('a pause still running keeps its words', async () => {
+    const now = Date.now(), iso = (ms: number) => new Date(ms).toISOString()
+    const pane = { protocolVersion: 1, now: iso(now), readAt: iso(now), closest: null, others: '', lines: [
+      line('claude', 'Claude CLI', { state: 'paused', short: 'Paused until today 9:15 AM', shortLong: 'Paused until today 9:15 AM', long: 'Paused until today 9:15 AM.', quiet: 'Claude CLI paused', until: iso(now + 600_000) })] }
+    const t = load({ 'cos.usage.planOpen': '1' })
+    void t.p.open(false); t.answer(pane); await flush()
+    expect(t.el().innerHTML).toContain('Paused until today 9:15 AM')
+    expect(t.el().innerHTML).not.toContain('Pause over')
+  })
+})
+
 describe('the plan ruler on Control Web (Miles: "Collapsed, tap to open")', () => {
   it('is closed by default: one row with the tool closest to its limit, its ruler, and the rest in quiet words', async () => {
     const t = load()

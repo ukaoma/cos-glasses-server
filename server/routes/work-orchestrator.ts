@@ -15,12 +15,18 @@
  *        7.0.41: the plan ruler on the Usage view (plan-pane.ts), from the same reader and the same rule: opening the
  *        view re-reads a reading older than 10 minutes, Refresh one older than 2. The breaker and the 10-minute hold
  *        after a "no limits" answer apply. Nothing reads on a timer.
+ *        7.0.54: two Claude rows, "Claude CLI" (the probe, or the terminal status line's reading when newer) and
+ *        "Claude Desktop" (the reading below), from local files only (usage-feed.ts).
+ *   POST /api/usage/feed/claude-desktop {plan: {status, plan, windows: [{label, percentUsed, resetsAt}]}, ...}
+ *        7.0.54: a desktop session records the Claude Desktop app's own usage tool reply. Checked and written
+ *        atomically; only the plan name and its windows are kept. 400 {error: 'invalid_reading', reason} otherwise.
  */
 import { Router } from 'express'
 import { parseSnapshotReport, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
 import type { OrchestratorInput } from '../lib/work-orchestrator/input.js'
 import { USAGE_PROVIDERS, type UsageMonitor, type UsageView } from '../lib/work-orchestrator/usage.js'
-import { planPane, type PlanPane } from '../lib/work-orchestrator/plan-pane.js'
+import { planPane, type PlanFeeds, type PlanPane } from '../lib/work-orchestrator/plan-pane.js'
+import { desktopReadingFromTool, FeedError, readFeed, writeDesktopFeed, type FeedReading } from '../lib/work-orchestrator/usage-feed.js'
 import { orchestratorInputFor, orchestratorSnapshots, orchestratorUsage } from '../lib/work-orchestrator/runtime.js'
 import { listBoard, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader } from '../lib/work-board-reader.js'
@@ -42,14 +48,17 @@ export interface WorkOrchestratorDeps {
   serverInstanceId: () => string | null
   admissions: () => boolean
   lease: () => { release(): void }
+  writeDesktopFeed: (reading: FeedReading) => void
 }
 
 /** GET /usage reads on demand: a reading older than 10 minutes is re-read (`refresh=1`: 2 minutes). */
 export const readUsage = (refresh: boolean, monitor: UsageMonitor = orchestratorUsage()): Promise<UsageView[]> => monitor.onDemand(refresh)
 /** GET /usage/plan: the same on-demand read, then the ruler's lines (plan-pane.ts). */
-export const readPlan = async (refresh: boolean, monitor: UsageMonitor = orchestratorUsage(), now: () => number = Date.now): Promise<PlanPane> => {
+export const readPlan = async (refresh: boolean, monitor: UsageMonitor = orchestratorUsage(), now: () => number = Date.now,
+  feeds: () => PlanFeeds = () => ({ cli: readFeed('cli'), desktop: readFeed('desktop') })): Promise<PlanPane> => {
   await monitor.onDemand(refresh, true) // the plan ruler: the one route that reads Cursor (Usage open and Refresh)
-  return planPane(USAGE_PROVIDERS.map(p => monitor.entry(p)), now(), undefined, monitor.cursorPlanOn())
+  // 7.0.54: the passive Claude readings (local files, no network): the CLI's status line and the Desktop app's.
+  return planPane(USAGE_PROVIDERS.map(p => monitor.entry(p)), now(), undefined, monitor.cursorPlanOn(), feeds())
 }
 
 const DEFAULTS: WorkOrchestratorDeps = {
@@ -62,6 +71,7 @@ const DEFAULTS: WorkOrchestratorDeps = {
   serverInstanceId: getServerInstanceId,
   admissions: maintenanceAdmissionsOpen,
   lease: () => acquireMaintenanceWork('api_mutation'),
+  writeDesktopFeed: reading => writeDesktopFeed(reading),
 }
 
 export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps> = {}) {
@@ -140,6 +150,20 @@ export function createWorkOrchestratorRouter(given: Partial<WorkOrchestratorDeps
   router.get('/work/orchestrator/usage', async (req, res) => {
     try { return res.json({ protocolVersion: 1, now: new Date(deps.now()).toISOString(), usage: await deps.usage(req.query.refresh === '1') }) }
     catch { return res.status(503).json({ error: 'usage_unavailable' }) }
+  })
+  // 7.0.54 (Miles 2026-11-17): a desktop session posts the Claude Desktop app's own usage tool reply here (its plan and
+  // weekly windows). Behind the API token like every /api route. Checked field by field and written atomically; the
+  // reply's session context and anything else are dropped. No timer posts it.
+  router.post('/usage/feed/claude-desktop', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    try {
+      const reading = desktopReadingFromTool(req.body, deps.now())
+      deps.writeDesktopFeed(reading)
+      return res.json({ ok: true, at: reading.at, plan: reading.plan, windows: reading.windows.length })
+    } catch (error) {
+      if (error instanceof FeedError) return res.status(400).json({ error: 'invalid_reading', reason: error.code })
+      return res.status(503).json({ error: 'usage_feed_unavailable' })
+    }
   })
   router.get('/usage/plan', async (req, res) => {
     res.set('Cache-Control', 'private, no-store')

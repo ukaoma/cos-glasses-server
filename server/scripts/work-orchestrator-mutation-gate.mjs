@@ -27,12 +27,13 @@ const tests = [
   'server/lib/work-orchestrator/plan-pane.test.ts',
   'server/web-control/plan-ruler-web.test.ts',
   'server/lib/work-orchestrator/cursor-plan.test.ts',
+  'server/lib/work-orchestrator/usage-feed.test.ts',
 ]
 const O = 'server/lib/work-orchestrator/'
 const TG = O + 'tags.ts', RD = O + 'redact.ts', SL = O + 'session-log.ts', PK = O + 'pickup.ts', TI = O + 'tag-index.ts', DI = O + 'discovery.ts'
 const IN = O + 'input.ts', SN = O + 'snapshot.ts', US = O + 'usage.ts', RT = O + 'runtime.ts', PL = O + 'plan-log.ts'
 const WC = 'server/lib/work-chat.ts', WR = 'server/routes/work-chat.ts', OR = 'server/routes/work-orchestrator.ts'
-const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts', PR = 'server/web-control/panes/plan-ruler.js', APP = 'server/web-control/app.js', CP = O + 'cursor-plan.ts'
+const CB = 'server/lib/claude-bridge.ts', QC = 'server/lib/query-job-coordinator.ts', AW = 'server/lib/ask-work-plan.ts', UE = O + 'usage-events.ts', PP = O + 'plan-pane.ts', PR = 'server/web-control/panes/plan-ruler.js', APP = 'server/web-control/app.js', CP = O + 'cursor-plan.ts', UF = O + 'usage-feed.ts'
 // Defense in depth that no test can reach on purpose, each with the guard that already stops the same outcome.
 const EXPECTED_SURVIVORS = new Set([
   'tail-drops-partial-line',     // a row cut by the seek never parses (JSON.parse rejects it), so it is skipped either way
@@ -170,7 +171,8 @@ const mutations = [
   ['pr-no-ruler-null', PR, "    if (line.usedPct === null || line.usedPct === undefined) return '';\n", ''],
   ['pr-closed-default', PR, "localStorage.getItem(KEY) === '1' : false", "localStorage.getItem(KEY) !== '1' : false"],
   ['pr-reading-hides', PR, "    if (S.loading) lead = '<span class=\"up-quietw\">Reading…</span>';\n", ''],
-  ['pr-rows-reading-hidden', PR, '    var lines = p && !S.loading ? p.lines :', '    var lines = p ? p.lines :'],
+  // 7.0.54: the rows now pass through current() (an ended pause); what this guards is unchanged.
+  ['pr-rows-reading-hidden', PR, '    var lines = p && !S.loading ? p.lines.map(', '    var lines = p ? p.lines.map('],
   ['pr-remember', PR, 'S.open = !S.open; saveOpen(S.open);', 'S.open = !S.open;'],
   ['pr-refresh-param', PR, "api('/api/usage/plan' + (refresh ? '?refresh=1' : '')", "api('/api/usage/plan' + ''"],
   ['pr-mount-top', PR, '    if (box.firstChild !== el) box.insertBefore(el, box.firstChild);\n', ''],
@@ -220,6 +222,23 @@ const mutations = [
   ["cur-timeout-unnamed", CP, "    if (ctl.signal.aborted) throw new UsageProbeError('timed_out', 'timed out')\n", ""],
   ["cur-extras-required", CP, "    const planInfo = capped ? null : await cursorRead(fetchFn, 'GetPlanInfo', token, version, ctl.signal, cap).catch(() => null)", "    const planInfo = capped ? null : await cursorRead(fetchFn, 'GetPlanInfo', token, version, ctl.signal, cap)"],
   ["cur-pane-no-period-start-guess", PP, "  if (live.mins === 0) {", "  if (false) {"],
+  // 7.0.54 Claude usage feed (U1, Miles 2026-11-17): the readers, the two rows, the ended pause, and Control Web.
+  ["feed-percent-over-100", UF, "if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100) throw", "if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) throw"],
+  ["feed-file-not-owner-only", UF, "atomicWriteFileSync(feedPath('desktop', dir), JSON.stringify(out), { mode: 0o600 })", "atomicWriteFileSync(feedPath('desktop', dir), JSON.stringify(out), { mode: 0o644 })"],
+  ["feed-size-cap-gone", UF, "if (statSync(path).size > MAX_FEED_BYTES) return", "if (statSync(path).size > MAX_FEED_BYTES * 1000) return"],
+  ["feed-not-ok-accepted", UF, "  if (plan.status !== 'ok') throw", "  if (plan.status !== 'ok' && plan.status !== 'unavailable') throw"],
+  ["feed-cli-older-wins", PP, "  if (!cli?.reading || Date.parse(cli.reading.at) <= (probe.observedAt ?? 0)) return probe", "  if (!cli?.reading) return probe"],
+  ["feed-cli-limit-dropped", PP, "limitUntil: probe.limitUntil, limitSource: probe.limitSource,", "limitUntil: null, limitSource: null,"],
+  ["feed-desktop-missing-silent", PP, "long: missing ? `No reading from Claude Desktop yet. ${DESKTOP_HOW}`", "long: missing ? 'Not read.'"],
+  ["feed-desktop-says-refresh", PP, "long: `${line.long.replace(' Refresh to read it.', ` ${DESKTOP_HOW}`)}", "long: `${line.long}"],
+  ["feed-desktop-no-extras", PP, "${extra.length ? ` Also ${extra.join(', ')}.` : ''}", "${''}"],
+  ["feed-route-no-feeds", OR, "monitor.cursorPlanOn(), feeds())", "monitor.cursorPlanOn())"],
+  ["pause-until-missing", PP, "    return { ...base, ...none, until: new Date(held).toISOString(), state: 'paused',", "    return { ...base, ...none, until: null, state: 'paused',"],
+  ["pause-words-no-day", PP, "    const at = whenWords(new Date(held).toISOString(), now, tz).long\n", "    const at = timeOf(new Date(held), tz)\n"],
+  ["web-ended-pause-current", PR, "|| Date.parse(line.until) > nowMs) return line;", "|| true) return line;"],
+  ["web-read-no-day", PR, "    if (key(d) === key(n)) return clock(iso);\n", "    return clock(iso);\n"],
+  ["web-colourless-row", PR, "function colorOf(provider) { return COLOR[provider] || 'var(--sub)'; }", "function colorOf(provider) { return COLOR[provider]; }"],
+  ["web-others-stale", PR, "    if (!lines.some(function (l) { return current(l, now) !== l; })) return p.others;\n", "    return p.others;\n"],
   ["cur-refused-said-generically", PP, "  if (e.provider === 'cursor' && e.lastFailure === 'keychain_refused') {", "  if (false) {"],
   ["cur-refused-message-generic", CP, "throw new UsageProbeError('keychain_refused', \"Cursor's sign-in was not shared with COS\")", "throw new UsageProbeError('keychain_refused', 'Keychain read refused')"],
   ["cur-first-read-says-nothing", PP, "        : e.provider === 'cursor' ? CURSOR_FIRST_READ_WORDS : 'Not read yet. Refresh to read it.',", "        : 'Not read yet. Refresh to read it.',"],

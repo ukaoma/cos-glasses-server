@@ -35,11 +35,11 @@ describe('the ruler draws only a live, stated reading', () => {
   })
   it('a failed, paused, missing or ended reading draws no ruler, so it can never look like 0% used', () => {
     const failed = planLine(claudeWeek(23, '2026-11-16T08:00:00Z', { lastFailure: 'no_limits', lastError: 'Claude gave no plan limits' }), NOW, TZ)
-    expect(failed).toMatchObject({ state: 'failed', usedPct: null, gonePct: null, short: 'Read failed, refused by Claude',
-      long: 'Read failed: refused by Claude. No number is shown until a read succeeds.', quiet: 'Claude read failed' })
+    expect(failed).toMatchObject({ state: 'failed', usedPct: null, gonePct: null, short: 'Read failed, refused by Claude CLI',
+      long: 'Read failed: refused by Claude CLI. No number is shown until a read succeeds.', quiet: 'Claude CLI read failed' })
     const paused = planLine(blank('claude', { lastFailure: 'no_limits', holdUntil: Date.parse('2026-11-14T17:05:00Z') }), NOW, TZ)
-    expect(paused).toMatchObject({ state: 'paused', usedPct: null, short: 'Paused until 11:05 AM' })
-    expect(paused.long).toContain('The last read: refused by Claude.')
+    expect(paused).toMatchObject({ state: 'paused', usedPct: null, short: 'Paused until today 11:05 AM', until: '2026-11-14T17:05:00.000Z' })
+    expect(paused.long).toContain('The last read: refused by Claude CLI.')
     expect(planLine(blank('claude'), NOW, TZ)).toMatchObject({ state: 'not_read', usedPct: null, short: 'Not read today', long: 'Not read yet. Refresh to read it.' })
     // The Oct 23 reading on his Mac: its week reset Oct 26. Not shown as 77% left, or as any number.
     const ended = planLine(claudeWeek(23, '2026-10-26T07:59:59Z', { observedAt: Date.parse('2026-10-23T14:18:57Z') }), NOW, TZ)
@@ -53,7 +53,7 @@ describe('the ruler draws only a live, stated reading', () => {
     expect(planLine(keyLogin, NOW, TZ).long).toBe('Read 0 min ago; this login has no plan limits. No number is shown.')
     const noReset = blank('claude', { observedAt: NOW, source: 'probe', reading: { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct: 30, resetsAt: null }] } })
     expect(planLine(noReset, NOW, TZ)).toMatchObject({ state: 'fresh', usedPct: 30, gonePct: null, windowWords: 'Week not known', short: '30% used',
-      long: '30% used. Week not known: Claude gave no reset time.', estimate: null })
+      long: '30% used. Week not known: Claude CLI gave no reset time.', estimate: null })
   })
   it('Q1 e3c3bb9e: a live window with no reset read long ago says how old it is, and its share is held to 0 to 100', () => {
     const noReset = (usedPct: number, observedAt: number) => blank('claude', { observedAt, source: 'probe', reading: { plan: 'max', allowed: null, available: true, windows: [{ kind: 'weekly_all', usedPct, resetsAt: null }] } })
@@ -76,12 +76,12 @@ describe('the ruler draws only a live, stated reading', () => {
 describe('the closed row and the estimate', () => {
   it('the closed row shows the tool closest to its limit; the rest in quiet words', () => {
     const pane = planPane([blank('claude', { lastFailure: 'no_limits' }), codexWeek(96), blank('cursor')], NOW, TZ)
-    expect(pane).toMatchObject({ protocolVersion: 1, closest: 'codex', others: 'Claude read failed. Cursor no plan reading.', readAt: new Date(NOW).toISOString() })
+    expect(pane).toMatchObject({ protocolVersion: 1, closest: 'codex', others: 'Claude CLI read failed. Cursor no plan reading.', readAt: new Date(NOW).toISOString() })
     expect(pane.lines.map(l => l.provider)).toEqual(['claude', 'codex', 'cursor'])
     expect(planPane([blank('claude'), blank('codex'), blank('cursor')], NOW, TZ)).toMatchObject({ closest: null, readAt: null })
     // Two rulers: the higher share used leads the closed row, whichever provider it is.
     const both = planPane([claudeWeek(23, '2026-11-16T08:00:00Z'), codexWeek(96), blank('cursor')], NOW, TZ)
-    expect(both).toMatchObject({ closest: 'codex', others: 'Claude 23% used. Cursor no plan reading.' })
+    expect(both).toMatchObject({ closest: 'codex', others: 'Claude CLI 23% used. Cursor no plan reading.' })
     expect(planPane([claudeWeek(80, '2026-11-16T08:00:00Z'), codexWeek(30), blank('cursor')], NOW, TZ).closest).toBe('claude')
   })
   it('the estimate is labelled by the client and carries its arithmetic: 96% in 6 days 11.5 hours of 7 days', () => {

@@ -9,11 +9,15 @@
  * when its higher bucket (Auto or API) of the billing period is drawn like the others. Off, its line is exactly as before.
  */
 import { USAGE_STALE_MS, windowLive, type UsageEntry, type UsageFailureCode, type UsageProvider, type UsageWindow } from './usage.js'
+import { feedEntry, type FeedRead } from './usage-feed.js'
 
 export type PlanState = 'fresh' | 'older' | 'limit' | 'paused' | 'failed' | 'not_read' | 'no_plan'
 export interface PlanEstimate { text: string; arithmetic: string }
+/** 7.0.54: the pane's rows. `claude` is the Claude CLI (the probe, or the terminal status line's reading when newer);
+ *  `claude_desktop` is the Claude Desktop app's plan, from the reading a desktop session records (usage-feed.ts). */
+export type PlanProvider = UsageProvider | 'claude_desktop'
 export interface PlanLine {
-  provider: UsageProvider
+  provider: PlanProvider
   name: string
   state: PlanState
   /** Percent of the window used; null when no ruler may be drawn. */
@@ -36,10 +40,14 @@ export interface PlanLine {
   lastGoodAt: string | null
   reason: UsageFailureCode | null
   estimate: PlanEstimate | null
+  /** 7.0.54: when a pause or a limit these words describe ends (ISO), else null. A client that keeps a pane past it must not
+   *  show the pause as current (Control showed "Paused until 11:50 PM" at 6:55 the next morning, 2026-11-17). */
+  until: string | null
 }
-export interface PlanPane { protocolVersion: 1; now: string; readAt: string | null; closest: UsageProvider | null; others: string; lines: PlanLine[] }
+export interface PlanPane { protocolVersion: 1; now: string; readAt: string | null; closest: PlanProvider | null; others: string; lines: PlanLine[] }
 
-const NAME: Record<UsageProvider, string> = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' }
+// 7.0.54: two Claude rows, so each says which (Miles 2026-11-17).
+const NAME: Record<UsageProvider, string> = { claude: 'Claude CLI', codex: 'Codex', cursor: 'Cursor' }
 const WEEK_MINS = 7 * 24 * 60
 /** No estimate until this much of the window has passed: an average over a few hours says little. */
 export const PLAN_ESTIMATE_MIN_ELAPSED_MS = 12 * 3_600_000
@@ -132,10 +140,11 @@ export function estimateFor(name: string, usedPct: number, startMs: number, rese
   return { text, arithmetic }
 }
 
-export function planLine(e: UsageEntry, now: number, tz?: string, cursorOn = false): PlanLine {
-  const name = NAME[e.provider]
-  const base = { provider: e.provider, name, readAt: e.observedAt ? new Date(e.observedAt).toISOString() : null,
-    lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null, reason: e.lastFailure ?? null, estimate: null as PlanEstimate | null }
+export function planLine(e: UsageEntry, now: number, tz?: string, cursorOn = false, nameOverride?: string): PlanLine {
+  const name = nameOverride ?? NAME[e.provider]
+  const base = { provider: e.provider as PlanProvider, name, readAt: e.observedAt ? new Date(e.observedAt).toISOString() : null,
+    lastGoodAt: e.observedAt ? new Date(e.observedAt).toISOString() : null, reason: e.lastFailure ?? null, estimate: null as PlanEstimate | null,
+    until: null as string | null }
   const none = { usedPct: null, gonePct: null, windowStart: null, resetsAt: null }
   if (e.provider === 'cursor' && !cursorOn) {
     return { ...base, ...none, state: 'no_plan', windowWords: '', short: 'No plan reading', shortLong: 'No plan reading',
@@ -148,7 +157,7 @@ export function planLine(e: UsageEntry, now: number, tz?: string, cursorOn = fal
   const limitUntil = e.limitUntil && e.limitUntil > now ? e.limitUntil : (e.reading?.allowed === false && live ? Date.parse(live.w.resetsAt!) : null)
   if (limitUntil) {
     const back = whenWords(new Date(limitUntil).toISOString(), now, tz)
-    return { ...base, usedPct: 100, gonePct: null, windowStart: null, resetsAt: new Date(limitUntil).toISOString(), state: 'limit',
+    return { ...base, until: new Date(limitUntil).toISOString(), usedPct: 100, gonePct: null, windowStart: null, resetsAt: new Date(limitUntil).toISOString(), state: 'limit',
       windowWords: `At its plan limit until ${back.long}`, short: `Limit reached, back ${back.long}`, shortLong: `Limit reached, back ${back.long}`,
       long: `Limit reached. ${name} says new work waits until ${back.long}.`, quiet: `${name} at its limit` }
   }
@@ -156,13 +165,14 @@ export function planLine(e: UsageEntry, now: number, tz?: string, cursorOn = fal
   // 7.0.45: he said no to sharing Cursor's sign-in. Said as that, in the row itself, not as a pause or a failure.
   if (e.provider === 'cursor' && e.lastFailure === 'keychain_refused') {
     const again = held > now ? ` COS asks again after ${timeOf(new Date(held), tz)}.` : ' Refresh to ask again.'
-    return { ...base, ...none, state: held > now ? 'paused' : 'failed', windowWords: 'Billing period not known', short: 'Sign-in not shared',
+    return { ...base, ...none, until: held > now ? new Date(held).toISOString() : null, state: held > now ? 'paused' : 'failed', windowWords: 'Billing period not known', short: 'Sign-in not shared',
       shortLong: "Cursor's sign-in was not shared with COS", long: `Cursor's sign-in was not shared with COS.${again} No number is shown until a read succeeds.`, quiet: 'Cursor sign-in not shared' }
   }
   if (held > now) {
-    const at = timeOf(new Date(held), tz)
+    // 7.0.54: the day is named when it is not today, and `until` says when these words stop being true.
+    const at = whenWords(new Date(held).toISOString(), now, tz).long
     const why = e.lastFailure ? ` The last read: ${failureWords(e.provider, e.lastFailure)}.` : ''
-    return { ...base, ...none, state: 'paused', windowWords: `${period} not known`, short: `Paused until ${at}`, shortLong: `Paused until ${at}`,
+    return { ...base, ...none, until: new Date(held).toISOString(), state: 'paused', windowWords: `${period} not known`, short: `Paused until ${at}`, shortLong: `Paused until ${at}`,
       long: `Paused until ${at}. COS waits before asking ${name} again, so a failing read is not repeated.${why} No number is shown until a read succeeds.`, quiet: `${name} paused` }
   }
   if (e.lastFailure) {
@@ -228,9 +238,43 @@ function cursorWords(windows: UsageWindow[], drawn: UsageWindow): string {
 }
 
 /** The whole pane: one line per provider, the closest to its limit for the closed row, and the rest in quiet words. */
-export function planPane(entries: UsageEntry[], now: number, tz?: string, cursorOn = false): PlanPane {
+/** 7.0.54: the passive readings the pane may use (usage-feed.ts). Omitted, the pane is as before 7.0.54 (no Desktop row). */
+export interface PlanFeeds { cli?: FeedRead; desktop?: FeedRead }
+
+/** The Claude CLI row's entry: the terminal status line's reading when it is newer than the probe's last good read. A
+ *  stated limit or warning from the probe's own frames still applies; the probe's failure and hold do not hide a newer
+ *  reading. */
+export function claudeCliEntry(probe: UsageEntry, cli?: FeedRead): UsageEntry {
+  if (!cli?.reading || Date.parse(cli.reading.at) <= (probe.observedAt ?? 0)) return probe
+  const fed = feedEntry(cli.reading, { provider: 'claude' })
+  return { ...fed, reading: { ...fed.reading!, plan: probe.reading?.plan ?? null }, limitUntil: probe.limitUntil, limitSource: probe.limitSource,
+    warning: probe.warning, warningUntil: probe.warningUntil ?? null }
+}
+
+const DESKTOP = 'Claude Desktop'
+const DESKTOP_HOW = 'A desktop session records one when it checks its usage.'
+/** The Claude Desktop row: the plan's week as the ruler, every other window (per model) and the plan named in its words. */
+export function desktopLine(read: FeedRead, now: number, tz?: string): PlanLine {
+  const none = { usedPct: null, gonePct: null, windowStart: null, resetsAt: null, estimate: null, until: null, reason: null }
+  if (!read.reading) {
+    const missing = read.problem === 'missing'
+    return { provider: 'claude_desktop', name: DESKTOP, ...none, state: missing ? 'not_read' : 'failed', windowWords: 'Week not known',
+      short: missing ? 'No reading yet' : 'Reading unreadable', shortLong: missing ? 'No reading from Claude Desktop yet' : 'Its saved reading could not be read',
+      long: missing ? `No reading from Claude Desktop yet. ${DESKTOP_HOW}` : `Its saved reading could not be read. ${DESKTOP_HOW} No number is shown.`,
+      quiet: `${DESKTOP} not read`, readAt: null, lastGoodAt: null }
+  }
+  const r = read.reading
+  const line = { ...planLine(feedEntry(r, { provider: 'claude' }), now, tz, false, DESKTOP), provider: 'claude_desktop' as PlanProvider }
+  const extra = r.windows.filter(w => w.kind !== 'weekly_all').map(w => `${w.label} ${Math.round(w.usedPct)}%`)
+  const words = `${r.plan ? ` ${r.plan} plan.` : ''}${extra.length ? ` Also ${extra.join(', ')}.` : ''}`
+  return { ...line, long: `${line.long.replace(' Refresh to read it.', ` ${DESKTOP_HOW}`)}${line.usedPct === null ? '' : words}` }
+}
+
+export function planPane(entries: UsageEntry[], now: number, tz?: string, cursorOn = false, feeds?: PlanFeeds): PlanPane {
   const order: UsageProvider[] = ['claude', 'codex', 'cursor']
-  const lines = order.map(p => entries.find(e => e.provider === p)).filter((e): e is UsageEntry => !!e).map(e => planLine(e, now, tz, cursorOn))
+  const lines = order.map(p => entries.find(e => e.provider === p)).filter((e): e is UsageEntry => !!e)
+    .map(e => planLine(e.provider === 'claude' ? claudeCliEntry(e, feeds?.cli) : e, now, tz, cursorOn))
+  if (feeds?.desktop) lines.splice(lines.findIndex(l => l.provider === 'claude') + 1, 0, desktopLine(feeds.desktop, now, tz))
   const ranked = lines.filter(l => l.usedPct !== null).sort((a, b) => b.usedPct! - a.usedPct!)
   const closest = ranked[0]?.provider ?? null
   const others = lines.filter(l => l.provider !== closest).map(l => l.quiet).join('. ')

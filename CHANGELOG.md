@@ -1,3 +1,17 @@
+## Unreleased (draft, U1): Claude usage you can trust: "Claude CLI" and "Claude Desktop", each with its own plan and read time
+
+Draft for 7.0.54 (or a 7.0.55 hotfix). Miles, 2026-11-17 06:55: "claude keeps failing on the usage tab ... It would be amazing if we could see \"Claude desktop\" vs the CLI. The main idea is getting usage of all systems." Not a release entry until it is cut.
+
+**On for everyone, one line each:**
+- server and Control Web: the Usage view's plan ruler shows two Claude rows, **Claude CLI** and **Claude Desktop**, each with its own plan, week and read time. On his Mac they are two different accounts with different weeks.
+- server: **Claude Desktop** is read from the Claude Desktop app's own usage tool. A desktop session records it through `POST /api/usage/feed/claude-desktop`, which checks it and writes it atomically. The row shows the plan (Ultra), the all-models week as the ruler, each per-model week (for example Fable) in words, and how old the reading is. With no reading it says "No reading from Claude Desktop yet". COS reads no token or cookie, makes no network call, and runs no timer for it.
+- server: **Claude CLI** uses the terminal status line's own `rate_limits` reading when it is newer than the probe's. That reading only exists after the one-line `~/.claude/settings.json` change Miles approves; until then the probe stays the source, with its hold unchanged. A limit the probe was told about still wins.
+- server and Control Web: **an ended pause is no longer shown as current.** Each line carries `until`, the time its pause or limit ends. Pause words name the day ("Paused until tonight 11:50 PM"). Control Web shows a line whose pause has ended as "Pause over", rebuilds the closed row's words from it, and names the day on its read time ("Read yesterday 10:50 PM"). On 11/17 Control showed "Paused until 11:50 PM" at 6:55 the next morning, from a pane read at 10:50 PM.
+
+**Not covered, said plainly:**
+- **Desktop sessions do not run the status line** (sampled 2026-11-17: 0 runs in 20 desktop sessions over 3 minutes). Claude Desktop's row comes only from the app's usage tool.
+- **The Mac app re-reading a kept pane** is Control's (0.5.403). Today it draws these lines as sent; a new row id gets its neutral colour.
+
 ## 7.0.53 - Reply ready rows that name their session, a re-checked merged banner, the desk rule in the turn report, phone approvals that survive a late Tailscale name, and the approval page's message line
 
 2026-11-17. A PRIVATE candidate, frozen at 52fb0415 (the lead, 05:06; branch claude/server-7053-fallback-52fb0415): 7.0.52 plus the changes below. Private: installed only on a line Miles types, not on npm. The lead's 20:5x order after Miles, 20:52: "start update gotcos.com and the desktop with these newer elements"; the message line in Miles's words, 21:13.
