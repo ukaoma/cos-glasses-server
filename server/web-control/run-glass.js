@@ -204,10 +204,21 @@
     for (var i = 0; i < C.order.length && out.length < LIVE_MAX; i++) { var m = C.rows[C.order[i]]; if (m && (m.state === 'work' || (m.state === 'done' && settling(m))) && slotSeen(slotFor(m.key))) out.push(m.key); }
     return out;
   }
+  /** In the window AND inside every box around it that clips (Codex 12:5x: on the framed Duo, Today scrolls inside the
+   *  workspace, so a slot can sit inside the window yet be clipped away under the bar). */
   function slotSeen(s) {
     if (!s || typeof s.getBoundingClientRect !== 'function') return false;
-    var r = s.getBoundingClientRect(), vw = window.innerWidth > 0 ? window.innerWidth : Infinity, vh = window.innerHeight > 0 ? window.innerHeight : Infinity;
-    return r.width > 0 && r.height > 0 && r.top + r.height > 0 && r.left + r.width > 0 && r.top < vh && r.left < vw;
+    var r = s.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    var top = 0, left = 0, bottom = window.innerHeight > 0 ? window.innerHeight : Infinity, right = window.innerWidth > 0 ? window.innerWidth : Infinity;
+    for (var p = s.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      var cs = window.getComputedStyle ? window.getComputedStyle(p) : null;
+      if (cs && /(auto|scroll|hidden|clip)/.test(cs.overflowX + ' ' + cs.overflowY) && p.getBoundingClientRect) {
+        var c = p.getBoundingClientRect();
+        top = Math.max(top, c.top); left = Math.max(left, c.left); bottom = Math.min(bottom, c.top + c.height); right = Math.min(right, c.left + c.width);
+      }
+    }
+    return r.top + r.height > top && r.left + r.width > left && r.top < bottom && r.left < right;
   }
   function settling(m) {
     if (Math.abs(targetE(m) - m.e) > 0.004) return true;

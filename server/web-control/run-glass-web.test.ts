@@ -54,7 +54,9 @@ function page(o: Opts = {}) {
     getBoundingClientRect: () => ({ left: 16, top: 300, width: 352, height: 402 }),
     querySelector(sel: string) { const m = /data-rg-key="(.*)"\]$/.exec(sel); return m ? slots.get(m[1].replace(/\\(.)/g, '$1')) ?? null : null },
   }
-  function slot(key: string, top = 340) { slots.set(key, { isConnected: true, getBoundingClientRect: () => ({ left: 100, top, width: 36, height: 20 }) }) }
+  let clipBox: { top: number; height: number } | null = null   // a scrolling box around the slots (the framed workspace)
+  const clipper = { parentElement: null, getBoundingClientRect: () => ({ left: 0, top: clipBox!.top, width: 382, height: clipBox!.height }) }
+  function slot(key: string, top = 340) { slots.set(key, { isConnected: true, parentElement: clipBox ? clipper : null, getBoundingClientRect: () => ({ left: 100, top, width: 36, height: 20 }) } as never) }
 
   let rafId = 0
   const rafs = new Map<number, (t: number) => void>()
@@ -72,6 +74,7 @@ function page(o: Opts = {}) {
     addEventListener: () => {},
     matchMedia: () => ({ get matches() { return reduced }, addEventListener: (_t: string, f: () => void) => mqListeners.push(f) }),
     requestAnimationFrame: (f: (t: number) => void) => { rafs.set(++rafId, f); return rafId },
+    getComputedStyle: (el: unknown) => ({ overflowX: 'visible', overflowY: el === clipper ? 'auto' : 'visible' }),
     cancelAnimationFrame: (id: number) => { rafs.delete(id) },
   }
   if (!o.noIO) win.IntersectionObserver = class { constructor(cb: typeof ioCb) { ioCb = cb } observe() {} disconnect() {} }
@@ -88,7 +91,7 @@ function page(o: Opts = {}) {
     for (let end = t + ms; t < end;) { t += 16; const fs = [...rafs.values()]; rafs.clear(); fs.forEach(f => f(t)) }
   }
   return {
-    G, panel, slot, slots, draws, run,
+    G, panel, slot, slots, draws, run, clip(top: number, height: number) { clipBox = { top, height } },
     contexts: () => contexts, pending: () => rafs.size,
     setHidden(h: boolean) { doc.hidden = h; docListeners.visibilitychange?.() },
     setReduced(r: boolean) { reduced = r; mqListeners.forEach(f => f()) },
@@ -251,6 +254,13 @@ describe('run-glass: what moves, and when', () => {
     p.G.sync([work('a'), work('b')]); expect(p.pending()).toBe(0)
     p.slot('a', 400); p.G.wake()
     expect(p.G.animating()).toBe(true); expect(p.pending()).toBe(1); expect(p.G.state().live).toEqual(['a'])
+  })
+  it('a slot inside the window but clipped away by the box that scrolls it (the framed workspace) is not seen (Codex 12:5x)', () => {
+    const p = page({ vh: 557 }); p.clip(48, 509); p.G.mount(p.panel); p.slot('a', 20)   // under the bar, above the workspace
+    p.G.sync([work('a')])
+    expect(p.G.animating()).toBe(false); expect(p.pending()).toBe(0)
+    p.slot('a', 200); p.G.wake()
+    expect(p.G.animating()).toBe(true); expect(p.pending()).toBe(1)
   })
   it('turning Reduce Motion on mid-loop stops the loop', () => {
     const p = page(); p.G.mount(p.panel); p.slot('a'); p.G.sync([work('a')]); p.run(200)
