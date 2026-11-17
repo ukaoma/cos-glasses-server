@@ -731,6 +731,33 @@ html { touch-action: manipulation; }
 }
 
 
+/* 7.0.54: the COS mark at work (F1's final files of 11/16 23:05, the lead's 11/17 06:57 scope). One box the size the
+   flat SVG had; nothing in it changes layout. Rest: the glass still (the mark is the box's height: the file is 644x696
+   with the mark 550x602 inside, so it overhangs the box by 7.807 percent above and below, 3.488 at the sides). Work
+   and Waiting: a window one frame wide over a 24-frame strip (the mark is 105 of each 128 px frame, so the window is
+   the box plus 3 px a side on the rail, 2 px on a row and on the full rail's 22 px mark: whole pixels, so every step
+   lands on a frame edge). Work holds frame 03, Waiting frame 00; the one mark app.js picks (mkSync) plays the loop.
+   The flat SVG inside is what an unstyled page shows. */
+.mk { position: relative; display: inline-block; vertical-align: middle;
+  --mk-still: url('/control/marks/mark_glass_light_2x.png'); --mk-s1: url('/control/marks/work_light_64_strip.png'); --mk-s2: url('/control/marks/work_light_128_strip.png'); }
+:root[data-theme='dark'] .mk, .run-panel .mk {
+  --mk-still: url('/control/marks/mark_glass_dark_2x.png'); --mk-s1: url('/control/marks/work_dark_64_strip.png'); --mk-s2: url('/control/marks/work_dark_128_strip.png'); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .mk {
+  --mk-still: url('/control/marks/mark_glass_dark_2x.png'); --mk-s1: url('/control/marks/work_dark_64_strip.png'); --mk-s2: url('/control/marks/work_dark_128_strip.png'); } }
+.mk > svg { display: none; }
+.mk[data-mk='rest']::before { content: ''; position: absolute; top: -7.807%; bottom: -7.807%; left: -3.488%; right: -3.488%; background: var(--mk-still) center / 100% 100% no-repeat; }
+.mk-w { display: none; position: absolute; inset: -3px; overflow: hidden; }
+.mk[data-mk='work'] .mk-w, .mk[data-mk='wait'] .mk-w { display: block; }
+.mk-s { position: absolute; left: 0; top: 0; width: 2400%; height: 100%; background: var(--mk-s1) 0 0 / 100% 100% no-repeat; transform: translateX(0); }
+@media (min-resolution: 2dppx), (-webkit-min-device-pixel-ratio: 2) { .mk-s { background-image: var(--mk-s2); } }
+.mk[data-mk='work'] .mk-s { transform: translateX(-12.5%); }
+.mk.mk-live[data-mk='work'] .mk-s { animation: mk-run 2s steps(24, end) var(--mk-delay, 0ms) infinite; }
+@keyframes mk-run { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+.mk-row { width: 18px; height: 18px; flex: none; }
+.mk-row .mk-w { inset: -2px; }
+@media (min-width: 1100px) and (min-height: 721px) { .rail-head .mk .mk-w { inset: -2px; } }
+@media (prefers-reduced-motion: reduce) { .mk.mk-live .mk-s { animation-name: none !important; } }
+
 /* ── 7.0.29: the folded Duo's side rail (Miles 21:39 "These side buttons are a must on the duo"; 21:42 tall phones keep
    the top menu). theme.js sets html.short-screen from the screen's shape; this draws it only under 600 px on a touch
    screen, so nothing changes from 600 px, on a mouse, or on a tall phone. It is the same nav.rail as the wide rail, so
