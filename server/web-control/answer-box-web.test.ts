@@ -287,6 +287,9 @@ class El {
   hasAttribute(k: string) { return k in this.attrs }
   focusOpts: unknown = undefined
   focus(o?: unknown) { this.focusOpts = o; if (this.doc) this.doc.activeElement = this }
+  // The form an element sits in (the Answer box), and the chat composer's form for a stand-in of its text box.
+  owner: unknown = null; cosForm: unknown = null
+  closest(s: string) { return s === '[data-cos-rr-answer]' ? this.owner : s === '[data-cos-form]' ? this.cosForm : null }
 }
 class FormEl extends El {
   input: El; note: El; verdict: El; caution: El; send: El; close: El
@@ -294,7 +297,11 @@ class FormEl extends El {
     super('FORM', doc)
     this.input = new El('TEXTAREA', doc); this.note = new El('P', doc); this.verdict = new El('DIV', doc); this.caution = new El('P', doc)
     this.send = new El('BUTTON', doc); this.close = new El('BUTTON', doc)
+    for (const c of [this.input, this.note, this.verdict, this.caution, this.send, this.close]) c.owner = this
+    this.owner = this
   }
+  rect = { top: 0, bottom: 0, height: 0 }
+  getBoundingClientRect() { return this.rect }
   set html(_v: string) {}
   querySelector(s: string) {
     if (s === '[data-cos-rr-input]') return this.input
@@ -317,11 +324,14 @@ function rr(o: { sid?: string; excerpt?: string; at?: string } = {}) {
     state: 'live', key: `agent:${sid}:turn:${'a'.repeat(63)}${itemN % 10}`, excerpt: o.excerpt ?? 'All gates passed. Publish to next?', turnAt: o.at ?? new Date(Date.now() - 240000).toISOString() }
 }
 
-function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; hash?: string; trip?: unknown; card?: { id: string; top: number; shift: number } } = {}) {
+function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; hash?: string; trip?: unknown; card?: { id: string; top: number; shift: number }; wide?: boolean; topbar?: { top: number; bottom: number; height: number } } = {}) {
   const forms: FormEl[] = []
   const ids = () => { const fe = forms[forms.length - 1]; return fe ? { 'rr-form': fe, 'rr-input': fe.input, 'rr-send': fe.send } : {} }
   const f = fakeFetch(o.routes ?? OK), K = realKit(f.fetch, { hash: o.hash, trip: o.trip, ids })
-  const document: any = { activeElement: null, hidden: false, addEventListener: () => {}, querySelectorAll: () => [], getElementById: () => null, body: { scrollHeight: 0 }, scrollingElement: {} }
+  const deCls = new Set<string>()
+  const documentElement = { classList: { add: (c: string) => deCls.add(c), remove: (c: string) => deCls.delete(c), contains: (c: string) => deCls.has(c), toggle: (c: string, on?: boolean) => ((on ?? !deCls.has(c)) ? deCls.add(c) : deCls.delete(c)) } }
+  const topbar = o.topbar ? { getBoundingClientRect: () => o.topbar } : null
+  const document: any = { activeElement: null, hidden: false, documentElement, addEventListener: () => {}, querySelectorAll: () => [], getElementById: (id: string) => (id === 'topbar' ? topbar : null), body: { scrollHeight: 0 }, scrollingElement: {} }
   document.createElement = (tag: string) => { if (tag === 'form') { const fe = new FormEl(document); forms.push(fe); return fe } return { setAttribute() {}, classList: { add() {} } } }
   let html = '', paints = 0
   const placed: Record<string, unknown> = {}
@@ -329,11 +339,13 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; has
   let cardTop = o.card ? o.card.top : 0
   const card = { getAttribute: (k: string) => (k === 'data-item-id' && o.card ? o.card.id : null), hasAttribute: (k: string) => k === 'data-item-id',
     getBoundingClientRect: () => ({ top: cardTop, bottom: cardTop + 100 }) }
-  const feed = {
+  const feed: any = {
+    feedRect: { top: 60, bottom: 500 },
+    getBoundingClientRect() { return this.feedRect },
     get innerHTML() { return html },
     // o.card: one card on screen at o.card.top; each paint after the first moves it by o.card.shift (a box above it went).
     // As in a browser: the old feed goes, and focus inside it is lost.
-    set innerHTML(v: string) { html = v; paints++; if (o.card && paints > 1) cardTop += o.card.shift; for (const k of Object.keys(placed)) { if ((placed[k] as FormEl).contains(document.activeElement)) document.activeElement = null; delete placed[k] } },
+    set innerHTML(v: string) { html = v; paints++; if (this.onPaint) this.onPaint(); if (o.card && paints > 1) cardTop += o.card.shift; for (const k of Object.keys(placed)) { if ((placed[k] as FormEl).contains(document.activeElement)) document.activeElement = null; delete placed[k] } },
     contains: (el: unknown) => Object.values(placed).some(n => (n as FormEl).contains(el)),
     querySelector: (s: string) => {
       const m = /^\[data-rr-answer-slot="(.+)"\]$/.exec(s)
@@ -343,15 +355,23 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; has
     },
     querySelectorAll: (s: string) => (o.card && s.includes('[data-item-id]') ? [card] : []), scrollTop: 0, scrollHeight: 0, clientHeight: 0,
   }
-  const host = { querySelector: (s: string) => (s === '[data-cos-feed]' ? feed : /^\[data-rr-row=/.test(s) ? { querySelector: () => goBtn } : null) }
+  // Everything in this harness is inside the chat column (markKeyboard's kb-chat test).
+  const host = { querySelector: (s: string) => (s === '[data-cos-feed]' ? feed : /^\[data-rr-row=/.test(s) ? { querySelector: () => goBtn } : null), contains: (el: unknown) => !!el }
   const W: Record<string, unknown> = {
     $: () => null, esc, toast: () => {}, autoGrow: () => {}, md: (s: unknown) => String(s), skeletonRows: () => '',
     toDate: (s: string) => { const d = new Date(s); return isNaN(d.getTime()) ? null : d }, readStore: () => ({}), writeStore: () => {},
     parseRoute: () => ({ pane: 'messages', args: ['cos'] }), go: () => {}, api: () => Promise.resolve({}),
     ...(o.noKit ? {} : { sessionKit: K.kit }),
   }
+  // The page's keyboard (app.js COSWeb.onKeyboard): the hook the chat registers, whether one is up, the visible box.
+  const kbHooks: Array<(what: string, v?: unknown) => void> = []
+  let kbUp = false, vv = { top: 0, height: 557 }
+  Object.assign(W, { onKeyboard: (fn: (what: string, v?: unknown) => void) => { kbHooks.push(fn) }, keyboardUp: () => kbUp, viewportFit: () => vv })
   const scrolls: unknown[][] = []
-  const window = { COSWeb: W, matchMedia: () => ({ matches: false, addEventListener: () => {} }), scrollTo: (...a: unknown[]) => { scrolls.push(a) }, scrollBy: (...a: unknown[]) => { scrolls.push(['by', ...a]) }, localStorage: { getItem: () => null, setItem: () => {} } }
+  let sy = 1000
+  const window = { COSWeb: W, get scrollY() { return sy }, get pageYOffset() { return sy }, innerHeight: 557,
+    matchMedia: (q: string) => ({ matches: !!o.wide && /min-width: (860|600)px/.test(q), addEventListener: () => {} }),
+    scrollTo: (...a: number[]) => { scrolls.push(a); sy = a[1]! }, scrollBy: (...a: number[]) => { scrolls.push(['by', ...a]); sy += a[1]! }, localStorage: { getItem: () => null, setItem: () => {} } }
   const ctx = vm.createContext({ window, document, setTimeout, clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto })
   vm.runInContext(CHAT, ctx)
   const chat = W.cosChat as any
@@ -360,7 +380,9 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; has
   const tap = (attrs: Record<string, string>) => chat.onClick({ getAttribute: (k: string) => attrs[k] ?? null, tagName: 'BUTTON' })
   const submit = (form: FormEl) => { let prevented = false; const handled = chat.onSubmit({ target: form, preventDefault: () => { prevented = true } }); return { handled, prevented } }
   const type = (form: FormEl, words: string) => { form.input.value = words; chat.onInput({ target: { ...form.input, hasAttribute: (k: string) => k === 'data-cos-rr-input', getAttribute: (k: string) => (k === 'data-cos-rr-input' ? form.getAttribute('data-cos-rr-answer') : null), value: words } }) }
-  return { chat, paint, tap, submit, type, forms, placed, html: () => html, paints: () => paints, document, goBtn, scrolls, ...f, K }
+  const kb = (what: string, v?: { top: number; height: number }) => { if (v) vv = v; kbUp = what !== 'close'; kbHooks.forEach(fn => fn(what, vv)) }
+  return { chat, paint, tap, submit, type, forms, placed, html: () => html, paints: () => paints, document, goBtn, scrolls, ...f, K, kb, deCls, feed,
+    scrollY: () => sy, scrollMine: (by: number) => { sy += by } }
 }
 
 describe('Answer on a Reply ready row', () => {
@@ -819,5 +841,87 @@ describe('X1 01:0x: the list row\'s real shape, and no approval from the thread'
     const wrong = t.paint([rr()])
     expect(wrong).toContain('data-cos="rr-answer"')
     expect(wrong).not.toContain('It asked for approval.')
+  })
+})
+
+describe('F1 02:3x (the lead\'s must-fix): the Answer box with the keyboard up is never under the chat\'s own composer', () => {
+  const KB = (h: number) => ({ top: 0, height: Math.round(h * 380 / 787) })
+  it('the box having the keyboard marks html.kb-rr (the composer undocks); the chat\'s own box, or no keyboard, does not', () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.document.activeElement).toBe(t.forms[0]!.input)
+    t.kb('open', KB(557))
+    expect(t.deCls.has('kb-rr')).toBe(true)
+    const main = new (t.goBtn.constructor as any)('TEXTAREA', t.document); main.cosForm = { classList: { add() {}, remove() {}, contains: () => false } }
+    t.document.activeElement = main
+    t.kb('move')
+    expect(t.deCls.has('kb-rr')).toBe(false)
+    t.document.activeElement = t.forms[0]!.input
+    t.kb('move'); expect(t.deCls.has('kb-rr')).toBe(true)
+    t.kb('close')
+    expect(t.deCls.has('kb-rr')).toBe(false)
+  })
+  for (const [w, h] of [[382, 557], [449, 655]] as const) {
+    it(`${w}x${h}: the box is brought above the keyboard by the smallest scroll, and Close puts the page back where it was`, () => {
+      const t = thread()
+      t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+      const f = t.forms[0]!, v = KB(h), before = t.scrollY()
+      f.rect = { top: v.height + 40, bottom: v.height + 200, height: 160 }   // under where the keyboard now is
+      const n = t.scrolls.length
+      t.kb('open', v)
+      expect(t.scrolls.slice(n)).toEqual([['by', 0, (v.height + 200) - (v.height - 8)]])
+      t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+      expect(t.scrollY()).toBe(before)
+    })
+  }
+  it('a box taller than the room above the keyboard: its top goes under the top of the visible box (its text area first)', () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const f = t.forms[0]!, v = KB(557)
+    f.rect = { top: 300, bottom: 600, height: 300 }
+    const n = t.scrolls.length
+    t.kb('open', v)
+    expect(t.scrolls.slice(n)).toEqual([['by', 0, 300 - 8]])
+  })
+  it('the sticky top bar covers the top of the visible box: a box under it comes down below the bar, not just below the top', () => {
+    const t = thread({ topbar: { top: 0, bottom: 48, height: 48 } })
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const f = t.forms[0]!
+    f.rect = { top: 20, bottom: 180, height: 160 }
+    const n = t.scrolls.length
+    t.kb('open', KB(557))
+    expect(t.scrolls.slice(n)).toEqual([['by', 0, 20 - (48 + 8)]])
+  })
+  it('he scrolled himself while the box was open: Close does not take him back', () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const f = t.forms[0]!, v = KB(557)
+    f.rect = { top: 400, bottom: 560, height: 160 }
+    t.kb('open', v)
+    t.scrollMine(-350)
+    const at = t.scrollY()
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(t.scrollY()).toBe(at)
+  })
+  it('951x539 (the column scrolls itself): the box revealed inside the column, and Close puts the column back, the last row included (no clamp jump)', () => {
+    const t = thread({ wide: true })
+    t.paint([rr()])
+    t.feed.scrollTop = 900
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const f = t.forms[0]!, v = KB(539)
+    t.feed.feedRect = { top: 60, bottom: v.height }
+    f.rect = { top: v.height - 40, bottom: v.height + 120, height: 160 }
+    t.kb('open', v)
+    expect(t.feed.scrollTop).toBe(900 + (v.height + 120) - (v.height - 8))
+    // The box goes; in that repaint the column's scroll clamps to its new end (what the browser does on the last row).
+    t.feed.onPaint = () => { t.feed.scrollTop = 700 }
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(t.feed.scrollTop).toBe(900)
+  })
+  it('the composer rules: undocked below 860 px, out of the column from 860 px, only while the box has the keyboard', () => {
+    const block = CSS.slice(CSS.indexOf('/* 7.0.53 (F1 02:3x'))
+    expect(block).toContain('html.kb-rr .cc-composer[data-cos-form="chat"] { position: static; }')
+    expect(block).toContain('@media (min-width: 860px) {\n  html.kb-rr .msg-right .cc-composer[data-cos-form="chat"] { display: none; }\n}')
+    expect(block).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i)
   })
 })
