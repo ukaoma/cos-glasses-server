@@ -69,16 +69,28 @@
     var rest = lines.filter(function (l) { return l.provider !== p.closest; }).map(function (l) { return current(l, now).quiet; });
     return rest.length ? rest.join('. ') + '.' : '';
   }
-  var COLOR = { claude: 'var(--u-gold)', claude_desktop: 'var(--u-gold)', codex: 'var(--u-codex)', cursor: 'var(--u-cursor)' };
+  // 7.0.55 (Miles 11:25): both Claude rows in one Claude orange (sessions.css --up-claude, light and dark, both looks).
+  var COLOR = { claude: 'var(--up-claude)', claude_desktop: 'var(--up-claude)', codex: 'var(--u-codex)', cursor: 'var(--u-cursor)' };
+  var CLAUDE = { claude: true, claude_desktop: true };
+  // The lead 11:3x: a limit keeps the warning colour and adds a diagonal stripe, so it differs from a Claude bar by shape
+  // too (the warning colour and Claude orange are close); an older Claude reading stays orange, faded to 55%.
+  var LIMIT_STRIPE = 'repeating-linear-gradient(135deg, transparent 0 3px, color-mix(in srgb, var(--panel) 55%, transparent) 3px 5px)';
+  var OLDER_CLAUDE_OPACITY = 0.55;
   function colorOf(provider) { return COLOR[provider] || 'var(--sub)'; } // an unknown row is drawn, never colourless
 
   // The short ruler in the closed row and the long one in an open row. No ruler at all when usedPct is null.
   function ruler(line, long) {
     if (line.usedPct === null || line.usedPct === undefined) return '';
-    var fill = line.state === 'limit' ? 'var(--up-warn)' : line.state === 'older' ? 'var(--sub)' : colorOf(line.provider);
+    // A limit: the warning colour with a stripe. An older reading: grey, except a Claude row's, which stays Claude orange at
+    // 55% (Miles 11:25: the Claude Desktop bar was grey beside its chip; the lead 11:3x: a kept number never looks current).
+    // Its words still say how old it is.
+    var fill, extra = '';
+    if (line.state === 'limit') { fill = 'var(--up-warn)'; extra = ';background-image:' + LIMIT_STRIPE; }
+    else if (line.state === 'older') { fill = CLAUDE[line.provider] ? colorOf(line.provider) : 'var(--sub)'; if (CLAUDE[line.provider]) extra = ';opacity:' + OLDER_CLAUDE_OPACITY; }
+    else fill = colorOf(line.provider);
     var now = line.gonePct === null || line.gonePct === undefined ? '' : '<span class="up-now" style="left:' + Number(line.gonePct) + '%"></span>';
     return '<span class="' + (long ? 'up-track' : 'up-mini') + '" aria-hidden="true"><span class="up-rail"></span><span class="up-fill" style="width:' +
-      Math.max(0, Math.min(100, Number(line.usedPct))) + '%;background:' + fill + '"></span>' + now + '</span>';
+      Math.max(0, Math.min(100, Number(line.usedPct))) + '%;background:' + fill + extra + '"></span>' + now + '</span>';
   }
   function who(line) { return '<span class="up-who"><i class="up-dot" style="background:' + colorOf(line.provider) + '"></i>' + esc(line.name) + '</span>'; }
   function wordsClass(line) { return line.state === 'failed' || line.state === 'not_read' || line.state === 'limit' ? 'up-warn' : line.state === 'fresh' ? '' : 'up-quietw'; }

@@ -776,7 +776,15 @@ button.sx-gh[aria-expanded='false'] .chev { transform: rotate(-45deg); }
 /* 7.0.41 (U1): the plan ruler at the top of Sessions > Usage (panes/plan-ruler.js). Drawn to round 2 tap-*. Kept here, not
    in its own file, so the boot stylesheet list (blank-open-web.test.ts) is unchanged.
    Fixed heights for the closed row, each open row and the estimate block, so a refresh never moves the page. */
-.up { --up-warn: var(--hot); margin: 6px 0 12px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius-sm); }
+/* 7.0.55 (Miles 11:25 on the Duo: "Can we set claude usage to be an orange bar as well"): both Claude rows, Claude CLI
+   and Claude Desktop, draw their chip and their bar in one Claude orange, in the closed row and the open rows alike.
+   Light rgb(180, 95, 38) (#b45f26, the lead 12:1x: the same as the Mac's, and 4.5:1 or better on the white panel), dark
+   rgb(226, 146, 92), the same in Amber and Espresso. Measured (WCAG relative luminance):
+   light 4.56:1 on the panel (#fff, both looks) and 3.56:1 on the rail (ink 12% on the panel); dark 6.88:1 and 5.01:1 on
+   Espresso's panel and rail (#221b15), 7.24:1 and 5.36:1 on Amber's (#22140c). Every pair clears the 3:1 for a bar. */
+.up { --up-warn: var(--hot); --up-claude: rgb(180, 95, 38); margin: 6px 0 12px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius-sm); }
+:root[data-theme='dark'] .up { --up-claude: rgb(226, 146, 92); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .up { --up-claude: rgb(226, 146, 92); } }
 .up-head { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px 0 2px; }
 .up-toggle { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; min-width: 44px; padding: 0 8px;
   font: 600 13px/1 var(--body); color: var(--ink); cursor: pointer; border-radius: 8px; white-space: nowrap; }
