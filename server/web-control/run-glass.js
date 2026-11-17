@@ -207,7 +207,7 @@
   function slotSeen(s) {
     if (!s || typeof s.getBoundingClientRect !== 'function') return false;
     var r = s.getBoundingClientRect(), vw = window.innerWidth > 0 ? window.innerWidth : Infinity, vh = window.innerHeight > 0 ? window.innerHeight : Infinity;
-    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
+    return r.width > 0 && r.height > 0 && r.top + r.height > 0 && r.left + r.width > 0 && r.top < vh && r.left < vw;
   }
   function settling(m) {
     if (Math.abs(targetE(m) - m.e) > 0.004) return true;
