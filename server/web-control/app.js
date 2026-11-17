@@ -6042,6 +6042,11 @@
       else { r.cautionAsk = true; r.cautionVia = 'phone'; if (typeof renderVerdict === 'function') renderVerdict(r); }
       return Promise.resolve('caution');
     }
+    // 7.0.53 (X1's must-fix): a caller may ask the Mac something fresh before the trip (the COS thread's box asks whether
+    // the session now waits on an approval); its no stops here, nothing attached or opened, and it says why itself.
+    if (typeof opts.precheck === 'function' && !opts.prechecked) {
+      return Promise.resolve(opts.precheck()).then(function (ok) { return ok ? approveOnPhone(Object.assign({}, opts, { r: r, prechecked: true })) : 'checked'; }, function () { return 'checked'; });
+    }
     // 7.0.51 (W1): the SAME draft and turn key a plain Send of these words uses (no files: the phone path refuses
     // them above). A phone-only key let a verified message and a Send of the same words both land.
     var draft = draftFor(text, r, []);
@@ -6219,7 +6224,7 @@
   // ── the send gates, written once (7.0.53, the lead's ruling (c), 21:0x; W1) ──
   // The reader's own gates (sendSessionTurn, watchTurn, renderVerdict), for a composer that is not the reader. The COS
   // thread's Answer box is the only caller in 7.0.53: the reader and Today's sheet keep their own code, and
-  // session-gates-parity-web.test.ts pins these words and this order to the reader's, and records where Today's copy
+  // answer-box-web.test.ts (its parity part) pins these words and this order to the reader's, and records where Today's copy
   // differs, so drift in any of the three fails a test until the follow-up moves both onto this. In order:
   //   no words; a file still uploading or failed; the caution (another app holds the session and looks idle: asked
   //   before the first send); one send at a time; then continueSession (attach or reuse the binding, one key per
@@ -6319,6 +6324,8 @@
     return '';
   }
   function gateCaution(r) { var v = r.verdict; return v && v.caution ? (sxProvider(r.provider) === 'codex' ? GATE_COPY.cautionCodex : GATE_COPY.cautionOther) : ''; }
+  /** Stop the watch of this session's sent turn now (its box closed). */
+  function gateStop(r) { if (r && r.watchTimer) { clearInterval(r.watchTimer); r.watchTimer = null; } }
   /** A tap inside the verdict slot ([data-gate]). `resend(opts)` sends the box's words again through gateSend. */
   function gateAction(r, act, resend) {
     var view = viewOf(r);
@@ -9132,7 +9139,7 @@
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
-    gates: { send: gateSend, watch: gateWatch, verdictHtml: gateVerdictHtml, caution: gateCaution, action: gateAction, copy: GATE_COPY, watchMs: GATE_WATCH_MS },
+    gates: { send: gateSend, watch: gateWatch, stop: gateStop, verdictHtml: gateVerdictHtml, caution: gateCaution, action: gateAction, copy: GATE_COPY, watchMs: GATE_WATCH_MS },
     parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
 

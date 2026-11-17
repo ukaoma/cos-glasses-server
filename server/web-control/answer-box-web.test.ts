@@ -93,6 +93,9 @@ function realKit(fetch: unknown, env: { hash?: string; trip?: unknown; ids?: () 
 const SID = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d', SID2 = '019a7b2c-3d4e-7f60-8a1b-2c3d4e5f6a7b'
 const P = (tail: string, id = SID) => `/api/agent-sessions/claude/${encodeURIComponent(id)}${tail}`
 const OK: Routes = {
+  // X1's must-fix: the box reads the session fresh at Send (idle here).
+  ['GET ' + P('?turns=1')]: { status: 200, body: { agent_state: 'idle' } },
+  ['GET ' + P('?turns=1', SID2)]: { status: 200, body: { agent_state: 'idle' } },
   ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 0 } },
   ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
   ['POST /api/agent-sessions/bindings/b1/turns']: { status: 202, body: { outcome: 'queued' } },
@@ -281,7 +284,8 @@ class El {
   setAttribute(k: string, v: unknown) { this.attrs[k] = String(v) }
   getAttribute(k: string) { return k in this.attrs ? this.attrs[k]! : null }
   hasAttribute(k: string) { return k in this.attrs }
-  focus() { if (this.doc) this.doc.activeElement = this }
+  focusOpts: unknown = undefined
+  focus(o?: unknown) { this.focusOpts = o; if (this.doc) this.doc.activeElement = this }
 }
 class FormEl extends El {
   input: El; note: El; verdict: El; caution: El; send: El; close: El
@@ -312,7 +316,7 @@ function rr(o: { sid?: string; excerpt?: string; at?: string } = {}) {
     state: 'live', key: `agent:${sid}:turn:${'a'.repeat(63)}${itemN % 10}`, excerpt: o.excerpt ?? 'All gates passed. Publish to next?', turnAt: o.at ?? new Date(Date.now() - 240000).toISOString() }
 }
 
-function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; hash?: string; trip?: unknown } = {}) {
+function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; hash?: string; trip?: unknown; card?: { id: string; top: number; shift: number } } = {}) {
   const forms: FormEl[] = []
   const ids = () => { const fe = forms[forms.length - 1]; return fe ? { 'rr-form': fe, 'rr-input': fe.input, 'rr-send': fe.send } : {} }
   const f = fakeFetch(o.routes ?? OK), K = realKit(f.fetch, { hash: o.hash, trip: o.trip, ids })
@@ -321,17 +325,22 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; has
   let html = '', paints = 0
   const placed: Record<string, unknown> = {}
   const goBtn = new El('BUTTON', document)
+  let cardTop = o.card ? o.card.top : 0
+  const card = { getAttribute: (k: string) => (k === 'data-item-id' && o.card ? o.card.id : null), hasAttribute: (k: string) => k === 'data-item-id',
+    getBoundingClientRect: () => ({ top: cardTop, bottom: cardTop + 100 }) }
   const feed = {
     get innerHTML() { return html },
+    // o.card: one card on screen at o.card.top; each paint after the first moves it by o.card.shift (a box above it went).
     // As in a browser: the old feed goes, and focus inside it is lost.
-    set innerHTML(v: string) { html = v; paints++; for (const k of Object.keys(placed)) { if ((placed[k] as FormEl).contains(document.activeElement)) document.activeElement = null; delete placed[k] } },
+    set innerHTML(v: string) { html = v; paints++; if (o.card && paints > 1) cardTop += o.card.shift; for (const k of Object.keys(placed)) { if ((placed[k] as FormEl).contains(document.activeElement)) document.activeElement = null; delete placed[k] } },
     contains: (el: unknown) => Object.values(placed).some(n => (n as FormEl).contains(el)),
     querySelector: (s: string) => {
       const m = /^\[data-rr-answer-slot="(.+)"\]$/.exec(s)
       if (m && html.includes('data-rr-answer-slot="' + esc(m[1]) + '"')) return { appendChild: (n: unknown) => { placed[m[1]!] = n } }
+      if (o.card && s === '[data-item-id="' + o.card.id + '"]') return card
       return null
     },
-    querySelectorAll: () => [], scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+    querySelectorAll: (s: string) => (o.card && s.includes('[data-item-id]') ? [card] : []), scrollTop: 0, scrollHeight: 0, clientHeight: 0,
   }
   const host = { querySelector: (s: string) => (s === '[data-cos-feed]' ? feed : /^\[data-rr-row=/.test(s) ? { querySelector: () => goBtn } : null) }
   const W: Record<string, unknown> = {
@@ -340,7 +349,8 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; has
     parseRoute: () => ({ pane: 'messages', args: ['cos'] }), go: () => {}, api: () => Promise.resolve({}),
     ...(o.noKit ? {} : { sessionKit: K.kit }),
   }
-  const window = { COSWeb: W, matchMedia: () => ({ matches: false, addEventListener: () => {} }), scrollTo: () => {}, scrollBy: () => {}, localStorage: { getItem: () => null, setItem: () => {} } }
+  const scrolls: unknown[][] = []
+  const window = { COSWeb: W, matchMedia: () => ({ matches: false, addEventListener: () => {} }), scrollTo: (...a: unknown[]) => { scrolls.push(a) }, scrollBy: (...a: unknown[]) => { scrolls.push(['by', ...a]) }, localStorage: { getItem: () => null, setItem: () => {} } }
   const ctx = vm.createContext({ window, document, setTimeout, clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto })
   vm.runInContext(CHAT, ctx)
   const chat = W.cosChat as any
@@ -349,7 +359,7 @@ function thread(o: { routes?: Routes; noKit?: boolean; sessions?: unknown[]; has
   const tap = (attrs: Record<string, string>) => chat.onClick({ getAttribute: (k: string) => attrs[k] ?? null, tagName: 'BUTTON' })
   const submit = (form: FormEl) => { let prevented = false; const handled = chat.onSubmit({ target: form, preventDefault: () => { prevented = true } }); return { handled, prevented } }
   const type = (form: FormEl, words: string) => { form.input.value = words; chat.onInput({ target: { ...form.input, hasAttribute: (k: string) => k === 'data-cos-rr-input', getAttribute: (k: string) => (k === 'data-cos-rr-input' ? form.getAttribute('data-cos-rr-answer') : null), value: words } }) }
-  return { chat, paint, tap, submit, type, forms, placed, html: () => html, paints: () => paints, document, goBtn, ...f, K }
+  return { chat, paint, tap, submit, type, forms, placed, html: () => html, paints: () => paints, document, goBtn, scrolls, ...f, K }
 }
 
 describe('Answer on a Reply ready row', () => {
@@ -369,7 +379,7 @@ describe('Answer on a Reply ready row', () => {
     expect(t.forms).toHaveLength(1)
     const f = t.forms[0]!
     expect(f.input.value).toBe('')
-    expect(f.innerHTML).toContain('To <strong>Release checks</strong>, Claude, <span class="rr-id">0a1b2c3d</span>')
+    expect(f.innerHTML).toContain('To <strong><bdi>Release checks</bdi></strong>, Claude, <span class="rr-id">0a1b2c3d</span>')
     expect(f.innerHTML).toContain('>Send as message only</button>')
     // The phone composer finds the box by these (prefix rr): one box at a time keeps them unique.
     expect(f.id).toBe('rr-form')
@@ -435,6 +445,8 @@ describe('Answer on a Reply ready row', () => {
     expect(turnPosts(t.calls)).toHaveLength(0)
     expect(t.forms[0]!.note.textContent).toBe('Write a message first.')
     expect(t.forms[0]!.note.cls.has('error')).toBe(true)
+    // No words, no read of the Mac.
+    expect(t.calls.filter(c => c.path === P('?turns=1'))).toHaveLength(0)
   })
   it('the caution from the Mac shows its line, then asks at Send; Send anyway (routed by data-cos) sends once', async () => {
     const routes: Routes = { ...OK, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: '', reasonCopy: '', ownerCount: 1 } } }
@@ -668,5 +680,128 @@ describe('7.0.53, the second piece: back from the phone, to the row he left', ()
     t.tap({ 'data-cos': 'rr-gate', 'data-rr': A_KEY, 'data-gate': 'caution-cancel' })
     expect(r.cautionVia).toBe(null)
     expect(seen).toHaveLength(1)
+  })
+})
+
+describe('the lead 00:5x: X1\'s must-fix and the four smaller items', () => {
+  const waiting = (kind: string) => ({ ...OK, ['GET ' + P('?turns=1')]: { status: 200, body: { agent_state: 'waiting', waiting_kind: kind } } })
+  it('MUST-FIX: an approval that arrived while the box was open: Send reads the session fresh, refuses with the row\'s line, keeps his words, posts nothing', async () => {
+    for (const kind of ['permission', 'plan']) {
+      const t = thread({ routes: waiting(kind) })
+      t.paint([rr()])
+      // The row was drawn idle: Answer is there.
+      expect(t.html()).toContain('data-cos="rr-answer"')
+      t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+      const f = t.forms[0]!
+      t.type(f, 'Yes, go ahead.')
+      t.submit(f); await flush()
+      expect(t.calls.filter(c => c.method === 'GET' && c.path === P('?turns=1'))).toHaveLength(1)
+      expect(turnPosts(t.calls)).toHaveLength(0)
+      expect(t.calls.some(c => c.method === 'POST')).toBe(false)
+      expect(f.note.textContent).toBe('It asked for approval. Approve it in Sessions, where the request card is.')
+      expect(f.input.value).toBe('Yes, go ahead.')
+      expect([f.send.disabled, f.input.readOnly]).toEqual([false, false])
+    }
+  })
+  it('a session waiting on a question (not an approval) still takes the message', async () => {
+    const t = thread({ routes: waiting('question') })
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Here is my answer.'); t.submit(t.forms[0]!); await flush()
+    expect(turnPosts(t.calls)).toHaveLength(1)
+  })
+  it('no answer to the fresh read: nothing posted, his words kept, and the box says so', async () => {
+    for (const r of [{ status: 500, body: {} }, new TypeError('Load failed')]) {
+      const t = thread({ routes: { ...OK, ['GET ' + P('?turns=1')]: () => r as Reply } })
+      t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+      t.type(t.forms[0]!, 'Go.'); t.submit(t.forms[0]!); await flush()
+      expect(t.calls.some(c => c.method === 'POST')).toBe(false)
+      expect(t.forms[0]!.note.textContent).toBe('COS could not check whether this session is waiting on an approval. Your words are still here; send again in a moment.')
+      expect(t.forms[0]!.input.value).toBe('Go.')
+    }
+  })
+  it('the key\'s Send gets the same fresh check: no while an approval waits (with the line), yes when idle', async () => {
+    const t = thread({ routes: waiting('permission') })
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    const r = t.chat._state.ansS[A_KEY]
+    expect(await t.chat._rrPhoneOpts(r).precheck()).toBe(false)
+    expect(t.forms[0]!.note.textContent).toBe('It asked for approval. Approve it in Sessions, where the request card is.')
+    const u = thread()
+    u.paint([rr()]); u.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(await u.chat._rrPhoneOpts(u.chat._state.ansS[A_KEY]).precheck()).toBe(true)
+  })
+  it('a second Send while the fresh read is out posts nothing more', async () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Once.')
+    t.submit(t.forms[0]!); t.submit(t.forms[0]!); await flush()
+    expect(t.calls.filter(c => c.path === P('?turns=1'))).toHaveLength(1)
+    expect(turnPosts(t.calls)).toHaveLength(1)
+  })
+  it('(a) the "To" line isolates the session-written name, so a right-to-left override cannot reorder the provider and short id', () => {
+    const t = thread()
+    const item = rr(); (item.links[0] as any).label = 'Ship ‮di trohs ,edualC'
+    t.paint([item]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.forms[0]!.innerHTML).toMatch(/To <strong><bdi>Ship ‮di trohs ,edualC<\/bdi><\/strong>, Claude, <span class="rr-id">0a1b2c3d<\/span>/)
+  })
+  it('(b) the box takes focus without scrolling, and opening it while following the newest line does not scroll to the end', () => {
+    const t = thread()
+    t.paint([rr()])           // a stick paint: following the newest line
+    const before = t.scrolls.length
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.forms[0]!.input.focusOpts).toEqual({ preventScroll: true })
+    expect(t.scrolls.slice(before)).toEqual([])
+    // A later quiet repaint does not either: he is answering this row now, not following.
+    t.document.activeElement = null
+    t.chat._paintFeed(false)
+    expect(t.scrolls.slice(before)).toEqual([])
+    // Close does not either.
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(t.scrolls.slice(before)).toEqual([])
+  })
+  it('(c) a second tap on the same Answer keeps the open box and his words (no new box)', () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.forms[0]!.input.value = 'Half way.'
+    t.document.activeElement = null
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    expect(t.forms).toHaveLength(1)
+    expect(t.placed[A_KEY]).toBe(t.forms[0])
+    expect(t.forms[0]!.input.value).toBe('Half way.')
+    expect(t.document.activeElement).toBe(t.forms[0]!.input)
+  })
+  it('(d) Close stops the watch at once: no read of the turn after it', async () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Go.'); t.submit(t.forms[0]!); await flush()
+    expect(turnPosts(t.calls)).toHaveLength(1)
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    const n = t.calls.length
+    t.K.tick(); t.K.tick(); await flush()
+    expect(t.calls.length).toBe(n)
+    expect(t.chat._state.ansS[A_KEY].watchTimer).toBe(null)
+  })
+})
+
+describe('the two survivors of the 00:5x mutants (Q1 asks for each to have its test)', () => {
+  it('M11: closing a box that sits above what he reads holds the first card he can see (the page scrolls back by what the box took)', () => {
+    const t = thread({ card: { id: 'fi_seen', top: 40, shift: -120 } })
+    t.paint([rr()])
+    t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.document.activeElement = null
+    const before = t.scrolls.length
+    t.tap({ 'data-cos': 'rr-answer-close', 'data-rr': A_KEY })
+    expect(t.scrolls.slice(before)).toEqual([['by', 0, -120]])
+  })
+  it('M14: when the box goes because its row went (not Close), the watch stops at its next tick', async () => {
+    const t = thread()
+    t.paint([rr()]); t.tap({ 'data-cos': 'rr-answer', 'data-rr': A_KEY })
+    t.type(t.forms[0]!, 'Go.'); t.submit(t.forms[0]!); await flush()
+    expect(turnPosts(t.calls)).toHaveLength(1)
+    t.document.activeElement = null
+    t.paint([rr({ sid: SID2 })])
+    expect(t.chat._state.ans.key).toBe('')
+    const n = t.calls.length
+    t.K.tick(); await flush()
+    expect(t.calls.length).toBe(n)
   })
 })

@@ -791,6 +791,7 @@
   var RR_SEND = 'Send as message only';
   var RR_PLACEHOLDER = 'Message this session';
   var RR_HOLD = 'COS is still answering in this session. Send again when it finishes; it will not post twice. Or open the session, where it sends on its own.';
+  var RR_UNCHECKED = 'COS could not check whether this session is waiting on an approval. Your words are still here; send again in a moment.';
   C.ans = { key: '', node: null };
   C.ansS = {};
   C.ansDraft = {};
@@ -800,6 +801,8 @@
   function rrSafeKey(key) { return String(key).replace(/["\\]/g, ''); }
   // His own tap (Answer on another row, Close) draws the feed even with focus in the box: the never-under-the-finger
   // rule is for the feed's own repaints.
+  // And it never moves him (Q1): rrAnswer stops "following the newest line" before it paints, so paintFeed takes its own
+  // keepPlace path (the first card he can see is held) and never scrolls to the end for a box opening or closing.
   function rrPaintNow() { C.paintTap = true; try { paintFeed(false); } finally { C.paintTap = false; } }
   var RR_VIEW = {
     status: function (r, text, kind) { r.note = { text: text || '', kind: kind || '' }; rrAnswerPaint(r); },
@@ -818,7 +821,8 @@
     hold: function (r) { RR_VIEW.status(r, RR_HOLD, 'error'); },
     watch: function (r, bindingId, key) { var K = rrKit(); if (K) K.gates.watch(r, bindingId, key); },
     queue: function () {},
-    live: function (r) { return C.ansS[r.rrKey] === r; },
+    // The watch lives while the box is open (Q1): Close stops it.
+    live: function (r) { return C.ans.key === r.rrKey && C.ansS[r.rrKey] === r; },
     sending: function (r, on) {
       var n = rrAnswerEl(r); if (!n) return;
       Array.prototype.forEach.call(n.querySelectorAll('button'), function (b) { b.disabled = !!on; });
@@ -837,7 +841,7 @@
     // One box at a time, so these ids are unique: the phone composer finds the box by them (prefix 'rr').
     f.id = 'rr-form';
     f.setAttribute('data-cos-rr-answer', g.key);
-    f.innerHTML = '<p class="rr-to" id="' + id + '-to">To <strong>' + esc(rrTitle(g)) + '</strong>, ' + esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(String(g.id).slice(0, 8)) + '</span></p>' +
+    f.innerHTML = '<p class="rr-to" id="' + id + '-to">To <strong><bdi>' + esc(rrTitle(g)) + '</bdi></strong>, ' + esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(String(g.id).slice(0, 8)) + '</span></p>' +
       '<textarea class="rr-input" id="rr-input" rows="2" data-cos-rr-input="' + esc(g.key) + '" aria-labelledby="' + id + '-to" placeholder="' + esc(RR_PLACEHOLDER) + '"></textarea>' +
       '<p class="rr-caution hidden" data-rr-caution></p>' +
       '<div class="rr-verdict" data-rr-verdict></div>' +
@@ -870,11 +874,32 @@
       askCaution: function () { r.cautionAsk = true; r.cautionVia = 'phone'; rrAnswerPaint(r); },
       status: function (text, kind) { RR_VIEW.status(r, text, kind); },
       files: function () { return 'none'; },
+      // X1's must-fix: the approval check is fresh at the moment he sends, not the row as it was drawn.
+      precheck: function () { return rrFresh(r).then(function (st) { return rrFreshSays(r, st); }); },
       thread: function () {
         var g = rrFind(r.rrKey), row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(r.rrKey) + '"]');
         var top = row && row.getBoundingClientRect ? row.getBoundingClientRect().top : null;
         return g ? { item: g.newest.id, top: top } : null;
       } };
+  }
+  // ── X1's must-fix (the lead 00:5x): no Answer while the session waits on an approval, checked FRESH at Send. The row's
+  // own check is as of when it was drawn; the feed is not drawn again while he types and the session rows are kept up to
+  // 60 s, so a permission or plan request that arrived with the box open would leave Send live, and his "yes, go ahead"
+  // would park and land after the request settled. So Send (and the key's Send) first reads that one session from the
+  // Mac. Waiting on an approval: the row's own line, his words kept, nothing posted. No answer: nothing posted either.
+  function rrFresh(r) {
+    var K = rrKit();
+    if (!K || typeof K.answer !== 'function' || typeof K.path !== 'function') return Promise.resolve('unknown');
+    return K.answer(K.path(r.provider, r.id, '?turns=1'), { timeoutMs: 15000 }).then(function (a) {
+      var d = a && a.status === 200 && a.body && typeof a.body === 'object' ? a.body : null;
+      if (!d) return 'unknown';
+      return d.agent_state === 'waiting' && (d.waiting_kind === 'permission' || d.waiting_kind === 'plan') ? 'approval' : 'ok';
+    }, function () { return 'unknown'; });
+  }
+  function rrFreshSays(r, st) {
+    if (st === 'approval') { RR_VIEW.status(r, RR_APPROVAL, 'error'); return false; }
+    if (st !== 'ok') { RR_VIEW.status(r, RR_UNCHECKED, 'error'); return false; }
+    return true;
   }
   function rrPhoneOffer(r) { var K = rrKit(); if (K && typeof K.phoneOffer === 'function' && rrAnswerEl(r)) K.phoneOffer(r, rrPhoneOpts(r)); }
   function rrPhone(key) {
@@ -906,8 +931,11 @@
   function rrAnswer(key) {
     var g = rrFind(key), K = rrKit();
     if (!g || !K) return;
+    // A second tap on the same row's Answer keeps the open box and his words (Q1): only focus goes back into it.
     if (C.ans.key !== key) {
       rrAnswerKeep();
+      // He is answering this row now, not following the newest line: a later quiet repaint must not scroll to the end.
+      if (TAIL) TAIL.following = false;
       var r = rrSessionFor(g);
       C.ans = { key: key, node: rrAnswerNode(g) };
       rrPaintNow();
@@ -927,6 +955,8 @@
   function rrAnswerClose(key) {
     if (!key || C.ans.key !== key) return;
     rrAnswerKeep();
+    // Close stops the watch now (Q1), not on its next tick.
+    var r = C.ansS[key], kit = rrKit(); if (r && kit && typeof kit.gates.stop === 'function') kit.gates.stop(r);
     C.ans = { key: '', node: null };
     rrPaintNow();
     var row = C.host && C.host.querySelector('[data-rr-row="' + rrSafeKey(key) + '"]'), go = row && row.querySelector('.rr-answer-go');
@@ -935,8 +965,16 @@
   function rrAnswerSend(key, extra) {
     var K = rrKit(), r = C.ansS[key], n = key && C.ans.key === key ? C.ans.node : null;
     if (!K || !r || !n) return Promise.resolve('');
-    var box = n.querySelector('[data-cos-rr-input]');
-    return K.gates.send(r, box ? box.value : '', extra || {});
+    var box = n.querySelector('[data-cos-rr-input]'), text = box ? box.value : '';
+    // No words: the gates say so, with no read of the Mac.
+    if (!String(text).trim()) return K.gates.send(r, text, extra || {});
+    if (r.checking || r.sending) return Promise.resolve('busy');
+    r.checking = true; RR_VIEW.sending(r, true);
+    return rrFresh(r).then(function (st) {
+      r.checking = false; RR_VIEW.sending(r, false);
+      if (!rrFreshSays(r, st)) return st === 'approval' ? 'approval' : 'unchecked';
+      return K.gates.send(r, text, extra || {});
+    });
   }
   function rrGate(key, act) {
     var K = rrKit(), r = C.ansS[key];

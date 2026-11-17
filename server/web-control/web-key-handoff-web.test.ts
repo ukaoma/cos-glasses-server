@@ -1342,6 +1342,23 @@ describe('7.0.53: the phone trip from the COS thread\'s Answer box (W1; X1: from
       expect(h.store.size).toBe(0)
     }
   })
+  it('a caller\'s fresh precheck (the box asks whether an approval now waits): its no stops the trip before anything is asked or opened; its yes goes on', async () => {
+    const no = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+    let asked = 0
+    expect(await no.approveOnPhone({ ...no.viewOpts, ...thread(), precheck: () => { asked++; return Promise.resolve(false) } })).toBe('checked')
+    expect(asked).toBe(1)
+    expect(no.requests.filter(q => q.path === '/api/web-key/handoff' || q.path.endsWith('/attach'))).toEqual([])
+    expect(no.assigned).toEqual([])
+    expect(no.store.size).toBe(0)
+    expect(no.r.sending).toBe(false)
+    const yes = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+    expect(await yes.approveOnPhone({ ...yes.viewOpts, ...thread(), precheck: () => Promise.resolve(true) })).toBe('opened')
+    expect(yes.assigned).toHaveLength(1)
+    // A failed check is a no.
+    const err = harness({ signer: 1, prefix: 'rr', text: 'Ship it.' })
+    expect(await err.approveOnPhone({ ...err.viewOpts, precheck: () => Promise.reject(new Error('x')) })).toBe('checked')
+    expect(err.assigned).toEqual([])
+  })
   it('a thread record comes back only into the thread\'s box, and a reader record only into the reader\'s', async () => {
     const h = harness({ hash: '#/phone-return', signer: 1, prefix: 'rr', text: '', trip: trip({ from: 'thread', item: 'fi_42', top: 10 }) })
     h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
