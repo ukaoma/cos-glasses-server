@@ -375,6 +375,16 @@ describe('an unrecognised usage reply is logged by its key shape, never its valu
     expect(replyKeyShape([[[[[[[1]]]]]]])).toBe('[[[[[[…]]x1]x1]x1]x1]x1')
     expect(replyKeyShape({ ['x'.repeat(41)]: 1, ['y'.repeat(42)]: 2 })).toBe(`{${'x'.repeat(41)}:number,?:number}`)
   })
+  it('the budget leaves a modest reply whole (Q1 08:11, B4): about 50 nodes under the cap print in full, no cut', () => {
+    const letters = 'abcdefghijklmno'.split('') // 15 keys
+    const inner = Object.fromEntries(letters.map(k => [k, null]))
+    const reply = { x: inner, y: inner, z: inner, n: [1, 2, 3] }
+    const innerShape = `{${letters.map(k => `${k}:null`).join(',')}}`
+    const expected = `{x:${innerShape},y:${innerShape},z:${innerShape},n:[number]x3}`
+    expect(expected.length).toBeLessThan(REPLY_SHAPE_MAX) // 51 nodes, 341 characters
+    expect(replyKeyShape(reply)).toBe(expected)
+    expect(replyKeyShape(reply)).not.toContain('…')
+  })
   it('a huge reply is walked only as far as the cap can show (Q1 08:05 advisory)', () => {
     let reads = 0
     const level = (d: number): unknown => {
