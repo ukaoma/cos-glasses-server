@@ -63,5 +63,8 @@ describe('npm tarball contents', () => {
     expect(files.filter(f => f.startsWith('server/certs/'))).toEqual([])
     // The real profile must never be packaged; only the example.
     expect(files.filter(f => f.endsWith('.cos-profile.json'))).toEqual([])
+    // 7.0.55 (the lead 12:2x): no test fixture ships; the routes golden G2 filing fixture is a synthetic transcript with
+    // identifying metadata. Its source stays for g2-filing-golden.test.ts, which reads it from the tree.
+    expect(files.filter(f => f.includes('/__fixtures__/'))).toEqual([])
   })
 })

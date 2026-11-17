@@ -98,6 +98,7 @@
     "!server/scripts/dictation-custom-polish-mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
+    "!server/routes/__fixtures__/**",
     "!server/lib/work-orchestrator/__fixtures__/**",
     "!server/scripts/work-orchestrator-mutation-gate.mjs",
     "!server/scripts/work-lens-rounds-mutation-gate.mjs",
