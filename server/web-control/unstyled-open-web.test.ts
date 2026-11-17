@@ -30,7 +30,7 @@ describe('the inline critical CSS (index.html)', () => {
   })
   it('every rule is a word-for-word copy of app.css, so the stylesheets change nothing when they arrive', () => {
     // 7.0.35: the script-free fallback line (.fp-lost, shown only when theme.js never ran) is the page's own, not app.css's.
-    const rules = critLines.filter(l => !l.startsWith(':root') && !l.startsWith('@media (prefers-color-scheme') && !/fp-lost/.test(l))
+    const rules = critLines.filter(l => !l.startsWith(':root') && !l.startsWith('@media (prefers-color-scheme') && !/fp-lost/.test(l) && !l.startsWith("html[data-look='amber']"))
     expect(rules.length).toBeGreaterThan(20)
     const app = norm(APP_CSS.replace(/\/\*[\s\S]*?\*\//g, ''))   // comments out on both sides
     const missing = rules.filter(r => !app.includes(norm(r)))

@@ -64,6 +64,20 @@
     set: function (choice) { choice = isStory(choice) ? choice : 'auto'; try { if (choice === 'auto') localStorage.removeItem(STORY_KEY); else localStorage.setItem(STORY_KEY, choice); } catch (_e) {} return storyApply(choice); }
   };
   storyApply(storyRead());
+  // Candidate look, per device. Absence/invalid storage keeps the current look; set before the first paint.
+  var LOOK_KEY = 'cos_web_look';
+  function lookRead() { try { return localStorage.getItem(LOOK_KEY) === 'amber' ? 'amber' : 'default'; } catch (_e) { return 'default'; } }
+  function lookApply(choice) {
+    var de = document.documentElement;
+    if (choice === 'amber') de.setAttribute('data-look', 'amber');
+    else if (de.hasAttribute ? de.hasAttribute('data-look') : de.removeAttribute) de.removeAttribute('data-look');
+    return choice;
+  }
+  window.CosLook = {
+    choice: lookRead,
+    set: function (choice) { choice = choice === 'amber' ? 'amber' : 'default'; try { if (choice === 'default') localStorage.removeItem(LOOK_KEY); else localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} return lookApply(choice); }
+  };
+  lookApply(lookRead());
   // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
   // never shows a mark that nothing would take away. app.js removes the class when the sign-in card or the app shows.
   document.documentElement.classList.add('fp-wait');
@@ -157,6 +171,13 @@
     var list = [];
     try { list = JSON.parse((document.getElementById('boot-styles') || {}).textContent || '[]'); } catch (_e) { list = []; }
     list = Array.isArray(list) ? list.filter(function (u) { return typeof u === 'string' && u.indexOf('/control/') === 0; }) : [];
+    // A default open has exactly the existing ten requests. Amber alone adds its stylesheet last.
+    // The URL is in HTML so web-control-static gives it the same content hash as the other stylesheets.
+    if (window.CosLook && window.CosLook.choice() === 'amber') {
+      var amberHref = '';
+      try { amberHref = JSON.parse((document.getElementById('amber-style') || {}).textContent || '""'); } catch (_e) {}
+      if (typeof amberHref === 'string' && amberHref.indexOf('/control/amber.css') === 0 && /^\/control\/amber\.css(?:\?v=[a-f0-9]+)?$/.test(amberHref)) list.push(amberHref);
+    }
     sheetsLeft = list.length;
     if (!sheetsLeft) { maybeSettle(); return; }
     var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
