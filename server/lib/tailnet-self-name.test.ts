@@ -124,6 +124,17 @@ describe('7.0.53: the bounded boot wait (X1 option i)', () => {
     const r = await awaitTailnetNameAtBoot(self, TAILNET_BOOT_WAIT, c)
     expect(r).toMatchObject({ name: NAME, attempts: 3 })
     expect(calls).toBe(3)
+    expect(r.waitedMs).toBe(2 * TAILNET_BOOT_WAIT.gapMs)   // two gaps, none after the find (mutant B3)
+  })
+  it('one lookup is bounded by its wait even when the lookup never answers (mutant B6)', async () => {
+    const self = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => '100.108.149.114', reverse: () => new Promise<string[]>(() => {}) })
+    const late = new Promise<'late'>(r => { const t = setTimeout(() => r('late'), 2_000); t.unref?.() })
+    expect(await Promise.race([self.lookupNow!(20), late])).toBeNull()
+  })
+  it('a lookup that throws does not end the wait: the next one still runs (mutant B8)', async () => {
+    let known: string | null = null, n = 0
+    const self = { currentSelfDnsName: () => known, lookupNow: async () => { if (++n === 1) throw new Error('resolver busy'); known = NAME; return NAME } }
+    expect(await awaitTailnetNameAtBoot(self, TAILNET_BOOT_WAIT, clock())).toMatchObject({ name: NAME, attempts: 2 })
   })
   it('the name never comes: null after exactly TAILNET_BOOT_WAIT.attempts lookups, the waits bounded', async () => {
     let calls = 0

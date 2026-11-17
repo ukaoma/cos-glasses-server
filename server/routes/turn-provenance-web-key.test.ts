@@ -25,7 +25,7 @@ import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { requireApiToken } from '../lib/api-auth.js'
 import { mintWebSessionCookieValue, setWebSessionEpochFile, isWebSessionAuthorized, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
-import { describeG2Turn, DESK_RULE_SCOPE_MEANING, G2TurnLedger, G2TurnProvenance, turnFooter, WEB_UNVOUCHED_REASON, type OriginRequest } from '../lib/g2-turn-provenance.js'
+import { describeG2Turn, DESK_RULE_SCOPE_MEANING, G2_TURN_VOUCH_MAX_MS, G2TurnLedger, G2TurnProvenance, turnFooter, WEB_UNVOUCHED_REASON, type OriginRequest } from '../lib/g2-turn-provenance.js'
 import { MESSAGE_SCOPE_MEANING, notAuthorizedFor, WEB_KEY_NEVER_AUTHORIZED } from '../../shared/web-turn-envelope.js'
 import { createAgentSessionBindingsRouter, type AgentSessionBindingsDeps, type BindingRegistry } from './agent-session-bindings.js'
 import { createThreadTurnQueueRouter, type ThreadTurnQueueDeps } from './thread-turn-queue.js'
@@ -344,6 +344,8 @@ describe.skipIf(!LAN)('flag on: a turn signed by the enrolled phone key', () => 
     expect((await turn(r.lan, 'ctwkDurable01', { ...webHeaders(r.lan), ...signed(s, 'ctwkDurable01') })).status).toBe(200)
     const restarted = new G2TurnProvenance({ ledger: new G2TurnLedger(s.ledgerFile), pairedInstance: () => null, webKey: s.authority })
     expect(await describeG2Turn(restarted, 'ctwkDurable01', Date.now())).toMatchObject({ sealed: false, verifiedOrigin: true, authority: 'web-key', scopeMeaning: DESK_RULE_SCOPE_MEANING, notAuthorized: [...WEB_KEY_NEVER_AUTHORIZED] })
+    // 7.0.53 (mutant K1): past the vouch limit the review is still clean, but the turn is refused, so it keeps the conversation labels.
+    expect(await describeG2Turn(restarted, 'ctwkDurable01', Date.now() + G2_TURN_VOUCH_MAX_MS + 60_000)).toMatchObject({ verifiedOrigin: false, reason: 'record_too_old', scopeMeaning: MESSAGE_SCOPE_MEANING, notAuthorized: notAuthorizedFor({ kind: 'message' }) })
     // A ledger line edited on disk (its signature swapped for another key's) vouches for nothing.
     const line = JSON.parse(readFileSync(s.ledgerFile, 'utf8').trim().split('\n').pop()!)
     line.webKey.signature = signB64(p256(), Buffer.from(line.webKey.envelope, 'base64url'))

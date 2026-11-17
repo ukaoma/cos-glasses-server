@@ -153,6 +153,20 @@ describe('7.0.53: the bounded boot wait for the name (X1 option i)', () => {
     env = { COS_WEB_KEY_DEVICES: device }; expect(activation.bootWaitWanted()).toBe(false)
     env = { COS_WEB_KEY_AUTHORITY: '1', COS_WEB_KEY_DEVICES: '100.101.102.104' }; expect(activation.bootWaitWanted()).toBe(false)
   })
+  it('no wait without a mature anchor, without an anchor, or when the registry throws (mutants W3, W4, W5)', () => {
+    accept(); reopen(); name = null
+    expect(activation.bootWaitWanted()).toBe(true)
+    const mature = vi.spyOn(registry, 'anchorMature').mockReturnValue(false)
+    expect(activation.bootWaitWanted()).toBe(false)
+    mature.mockRestore()
+    const none = vi.spyOn(registry, 'anchor').mockReturnValue(null)
+    vi.spyOn(registry, 'anchorMature').mockReturnValue(true)
+    expect(activation.bootWaitWanted()).toBe(false)
+    none.mockRestore()
+    vi.spyOn(registry, 'activationState').mockImplementation(() => { throw new Error('registry unreadable') })
+    expect(activation.bootWaitWanted()).toBe(false)
+    vi.restoreAllMocks()
+  })
   it('a name that arrives inside the wait arms; one that never comes leaves it off and status says why and how long', () => {
     accept(); reopen(); name = null
     activation.noteBootWait(14_000)

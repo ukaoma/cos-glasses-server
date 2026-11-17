@@ -97,6 +97,7 @@ describe('parseFeedItem keeps the new fields only when they fit, and never throw
     expect(item).not.toHaveProperty('superseded')
     expect(item.earlier?.map(e => e.excerpt)).toEqual(['e0', 'e1', 'e2'])   // the first DROP_LIMITS.earlier entries, the bad ones left out
     expect(parseFeedItem({ ...base(), count: 0 })).not.toHaveProperty('count')
+    expect(parseFeedItem({ ...base(), excerpt: '' })).not.toHaveProperty('excerpt')   // mutant P1
     expect(parseFeedItem({ ...base(), excerpt: 'x'.repeat(DROP_LIMITS.excerpt) }).excerpt).toHaveLength(DROP_LIMITS.excerpt)
   })
 })
@@ -113,6 +114,11 @@ describe('G3: one live Reply ready per session', () => {
     expect(by(a3)).not.toHaveProperty('superseded')
     expect(by(b1)).toMatchObject({ count: 1 })
     expect(by(b1)).not.toHaveProperty('earlier')
+    expect(by(a3).earlier!.map(e => e.at)).toEqual([new Date(WORK + 1).toISOString(), new Date(WORK).toISOString()])   // each turn's end (mutant G9)
+    const shape = by(a3)
+    expect(replyGroupOf(shape)).toBe(A)
+    expect(replyGroupOf({ ...shape, title: 'Finished' })).toBeNull()   // mutant G1
+    expect(replyGroupOf({ ...shape, kind: 'receipt' as FeedItem['kind'] })).toBeNull()   // mutant G10
     expect(feed.list()).toHaveLength(4)   // never deleted
     feed.close()
   })
