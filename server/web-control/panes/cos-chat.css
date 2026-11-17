@@ -446,3 +446,19 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .rr-e { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; font-size: 13.5px; color: var(--sub); min-height: 32px; align-items: center; }
 .rr-e-when { font-size: 12.5px; color: var(--tertiary); }
 .rr-e-said { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 7.0.53 the Answer box (the lead's 23:5x, the smaller box): under its row, empty, addressed to that one session. The
+   page's own textarea and buttons; 16 px words so a phone never zooms. Tokens only (amber.css restyles them). */
+.rr-answer { margin: 10px 0 2px; display: grid; gap: 8px; }
+.rr-to { margin: 0; font-size: 13px; line-height: 1.4; color: var(--sub); overflow-wrap: anywhere; }
+.rr-to strong { font-weight: 600; color: var(--ink); }
+.rr-input { width: 100%; min-height: 44px; max-height: 200px; padding: 11px 12px; font-size: 16px; line-height: 1.4; border-radius: 12px; resize: vertical; }
+.rr-caution { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--tertiary); }
+.rr-verdict:empty { display: none; }
+.rr-verdict .sx-box, .rr-verdict .sx-park { margin: 0; }
+.rr-note { margin: 0; font-size: 13px; line-height: 1.45; color: var(--sub); }
+.rr-note:empty { display: none; }
+.rr-note.error { color: var(--hot); }
+.rr-answer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.rr-answer-actions .cx-btn { min-height: 40px; }
+.rr-answer-actions .link-btn { color: var(--sub); }
