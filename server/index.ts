@@ -1970,6 +1970,8 @@ listenRequiredServers(listeners).then(() => {
   }
   console.log(`[COS API] HTTP server running on http://${BIND_HOST}:${PORT}`)
   console.log(`[COS API] Server instance: ${serverInstanceId}`)
+  // 7.0.53 (D4's 60 s managed-health deadline): spawn-to-listen time, so each install measures it (the logs carry no timestamps).
+  console.log(`[boot] listening ${Math.round(performance.now())} ms after process start`)
   console.log(`[COS API] Mode: ${COS_MODE ? 'COS pipeline' : 'standalone'}`)
 
   if (!startupAdmissionsOpen) {
