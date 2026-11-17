@@ -1123,9 +1123,13 @@
     MK.soon = null;
     var rail = document.querySelector('.rail-head .mk'), bar = document.querySelector('#section-btn .mk');
     var working = mkWorking();
-    [rail, bar].forEach(function (m) { if (m && m.getAttribute('data-mk') !== (working ? 'work' : 'rest')) m.setAttribute('data-mk', working ? 'work' : 'rest'); });
+    // 7.0.55 (the lead 09:32): live glass rows on screen take the motion; the rail and top-bar marks then rest (the still)
+    // and no strip plays. Else the rail, else the top bar, else (the glass off or failed) the first working strip row.
+    var glass = rgAnimating();
+    var says = working && !glass ? 'work' : 'rest';
+    [rail, bar].forEach(function (m) { if (m && m.getAttribute('data-mk') !== says) m.setAttribute('data-mk', says); });
     var pick = null;
-    if (working && !document.hidden && !mkReduced()) {
+    if (working && !glass && !document.hidden && !mkReduced()) {
       if (mkOnScreen(rail)) pick = rail;
       else if (mkOnScreen(bar)) pick = bar;
       else {
@@ -1148,6 +1152,7 @@
   function mkSoon() {
     if (typeof document === 'undefined' || !document) return;
     if (!MK.wired) mkWire();
+    rgWake();
     if (document.hidden) { clearTimeout(MK.soon); mkSync(); return; }   // hidden: stop at once, no timer
     if (MK.soon) return;
     MK.soon = setTimeout(mkSync, 50);
@@ -1173,6 +1178,53 @@
       }
     } catch (_e) {}
   }
+  // ── 7.0.55: live glass on the Running rows (A1's run-glass.js, adopted; the lead 09:32 and 09:4x) ──
+  // run-glass.js loads lazily (index.html #lazy-panes: runGlass) the first time a Running row works or waits, and draws
+  // ONE canvas over the Running panel into each row's .rg-slot. While it is mounted the panel carries .rg-on: the slots
+  // show and the 7.0.54 strip marks hide (app.css). No WebGL, a shader that fails, or a lost context: .rg-on goes, the
+  // strips come back, and this page never tries again. What it is told is only true: Working or Waiting as the row says,
+  // a done and total only from the session's own subagent_activity, and activity only from last_activity_at (which the
+  // live stream moves; the module drops at most one bead a second, and none without a later time).
+  var RG = { failed: false, panel: null, loading: false, list: null, rows: [] };
+  function rgSlot(st, key) { return st ? '<span class="rg-slot" data-rg-key="' + esc(key) + '"></span>' : ''; }
+  function rgRow(s, activeNow) {
+    var k = splitSessionId(s.provider, s.session_id), st = sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '';
+    if (!st) return null;
+    var a = s.subagent_activity, at = Date.parse(s.last_activity_at || '');
+    return { key: k.provider + '|' + k.id, state: st,
+      done: a && typeof a.completed === 'number' ? a.completed : null, total: a && typeof a.total === 'number' ? a.total : null,
+      activityAt: isFinite(at) ? at : null };
+  }
+  function rgGlass() { var G = typeof window !== 'undefined' ? window.CosRunGlass : null; return G && typeof G.sync === 'function' ? G : null; }
+  function rgFail() {
+    RG.failed = true; RG.panel = null;
+    document.querySelectorAll('.run-panel.rg-on').forEach(function (p) { p.classList.remove('rg-on'); });
+    mkSoon();
+  }
+  /** After the Running rows are drawn: mount once on their panel, then tell the glass what the rows say. */
+  function rgRender(list, rows) {
+    RG.list = list; RG.rows = (rows || []).filter(Boolean);
+    if (RG.failed) return;
+    var panel = list && list.closest ? list.closest('.run-panel') : null, G = rgGlass();
+    if (!panel) return;
+    if (!G) {
+      if (!RG.rows.length || RG.loading || typeof ensurePane !== 'function') return;
+      RG.loading = true;
+      ensurePane('runGlass').then(function () { RG.loading = false; if (rgGlass()) rgRender(RG.list, RG.rows); else rgFail(); },
+        function () { RG.loading = false; rgFail(); });
+      return;
+    }
+    if (RG.panel !== panel) {
+      if (!G.mount(panel, { onFail: rgFail })) { rgFail(); return; }
+      RG.panel = panel; panel.classList.add('rg-on');
+    }
+    G.sync(RG.rows);
+    // Who plays may have changed (Codex 11:4x): on the lazy path the glass mounts after renderRunning's own look ran, so the
+    // rail or top-bar mark would keep playing beside it until the next scroll or the 15 s look.
+    mkSoon();
+  }
+  function rgWake() { var G = RG.panel ? rgGlass() : null; if (G && typeof G.wake === 'function') { try { G.wake(); } catch (_e) {} } }
+  function rgAnimating() { var G = RG.panel && !RG.failed ? rgGlass() : null; try { return !!(G && typeof G.animating === 'function' && G.animating()); } catch (_e) { return false; } }
   // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions"): a session that has just gone to waiting may have
   // parked a question for this page. The question poll (panes/questions.js) reads at once rather than at its next turn.
   function questionsNudge() {
@@ -2181,6 +2233,7 @@
   function listWords(names) { return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]; }
   function runRow(s, activeNow) {
     var key = splitSessionId(s.provider, s.session_id);
+    var mkSt = typeof mkRow === 'function' || typeof rgSlot === 'function' ? (sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '') : '';
     // 7.0.1: with the live stream, a working row's clock ticks every second from the turn's start (liveTickOnce).
     // Without it (an older server, the switch off), the minute line 7.0.0 showed.
     var since = activeNow && typeof liveOn === 'function' && liveOn() ? liveSince(s) : null;
@@ -2193,7 +2246,7 @@
       : esc(meta);
     // A tap opens the peek on Today (panes/today-actions.js); it falls back to the reader if the peek cannot load.
     return '<button type="button" class="run-row" data-today="run" data-key="' + esc(key.provider) + '|' + esc(key.id) + '">' +
-      '<span class="run-who">' + badge(key.provider) + (typeof mkRow === 'function' ? mkRow(sxState(s) === 'waiting' ? 'wait' : activeNow ? 'work' : '') : '') + '</span>' +
+      '<span class="run-who">' + badge(key.provider) + (typeof rgSlot === 'function' ? rgSlot(mkSt, key.provider + '|' + key.id) : '') + (typeof mkRow === 'function' ? mkRow(mkSt) : '') + '</span>' +
       '<span class="run-title">' + esc(sessionTitle(s)) + '</span>' +
       '<span class="run-meta">' + metaHtml + '</span></button>';
   }
@@ -2207,7 +2260,7 @@
     // Today says about it; the panel shows again the moment a session or a COS job runs.
     var panel = list.closest ? list.closest('.run-panel') : null;
     if (panel && panel.classList) panel.classList.toggle('hidden', !jobs.n && (TODAY.sessionsState === 'failed' || (TODAY.sessionsState === 'answered' && !working.length && !open.length)));
-    if (TODAY.sessionsState === 'failed') { list.innerHTML = jobs.html + '<button type="button" class="run-more run-failed" data-today-needs="retry">Couldn\u2019t read sessions. Try again</button>'; if (typeof mkSoon === 'function') mkSoon(); return; }
+    if (TODAY.sessionsState === 'failed') { list.innerHTML = jobs.html + '<button type="button" class="run-more run-failed" data-today-needs="retry">Couldn\u2019t read sessions. Try again</button>'; if (typeof rgRender === 'function') rgRender(list, []); if (typeof mkSoon === 'function') mkSoon(); return; }
     var shown = working.slice(0, 3);
     var html = jobs.html + shown.map(function (s) { return runRow(s, true); }).join('');
     if (!shown.length) {
@@ -2217,6 +2270,7 @@
     var more = (working.length - shown.length) + (shown.length ? open.length : Math.max(0, open.length - 2));
     if (more > 0) html += '<button type="button" class="run-more" data-goto="sessions">' + countWord(more) + ' more open. All sessions</button>';
     list.innerHTML = html;
+    if (typeof rgRender === 'function') rgRender(list, shown.length ? shown.map(function (s) { return rgRow(s, true); }) : open.slice(0, 2).map(function (s) { return rgRow(s, false); }));
     if (typeof mkSoon === 'function') mkSoon();
     if (typeof liveTickStart === 'function' && list.querySelector && list.querySelector('[data-live-since]')) liveTickStart();
   }

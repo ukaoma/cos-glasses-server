@@ -758,6 +758,16 @@ html { touch-action: manipulation; }
 @media (min-width: 1100px) and (min-height: 721px) { .rail-head .mk .mk-w { inset: -2px; } }
 @media (prefers-reduced-motion: reduce) { .mk.mk-live .mk-s { animation-name: none !important; } }
 
+/* 7.0.55: live glass on the Running rows (run-glass.js, A1; folded here from A1's run-glass.css so it boots with the page,
+   the boot style list being fixed). The canvas lies over the panel and draws only in the slots; the slot is the badge
+   line's own height (36 x 20 beside a 22 or 24 px badge), so no row grows. The slots show only while the glass is mounted
+   (.rg-on, app.js rgRender); otherwise, or after a failure, the 7.0.54 strip marks stay. */
+.run-panel { position: relative; }
+.rg-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+.rg-slot { display: none; width: 36px; height: 20px; flex: none; }
+.run-panel.rg-on .rg-slot { display: inline-block; }
+.run-panel.rg-on .mk-row { display: none; }
+
 /* ── 7.0.29: the folded Duo's side rail (Miles 21:39 "These side buttons are a must on the duo"; 21:42 tall phones keep
    the top menu). theme.js sets html.short-screen from the screen's shape; this draws it only under 600 px on a touch
    screen, so nothing changes from 600 px, on a mouse, or on a tall phone. It is the same nav.rail as the wide rail, so
