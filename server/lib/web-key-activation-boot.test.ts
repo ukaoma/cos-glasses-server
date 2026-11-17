@@ -25,6 +25,12 @@ it('bounded name lookup and Off reconciliation precede one boot decision and eve
   expect(lookup).toBeGreaterThan(index.indexOf('const tailnetSelf ='))
   expect(off).toBeGreaterThan(lookup); expect(arm).toBeGreaterThan(off); expect(integrity).toBeGreaterThan(arm); expect(listeners).toBeGreaterThan(integrity)
   expect(index.split('webKeyActivation.armAtBoot()')).toHaveLength(2)
+  // 7.0.53 (the boot race; X1 option i): the bounded wait for the name sits between the 2 s lookup and Off, only when arming is wanted.
+  const wait = index.indexOf('if (!tailnetSelf.currentSelfDnsName() && webKeyActivation.bootWaitWanted()) {')
+  expect(wait).toBeGreaterThan(lookup); expect(off).toBeGreaterThan(wait)
+  expect(index.split('await awaitTailnetNameAtBoot(tailnetSelf)')).toHaveLength(2)
+  expect(index.indexOf('await awaitTailnetNameAtBoot(tailnetSelf)')).toBeGreaterThan(wait)
+  expect(index.indexOf('await awaitTailnetNameAtBoot(tailnetSelf)')).toBeLessThan(off)
 })
 it('Off/invalidated name closes authority, cancels pending requests and hands independently enabled3143 back to its own manager', () => {
   expect(index).toContain('webKeyEnrollments.invalidatePending()')

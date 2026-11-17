@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createTailnetSelfName } from './tailnet-self-name.js'
+import { TAILNET_BOOT_WAIT, awaitTailnetNameAtBoot, createTailnetSelfName } from './tailnet-self-name.js'
 import { isAllowedCorsOrigin } from '../routes/web-control.js'
 
 const NAME = 'ukaoma-mac-studio.tail38457f.ts.net'
@@ -103,5 +103,46 @@ describe('tailnet self name (MagicDNS reverse lookup)', () => {
     expect(late.lastMiss!()).toBe('no_tailscale_ip')
     nudge = NAME
     expect(late.lastMiss!()).toBeNull()
+  })
+})
+
+describe('7.0.53: the bounded boot wait (X1 option i)', () => {
+  const clock = () => { let t = 0; return { now: () => t, sleep: async (ms: number) => { t += ms } } }
+  it('lookupNow looks again past the miss caches that refresh() and refreshIfMissing() honour', async () => {
+    let answer: string[] = []
+    const self = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => '100.108.149.114', reverse: async () => answer, now: () => 1_000_000 })
+    expect(await self.refreshIfMissing()).toBeNull()
+    answer = [NAME]
+    expect(await self.refresh()).toBeNull()             // the miss is cached
+    expect(await self.refreshIfMissing()).toBeNull()    // and refreshIfMissing waits its window
+    expect(await self.lookupNow!(1_500)).toBe(NAME)      // a fresh lookup
+  })
+  it('the name fails N times, then comes inside the window: found, after N + 1 lookups', async () => {
+    let calls = 0
+    const self = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => '100.108.149.114', reverse: async () => (++calls >= 3 ? [NAME] : []) })
+    const c = clock()
+    const r = await awaitTailnetNameAtBoot(self, TAILNET_BOOT_WAIT, c)
+    expect(r).toMatchObject({ name: NAME, attempts: 3 })
+    expect(calls).toBe(3)
+  })
+  it('the name never comes: null after exactly TAILNET_BOOT_WAIT.attempts lookups, the waits bounded', async () => {
+    let calls = 0
+    const self = createTailnetSelfName({ nudgerName: () => null, tailscaleIpv4: () => '100.108.149.114', reverse: async () => { calls++; return [] } })
+    const c = clock()
+    const r = await awaitTailnetNameAtBoot(self, TAILNET_BOOT_WAIT, c)
+    expect(r.name).toBeNull()
+    expect(r.attempts).toBe(TAILNET_BOOT_WAIT.attempts)
+    expect(calls).toBe(TAILNET_BOOT_WAIT.attempts)
+    expect(r.waitedMs).toBe((TAILNET_BOOT_WAIT.attempts - 1) * TAILNET_BOOT_WAIT.gapMs)   // the fake clock counts only the gaps
+  })
+  it('a name known already: no lookup at all', async () => {
+    let calls = 0
+    const self = createTailnetSelfName({ nudgerName: () => NAME, tailscaleIpv4: () => '100.108.149.114', reverse: async () => { calls++; return [] } })
+    expect(await awaitTailnetNameAtBoot(self, TAILNET_BOOT_WAIT, clock())).toEqual({ name: NAME, waitedMs: 0, attempts: 0 })
+    expect(calls).toBe(0)
+  })
+  it('the whole wait stays bounded: at most attempts x waitMs + (attempts - 1) x gapMs, under 20 s', () => {
+    const worst = TAILNET_BOOT_WAIT.attempts * TAILNET_BOOT_WAIT.waitMs + (TAILNET_BOOT_WAIT.attempts - 1) * TAILNET_BOOT_WAIT.gapMs
+    expect(worst).toBeLessThan(20_000)
   })
 })

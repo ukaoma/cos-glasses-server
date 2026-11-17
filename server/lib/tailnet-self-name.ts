@@ -31,6 +31,12 @@ export const TAILNET_NAME_ON_DEMAND_MIN_MS = 30_000
 /** refreshIfMissing(): the longest a request waits for that lookup (the lookup itself is bounded by the resolver timeout). */
 export const TAILNET_NAME_ON_DEMAND_WAIT_MS = 2_000
 const MAGIC_DNS_RESOLVER = '100.100.100.100'
+/**
+ * 7.0.53 (the boot race; X1's option i): when phone approvals would arm, boot retries the name this many times, each a fresh lookup
+ * (past the miss caches) waited at most `waitMs`, `gapMs` apart, before the one arming decision. Same local source only (the nudger,
+ * then this Mac's Tailscale IPv4 at MagicDNS). The total stays under Control's readiness deadline (D4).
+ */
+export const TAILNET_BOOT_WAIT = { attempts: 6, waitMs: 1_500, gapMs: 1_000 } as const
 
 export interface TailnetSelfNameDeps {
   /** The nudger's own reading, preferred whenever it has one. */
@@ -56,6 +62,8 @@ export interface TailnetSelfName {
    * running and caches its answer for the next reader. Never throws.
    */
   refreshIfMissing(waitMs?: number): Promise<string | null>
+  /** 7.0.53: a name known now, or one fresh lookup (joining one in flight), past every cache, waited at most `waitMs`. Never throws. */
+  lookupNow?(waitMs: number): Promise<string | null>
   /**
    * X1 (7.0.42): why the last lookup found no name, or null after a hit (or before any lookup). Optional so
    * hand-made fakes need not carry it. Never a name or an address.
@@ -155,7 +163,18 @@ export function createTailnetSelfName(deps: TailnetSelfNameDeps = {}): TailnetSe
     })
   }
 
-  return { currentSelfDnsName, refresh, queryStatus: refresh, refreshIfMissing, lastMiss: () => (currentSelfDnsName() ? null : miss) }
+  const lookupNow = (waitMs: number): Promise<string | null> => {
+    const known = currentSelfDnsName()
+    if (known) return Promise.resolve(known)
+    const pending = lookup()
+    return new Promise<string | null>(resolve => {
+      const timer = setTimeout(() => resolve(null), Math.max(0, waitMs))
+      timer.unref?.()
+      pending.then(name => { clearTimeout(timer); resolve(name) }, () => { clearTimeout(timer); resolve(null) })
+    })
+  }
+
+  return { currentSelfDnsName, refresh, queryStatus: refresh, refreshIfMissing, lookupNow, lastMiss: () => (currentSelfDnsName() ? null : miss) }
 }
 
 let singleton: TailnetSelfName | null = null
@@ -167,4 +186,30 @@ export function installTailnetSelfName(deps: TailnetSelfNameDeps): TailnetSelfNa
 export function getTailnetSelfName(): TailnetSelfName {
   if (!singleton) singleton = createTailnetSelfName()
   return singleton
+}
+
+/**
+ * 7.0.53: the bounded boot wait for the name (TAILNET_BOOT_WAIT). Returns the name or null, how long it waited and how many
+ * lookups it made. Never throws; never more than `attempts` lookups.
+ */
+export async function awaitTailnetNameAtBoot(
+  self: Pick<TailnetSelfName, 'currentSelfDnsName' | 'lookupNow'>,
+  opts: { attempts: number; waitMs: number; gapMs: number } = TAILNET_BOOT_WAIT,
+  deps: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<{ name: string | null; waitedMs: number; attempts: number }> {
+  const now = deps.now ?? (() => Date.now())
+  const sleep = deps.sleep ?? (ms => new Promise<void>(r => { const t = setTimeout(r, ms); t.unref?.() }))
+  const start = now()
+  let made = 0
+  for (let i = 0; i < opts.attempts; i++) {
+    const known = self.currentSelfDnsName()
+    if (known) return { name: known, waitedMs: now() - start, attempts: made }
+    if (!self.lookupNow) break
+    made++
+    let name: string | null = null
+    try { name = await self.lookupNow(opts.waitMs) } catch { name = null }
+    if (name) return { name, waitedMs: now() - start, attempts: made }
+    if (i < opts.attempts - 1) await sleep(opts.gapMs)
+  }
+  return { name: self.currentSelfDnsName(), waitedMs: now() - start, attempts: made }
 }

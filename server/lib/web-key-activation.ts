@@ -81,7 +81,28 @@ export class WebKeyActivation {
     if (!webKeyAuthorityEnabled(env) && (state?.grant || state?.pending) && !this.off().ok) throw new Error('Cannot durably invalidate phone authority activation')
   }
   status(): Record<string, unknown> {
-    return { activationProtocol: WEB_AUTHORITY_ACTIVATION_PROTOCOL, activationEpoch: this.deps.registry.activationEpoch(), activationAccepted: this.accepted() }
+    return { activationProtocol: WEB_AUTHORITY_ACTIVATION_PROTOCOL, activationEpoch: this.deps.registry.activationEpoch(), activationAccepted: this.accepted(),
+      ...(this.bootResolved ? { bootArm: { armed: this.enabled(), reason: this.bootArmReason(), waitedMs: this.bootWaitMs } } : {}) }
+  }
+  /**
+   * 7.0.53 (the boot race): whether arming could happen if the name were known, so boot may wait for the name: authority on, a
+   * grant whose device is this Mac's configured phone, and a mature anchor. Everything accepted() checks except the name.
+   */
+  bootWaitWanted(): boolean {
+    try {
+      const env = (this.deps.env ?? (() => process.env))()
+      const g = this.deps.registry.activationState()?.grant
+      const parsed = g ? parseAuthorityOn(g.statement) : null
+      return !!(webKeyAuthorityEnabled(env) && parsed && env.COS_WEB_KEY_DEVICES === parsed.value.device && this.deps.registry.anchor() && this.deps.registry.anchorMature())
+    } catch { return false }
+  }
+  private bootWaitMs: number | null = null
+  /** 7.0.53: how long boot waited for the name before arming (null: it did not wait). */
+  noteBootWait(waitedMs: number | null): void { this.bootWaitMs = waitedMs }
+  private bootArmReason(): string | null {
+    if (this.enabled()) return null
+    if (!this.bootWaitWanted()) return 'not_configured'
+    return this.deps.selfDnsName() === null ? 'tailnet_name_unknown_at_boot' : 'not_accepted_at_boot'
   }
   challenge(device: unknown): { ok: true; statement: string } | { ok: false; reason: string } {
     const r = this.deps.registry

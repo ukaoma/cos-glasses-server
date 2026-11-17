@@ -254,7 +254,7 @@ import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlE
 import { webControlOffnetResponse } from './lib/web-control-offnet-page.js'
 import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
-import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
+import { awaitTailnetNameAtBoot, getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { createSignerTlsForBoot, signerHttpsOptions, SIGNER_TLS_CERT_FILE, SIGNER_TLS_DIR, type SignerTls } from './lib/web-key-signer-tls.js'
 import { guardSignerConnections, signerConnectionAllowed, keepSignerBind, planSignerBind, readCertDisclosure, SIGNER_BIND_FIX_VERSION, signerBindStatus, type SignerBindPlan } from './lib/web-key-signer-bind.js'
 import { controlHttpsOptions, controlTsnetHttpsEnabled, controlTsnetSelfDnsName, createControlTsnetTlsForBoot, registerControlTsnetTls, type ControlTsnetTls } from './lib/control-tsnet-tls.js'
@@ -1769,6 +1769,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // disk server behind it. Read once at boot.
 // Resolve the disclosed name before planning any authority surface. Unknown: closed until managed restart.
 await tailnetSelf.refreshIfMissing()
+// 7.0.53 (the boot race; X1's option i): when phone approvals would arm but the name is still unknown, wait for it a bounded time
+// (TAILNET_BOOT_WAIT, same local source) before the one arming decision. Authority off or no grant: no wait, boot as before.
+if (!tailnetSelf.currentSelfDnsName() && webKeyActivation.bootWaitWanted()) {
+  const waited = await awaitTailnetNameAtBoot(tailnetSelf)
+  webKeyActivation.noteBootWait(waited.waitedMs)
+  console.log(`[web-key] boot waited ${waited.waitedMs} ms for the tailnet name (${waited.attempts} lookups): ${waited.name ? 'found' : 'still unknown'}`)
+}
 // An env-Off restart is also a durable Off for old accepted grants/pending challenges. Legacy registries are untouched.
 webKeyActivation.reconcileOffAtBoot()
 webKeyActivation.armAtBoot()

@@ -144,3 +144,28 @@ it('closing planned authority surfaces cannot silently rearm when a renamed name
   name = 'renamed.tail00000a.ts.net'; expect(activation.enabled()).toBe(false); activation.disarm()
   name = SELF_DNS; expect(activation.accepted()).toBe(true); expect(activation.enabled()).toBe(false); expect(activation.armAtBoot()).toBe(false)
 })
+
+describe('7.0.53: the bounded boot wait for the name (X1 option i)', () => {
+  it('bootWaitWanted needs authority on, a grant for this device and a mature anchor, never the name', () => {
+    expect(activation.bootWaitWanted()).toBe(false)   // no grant yet
+    accept(); reopen(); name = null
+    expect(activation.bootWaitWanted()).toBe(true)
+    env = { COS_WEB_KEY_DEVICES: device }; expect(activation.bootWaitWanted()).toBe(false)
+    env = { COS_WEB_KEY_AUTHORITY: '1', COS_WEB_KEY_DEVICES: '100.101.102.104' }; expect(activation.bootWaitWanted()).toBe(false)
+  })
+  it('a name that arrives inside the wait arms; one that never comes leaves it off and status says why and how long', () => {
+    accept(); reopen(); name = null
+    activation.noteBootWait(14_000)
+    expect(activation.armAtBoot()).toBe(false)
+    expect(activation.status().bootArm).toEqual({ armed: false, reason: 'tailnet_name_unknown_at_boot', waitedMs: 14_000 })
+    name = SELF_DNS; expect(activation.armAtBoot()).toBe(false)   // still one-shot: a name after the window never arms
+    reopen(); name = SELF_DNS; activation.noteBootWait(3_000)
+    expect(activation.armAtBoot()).toBe(true)
+    expect(activation.status().bootArm).toEqual({ armed: true, reason: null, waitedMs: 3_000 })
+  })
+  it('not configured: no wait wanted, and the reason says so', () => {
+    reopen(); env = {}
+    expect(activation.armAtBoot()).toBe(false)
+    expect(activation.status().bootArm).toEqual({ armed: false, reason: 'not_configured', waitedMs: null })
+  })
+})
