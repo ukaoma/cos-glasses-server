@@ -60,7 +60,28 @@ export type UsageFailureCode = 'no_limits' | 'unknown_shape' | 'refused' | 'time
   // 7.0.45, Cursor's read: the Keychain item missing, refused or locked; its sign-in expired (or a 401/403); a redirect; another HTTP status.
   | 'sign_in_missing' | 'keychain_refused' | 'keychain_locked' | 'sign_in_expired' | 'redirected' | 'http_error' | 'tls_off'
 export class UsageProbeError extends Error {
-  constructor(readonly code: UsageFailureCode, message: string) { super(message) }
+  /** 7.0.54: for an unrecognised reply only, its key names and value types (replyKeyShape), never a value. Logged on the
+   *  one failure line; never stored, served or put in the message. */
+  constructor(readonly code: UsageFailureCode, message: string, readonly keyShape: string | null = null) { super(message) }
+}
+
+/** 7.0.54 (lead 2026-11-17 08:0x, after the 22:50 unknown_shape that left no clue): an unrecognised usage reply's key
+ *  names and value types, never a value, capped at REPLY_SHAPE_MAX characters. A key that is not a plain identifier is
+ *  shown as "?", so a map keyed by anything personal cannot leak through its keys. Arrays show their first item and length. */
+export const REPLY_SHAPE_MAX = 400
+export function replyKeyShape(value: unknown, max = REPLY_SHAPE_MAX): string {
+  const walk = (v: unknown, depth: number): string => {
+    if (v === null) return 'null'
+    if (Array.isArray(v)) return v.length ? `[${walk(v[0], depth + 1)}]x${v.length}` : '[]'
+    if (typeof v === 'object') {
+      if (depth > 4) return '{…}'
+      const keys = Object.keys(v as object)
+      return `{${keys.slice(0, 20).map(k => `${/^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(k) ? k : '?'}:${walk((v as Record<string, unknown>)[k], depth + 1)}`).join(',')}${keys.length > 20 ? `,…+${keys.length - 20}` : ''}}`
+    }
+    return typeof v
+  }
+  const s = walk(value, 0)
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
 /** The only failure words a client may read (route note, Work chat, log): the fixed messages the probes write. Anything
@@ -339,7 +360,8 @@ export class UsageMonitor {
         // One line per failed read, a code and times only (no plan, account or reply text). Before 7.0.39 only the breaker's
         // pause was logged, so a failed read (Claude's no_limits on 2026-11-14) left no trace in the server log.
         const until = Math.max(e.pausedUntil ?? 0, e.holdUntil ?? 0)
-        console.warn(`[work-orchestrator] usage probe ${p} failed: ${code}; ${e.failures} in a row; last good read ${e.observedAt ? new Date(e.observedAt).toISOString() : 'never'}${until > now ? `; next read after ${new Date(until).toISOString()}` : ''}`)
+        const shape = error instanceof UsageProbeError && code === 'unknown_shape' && error.keyShape ? `; reply keys ${error.keyShape}` : ''
+        console.warn(`[work-orchestrator] usage probe ${p} failed: ${code}; ${e.failures} in a row; last good read ${e.observedAt ? new Date(e.observedAt).toISOString() : 'never'}${until > now ? `; next read after ${new Date(until).toISOString()}` : ''}${shape}`)
       } finally { delete this.inflight[p]; this.save() }
     })()
     this.inflight[p] = run
@@ -464,7 +486,7 @@ export function probeClaudeUsage(spawnFn: SpawnLines = spawnLines, timeoutMs = U
       const c = classifyClaudeUsage(o.response.response)
       if ('reading' in c) finish(null, c.reading)
       else if (c.code === 'no_limits') finish(new UsageProbeError('no_limits', 'Claude gave no plan limits (its usage service may be refusing reads)'))
-      else finish(new UsageProbeError('unknown_shape', 'unknown get_usage shape'))
+      else finish(new UsageProbeError('unknown_shape', 'unknown get_usage shape', replyKeyShape(o.response.response)))
     })
     child.onExit(code => finish(new UsageProbeError('exited', `exited ${code ?? 'on error'} before answering`)))
     for (const line of CLAUDE_USAGE_LINES) child.write(JSON.stringify(line))
@@ -488,7 +510,7 @@ export function probeCodexUsage(spawnFn: SpawnLines = spawnLines, timeoutMs = US
       if (o.id !== 2) return
       if (o.error) return finish(new UsageProbeError('refused', 'rateLimits/read refused'))
       const reading = parseCodexUsage(o.result)
-      if (reading) finish(null, reading); else finish(new UsageProbeError('unknown_shape', 'unknown rateLimits shape'))
+      if (reading) finish(null, reading); else finish(new UsageProbeError('unknown_shape', 'unknown rateLimits shape', replyKeyShape(o.result)))
     })
     child.onExit(code => finish(new UsageProbeError('exited', `exited ${code ?? 'on error'} before answering`)))
     child.write(JSON.stringify(CODEX_INIT))

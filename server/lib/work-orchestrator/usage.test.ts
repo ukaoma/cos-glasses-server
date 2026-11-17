@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, windowLive, probeClaudeUsage, probeCodexUsage,
   CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines,
-  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS, USAGE_FAILURE_HOLD_MS, providerOrder, clockWords } from './usage.js'
+  classifyClaudeUsage, UsageProbeError, USAGE_NO_LIMITS_HOLD_MS, USAGE_FAILURE_HOLD_MS, providerOrder, clockWords, replyKeyShape, REPLY_SHAPE_MAX } from './usage.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -350,5 +350,48 @@ describe('7.0.41: reopening Usage never retries a failed read sooner than 10 min
     now = NOW + USAGE_FAILURE_HOLD_MS + 1000
     await m.onDemand()
     expect(claude).toHaveBeenCalledTimes(2)
+  })
+})
+
+// 7.0.54 (lead 2026-11-17 08:0x): the 22:50 unknown_shape left no clue. An unrecognised reply's key names and value
+// types (never a value) now go on that one failure line, capped; nothing of it is stored or served.
+describe('an unrecognised usage reply is logged by its key shape, never its values', () => {
+  const odd = { subscription_type: 'max_secret_plan', rate_limits_available: true,
+    rate_limits: { windows: [{ name: 'weekly', used: 55, reset: '2026-11-22T17:00:00Z' }, { name: 'session', used: 9 }] },
+    'user@example.com': { org: 'acme-secret' }, model_usage: {} }
+  it('names keys and types only; an odd key shows as ?; arrays show their first item and length; capped', () => {
+    const s = replyKeyShape(odd)
+    expect(s).toBe('{subscription_type:string,rate_limits_available:boolean,rate_limits:{windows:[{name:string,used:number,reset:string}]x2},?:{org:string},model_usage:{}}')
+    for (const value of ['max_secret_plan', '55', 'weekly', '2026-11-22', 'user@example.com', 'acme-secret']) expect(s).not.toContain(value)
+    const wide = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`key_number_${i}`, { nested: { deeper: [i] } }]))
+    expect(replyKeyShape(wide).length).toBeLessThanOrEqual(REPLY_SHAPE_MAX)
+    expect(replyKeyShape(wide)).toMatch(/…/)
+  })
+  it('both probes attach the shape to their unknown_shape failure; the message stays the fixed words', async () => {
+    const f = fakeSpawn((line, emit) => { if (line.request?.subtype === 'get_usage') emit({ type: 'control_response', response: { subtype: 'success', request_id: 'cos_usage', response: odd } }) })
+    const e = await probeClaudeUsage(f.spawnFn, 2000).catch(x => x)
+    expect(e).toBeInstanceOf(UsageProbeError)
+    expect([e.code, e.message, e.keyShape]).toEqual(['unknown_shape', 'unknown get_usage shape', replyKeyShape(odd)])
+    const c = fakeSpawn((line, emit) => { if (line.id === 1) emit({ id: 1, result: {} }); if (line.id === 2) emit({ id: 2, result: { odd: 'secret-value', n: 3 } }) })
+    const ce = await probeCodexUsage(c.spawnFn, 2000).catch(x => x)
+    expect([ce.code, ce.message, ce.keyShape]).toEqual(['unknown_shape', 'unknown rateLimits shape', '{odd:string,n:number}'])
+  })
+  it('the monitor logs it on the one failure line, and stores only the fixed words', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-usage-shape-'))
+    const lines: string[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(' ')) })
+    try {
+      const path = join(dir, 'usage.json')
+      const m = new UsageMonitor({ path, probes: {
+        claude: async () => { throw new UsageProbeError('unknown_shape', 'unknown get_usage shape', replyKeyShape(odd)) },
+        codex: async () => { throw new UsageProbeError('no_limits', 'Claude gave no plan limits (its usage service may be refusing reads)', '{should:never_print}') } }, now: () => NOW })
+      await m.refresh('claude'); await m.refresh('codex')
+      const claudeLine = lines.find(l => l.includes('usage probe claude failed: unknown_shape'))!
+      expect(claudeLine).toContain(`; reply keys ${replyKeyShape(odd)}`)
+      expect(lines.find(l => l.includes('usage probe codex failed'))).not.toContain('reply keys')
+      expect(m.entry('claude').lastError).toBe('unknown get_usage shape')
+      const saved = readFileSync(path, 'utf8')
+      expect(saved).not.toContain('reply keys'); expect(saved).not.toContain('rate_limits_available:boolean')
+    } finally { warn.mockRestore(); rmSync(dir, { recursive: true, force: true }) }
   })
 })
