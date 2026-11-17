@@ -419,3 +419,30 @@ describe('Back from Open result keeps his place in the COS chat', () => {
     })
   }
 })
+
+// 7.0.53 (Codex 3712d0a4 P2): a Reply ready row is one row per session, so a newer reply gives it a new newest item id
+// and moves it to its new place in time. A quiet repaint must still hold the row he is reading.
+describe('a Reply ready row being read stays put when a newer reply changes and moves it', () => {
+  for (const wide of [true, false]) {
+    it(`${wide ? 'wide feed' : 'narrow page'}: the row keeps its height on screen through the repaint`, async () => {
+      const h = fixture(wide)
+      let id = 'fi_1', off = 900, move = false, html = ''
+      Object.defineProperty(h.feed, 'innerHTML', { get: () => html, set(v: string) { html = v; if (move) { id = 'fi_2'; off = 1400; move = false } }, configurable: true })
+      const row = {
+        getBoundingClientRect: () => ({ top: off - h.scroll.scrollTop, bottom: off + 80 - h.scroll.scrollTop }),
+        hasAttribute: (a: string) => a === 'data-rr-row' || a === 'data-item-id',
+        getAttribute: (a: string) => (a === 'data-rr-row' ? 'claude|A' : a === 'data-item-id' ? id : null),
+      }
+      const feedQ = h.feed.querySelector
+      h.feed.querySelectorAll = (s: string) => (/data-item-id/.test(s) ? [row] : [])
+      h.feed.querySelector = (s: string) => (s === '[data-rr-row="claude|A"]' || s === `[data-item-id="${id}"]` ? row : feedQ(s))
+      h.chat.mount(h.host, true); await flush(); h.layout()
+      h.emit(wide ? h.feed : h.win, 'wheel', { deltaY: -200 }); h.scroll.scrollTop = 600; h.emit(wide ? h.feed : h.win, 'scroll')
+      expect(row.getBoundingClientRect().top).toBe(300)
+      move = true
+      h.chat._paintFeed(false); h.layout()
+      expect(id).toBe('fi_2')
+      expect(row.getBoundingClientRect().top).toBe(300)
+    })
+  }
+})

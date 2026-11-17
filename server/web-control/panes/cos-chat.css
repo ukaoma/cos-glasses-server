@@ -435,7 +435,7 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .rr-said { margin-top: 2px; font-size: 15px; line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; cursor: pointer; }
 .rr-said p { margin: 0 0 0.55em; white-space: pre-line; }
 .rr-said p:last-child { margin-bottom: 0; }
-.rr-said.clip p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.rr-said.clip p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 0; }
 .rr-tert { color: var(--tertiary); }
 .rr-status { margin: 6px 0 0; font-size: 13.5px; color: var(--hot); }
 .rr-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; margin-top: 2px; }

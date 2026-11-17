@@ -735,7 +735,9 @@
     var short = String(g.id).slice(0, 8), when = aboutAgo(rrWhen(it));
     var meta = esc(RR_WHO[g.provider]) + ', <span class="rr-id">' + esc(short) + '</span>' + (n > 1 ? ', ' + n + ' replies' : '') + (when ? ', ' + esc(when) : '');
     var said = rrText(it.excerpt);
-    var saidHtml = said ? '<div class="rr-said' + (open ? '' : ' clip') + '" data-cos="rr-more" data-rr="' + esc(g.key) + '" role="button" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '">' + rrParas(said) + '</div>'
+    // Closed: the whole reply as one block clamped to three lines, its paragraphs kept as line breaks (Codex 3712d0a4 P2:
+    // a clamp per paragraph let a long reply fill the screen). Open: its paragraphs.
+    var saidHtml = said ? '<div class="rr-said' + (open ? '' : ' clip') + '" data-cos="rr-more" data-rr="' + esc(g.key) + '" role="button" tabindex="0" aria-expanded="' + (open ? 'true' : 'false') + '">' + (open ? rrParas(said) : '<p>' + esc(said.replace(/\n{2,}/g, '\n')) + '</p>') + '</div>'
       : '<div class="rr-said"><p class="rr-tert">' + esc(it.turnAt ? RR_NOTEXT : RR_OLD) + '</p></div>';
     var earlier = '';
     if (open && n > 1) {
@@ -763,11 +765,17 @@
     rememberReturn(g.newest, at);
     W.go('sessions', at);
   }
-  function rrToggle(key) {
+  // `which` is the control he used: 'words' (the reply itself) or 'count' ("N earlier replies"). The feed is drawn again,
+  // so focus goes back to that control in the new row, without scrolling (Codex 3712d0a4 P2: Space then scrolled the page).
+  function rrToggle(key, which) {
     if (!rrFind(key)) return;
     C.rrOpen = C.rrOpen || {};
     if (C.rrOpen[key]) delete C.rrOpen[key]; else C.rrOpen[key] = 1;
     paintFeed(false);
+    if (!which || !C.host) return;
+    var row = C.host.querySelector('[data-rr-row="' + String(key).replace(/["\\]/g, '') + '"]');
+    var el = row && row.querySelector(which === 'count' ? '.rr-count' : '.rr-said[data-cos="rr-more"]');
+    if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (_e) { el.focus(); } }
   }
   function itemHtml(item) {
     if (item.kind === 'drop' || item.kind === 'answer') {
@@ -1702,7 +1710,9 @@
     for (var i = 0; i < cards.length; i++) {
       var r = cards[i].getBoundingClientRect();
       if (r.bottom > top0) {
-        attr = cards[i].hasAttribute('data-hist') ? 'data-hist' : cards[i].hasAttribute('data-item-id') ? 'data-item-id' : 'data-ask';
+        // 7.0.53 (Codex 3712d0a4 P2): a Reply ready row is held by its session (data-rr-row), which stays the same when a
+        // newer reply changes its newest item and moves it; its data-item-id does not.
+        attr = cards[i].hasAttribute('data-rr-row') ? 'data-rr-row' : cards[i].hasAttribute('data-hist') ? 'data-hist' : cards[i].hasAttribute('data-item-id') ? 'data-item-id' : 'data-ask';
         held = cards[i].getAttribute(attr); at = r.top; break;
       }
     }
@@ -3105,7 +3115,7 @@
     if (what === 'hist-again') return retryEntry(t.getAttribute('data-id'));
     if (what === 'tl-open') return openNote(t);
     if (what === 'rr-open') return rrOpen(t.getAttribute('data-rr'));
-    if (what === 'rr-more') return rrToggle(t.getAttribute('data-rr'));
+    if (what === 'rr-more') return rrToggle(t.getAttribute('data-rr'), t.tagName === 'BUTTON' ? 'count' : 'words');
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -3140,7 +3150,7 @@
     // 7.0.53: a Reply ready row's clipped words open with Enter or Space, as a button does (it is a div, so its words can
     // be selected).
     var t = e.target;
-    if (t && t.getAttribute && t.getAttribute('data-cos') === 'rr-more' && t.tagName !== 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return rrToggle(t.getAttribute('data-rr')); }
+    if (t && t.getAttribute && t.getAttribute('data-cos') === 'rr-more' && t.tagName !== 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return rrToggle(t.getAttribute('data-rr'), 'words'); }
     if (!isComposerInput(e.target) || e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.shiftKey) return;
     e.preventDefault();
     var k = kOf(e.target);

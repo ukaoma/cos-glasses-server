@@ -102,11 +102,20 @@ describe('the name: the link label, else the session list, else "Reply ready"', 
 })
 
 describe('the reply in plain words, three lines until he opens it', () => {
-  it('plain text, paragraphs kept, markup shown as text, clipped', () => {
-    const html = load().paint([rr({ excerpt: 'All three gates passed.\n\nOne thing: <img src=x onerror=alert(1)> **now**?' })])
-    expect(html).toContain('<div class="rr-said clip" data-cos="rr-more"')
-    expect(html).toContain('<p>All three gates passed.</p><p>One thing: &lt;img src=x onerror=alert(1)&gt; **now**?</p>')
-    expect(html).not.toContain('<img')
+  it('closed: the whole reply is ONE clamped block, its paragraphs kept as line breaks (Codex P2); open: its paragraphs', () => {
+    const h = load()
+    const items = [rr({ excerpt: 'All three gates passed.\n\nOne thing: <img src=x onerror=alert(1)> **now**?\n\nThird.\n\nFourth.' })]
+    const closed = h.paint(items)
+    expect(closed).toContain('<div class="rr-said clip" data-cos="rr-more"')
+    const said = /<div class="rr-said clip"[^>]*>([\s\S]*?)<\/div>/.exec(closed)![1]!
+    expect(said.match(/<p>/g)).toHaveLength(1)
+    expect(said).toBe('<p>All three gates passed.\nOne thing: &lt;img src=x onerror=alert(1)&gt; **now**?\nThird.\nFourth.</p>')
+    expect(closed).not.toContain('<img')
+    h.tap({ 'data-cos': 'rr-more', 'data-rr': 'claude|' + A })
+    expect(h.html()).toContain('<p>All three gates passed.</p><p>One thing: &lt;img src=x onerror=alert(1)&gt; **now**?</p><p>Third.</p><p>Fourth.</p>')
+  })
+  it('the clamp is on that one block, in the stylesheet', () => {
+    expect(CSS).toMatch(/\.rr-said\.clip p \{ display: -webkit-box; -webkit-line-clamp: 3;/)
   })
   it('a reply from before COS kept reply text says so and is not a toggle', () => {
     const html = load().paint([rr({})])
@@ -164,6 +173,19 @@ describe('"N earlier replies" opens them in place', () => {
     h.tap({ 'data-cos': 'rr-more', 'data-rr': 'claude|' + A })
     expect(count(h.html(), /class="rr-e"/g)).toBe(6)
     expect(h.html()).toContain('3 more in the session')
+  })
+  it('after opening or closing, focus is back on the same control in the new row, without scrolling (Codex P2)', () => {
+    const h = load()
+    h.paint([rr({ excerpt: 'Words.' }), rr({ excerpt: 'More.', at: minAgo(1) })])
+    const key = 'claude|' + A
+    const focused: Array<[string, unknown]> = []
+    const ctl = (name: string) => ({ focus: (o: unknown) => { focused.push([name, o]) } })
+    const words = ctl('words'), count = ctl('count')
+    h.rows[`[data-rr-row="${key}"]`] = { querySelector: (sel: string) => (sel === '.rr-count' ? count : sel === '.rr-said[data-cos="rr-more"]' ? words : null) }
+    h.tap({ 'data-cos': 'rr-more', 'data-rr': key })                       // the "N earlier replies" button
+    h.chat.onKey({ key: 'Enter', target: { tagName: 'DIV', getAttribute: (a: string) => (({ 'data-cos': 'rr-more', 'data-rr': key }) as Record<string, string>)[a] ?? null }, preventDefault: () => {} })
+    h.chat.onClick({ getAttribute: (k: string) => (({ 'data-cos': 'rr-more', 'data-rr': key }) as Record<string, string>)[k] ?? null, tagName: 'DIV' })
+    expect(focused).toEqual([['count', { preventScroll: true }], ['words', { preventScroll: true }], ['words', { preventScroll: true }]])
   })
   it('an unknown row key changes nothing', () => {
     const h = load()

@@ -8172,6 +8172,15 @@
       b.querySelector('.value').innerHTML = on ? '<span class="check">✓</span>' : '';
     });
   }
+  // 7.0.53: the look rows (Settings), as the theme rows.
+  function paintLook() {
+    var choice = window.CosLook ? window.CosLook.choice() : 'amber';
+    document.querySelectorAll('[data-look-choice]').forEach(function (b) {
+      var on = b.getAttribute('data-look-choice') === choice;
+      b.setAttribute('aria-pressed', String(on));
+      b.querySelector('.value').innerHTML = on ? '<span class="check">✓</span>' : '';
+    });
+  }
   // F1: the summary size rows (Settings). A new size may shrink the summary, so the held height (storyHold) starts over.
   function paintStorySize() {
     var choice = window.CosStorySize ? window.CosStorySize.choice() : 'auto';
@@ -8457,7 +8466,7 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],[data-trail-back],#topbar-back,#rail-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#auth-retry,#device-code-btn');
+    var t = e.target.closest('[data-today-next],[data-next-prep],[data-next-prep-cancel],[data-next-prep-remove],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],[data-look-choice],[data-trail-back],#topbar-back,#rail-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#auth-retry,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
@@ -8507,6 +8516,7 @@
       return paintNeeds();
     }
     if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); return; }
+    if (t.hasAttribute('data-look-choice') && window.CosLook) { window.CosLook.set(t.getAttribute('data-look-choice')); paintLook(); return; }
     if (t.hasAttribute('data-story-choice') && window.CosStorySize) { window.CosStorySize.set(t.getAttribute('data-story-choice')); paintStorySize(); return; }
     if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
       // 7.0.33 A11: a pick from the menu (the rail, the pane menu, Ask's Go to) starts a new trail (navStamp).

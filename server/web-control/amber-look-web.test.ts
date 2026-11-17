@@ -1,4 +1,4 @@
-/** Amber is an opt-in color layer. Layout and runtime behavior stay with the existing app.
+/** Amber is the default color layer (7.0.53, Miles 23:39); Espresso restores the look from before it. Layout and runtime behavior stay with the existing app.
  * These source/behavior guards do not replace F1's rendered, keyed WebKit sweep. */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -75,7 +75,7 @@ function readable(css: string) {
     }
   }
 }
-function themeRun(options: { store?: Record<string, string>; dark?: boolean; storageThrows?: boolean; source?: string } = {}) {
+function themeRun(options: { store?: Record<string, string>; dark?: boolean; storageThrows?: boolean; source?: string; calls?: string[] } = {}) {
   const store = { ...options.store }, attrs: Record<string, string> = {}, order: string[] = []
   let mediaChanged = () => {}
   const media = { matches: !!options.dark, addEventListener: (_type: string, fn: () => void) => { mediaChanged = fn } }
@@ -90,7 +90,12 @@ function themeRun(options: { store?: Record<string, string>; dark?: boolean; sto
   const start = source.indexOf('/* Runs before first paint so the page never flashes')
   const end = source.indexOf('})();', start) + 5
   if (start < 0 || end <= start) throw new Error('theme block missing')
-  new Function('window', 'document', 'localStorage', source.slice(start, end))(window, { documentElement: de }, localStorage)
+  // Every way out of the page, bound to a recorder: a look that reached one would show up in options.calls.
+  const rec = (name: string) => (..._a: unknown[]) => { options.calls?.push(name) }
+  const XHR = function () { options.calls?.push('XMLHttpRequest') }
+  const consoleRec = { log: rec('console.log'), info: rec('console.info'), warn: rec('console.warn'), error: rec('console.error'), debug: rec('console.debug') }
+  window.fetch = rec('fetch'); window.XMLHttpRequest = XHR; window.navigator = { sendBeacon: rec('sendBeacon') }; window.console = consoleRec
+  new Function('window', 'document', 'localStorage', 'fetch', 'XMLHttpRequest', 'navigator', 'console', source.slice(start, end))(window, { documentElement: de }, localStorage, window.fetch, XHR, window.navigator, consoleRec)
   return { store, attrs, order, look: window.CosLook, theme: window.CosTheme, story: window.CosStorySize, changeSystem: (dark: boolean) => { media.matches = dark; mediaChanged() } }
 }
 
@@ -121,61 +126,108 @@ describe('Amber scope and palette guards (mutants exercise each failure)', () =>
   })
 })
 
-describe('Amber preference is per device and pre-paint, with the current default intact', () => {
-  it('no preference means no look attribute or mutation; a default-on mutant is rejected', () => {
-    const assertDefault = (source: string) => {
-      const t = themeRun({ source })
-      expect(t.look.choice()).toBe('default')
-      expect(t.attrs).not.toHaveProperty('data-look')
-      expect(t.order.some(s => s.includes('data-look'))).toBe(false)
-      expect(t.store).toEqual({})
+// 7.0.53 (Miles 23:39, the lead's R3): Amber is the DEFAULT; "Espresso" is the look from before Amber. These replace the
+// 18:58 opt-in expectations (flipped on purpose, named in each title): nothing stored now means Amber.
+describe('Amber is the default look; Espresso is chosen per device, before the first paint', () => {
+  it('FLIPPED: no preference means Amber, set before fp-wait and cos-js; an Espresso-by-default mutant is rejected', () => {
+    const assertAmber = (source: string) => {
+      for (const dark of [false, true]) {
+        const t = themeRun({ source, dark })
+        expect(t.look.choice()).toBe('amber')
+        expect(t.attrs).toMatchObject({ 'data-look': 'amber' })
+        expect(t.order.indexOf('data-look=amber')).toBeLessThan(t.order.indexOf('class:fp-wait'))
+        expect(t.store).toEqual({})
+      }
     }
-    assertDefault(THEME)
-    const mutant = THEME.replace("localStorage.getItem(LOOK_KEY) === 'amber'", "localStorage.getItem(LOOK_KEY) == null || localStorage.getItem(LOOK_KEY) === 'amber'")
+    assertAmber(THEME)
+    const mutant = THEME.replace("localStorage.getItem(LOOK_KEY) === 'espresso' ? 'espresso' : 'amber'", "localStorage.getItem(LOOK_KEY) === 'amber' ? 'amber' : 'espresso'")
     expect(mutant).not.toBe(THEME)
-    expect(() => assertDefault(mutant)).toThrow()
+    expect(() => assertAmber(mutant)).toThrow()
   })
-  it('a saved valid look is applied before fp-wait/cos-js, in explicit and system themes', () => {
+  it('Espresso stored: no look attribute at all, so every Amber rule stays off and its first frame is Espresso', () => {
     for (const [choice, system, mode] of [['light', true, 'light'], ['dark', false, 'dark'], ['system', true, 'dark']] as const) {
-      const t = themeRun({ store: { cos_web_look: 'amber', cos_web_theme: choice }, dark: system })
-      expect(t.attrs).toMatchObject({ 'data-look': 'amber', 'data-theme': mode })
-      expect(t.order.indexOf('data-look=amber')).toBeLessThan(t.order.indexOf('class:fp-wait'))
+      const t = themeRun({ store: { cos_web_look: 'espresso', cos_web_theme: choice }, dark: system })
+      expect(t.look.choice()).toBe('espresso')
+      expect(t.attrs).toEqual({ 'data-theme': mode })
+      expect(t.order.some(s => s.includes('data-look'))).toBe(false)
     }
   })
-  it('invalid values and blocked storage keep the default and still show the page', () => {
-    for (const value of ['', 'Amber', 'toString', '__proto__', 'constructor', 'default', 'anything']) {
+  it('a device that stored amber under the opt-in keeps Amber', () => {
+    expect(themeRun({ store: { cos_web_look: 'amber' } }).attrs['data-look']).toBe('amber')
+  })
+  it('FLIPPED: an unknown value or blocked storage is Amber, and the page still shows', () => {
+    for (const value of ['', 'Amber', 'Espresso', 'toString', '__proto__', 'constructor', 'default', 'anything']) {
       const t = themeRun({ store: { cos_web_look: value } })
-      expect(t.look.choice()).toBe('default')
-      expect(t.attrs).not.toHaveProperty('data-look')
+      expect(t.look.choice()).toBe('amber')
+      expect(t.attrs['data-look']).toBe('amber')
     }
     const t = themeRun({ storageThrows: true, dark: true })
-    expect(t.attrs).toEqual({ 'data-theme': 'dark' })
+    expect(t.attrs).toEqual({ 'data-theme': 'dark', 'data-look': 'amber' })
     expect(t.order).toContain('class:cos-js')
+    expect(() => t.look.set('espresso')).not.toThrow()
+    expect(t.attrs).not.toHaveProperty('data-look')
     expect(() => t.look.set('amber')).not.toThrow()
     expect(t.attrs['data-look']).toBe('amber')
-    expect(() => t.look.set('default')).not.toThrow()
-    expect(t.attrs).not.toHaveProperty('data-look')
   })
-  it('on → off → on persists independently of theme/story, and survives reopening', () => {
+  it('FLIPPED: Amber, Espresso, Amber at once and across reopening, each stored as he chose it, apart from theme and size', () => {
     const t = themeRun({ store: { cos_web_theme: 'dark', cos_web_story_size: 'small' } })
-    expect(t.look.set('amber')).toBe('amber')
-    expect(t.store.cos_web_look).toBe('amber')
-    expect(themeRun({ store: t.store }).attrs['data-look']).toBe('amber')
-    expect(t.look.set('default')).toBe('default')
-    expect(t.store).not.toHaveProperty('cos_web_look')
+    expect(t.look.set('espresso')).toBe('espresso')
+    expect(t.store.cos_web_look).toBe('espresso')
     expect(t.attrs).not.toHaveProperty('data-look')
     expect(themeRun({ store: t.store }).attrs).not.toHaveProperty('data-look')
-    t.look.set('amber'); t.theme.set('light'); t.story.set('medium')
+    expect(t.look.set('amber')).toBe('amber')
+    expect(t.store.cos_web_look).toBe('amber')
+    expect(t.attrs['data-look']).toBe('amber')
+    expect(themeRun({ store: t.store }).attrs['data-look']).toBe('amber')
+    t.theme.set('light'); t.story.set('medium')
     expect(t.attrs).toMatchObject({ 'data-look': 'amber', 'data-theme': 'light', 'data-story-size': 'medium' })
-    expect(t.look.set('__proto__')).toBe('default')
-    expect(t.attrs).not.toHaveProperty('data-look')
+    expect(t.store).toMatchObject({ cos_web_theme: 'light', cos_web_story_size: 'medium', cos_web_look: 'amber' })
+    // Anything else asked for is Amber, the default; it never turns the look off.
+    expect(t.look.set('__proto__')).toBe('amber')
+    expect(t.attrs['data-look']).toBe('amber')
   })
-  it('a system theme change preserves the chosen look', () => {
-    const t = themeRun({ store: { cos_web_look: 'amber' }, dark: false })
-    t.changeSystem(true)
-    expect(t.attrs).toMatchObject({ 'data-look': 'amber', 'data-theme': 'dark' })
-    t.changeSystem(false)
-    expect(t.attrs).toMatchObject({ 'data-look': 'amber', 'data-theme': 'light' })
+  it('a system theme change keeps the look', () => {
+    for (const look of ['amber', 'espresso']) {
+      const t = themeRun({ store: { cos_web_look: look }, dark: false })
+      t.changeSystem(true)
+      expect(t.attrs['data-theme']).toBe('dark')
+      expect(t.attrs['data-look']).toBe(look === 'amber' ? 'amber' : undefined)
+      t.changeSystem(false)
+      expect(t.attrs['data-theme']).toBe('light')
+    }
+  })
+})
+
+// 7.0.53 (Miles 23:39: "do [not] want to break trust around privacy"): the look is kept in this browser only. Nothing is
+// sent, set on the server, logged or counted, including a switch back to Espresso.
+describe('the look makes no request, no server setting and no log line', () => {
+  const APP = readFileSync(join(HERE, 'app.js'), 'utf8'), SETTINGS = readFileSync(join(HERE, 'panes', 'settings.js'), 'utf8')
+  const NETWORK = /\bfetch\(|XMLHttpRequest|sendBeacon|\bapi\(|apiAnswer\(|clientLog|layoutCrumb|crumb\(|console\./
+  it('opening and choosing a look call no request, beacon or console, in any order (a mutant that reports a revert is caught)', () => {
+    const run = (source: string) => {
+      const calls: string[] = []
+      const t = themeRun({ source, calls, store: { cos_web_look: 'espresso' } })
+      for (const choice of ['amber', 'espresso', 'amber']) t.look.set(choice)
+      return calls
+    }
+    expect(run(THEME)).toEqual([])
+    const reporting = THEME.replace("try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {}", "try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} if (choice === 'espresso') fetch('/api/look-revert');")
+    expect(reporting).not.toBe(THEME)
+    expect(run(reporting)).toEqual(['fetch'])
+  })
+  it('the look code in theme.js, app.js and settings.js contains no request, server route or log call', () => {
+    const lookBlock = THEME.slice(THEME.indexOf("var LOOK_KEY = 'cos_web_look';"), THEME.indexOf('lookApply(lookRead());'))
+    expect(lookBlock.length).toBeGreaterThan(200)
+    expect(lookBlock).not.toMatch(NETWORK)
+    const paint = APP.slice(APP.indexOf('function paintLook()'), APP.indexOf('function paintStorySize()'))
+    expect(paint.length).toBeGreaterThan(100)
+    expect(paint).not.toMatch(NETWORK)
+    const handler = APP.split('\n').filter(l => l.includes("hasAttribute('data-look-choice')"))
+    expect(handler).toHaveLength(1)
+    expect(handler[0]).not.toMatch(NETWORK)
+    const rows = SETTINGS.slice(SETTINGS.indexOf('var look = window.CosLook'), SETTINGS.indexOf('var story = window.CosStorySize'))
+    expect(rows.length).toBeGreaterThan(100)
+    expect(rows).not.toMatch(NETWORK)
   })
 })
 

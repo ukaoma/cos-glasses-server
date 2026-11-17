@@ -22,20 +22,22 @@ function slice(text: string, startMark: string, endMark: string): string {
 }
 
 describe('theme.js: the theme first, then the gate that lets the first paint show', () => {
-  function run(stored: string | null, dark: boolean) {
+  function run(stored: string | null, dark: boolean, look: string | null = null) {
     const order: string[] = []
     const root = { setAttribute: (n: string, v: string) => order.push(`${n}=${v}`), classList: { add: (c: string) => order.push(`class+${c}`) } }
     const window = { matchMedia: () => ({ matches: dark, addEventListener() {} }) }
-    const localStorage = { getItem: () => stored }
+    const localStorage = { getItem: (k: string) => (k === 'cos_web_look' ? look : k === 'cos_web_theme' ? stored : null) }
     // eslint-disable-next-line no-new-func
     new Function('window', 'document', 'localStorage', THEME)(window, { documentElement: root, readyState: 'loading', addEventListener() {} }, localStorage)
     return order
   }
-  it('sets data-theme, then adds fp-wait, in that order, for system, light and dark', () => {
+  it('FLIPPED (7.0.53, Amber the default): sets data-theme and the look, then adds fp-wait, in that order, for system, light and dark', () => {
     // 7.0.35: then cos-js, which keeps index.html's script-free fallback line away (blank-open-web.test.ts).
-    expect(run(null, true)).toEqual(['data-theme=dark', 'class+fp-wait', 'class+cos-js'])
-    expect(run('light', true)).toEqual(['data-theme=light', 'class+fp-wait', 'class+cos-js'])
-    expect(run('dark', false)).toEqual(['data-theme=dark', 'class+fp-wait', 'class+cos-js'])
+    expect(run(null, true)).toEqual(['data-theme=dark', 'data-look=amber', 'class+fp-wait', 'class+cos-js'])
+    expect(run('light', true)).toEqual(['data-theme=light', 'data-look=amber', 'class+fp-wait', 'class+cos-js'])
+    expect(run('dark', false)).toEqual(['data-theme=dark', 'data-look=amber', 'class+fp-wait', 'class+cos-js'])
+    // Espresso, the look from before Amber: no look attribute, exactly the order it had.
+    expect(run('dark', false, 'espresso')).toEqual(['data-theme=dark', 'class+fp-wait', 'class+cos-js'])
   })
   it('theme.js stays the first script, in the head, before the body: no frame in the wrong theme', () => {
     const head = HTML.slice(0, HTML.indexOf('</head>'))

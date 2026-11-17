@@ -139,6 +139,13 @@
       var on = choice === id;
       return '<button type="button" class="cx-set-row cx-set-choice" data-theme-choice="' + id + '" aria-pressed="' + on + '"><span class="cx-set-name">' + esc(label) + '</span><span class="value">' + (on ? '<span class="check">✓</span>' : '') + '</span></button>';
     };
+    // 7.0.53 (Miles 23:39, the lead's R3): the look, per device, built like the theme rows. Amber is the default; Espresso is
+    // the look from before Amber. It changes at once, in this browser only (theme.js CosLook): no request, nothing counted.
+    var look = window.CosLook ? window.CosLook.choice() : 'amber';
+    var lookBtn = function (id, label) {
+      var on = look === id;
+      return '<button type="button" class="cx-set-row cx-set-choice" data-look-choice="' + id + '" aria-pressed="' + on + '"><span class="cx-set-name">' + esc(label) + '</span><span class="value">' + (on ? '<span class="check">✓</span>' : '') + '</span></button>';
+    };
     var story = window.CosStorySize ? window.CosStorySize.choice() : 'auto';
     var storyBtn = function (id, label, desc) {
       var on = story === id;
@@ -147,6 +154,7 @@
     };
     return '<section class="cx-set-cat"><h2 class="cx-col-title">This browser</h2>' +
       group('Appearance', '', themeBtn('system', 'Match this device') + themeBtn('light', 'Light') + themeBtn('dark', 'Dark')) +
+      group('Look', '', lookBtn('amber', 'Amber') + lookBtn('espresso', 'Espresso')) +
       // F1 (Miles 11/13 23:02): the size of Today's summary on this device, built like the theme rows (app.js paintStorySize).
       group('Today summary size', '', storyBtn('auto', 'Automatic', 'Small on a narrow screen, Medium on a wide one') + storyBtn('large', 'Large', '') +
         storyBtn('medium', 'Medium', '') + storyBtn('small', 'Small', '')) +

@@ -64,18 +64,23 @@
     set: function (choice) { choice = isStory(choice) ? choice : 'auto'; try { if (choice === 'auto') localStorage.removeItem(STORY_KEY); else localStorage.setItem(STORY_KEY, choice); } catch (_e) {} return storyApply(choice); }
   };
   storyApply(storyRead());
-  // Candidate look, per device. Absence/invalid storage keeps the current look; set before the first paint.
+  // The look, per device (Miles 23:39, the lead's R3): Amber is the default; "Espresso" is the look from before Amber,
+  // restored exactly (no data-look attribute: every rule under html[data-look='amber'] stays off). Only a stored
+  // 'espresso' turns Amber off; nothing stored, 'amber', or anything unreadable is Amber. Set before the first paint, so a
+  // default open never draws an Espresso frame and an Espresso open never draws an Amber one (index.html's critical CSS
+  // carries both). Kept in this browser only: no request, no server setting, no log line, nothing counted.
   var LOOK_KEY = 'cos_web_look';
-  function lookRead() { try { return localStorage.getItem(LOOK_KEY) === 'amber' ? 'amber' : 'default'; } catch (_e) { return 'default'; } }
+  function lookRead() { try { return localStorage.getItem(LOOK_KEY) === 'espresso' ? 'espresso' : 'amber'; } catch (_e) { return 'amber'; } }
   function lookApply(choice) {
     var de = document.documentElement;
-    if (choice === 'amber') de.setAttribute('data-look', 'amber');
-    else if (de.hasAttribute ? de.hasAttribute('data-look') : de.removeAttribute) de.removeAttribute('data-look');
+    if (choice === 'espresso') { if (de.hasAttribute ? de.hasAttribute('data-look') : de.removeAttribute) de.removeAttribute('data-look'); }
+    else de.setAttribute('data-look', 'amber');
     return choice;
   }
   window.CosLook = {
     choice: lookRead,
-    set: function (choice) { choice = choice === 'amber' ? 'amber' : 'default'; try { if (choice === 'default') localStorage.removeItem(LOOK_KEY); else localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} return lookApply(choice); }
+    // His choice is stored as he made it, so a later change of the default never changes it for him.
+    set: function (choice) { choice = choice === 'espresso' ? 'espresso' : 'amber'; try { localStorage.setItem(LOOK_KEY, choice); } catch (_e) {} return lookApply(choice); }
   };
   lookApply(lookRead());
   // 7.0.19: the first paint (index.html #first-paint) shows only when this script ran, so with JavaScript off the page
@@ -171,7 +176,7 @@
     var list = [];
     try { list = JSON.parse((document.getElementById('boot-styles') || {}).textContent || '[]'); } catch (_e) { list = []; }
     list = Array.isArray(list) ? list.filter(function (u) { return typeof u === 'string' && u.indexOf('/control/') === 0; }) : [];
-    // A default open has exactly the existing ten requests. Amber alone adds its stylesheet last.
+    // Amber (the default) adds its stylesheet last; Espresso has exactly the ten from before Amber.
     // The URL is in HTML so web-control-static gives it the same content hash as the other stylesheets.
     if (window.CosLook && window.CosLook.choice() === 'amber') {
       var amberHref = '';

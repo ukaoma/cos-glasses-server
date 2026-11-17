@@ -16,6 +16,9 @@ const THEME = readFileSync(join(HERE, 'theme.js'), 'utf8')
 const HTML = readFileSync(join(HERE, 'index.html'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const STYLES = JSON.parse(/<script type="application\/json" id="boot-styles">([^<]*)<\/script>/.exec(HTML)![1]!) as string[]
+const AMBER = JSON.parse(/id="amber-style">([^<]*)<\/script>/.exec(HTML)![1]!) as string
+// 7.0.53: what a default open (Amber) and an Espresso open each ask for, so the boot tests hold for both looks.
+const LOOKS: Array<[string, Record<string, string>, string[]]> = [['amber (default)', {}, [...STYLES, AMBER]], ['espresso', { cos_web_look: 'espresso' }, STYLES]]
 const SCRIPTS = JSON.parse(/<script type="application\/json" id="boot-scripts">([^<]*)<\/script>/.exec(HTML)![1]!) as string[]
 
 function el(tag: string): any {
@@ -68,23 +71,26 @@ describe('B: the stylesheets do not hold the first paint, and boot waits for the
     expect([...nos.matchAll(/<link rel="stylesheet" href="([^"]+)">/g)].map(m => m[1])).toEqual(STYLES)
     expect(HTML.slice(0, HTML.indexOf('<noscript>')), 'no stylesheet link left in the head outside noscript').not.toMatch(/<link rel="stylesheet"/)
   })
-  it('theme.js adds them at once, in order, as print (never render-blocking); each turns on when it arrives', () => {
+  it('FLIPPED for the default look: theme.js adds them at once, in order, as print (never render-blocking); each turns on when it arrives', () => {
+    for (const [, store, want] of LOOKS) expect(boot({ store }).sheets().map((s: any) => s.href)).toEqual(want)
     const b = boot()
-    expect(b.sheets().map((s: any) => s.href)).toEqual(STYLES)
     expect(b.sheets().every((s: any) => s.media === 'print')).toBe(true)
     b.sheets()[0].onload()
     expect(b.sheets()[0].media).toBe('all')
     b.sheets()[1].onerror()
     expect(b.sheets()[1].media, 'a failed one stays off; the restyle check asks for it again').toBe('print')
   })
-  it('boot waits for the scripts AND the stylesheets, a failed one counting as settled', () => {
-    const b = boot()
-    b.loadScripts(); b.scripts().forEach((s: any) => s.onload())
-    expect(b.booted(), 'scripts in, stylesheets not: no boot').toBe(false)
-    b.sheets().slice(0, 9).forEach((s: any) => s.onload())
-    expect(b.booted()).toBe(false)
-    b.sheets()[9].onerror()
-    expect(b.booted(), 'every one settled').toBe(true)
+  it('FLIPPED for the default look: boot waits for the scripts AND every stylesheet of that look, a failed one counting as settled', () => {
+    for (const [name, store, want] of LOOKS) {
+      const b = boot({ store })
+      b.loadScripts(); b.scripts().forEach((s: any) => s.onload())
+      expect(b.booted(), name + ': scripts in, stylesheets not: no boot').toBe(false)
+      expect(b.sheets()).toHaveLength(want.length)
+      b.sheets().slice(0, -1).forEach((s: any) => s.onload())
+      expect(b.booted(), name).toBe(false)
+      b.sheets()[want.length - 1].onerror()
+      expect(b.booted(), name + ': every one settled').toBe(true)
+    }
   })
   it('the other way round too: stylesheets first, then the last script', () => {
     const b = boot()
@@ -97,22 +103,24 @@ describe('B: the stylesheets do not hold the first paint, and boot waits for the
   })
 })
 
-describe('Amber alone adds a final stylesheet without changing the default open', () => {
-  it('default and invalid preferences keep exactly the original requests; an unconditional-load mutant fails', () => {
-    const assertDefault = (source: string) => {
-      for (const value of [undefined, 'default', 'Amber', '__proto__']) {
-        const b = boot({ source, store: value == null ? {} : { cos_web_look: value } })
-        expect(b.sheets().map((s: any) => s.href)).toEqual(STYLES)
-      }
+describe('FLIPPED (7.0.53, Miles 23:39): Amber is the default open and adds its stylesheet last; Espresso has the original ten', () => {
+  it('FLIPPED: no preference, amber, and any unknown value open with the ten and amber.css last; Espresso with exactly the ten', () => {
+    for (const value of [undefined, 'amber', 'default', 'Amber', '__proto__']) {
+      const b = boot({ store: value == null ? {} : { cos_web_look: value } })
+      expect(b.sheets().map((s: any) => s.href)).toEqual([...STYLES, AMBER])
     }
-    assertDefault(THEME)
-    const mutant = THEME.replace("window.CosLook && window.CosLook.choice() === 'amber'", 'true')
-    expect(mutant).not.toBe(THEME)
-    expect(() => assertDefault(mutant)).toThrow()
+    const e = boot({ store: { cos_web_look: 'espresso' } })
+    expect(e.sheets().map((s: any) => s.href)).toEqual(STYLES)
+    // A mutant that loads amber.css for Espresso too, or never, is caught.
+    const always = THEME.replace("window.CosLook && window.CosLook.choice() === 'amber'", 'true')
+    expect(always).not.toBe(THEME)
+    expect(boot({ source: always, store: { cos_web_look: 'espresso' } }).sheets().map((s: any) => s.href)).not.toEqual(STYLES)
+    const never = THEME.replace("window.CosLook && window.CosLook.choice() === 'amber'", 'false')
+    expect(boot({ source: never }).sheets().map((s: any) => s.href)).not.toEqual([...STYLES, AMBER])
   })
   it('amber is appended last, including the server-stamped version, and boot waits for it to settle', () => {
     for (const href of ['/control/amber.css', '/control/amber.css?v=deadbeef']) for (const outcome of ['onload', 'onerror']) {
-      const b = boot({ store: { cos_web_look: 'amber' }, amberHref: href })
+      const b = boot({ amberHref: href })
       const sheets = b.sheets()
       expect(sheets).toHaveLength(STYLES.length + 1)
       expect(sheets.map((s: any) => s.href)).toEqual([...STYLES, href])
@@ -122,6 +130,13 @@ describe('Amber alone adds a final stylesheet without changing the default open'
       sheets[sheets.length - 1][outcome]()
       expect(b.booted(), 'all sheets settled').toBe(true)
     }
+  })
+  it('Espresso settles on the ten alone', () => {
+    const b = boot({ store: { cos_web_look: 'espresso' } })
+    const sheets = b.sheets()
+    b.loadScripts(); b.scripts().forEach((s: any) => s.onload())
+    sheets.forEach((s: any) => s.onload())
+    expect(b.booted()).toBe(true)
   })
 })
 
