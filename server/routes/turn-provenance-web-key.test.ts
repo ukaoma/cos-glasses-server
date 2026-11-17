@@ -25,7 +25,8 @@ import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { requireApiToken } from '../lib/api-auth.js'
 import { mintWebSessionCookieValue, setWebSessionEpochFile, isWebSessionAuthorized, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
-import { describeG2Turn, G2TurnLedger, G2TurnProvenance, turnFooter, WEB_UNVOUCHED_REASON, type OriginRequest } from '../lib/g2-turn-provenance.js'
+import { describeG2Turn, DESK_RULE_SCOPE_MEANING, G2TurnLedger, G2TurnProvenance, turnFooter, WEB_UNVOUCHED_REASON, type OriginRequest } from '../lib/g2-turn-provenance.js'
+import { MESSAGE_SCOPE_MEANING, notAuthorizedFor, WEB_KEY_NEVER_AUTHORIZED } from '../../shared/web-turn-envelope.js'
 import { createAgentSessionBindingsRouter, type AgentSessionBindingsDeps, type BindingRegistry } from './agent-session-bindings.js'
 import { createThreadTurnQueueRouter, type ThreadTurnQueueDeps } from './thread-turn-queue.js'
 import { createG2TurnsRouter } from './g2-turns.js'
@@ -272,8 +273,10 @@ describe.skipIf(!LAN)('flag on: a turn signed by the enrolled phone key', () => 
     // Review B1/B2/B3/B4/W1/W5: what the verifier reads (docs/web-key-verifier-contract.md section 6).
     expect(v.body.registryEntry.passkeySpki).toBe(passkeyOf(s.phone).spki)
     expect(v.body.passkey).toMatchObject({ credentialId: credentialIdOf(s.phone) })
-    expect(v.body).toMatchObject({ scopeMeaning: 'conversation', epoch: 0, revoked: [], integrity: INTEGRITY_OK, integrityAtAccept: INTEGRITY_OK })
-    expect(v.body.notAuthorized).toEqual(expect.arrayContaining(['install', 'publish', 'push-main', 'sending-messages', 'deleting-data']))
+    // 7.0.53 (Miles's rule of 2026-11-16; X1): a passkey-verified message reports the desk rule and the never list alone. Report only.
+    expect(v.body).toMatchObject({ scopeMeaning: DESK_RULE_SCOPE_MEANING, epoch: 0, revoked: [], integrity: INTEGRITY_OK, integrityAtAccept: INTEGRITY_OK })
+    expect(v.body.notAuthorized).toEqual([...WEB_KEY_NEVER_AUTHORIZED])
+    expect(v.body.notAuthorized).not.toContain('install')
     expect(v.body.anchor).toMatchObject({ spkiSha256: createHash('sha256').update(s.anchor.der).digest('hex'), mature: true })
     expect(v.body.consumeKeys).toEqual([`turn:ctwkLive00001`, `web:${v.body.aud}:${v.body.authId}`])
     expect(typeof v.body.revocationDigest).toBe('string')
@@ -340,7 +343,7 @@ describe.skipIf(!LAN)('flag on: a turn signed by the enrolled phone key', () => 
     const r = await rig(s, { deliverLiveTurn: live.deliverLiveTurn })
     expect((await turn(r.lan, 'ctwkDurable01', { ...webHeaders(r.lan), ...signed(s, 'ctwkDurable01') })).status).toBe(200)
     const restarted = new G2TurnProvenance({ ledger: new G2TurnLedger(s.ledgerFile), pairedInstance: () => null, webKey: s.authority })
-    expect(await describeG2Turn(restarted, 'ctwkDurable01', Date.now())).toMatchObject({ sealed: false, verifiedOrigin: true, authority: 'web-key' })
+    expect(await describeG2Turn(restarted, 'ctwkDurable01', Date.now())).toMatchObject({ sealed: false, verifiedOrigin: true, authority: 'web-key', scopeMeaning: DESK_RULE_SCOPE_MEANING, notAuthorized: [...WEB_KEY_NEVER_AUTHORIZED] })
     // A ledger line edited on disk (its signature swapped for another key's) vouches for nothing.
     const line = JSON.parse(readFileSync(s.ledgerFile, 'utf8').trim().split('\n').pop()!)
     line.webKey.signature = signB64(p256(), Buffer.from(line.webKey.envelope, 'base64url'))
@@ -363,6 +366,10 @@ describe.skipIf(!LAN)('flag on: a turn signed by the enrolled phone key', () => 
     // ...and reads revoked the moment its key is revoked.
     s.registry.revoke(s.phone.kid, 'lost', 'token')
     expect(await describeG2Turn(restarted, 'ctwkDurable01', Date.now())).toMatchObject({ verifiedOrigin: false, reason: 'key_revoked' })
+    // 7.0.53 (X1): a refused web-key message keeps today's labels, the conversation meaning and the full list.
+    const refused = await describeG2Turn(restarted, 'ctwkDurable01', Date.now()) as Record<string, unknown>
+    expect(refused).toMatchObject({ authority: 'web-key', scopeMeaning: MESSAGE_SCOPE_MEANING, notAuthorized: notAuthorizedFor({ kind: 'message' }) })
+    expect(refused.notAuthorized).toContain('install')
   })
 
   it('with files: vouched when the signed manifest matches; footer after the files block', async () => {

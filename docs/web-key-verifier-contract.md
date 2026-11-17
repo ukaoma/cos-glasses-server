@@ -306,7 +306,7 @@ verifiedOrigin, reason, sealed, target, via`) are unchanged. A web-key record ad
   "kid": "<kid>",
   "aud": "<hex64>",
   "scope": { ... },
-  "scopeMeaning": "conversation" | "approve",
+  "scopeMeaning": "conversation" | "miles-typing-in-this-session" | "approve",
   "notAuthorized": [ "<item>", ... ],
   "envelope": "<b64url JCS>", "signature": "<P1363 b64url>",
   "passkey": { "credentialId", "authenticatorData", "clientDataJSON", "signature" },
@@ -358,6 +358,12 @@ mirror) and refuses on difference; `approval.epoch` and `envelope.epoch` must eq
 `credentials`, `payment-details`, `moving-money`, `deleting-data`, `sending-messages`,
 `security-or-permission-settings`, `harness-permission-prompts`, `authority-rule-changes`.
 For `message` scope it also includes `install`, `publish`, `push-main`, `push-branch`, `hub-file`.
+7.0.53 (Miles's rule of 2026-11-16 19:41 and 19:53): for a passkey-verified message (no refusal reason, a passkey assertion
+present, scope exactly `{ "kind": "message" }`) the answer reports `scopeMeaning: "miles-typing-in-this-session"` and
+`notAuthorized` as the never-list alone. **These two labels are advisory, never authority.** Authority comes only from
+`verify_g2_turn.py`'s own JSON, which computes its own lists and does not read these fields. The answer also does not know
+whether the turn was spent (spending goes through the consume endpoint), so a re-read inside 15 minutes still shows the label.
+A refused message and every `approve` scope keep the values above.
 For `approve` scope it also includes every action other than the signed one (`push-main` always, though it is not
 signable), and `other-artifact-version-digest-or-channel`.
 

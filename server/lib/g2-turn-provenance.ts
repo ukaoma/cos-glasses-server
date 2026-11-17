@@ -78,7 +78,15 @@ import { readFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { turnFooter } from './turn-footer.js'
 import { webKeyCandidateOf, type WebKeyAuthority, type WebKeyCandidate, type WebKeyContext, type WebKeyProof } from './web-key-authority.js'
-import { MESSAGE_SCOPE_MEANING, notAuthorizedFor } from '../../shared/web-turn-envelope.js'
+import { MESSAGE_SCOPE_MEANING, notAuthorizedFor, WEB_KEY_NEVER_AUTHORIZED } from '../../shared/web-turn-envelope.js'
+
+/**
+ * 7.0.53 (Miles's rule of 2026-11-16 19:41 and 19:53; X1's desk_rule page): a passkey-verified message counts as Miles typing in
+ * the session that receives it, so its report says so and lists only the never list. REPORT ONLY and advisory: authority comes
+ * from verify_g2_turn.py's own JSON, which never reads these labels, and the answer does not know whether the turn was spent. The
+ * shared MESSAGE_SCOPE_MEANING and notAuthorizedFor (mirrored into the COS golden file) are unchanged.
+ */
+export const DESK_RULE_SCOPE_MEANING = 'miles-typing-in-this-session'
 
 export { FOOTER_LINE_REFUSED_COPY, G2_TURN_FOOTER_RE, g2TurnFooter, hasFooterShapedLine, stripG2TurnFooter, TURN_FOOTER_SHAPED_RE, TURN_ID_IN_USE_COPY, turnFooter, turnFooterTag, withoutTurnFooter } from './turn-footer.js'
 
@@ -763,6 +771,11 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
   } else if (record.verifiedOrigin !== true) reason = typeof record.reason === 'string' ? record.reason : 'unverified'
   else if (!sealed) reason = 'not_sealed'
   else if (ageMs === null || ageMs > G2_TURN_VOUCH_MAX_MS) reason = 'record_too_old'
+  // 7.0.53: the desk-rule report only for a passkey-verified message (no refusal, the review clean, a passkey assertion present)
+  // whose scope is exactly {kind:'message'}. Refused turns and approve keep today's labels (X1 21:0x).
+  const scope = record.webKey?.scope as unknown
+  const deskRule = reason === null && webKeyReview !== null && webKeyReview.reason === null && !!record.webKey?.passkey
+    && !!scope && typeof scope === 'object' && (scope as { kind?: unknown }).kind === 'message' && Object.keys(scope).length === 1
   return {
     found: true,
     turnId: record.turnId,
@@ -784,8 +797,8 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
       kid: record.webKey.kid,
       scope: record.webKey.scope,
       // Review B4: what this scope means and what it never authorizes, in the answer itself.
-      scopeMeaning: record.webKey.scope?.kind === 'approve' ? 'approve' : MESSAGE_SCOPE_MEANING,
-      notAuthorized: notAuthorizedFor(record.webKey.scope?.kind === 'approve' ? record.webKey.scope : { kind: 'message' }),
+      scopeMeaning: record.webKey.scope?.kind === 'approve' ? 'approve' : deskRule ? DESK_RULE_SCOPE_MEANING : MESSAGE_SCOPE_MEANING,
+      notAuthorized: record.webKey.scope?.kind === 'approve' ? notAuthorizedFor(record.webKey.scope) : deskRule ? [...WEB_KEY_NEVER_AUTHORIZED] : notAuthorizedFor({ kind: 'message' }),
       envelope: record.webKey.envelope,
       signature: record.webKey.signature,
       passkey: record.webKey.passkey ?? null,
