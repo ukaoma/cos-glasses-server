@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PING_STATE_LIMITS, PingEngine, PingStateStore, REPLY_MIN_GAP_MS, type HeldReply, type PingBanner, type PingFeedSink, type PingState } from './ping-engine.js'
+import { PING_STATE_LIMITS, PingEngine, PingStateStore, REPLY_MIN_GAP_MS, replyStillNewFromSignal, type HeldReply, type PingBanner, type PingFeedSink, type PingState } from './ping-engine.js'
 import { agentCandidate, type PingCandidate } from './ping-sources.js'
 import { normalizeP2Settings, P2_DEFAULTS, type P2Settings } from './drop-p2-settings.js'
 import { taskInstant } from './morning-brief-schedule.js'
@@ -18,7 +18,7 @@ const A = 'aa000000-0000-0000-0000-00000000000a', B = 'bb000000-0000-0000-0000-0
 const reply = (sessionId: string, when: number, provider = 'claude') => agentCandidate({ provider, sessionId, turnEndedAt: when, replyReady: true })!
 const on = (over: Record<string, unknown> = {}) => normalizeP2Settings({ pings: { mergeReplies: true, gapMinutes: 45, ...over }, banners: { agent: true } })
 
-function rig(settings: P2Settings) {
+function rig(settings: P2Settings, stillNew?: (r: HeldReply) => boolean) {
   let state: PingState = { ledger: [], held: [], consumed: [] }
   let n = 0
   const keys = new Set<string>()
@@ -30,6 +30,7 @@ function rig(settings: P2Settings) {
   const engine = new PingEngine({
     state: { read: () => structuredClone(state), write: s => { state = structuredClone(s) } }, feed, read: async () => ({}),
     banner: b => { shown.push(b) }, phoneBanner: b => { phone.push(b) }, now: () => clock.now, timezone: () => TZ, settings: () => set,
+    ...(stillNew ? { replyStillNew: stillNew } : {}),
   })
   const push = (when: string, ...cs: PingCandidate[]) => { clock.now = at(when); return engine.push(cs) }
   const tick = async (when: string) => { clock.now = at(when); return engine.tick() }
@@ -178,6 +179,24 @@ describe('mergeReplies on', () => {
     expect(r.state().replies).toBeUndefined()
     expect(r.state().ledger.filter(b => b.replies)).toHaveLength(2)   // no record for a banner that was not shown
   })
+  it('7.0.53 re-check at release: a session no longer news is dropped; none left means no banner; a throwing check keeps them', async () => {
+    let stale = new Set<string>([B])
+    const r = rig(on(), h => !stale.has(h.sessionId))
+    r.push('10:00', reply(A, at('10:00')))
+    r.push('10:10', reply(B, at('10:10')))
+    r.push('10:20', reply(C, at('10:20')))
+    await r.tick('10:45')
+    expect(r.shown[1]).toMatchObject({ title: 'Reply ready', sessions: [{ id: C, provider: 'claude' }], feedIds: ['f3'] })
+    r.push('11:00', reply(A, at('11:00')))
+    stale = new Set([A])
+    await r.tick('11:30')
+    expect(r.shown).toHaveLength(2)
+    expect(r.state().replies).toBeUndefined()
+    expect(r.state().ledger.filter(b => b.replies)).toHaveLength(2)
+    const t = rig(on(), () => { throw new Error('signal store unreadable') })
+    t.push('10:00', reply(A, at('10:00')))
+    expect(t.shown).toHaveLength(1)
+  })
   it('switched off while replies wait: they are dropped (they are in the chat), and no merged banner follows', async () => {
     const r = rig(on())
     r.push('10:00', reply(A, at('10:00')))
@@ -212,5 +231,24 @@ describe('what is kept on disk', () => {
     s.close()
     const files = ['state.json']
     expect(JSON.parse(readFileSync(join(d, 'pings', files[0]), 'utf8'))).toEqual({ version: 1, ledger: [], held: [], consumed: [] })
+  })
+})
+
+describe('7.0.53: the re-check, from the session\'s hook signal and open asks', () => {
+  const r = { at: 1_000 }
+  const sig = (over: Record<string, unknown> = {}) => ({ ended: null, turnStartedAt: null, waiting: null, failure: null, ...over }) as Parameters<typeof replyStillNewFromSignal>[0]
+  it('still news only when nothing happened since the reply', () => {
+    expect(replyStillNewFromSignal(sig(), r, false)).toBe(true)
+    expect(replyStillNewFromSignal(sig({ turnStartedAt: 999 }), r, false)).toBe(true)
+    expect(replyStillNewFromSignal(sig({ turnStartedAt: 1_000 }), r, false)).toBe(true)
+    expect(replyStillNewFromSignal(sig({ failure: { kind: 'x', at: 999 } }), r, false)).toBe(true)   // an older failure, before this reply
+  })
+  it('gone, ended, answered, waiting, failed after the reply, or asking: not news', () => {
+    expect(replyStillNewFromSignal(undefined, r, false)).toBe(false)
+    expect(replyStillNewFromSignal(sig({ ended: { at: 900, reason: 'x' } }), r, false)).toBe(false)
+    expect(replyStillNewFromSignal(sig({ turnStartedAt: 1_001 }), r, false)).toBe(false)
+    expect(replyStillNewFromSignal(sig({ waiting: { kind: 'permission', since: 500 } }), r, false)).toBe(false)
+    expect(replyStillNewFromSignal(sig({ failure: { kind: 'x', at: 1_001 } }), r, false)).toBe(false)
+    expect(replyStillNewFromSignal(sig(), r, true)).toBe(false)
   })
 })

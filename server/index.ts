@@ -213,6 +213,7 @@ import { workSessionActivity } from './lib/work-session-activity.js'
 import { readWorkJournal } from './lib/work-activity.js'
 import { createDropP2Boot } from './lib/drop-p2-boot.js'
 import { createP2SettingsReader } from './lib/drop-p2-settings.js'
+import { replyStillNewFromSignal } from './lib/ping-engine.js'
 import { createDropP2Runtime, journalReceiptsLite } from './lib/drop-p2-runtime.js'
 import { sessionTurnOutcome } from './lib/drop-resolution.js'
 import { createSessionReplyPings } from './lib/session-reply-pings.js'
@@ -1158,6 +1159,8 @@ const dropP2 = createDropP2Boot({
     // Quiet while the server drains for an update or restart, as the morning brief is.
     paused: () => gracefulShutdownStarted || !maintenanceAdmissionsOpen(),
     settings: () => dropP2Settings.read(),
+    // 7.0.53: the merged Reply ready banner re-checks each held reply against the session's hook signal and open asks at release.
+    replyStillNew: reply => replyStillNewFromSignal(sessionSignalStore.get(reply.sessionId), reply, !!peekTurnEndAsk(reply.sessionId)),
   }),
 })
 const sessionReplyPings = createSessionReplyPings({

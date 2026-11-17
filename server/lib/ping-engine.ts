@@ -56,6 +56,23 @@ export interface PingState {
   replies?: HeldReply[]
 }
 
+/**
+ * 7.0.53 (the lead's 7.0.52 follow-up): is a held reply still news at the merged banner's release, from what the hooks last said
+ * about its session? No when the session is gone (no signal) or ended; when a turn started after the reply ended (he answered,
+ * here or at the desk); when it is now waiting (a permission or a question); when it failed after the reply; or when a turn-end
+ * ask is open (`asking`). Otherwise yes.
+ */
+export function replyStillNewFromSignal(
+  signal: { ended: unknown; turnStartedAt: number | null; waiting: unknown; failure: { at: number } | null } | undefined,
+  reply: Pick<HeldReply, 'at'>, asking: boolean,
+): boolean {
+  if (!signal || signal.ended) return false
+  if (typeof signal.turnStartedAt === 'number' && signal.turnStartedAt > reply.at) return false
+  if (signal.waiting) return false
+  if (signal.failure && typeof signal.failure.at === 'number' && signal.failure.at > reply.at) return false
+  return !asking
+}
+
 /** A Reply ready item waiting for the merged banner: its feed id and key, its session, the provider from the link, when it ended, its line. */
 export interface HeldReply { feedId: string; key: string; sessionId: string; provider?: SessionLinkProvider; at: number; line: string }
 
@@ -187,6 +204,11 @@ export interface PingEngineDeps {
   enabled?: () => readonly PingSource[]
   /** 6.99.11 settings. When given, they decide the budget, quiet hours, sources, check-in, steer and banners. */
   settings?: () => P2Settings
+  /**
+   * 7.0.53: at the merged banner's release, is this held reply still news (replyStillNewFromSignal)? False drops it. Absent, or
+   * throwing: kept, as in 7.0.52.
+   */
+  replyStillNew?: (reply: HeldReply) => boolean
 }
 
 export interface PingTickResult { posted: number; held: number; released: number; expired: number; banners: number }
@@ -246,9 +268,9 @@ export class PingEngine {
    * - The gap is measured from the last merged reply banner only, and is at least REPLY_MIN_GAP_MS. If the clock went back, the
    *   wait lasts until the clock passes that banner's time plus the gap, which can be longer than one gap; the next state write
    *   drops a ledger record more than a minute in the future (trimLedger), and the gap then counts from what is left (Q1 16:47).
-   * - At release a reply whose item is no longer in the chat (purged) is dropped; several replies of one session count once.
-   *   Zero left: no banner. Not tonight (the lead, 16:42; a named 7.0.53 follow-up): a re-check against the session's state, so a
-   *   reply he has already answered at the desk can still be announced.
+   * - At release a reply whose item is no longer in the chat (purged) is dropped, and so is one whose session is no longer news
+   *   (replyStillNew, 7.0.53: gone, ended, answered, waiting, failed or asking). Several replies of one session count once. Zero
+   *   left: no banner.
    * - Title and line, which the Mac banner shows: one session "Reply ready" and its own line ("Claude has a reply ready."); several
    *   "N sessions replied" and "N sessions have a reply ready." Never a title or reply text.
    */
@@ -260,7 +282,10 @@ export class PingEngine {
     const last = state.ledger.reduce((m, b) => (b.replies === true ? Math.max(m, b.at) : m), -Infinity)
     if (nowMs - last < Math.max(budget.gapMs, REPLY_MIN_GAP_MS)) return null
     delete state.replies
-    const live = held.filter(r => this.deps.feed.hasKey(r.key))
+    const live = held.filter(r => {
+      if (!this.deps.feed.hasKey(r.key)) return false
+      try { return this.deps.replyStillNew ? this.deps.replyStillNew(r) !== false : true } catch { return true }
+    })
     if (!live.length) return false
     const sessions = distinctSessions(live.map(r => ({ id: r.sessionId, provider: r.provider })))
     const n = sessions.length
