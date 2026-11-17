@@ -1070,10 +1070,11 @@
   function sessionListCached() { return SL.data ? { data: SL.data, at: SL.at } : null; }
 
   // ── 7.0.54: the COS mark at work (F1's final files, 23:05; the lead's 06:57 scope) ──
-  // Two places: the rail's mark, and the mark on each Running row on Today. Each is one box the size the flat SVG had
-  // (marks/: the glass still for rest, a 24-frame strip for work). A mark at work holds frame 03; at most ONE on the
-  // whole page plays (2 s, steps(24), a transform), chosen here: the rail's mark when it is on screen, else the first
-  // working Running row on screen. Waiting holds frame 00. Nothing plays while the page is hidden, under reduced
+  // Three places: the rail's mark; where the rail's mark is hidden (a phone, the open Duo's short screen), the top bar's
+  // mark, which takes its role (the lead, 07:40); and the mark on each Running row on Today. Each is one box the size
+  // the flat SVG had (marks/: the glass still for rest, a 24-frame strip for work). A mark at work holds frame 03; at
+  // most ONE on the whole page plays (2 s, steps(24), a transform), chosen here: the rail's mark if it is on screen,
+  // else the top bar's mark if it is, else the first working Running row on screen. Waiting holds frame 00. Nothing plays while the page is hidden, under reduced
   // motion (CSS holds 03), or on a list that is not fresh: the rail and the rows say Working only from a list read in
   // the last 90 s and not failed since, or kept current by the live stream. COS jobs and the Ask box are their own
   // sources and never start the mark.
@@ -1105,6 +1106,8 @@
     if (!(r.width > 0 && r.height > 0)) return false;
     var top = 0, left = 0, bottom = window.innerHeight || 0, right = window.innerWidth || 0;
     for (var p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      // A top bar sliding away (tucked: 220 ms) is gone already; its own class change brings the mark back (mkWire).
+      if (p.classList && p.classList.contains('tucked')) return false;
       var cs = window.getComputedStyle ? window.getComputedStyle(p) : null;
       if (cs && cs.visibility === 'hidden') return false;
       if (cs && /(auto|scroll|hidden|clip)/.test(cs.overflowX + ' ' + cs.overflowY)) {
@@ -1116,12 +1119,13 @@
   }
   function mkSync() {
     MK.soon = null;
-    var rail = document.querySelector('.rail-head .mk');
+    var rail = document.querySelector('.rail-head .mk'), bar = document.querySelector('#section-btn .mk');
     var working = mkWorking();
-    if (rail && rail.getAttribute('data-mk') !== (working ? 'work' : 'rest')) rail.setAttribute('data-mk', working ? 'work' : 'rest');
+    [rail, bar].forEach(function (m) { if (m && m.getAttribute('data-mk') !== (working ? 'work' : 'rest')) m.setAttribute('data-mk', working ? 'work' : 'rest'); });
     var pick = null;
     if (working && !document.hidden && !mkReduced()) {
       if (mkOnScreen(rail)) pick = rail;
+      else if (mkOnScreen(bar)) pick = bar;
       else {
         var rows = document.querySelectorAll('#run-list .mk[data-mk="work"]');
         for (var i = 0; i < rows.length && !pick; i++) if (mkOnScreen(rows[i])) pick = rows[i];
@@ -1156,7 +1160,15 @@
       if (mq && mq.addEventListener) mq.addEventListener('change', mkSoon); else if (mq && mq.addListener) mq.addListener(mkSoon);
     } catch (_e) {}
     // Focus mode, the short screen and the look are classes on <html>: the rail can come and go with them.
-    try { if (window.MutationObserver) new MutationObserver(mkSoon).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] }); } catch (_e) {}
+    // The top bar tucks and comes back on scroll: a class on #topbar.
+    try {
+      if (window.MutationObserver) {
+        var mo = new MutationObserver(mkSoon);
+        mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+        var tb = document.getElementById && document.getElementById('topbar');
+        if (tb) mo.observe(tb, { attributes: true, attributeFilter: ['class'] });
+      }
+    } catch (_e) {}
   }
   // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions"): a session that has just gone to waiting may have
   // parked a question for this page. The question poll (panes/questions.js) reads at once rather than at its next turn.

@@ -48,12 +48,13 @@ interface Opts { signedIn?: boolean; reduced?: boolean; hidden?: boolean; live?:
 function page(o: Opts = {}) {
   const now = { t: o.now ?? 1_700_000_001_234 }
   const rail = node(box(20, 30), { 'data-mk': 'rest' })
+  const bar = node(NONE, { 'data-mk': 'rest' })   // the top bar's mark: not laid out where the rail shows
   let rows: Node[] = []
   const listeners: Record<string, Array<() => void>> = {}
   const timers = { intervals: new Map<number, () => void>(), timeouts: new Map<number, () => void>(), id: 0 }
   const doc = {
     hidden: !!o.hidden, body: {} as unknown, documentElement: {} as unknown,
-    querySelector: (sel: string) => (sel === '.rail-head .mk' ? rail : null),
+    querySelector: (sel: string) => (sel === '.rail-head .mk' ? rail : sel === '#section-btn .mk' ? bar : null),
     querySelectorAll: (sel: string) => {
       if (sel === '#run-list .mk[data-mk="work"]') return rows.filter(r => r.isConnected && r.attrs['data-mk'] === 'work')
       throw new Error('unexpected selector ' + sel)
@@ -85,11 +86,11 @@ function page(o: Opts = {}) {
   vm.runInContext(BLOCK + '\n;this.api = { mkRow: mkRow, mkSync: mkSync, mkSoon: mkSoon, MK: MK };', ctx)
   const api = (ctx as { api: { mkRow(st: string): string; mkSync(): void; mkSoon(): void; MK: { live: unknown; timer: unknown } } }).api
   return {
-    api, rail, now, doc, SL, state, sessions, timers, listeners,
+    api, rail, bar, now, doc, SL, state, sessions, timers, listeners,
     working(n = 1) { for (let i = 0; i < n; i++) sessions.push({ session_id: 's' + i, running_active: true }) },
     rowsAt(...tops: number[]) { rows = tops.map(t => node(t < 0 ? NONE : box(t), { 'data-mk': 'work' })); return rows },
     setRows(r: Node[]) { rows = r },
-    live() { return [rail, ...rows].filter(r => r.cls.has('mk-live')) },
+    live() { return [rail, bar, ...rows].filter(r => r.cls.has('mk-live')) },
     flush() { const fs = [...timers.timeouts.values()]; timers.timeouts.clear(); fs.forEach(f => f()) },
   }
 }
@@ -115,7 +116,35 @@ describe('one mark plays on the whole page (mkSync)', () => {
     expect(p.rail.attrs['data-mk']).toBe('work')
     expect(p.live()).toEqual([p.rail])
   })
-  it('no rail on screen (a phone, the short screen): the first working row ON SCREEN plays, and only it', () => {
+  it('the rail hidden (a phone, the open Duo): the top bar\'s mark takes its role, in every pane that shows it', () => {
+    const p = page(); p.working(); p.rail.rect = NONE; p.bar.rect = box(10, 28, 16, 28)
+    const [row] = p.rowsAt(200)
+    p.api.mkSync()
+    expect(p.live()).toEqual([p.bar]); expect(row.cls.has('mk-live')).toBe(false)
+    expect(p.bar.attrs['data-mk']).toBe('work'); expect(p.rail.attrs['data-mk']).toBe('work')
+    p.sessions[0].running_active = false; p.api.mkSync()
+    expect(p.bar.attrs['data-mk']).toBe('rest'); expect(p.live()).toEqual([])   // frame 00's still when nothing works
+  })
+  it('a top bar tucking away on scroll (it slides for 220 ms) is gone at once: the row on screen plays', () => {
+    const p = page(); p.working(); p.rail.rect = NONE
+    const topbar = node(box(0, 56, 0, 382)); topbar.cls = new Set(['topbar', 'tucked'])
+    p.bar.parentElement = topbar; p.bar.rect = box(-20, 28, 16, 28)   // still partly in the window, mid-slide
+    const [row] = p.rowsAt(200)
+    p.api.mkSync()
+    expect(p.live()).toEqual([row])
+    topbar.cls.delete('tucked'); p.bar.rect = box(10, 28, 16, 28); p.api.mkSync()
+    expect(p.live()).toEqual([p.bar])
+  })
+  it('watches the top bar\'s own class, so its return is seen', () => {
+    expect(BLOCK).toContain("var tb = document.getElementById && document.getElementById('topbar');")
+    expect(BLOCK).toContain("if (tb) mo.observe(tb, { attributes: true, attributeFilter: ['class'] });")
+  })
+  it('the rail\'s mark comes first when both could show', () => {
+    const p = page(); p.working(); p.bar.rect = box(10, 28, 16, 28)
+    p.api.mkSync()
+    expect(p.live()).toEqual([p.rail])
+  })
+  it('no rail and no top bar mark on screen (a reader with Back): the first working row ON SCREEN plays, and only it', () => {
     const p = page(); p.working(2); p.rail.rect = NONE
     const [offTop, first, second] = p.rowsAt(-1, 200, 260)
     p.api.mkSync()
@@ -264,6 +293,7 @@ describe('the CSS', () => {
   })
   it('no layout shift: the rail mark keeps the SVG box, a row mark (18 px) is shorter than the badge beside it (22 px at the smallest)', () => {
     expect(HTML).toContain('<div class="rail-head"><span class="mark mk" data-mk="rest" aria-hidden="true"><svg class="mark" width="28" height="28"><use href="#i-mark"/></svg><span class="mk-w"><span class="mk-s"></span></span></span><span class="rail-brand">Control</span></div>')
+    expect(HTML).toContain('<span class="mark mk" data-mk="rest" aria-hidden="true"><svg class="mark" width="28" height="28"><use href="#i-mark"/></svg><span class="mk-w"><span class="mk-s"></span></span></span><span id="section-name">Today</span>')
     expect(MKCSS).toContain('.mk-row { width: 18px; height: 18px; flex: none; }')
     expect(CSS).toContain('.badge { height: 22px;')
     expect(MKCSS).toContain('.mk > svg { display: none; }')
