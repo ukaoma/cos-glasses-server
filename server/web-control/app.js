@@ -844,6 +844,8 @@
       // A change after boot (a fold, a rotation, a new screen) is reported once, with the screen's own numbers.
       if (RAIL.on !== null && RAIL.on !== on) railRecord('change', on);
       RAIL.on = on;
+      // Screen shape is current before the page-frame breakpoint is checked (fold/unfold).
+      if (typeof pgFrameSync === 'function') pgFrameSync();
       if (!RAIL.hooked && typeof window.matchMedia === 'function' && typeof window.addEventListener === 'function') {
         RAIL.hooked = true;
         var mq = window.matchMedia(SIDE_RAIL_MQ);
@@ -972,6 +974,8 @@
   var lastY = 0;
   function onScroll() {
     var y = Math.max(0, window.scrollY || 0);
+    // Today/Settings in their own workspace: the top bar never tucks with document scroll.
+    if (typeof pgFrameApplies === 'function' && pgFrameApplies()) { var heldBar = $('topbar'); barShow(heldBar); heldBar.classList.remove('scrolled'); lastY = 0; return; }
     // On a reader the bar stays (its Back is there). 7.0.33 A12: on the folded Duo too, where the bar now shows a named
     // Back (app.css); before, the bar tucked there and a tap meant for it landed on the page.
     var bar = $('topbar'), back = $('topbar-back'), onReader = !!(back && !back.classList.contains('hidden'));
@@ -1057,6 +1061,7 @@
     document.documentElement.classList.remove('sx-frame');
     document.documentElement.classList.remove('rd-frame');
     document.documentElement.classList.remove('pg-frame');
+    if (typeof pgPlaceDrop === 'function') pgPlaceDrop();
     // A later 401 from a pane still polling (W.api passes no message) must not blank what the gate already says:
     // the reason it opened, or "That code did not match" while the person retypes.
     if (!message && alreadyOpen) return;
@@ -3392,17 +3397,109 @@
   // the layout viewport, which that view has left, so the rail ended a quarter of the way down with its last items at
   // the top. html.pg-frame makes the page one screen (app.css): the app shell is the visible box (--vv-top, --vv-h from
   // viewportFit, which falls back to innerHeight when the reading is bad), Settings scrolls in the workspace and the
-  // rail is a static column, as on Sessions and the message reader. Gated in CSS to 600 px and up on touch; a class
-  // left on elsewhere does nothing. Panes are listed by name (own keys only).
-  var PG_FRAME_PANES = { settings: 1 };
+  // rail is a static column, as on Sessions and the message reader. The 7.0.55 candidate below also frames Today
+  // and the folded short-screen rail; tall phones and fine pointers keep the page. Panes are own keys only.
+  // 7.0.55 candidate: bounded migration. Today has no page-scroll restoration; Settings already used this frame.
+  // COS thread/Focus, all Sessions views and message readers keep their own ownership. Work/Meetings/Speakers still
+  // restore window scroll explicitly; no blanket pane opt-in. These exact viewport gates are paired with app.css.
+  var PG_FRAME_PANES = { today: 1, settings: 1 };
+  var PG_FRAME_WIDE = '(min-width: 600px) and (pointer: coarse)';
+  var PG_PLACE = { key: '', width: 0, a: null, seq: 0, pending: false, hooked: false };
+  function pgFrameViewport() { return !!(window.matchMedia && (window.matchMedia(PG_FRAME_WIDE).matches || (typeof sideRail === 'function' && sideRail()))); }
+  // The route allowlist excludes COS/Focus. Do not test a stale focus class: focusSync clears it after route() frames Today.
   function pgFrameOn(r) {
-    var shell = $('app-shell');
-    return !!(r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && !(shell && shell.classList && shell.classList.contains('hidden')));
+    var shell = $('app-shell'), de = document.documentElement;
+    return !!(r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && pgFrameViewport() &&
+      !(shell && shell.classList && shell.classList.contains('hidden')) &&
+      !(de && de.classList && (de.classList.contains('sx-frame') || de.classList.contains('rd-frame'))));
+  }
+  function pgPlaceKey(r) { return r ? r.pane + '|' + (r.args || []).join('|') : ''; }
+  function pgPlaceDrop() { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; PG_PLACE.key = ''; }
+  function pgPlaceTop(framed) {
+    var ws = $('workspace');
+    if (framed && ws && ws.getBoundingClientRect) return ws.getBoundingClientRect().top;
+    var top = 0;
+    ['.topbar', '.navbar'].forEach(function (sel) {
+      var e = document.querySelector(sel), cs = e && getComputedStyle(e), b = e && e.getBoundingClientRect();
+      if (b && cs.display !== 'none' && (cs.position === 'sticky' || cs.position === 'fixed')) top = Math.max(top, b.bottom);
+    });
+    return top;
+  }
+  function pgPlaceRect(a) {
+    if (!a || !a.node || a.node.isConnected === false) return null;
+    if (a.text && typeof rdPosRect === 'function') return rdPosRect(a.node, a.offset);
+    return a.node.getBoundingClientRect ? a.node.getBoundingClientRect() : null;
+  }
+  // Remember a live text/element anchor while he scrolls, BEFORE a width change reflows it. Never persist raw offsets
+  // across panes. A replaced/disconnected anchor is discarded rather than restoring an old page position or bottom.
+  function pgPlaceCapture(r, framed) {
+    var ws = $('workspace'), pane = $('pane-' + r.pane), top = pgPlaceTop(framed);
+    if (!ws || !pane || !pane.getBoundingClientRect) return null;
+    if ((framed ? ws.scrollTop : window.scrollY || 0) <= 2) return { key: pgPlaceKey(r), atTop: true };
+    var b = pane.getBoundingClientRect(), xs = [b.left + 12, b.left + b.width / 2];
+    for (var dy = 4; dy <= 64; dy += 12) {
+      for (var i = 0; i < xs.length; i++) {
+        var hit = document.caretRangeFromPoint ? document.caretRangeFromPoint(xs[i], top + dy) : null, n = hit && hit.startContainer;
+        var a = n && n.nodeType === 3 && pane.contains(n) && !(n.parentElement && n.parentElement.closest('input,textarea,[contenteditable]')) ?
+          { key: pgPlaceKey(r), node: n, text: true, offset: hit.startOffset } : null;
+        if (!a && document.elementFromPoint) { n = document.elementFromPoint(xs[i], top + dy); if (n && n !== pane && pane.contains(n)) a = { key: pgPlaceKey(r), node: n }; }
+        var rect = pgPlaceRect(a);
+        if (rect && rect.height > 0) { a.dy = rect.top - top; return a; }
+      }
+    }
+    return { key: pgPlaceKey(r), node: pane, dy: b.top - top };
+  }
+  function pgPlaceApply(a, framed) {
+    var r = parseRoute(), ws = $('workspace'), de = document.documentElement, shell = $('app-shell');
+    if (shell && shell.classList && shell.classList.contains('hidden')) return false;
+    if (de && de.classList && (de.classList.contains('sx-frame') || de.classList.contains('rd-frame'))) return false;
+    if (!a || !ws || a.key !== pgPlaceKey(r) || !Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane)) return false;
+    if (a.atTop) { if (framed) ws.scrollTop = 0; else window.scrollTo(0, 0); return true; }
+    var rect = pgPlaceRect(a); if (!rect) return false;
+    var delta = Math.round(rect.top - pgPlaceTop(framed) - a.dy);
+    if (framed) ws.scrollTop += delta; else window.scrollBy(0, delta);
+    return true;
+  }
+  function pgPlaceRemember() {
+    if (PG_PLACE.pending) return;
+    var r = parseRoute();
+    if (r && Object.prototype.hasOwnProperty.call(PG_FRAME_PANES, r.pane) && PG_PLACE.key === pgPlaceKey(r)) PG_PLACE.a = pgPlaceCapture(r, pgFrameApplies());
+  }
+  function pgPlaceHook() {
+    if (PG_PLACE.hooked || !window.addEventListener || !document.addEventListener) return;
+    PG_PLACE.hooked = true;
+    document.addEventListener('scroll', pgPlaceRemember, { capture: true, passive: true });
+    // A new deliberate gesture supersedes a queued fold restoration. Its next scroll becomes the fresh anchor.
+    ['touchstart', 'wheel', 'keydown'].forEach(function (name) { document.addEventListener(name, function () {
+      if (PG_PLACE.pending) { PG_PLACE.seq++; PG_PLACE.pending = false; PG_PLACE.a = null; }
+    }, { capture: true, passive: true }); });
+    window.addEventListener('resize', function () { pgFrameSync(); });
+    window.addEventListener('orientationchange', function () { pgFrameSync(); });
+    window.addEventListener('pageshow', function () { pgFrameSync(); });
   }
   function pgFrameSync(r) {
-    var de = document.documentElement, on = pgFrameOn(r || parseRoute()), was = !!(de && de.classList && de.classList.contains('pg-frame'));
+    r = r || parseRoute();
+    var de = document.documentElement, on = pgFrameOn(r), was = !!(de && de.classList && de.classList.contains('pg-frame'));
+    var key = pgPlaceKey(r), same = key === PG_PLACE.key, width = window.innerWidth || (de && de.clientWidth) || 0;
+    var moving = same && (on || was) && (on !== was || width !== PG_PLACE.width);
+    var anchor = moving ? PG_PLACE.a || pgPlaceCapture(r, was) : null;
+    if (!same) { pgPlaceDrop(); PG_PLACE.key = key; }
+    PG_PLACE.width = width;
     if (de && de.classList) de.classList.toggle('pg-frame', on);
+    pgPlaceHook();
     if (on) { pgFrameHook(); if (!was) pgFrameCrumb('open'); }
+    if (on && typeof lrFit === 'function') lrFit(); // existing viewportFit rejects height 0 and resets stranded top to 0
+    if (on && typeof barShow === 'function') { barShow($('topbar')); lastY = 0; }
+    if (moving) {
+      var seq = ++PG_PLACE.seq; PG_PLACE.pending = true;
+      if (on) window.scrollTo(0, 0);
+      requestAnimationFrame(function () {
+        if (seq !== PG_PLACE.seq) return;
+        PG_PLACE.pending = false;
+        if (key !== pgPlaceKey(parseRoute()) || pgFrameOn(parseRoute()) !== on) return;
+        pgPlaceApply(anchor, on); pgPlaceRemember();
+      });
+    } else pgPlaceRemember();
     return on;
   }
   // One numbers-only web.layout row (pg-frame) when the frame comes on and after the keyboard closes (the trigger at
@@ -3422,11 +3519,11 @@
     } catch (_e) { /* a report never stops the page */ }
     return false;
   }
-  // The frame applies only where app.css's block does (600 px and up, touch). The class alone is set at every width, so
-  // anything that acts on the frame asks this (Q1 08:4x: under 600 px a keyboard must not scroll the page).
+  // The frame applies on wide touch screens and the folded short-screen rail only. Tall phones and fine pointers
+  // keep page scrolling; this predicate and both CSS gates use width/screen shape, never keyboard-sensitive height.
   function pgFrameApplies() {
     var de = document.documentElement;
-    return !!(de && de.classList && de.classList.contains('pg-frame') && window.matchMedia && window.matchMedia('(min-width: 600px) and (pointer: coarse)').matches);
+    return !!(de && de.classList && de.classList.contains('pg-frame') && pgFrameViewport());
   }
   function pgFrameHook() {
     if (PG_FRAME_LOG.hooked || !window.COSWeb || typeof window.COSWeb.onKeyboard !== 'function') return;

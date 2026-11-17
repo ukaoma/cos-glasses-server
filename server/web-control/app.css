@@ -812,3 +812,18 @@ html { touch-action: manipulation; }
   html.short-screen .section-btn .caret { display: none !important; }
   html.short-screen .section-btn { cursor: default; }
 }
+/* 7.0.55 candidate: Today and Settings on the folded Duo reuse pg-frame, not a second frame. Kept AFTER the folded
+   rail rules: its align-items:flex-start and sticky 100dvh rail must not win. The same width/pointer + short-screen
+   gate is used by pgFrameViewport/sideRail. Wide touch screens keep the existing pg-frame block above. */
+@media (max-width: 599px) and (pointer: coarse) {
+  html.short-screen.pg-frame, html.short-screen.pg-frame body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+  html.short-screen.pg-frame body { min-height: 0; }
+  html.short-screen.pg-frame .app-shell { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh);
+    min-height: 0; align-items: stretch; overflow: hidden; }
+  html.short-screen.pg-frame .rail { position: static; top: auto; height: auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  html.short-screen.pg-frame .main-col { min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  html.short-screen.pg-frame .topbar, html.short-screen.pg-frame .navbar { flex: none; position: relative; }
+  html.short-screen.pg-frame .workspace { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 0; }
+  html.short-screen.pg-frame .workspace::after { content: ''; display: block; height: calc(var(--safe-bottom) + 40px); }
+}
+
