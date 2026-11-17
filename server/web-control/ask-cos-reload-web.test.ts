@@ -8,11 +8,19 @@
  * conversation>/messages once, and draw each pair with the history card and the day lines; a number an Ask on this page
  * already shows is drawn once; 404 is nothing to show; any other error is one quiet line with Try again.
  */
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+
+// 7.0.53 (W1 found it 00:29, the lead 00:3x): the fixtures put asks 10 to 30 minutes before now and expect one 'Today' day
+// line, so between 00:00 and 00:30 local some asks fell on yesterday and the file failed on any head. Date alone is pinned to
+// local noon today, before the constants below read it, and restored after; timers stay real (flush() uses setTimeout).
+const NOON = new Date(); NOON.setHours(12, 0, 0, 0)
+vi.useFakeTimers({ toFake: ['Date'] })
+vi.setSystemTime(NOON)
+afterAll(() => { vi.useRealTimers() })
 
 const SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'panes', 'cos-chat.js'), 'utf8')
 const flush = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)) }
