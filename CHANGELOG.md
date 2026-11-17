@@ -17,6 +17,12 @@
 - **Desktop sessions do not run the status line** (sampled 2026-11-17: 0 runs in 20 desktop sessions over 3 minutes). Claude Desktop's row comes only from the app's usage tool.
 - **The Mac app re-reading a kept pane** is Control's (planned for 0.5.402 with the lead's 08:44 cutoff, else 0.5.403). Today it draws these lines as sent; a new row id gets its neutral colour.
 
+**Tested on this build** (the counted run on 7de59972; this commit adds only these lines):
+- **Pre-suite and counted run, alone, swift-slot lease held start to end (09:47 to 10:05):** the web set 2436 passed (2436); the 16 server tests that read web source, the key-lane, spawn and Cursor censuses, hazard invariants and route suites 3215 passed (3215); type check exit 0; `npm test` 987 passed | 2 skipped (989); 18231 passed | 6 skipped (18237); exit 0. Stamp: script fd38a73032860daa, commit 7de599729250b8fe373bbeff6ccf7664ecb44743, tracked-files dbf891b225938dc8, node_modules -> /Users/ukaoma/cos-worktrees/server-candidate-7032/node_modules.
+- **F1's WebKit verdicts for this head (on the commits named):** molecule sweep on d436f824, PASS, 0 findings (08:46; one live mark per page, frames, hidden and reduced motion, boxes 0 px against 7.0.53, 24 of 24), and the closed plan row re-look on 07cd692d, PASS, 0 findings (09:25; 382x557 and 951x539, Amber dark and light). This is the molecule kind, not the keyed layout sweep, which is owed on the final head before any npm publish (the lead, 08:54 and 09:40).
+- **Q1:** PASS on every range: the usage feed ef436f50..f36d54c3 (07:46, 25 of 25 mutants), the probe key-shape lines 124892c4..02ca80a1 (08:13), the molecule mark d7c76bb8..d436f824 (08:25, 20 of 20), the closed plan row 07cd692d (09:36, 5 of 5).
+- **Every changed file is byte-identical to the reviewed commit that last set it**, except CHANGELOG.md, package.json and package-lock.json, which the release commit 7de59972 sets (release-7.0.54/merges.txt).
+
 ## 7.0.53 - Reply ready rows that name their session, a re-checked merged banner, the desk rule in the turn report, phone approvals that survive a late Tailscale name, and the approval page's message line
 
 2026-11-17. A PRIVATE candidate, frozen at 52fb0415 (the lead, 05:06; branch claude/server-7053-fallback-52fb0415): 7.0.52 plus the changes below. Private: installed only on a line Miles types, not on npm. The lead's 20:5x order after Miles, 20:52: "start update gotcos.com and the desktop with these newer elements"; the message line in Miles's words, 21:13.
