@@ -366,9 +366,10 @@ describe('the markup and the CSS', () => {
   })
   it('keyboard up (F1 07:41, Q1 07:42): the dock is the handle and the reply row at every height; what answers a send sits under it', () => {
     const hide = between(DOCKCSS, "html.sx-frame.kb-up .sx-docked .sx-wline,", '{ display: none; }')
-    for (const part of ['.sx-wline', '#session-queue', '#session-clip', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-x2-note',
-      '#session-form > .sx-stop-row', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
-      expect(hide, part).toContain('html.sx-frame.kb-up .sx-docked ' + part)
+    // Whole selectors, never a substring: '#session-form > .sx-x2' is inside '... > .sx-x2-note' (mutant K2 survived that).
+    const sels = hide.split(',').map(x => x.trim()).filter(Boolean)
+    expect(sels).toEqual(['.sx-wline', '#session-queue', '#session-clip', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-x2-note',
+      '#session-form > .sx-stop-row', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'].map(p => 'html.sx-frame.kb-up .sx-docked ' + p))
     // Approve and send stays in the reply row with a request card up, and the field itself is never hidden.
     expect(hide).not.toMatch(/\.pa-req \.pa-go|#session-input|#session-send,|#session-form,/)
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }')
