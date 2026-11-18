@@ -5399,24 +5399,32 @@
   }
   /** Stop, in full only, and only while it works. The first tap asks; Keep working is the filled, focused answer, where
    *  Stop was, so a second stray tap keeps the session going. No hold gesture. */
+  // Q1 07:15: paintActivity runs on every stream event and sxDockPaint on every resize, so the row is rebuilt only when
+  // its state (none, ask, asked) changes: the buttons are never swapped under his thumb, and focus never moves here.
   function sxStopPaint(r) {
     var row = $('session-stop-row'); if (!row) return;
     var working = !!(r && state.reading === r && r.live && r.live.working);
-    if (!working) { SX_DOCK.stopAsk = false; row.innerHTML = ''; return; }
-    if (SX_DOCK.stopAsk) {
-      row.innerHTML = '<p class="sx-stop-q" id="session-stop-q">Stop this session?</p>' +
+    if (!working) SX_DOCK.stopAsk = false;
+    var want = !working ? 'none' : SX_DOCK.stopAsk ? 'asked' : 'ask';
+    if (row.getAttribute && row.getAttribute('data-stop') === want) return;
+    if (row.setAttribute) row.setAttribute('data-stop', want);
+    row.innerHTML = want === 'none' ? '' : want === 'asked'
+      ? '<p class="sx-stop-q" id="session-stop-q">Stop this session?</p>' +
         '<button type="button" class="cx-btn primary sx-stop-keep" data-sx="dock-stop-keep" aria-describedby="session-stop-q">Keep working</button>' +
-        '<button type="button" class="cx-btn danger sx-stop-go" data-action="stop-session">Stop</button>';
-      var keep = row.querySelector ? row.querySelector('[data-sx="dock-stop-keep"]') : null;
-      if (keep && keep.focus) { try { keep.focus({ preventScroll: true }); } catch (_e) { keep.focus(); } }
-    } else row.innerHTML = '<button type="button" class="cx-btn quiet sx-stop-ask" data-sx="dock-stop">Stop</button>';
+        '<button type="button" class="cx-btn danger sx-stop-go" data-action="stop-session">Stop</button>'
+      : '<button type="button" class="cx-btn quiet sx-stop-ask" data-sx="dock-stop">Stop</button>';
+  }
+  /** Keep working takes focus once, on his tap of Stop (it is where Stop was). */
+  function sxStopFocusKeep() {
+    var row = $('session-stop-row'), keep = row && row.querySelector ? row.querySelector('[data-sx="dock-stop-keep"]') : null;
+    if (keep && keep.focus) { try { keep.focus({ preventScroll: true }); } catch (_e) { keep.focus(); } }
   }
   function sxDockClick(act) {
     var h = sxDockHeight();
     if (act === 'dock-handle') { if (SX_DOCK.dragged) { SX_DOCK.dragged = false; return; } return sxDockSet(sxDockNext(h)); }
     if (act === 'dock-full') return sxDockSet(h === 'full' ? 'middle' : 'full');
     if (act === 'dock-focus') return sxDockSet(h === 'focus' ? 'middle' : 'focus');
-    if (act === 'dock-stop') { SX_DOCK.stopAsk = true; return sxStopPaint(state.reading); }
+    if (act === 'dock-stop') { SX_DOCK.stopAsk = true; sxStopPaint(state.reading); return sxStopFocusKeep(); }
     if (act === 'dock-stop-keep') { SX_DOCK.stopAsk = false; return sxStopPaint(state.reading); }
   }
   function sxDockKey(e) {

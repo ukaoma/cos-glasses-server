@@ -26,7 +26,9 @@ const DOCKCSS = between(CSS, '/* ── 7.0.56: the Sessions dock, Direction 2',
 
 // ── a page of fakes ───────────────────────────────────────────────────────────────────────────────────────────────
 class El {
-  attrs: Record<string, string> = {}; cls = new Set<string>(); innerHTML = ''; style: Record<string, string> = {}; focused = 0
+  attrs: Record<string, string> = {}; cls = new Set<string>(); style: Record<string, string> = {}; focused = 0; writes = 0; html = ''
+  get innerHTML() { return this.html }
+  set innerHTML(v: string) { this.html = v; this.writes++ }
   constructor(public id = '', public h = 0) {}
   get classList() { const c = this.cls; return { toggle: (n: string, on: boolean) => { if (on) c.add(n); else c.delete(n) }, contains: (n: string) => c.has(n) } }
   setAttribute(k: string, v: string) { this.attrs[k] = v }
@@ -220,6 +222,29 @@ describe('Stop: full only, never one tap, Keep working the default', () => {
     expect(p.stop.innerHTML).toContain('data-sx="dock-stop"'); expect(p.stop.innerHTML).not.toContain('stop-session')
     p.api.click('dock-stop'); p.api.click('dock-focus'); p.api.click('dock-full')
     expect(p.stop.innerHTML).not.toContain('stop-session')
+  })
+  it('Q1 07:15: asked, a stream of activity and resize paints never rebuild the row or move focus; Keep working is focused once', () => {
+    const p = page({ docked: true, stored: 'full' })
+    p.api.stop(p.r)                                        // the first paint: one Stop that asks
+    p.api.click('dock-stop')                               // his tap: the question
+    const w = p.stop.writes
+    for (let i = 0; i < 6; i++) { p.api.stop(p.r); p.api.paint() }   // paintActivity per stream event, sxDockPaint per resize
+    expect(p.stop.writes, 'the same buttons stay under his thumb').toBe(w)
+    expect(p.stop.kids.keep.focused, 'focus moved once, from his tap').toBe(1)
+    expect(p.stop.innerHTML).toContain('data-sx="dock-stop-keep"')
+  })
+  it('the row is rebuilt only when its state changes: ask, asked, ask again, none when it stops', () => {
+    const p = page({ stored: 'full' })
+    p.api.stop(p.r); p.api.stop(p.r); expect([p.stop.attrs['data-stop'], p.stop.writes]).toEqual(['ask', 1])
+    p.api.click('dock-stop'); expect([p.stop.attrs['data-stop'], p.stop.writes]).toEqual(['asked', 2])
+    p.api.click('dock-stop-keep'); expect([p.stop.attrs['data-stop'], p.stop.writes]).toEqual(['ask', 3])
+    p.r.live.working = false; p.api.stop(p.r); expect([p.stop.attrs['data-stop'], p.stop.innerHTML]).toEqual(['none', ''])
+    p.r.live.working = true; p.api.stop(p.r); expect(p.stop.innerHTML).toContain('data-sx="dock-stop"')   // asked was forgotten
+  })
+  it('only his tap of Stop moves focus: the painters never call focus', () => {
+    expect(between(APP, '  function sxStopPaint(r) {', '  function sxStopFocusKeep() {')).not.toContain('focus(')
+    expect(between(APP, '  function paintActivity(r) {', '\n  }\n')).toContain("if (typeof sxStopPaint === 'function') sxStopPaint(r);")
+    expect(APP).toContain("if (act === 'dock-stop') { SX_DOCK.stopAsk = true; sxStopPaint(state.reading); return sxStopFocusKeep(); }")
   })
   it('not working: no Stop at all', () => {
     const p = page({ stored: 'full', working: false }); p.api.stop(p.r)
