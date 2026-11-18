@@ -379,6 +379,9 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(card(h)).toBeUndefined()
       expect(h.form.querySelector('[data-phone-offer]')!.getAttribute('aria-label')).toBe('Send with passkey, confirmed with this phone')
+      // What he reads on it, not only what a screen reader hears (W5 survived without this).
+      expect(h.form.querySelector('[data-phone-offer]')!.innerHTML).toContain('<span>Send with passkey</span>')
+      expect(h.form.querySelector('[data-phone-offer]')!.innerHTML).not.toContain('Approve')
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
       expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).not.toHaveProperty('packetSha256')
     })
