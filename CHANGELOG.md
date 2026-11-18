@@ -1,3 +1,21 @@
+## 7.0.57 - The dock hides the request card with the keyboard up, and a Cursor ask is not cut off while a sub-agent works
+
+2026-11-18. 7.0.56 (ce39e1ee, installed on Miles's Mac 09:05) plus W1's dock fixes and S1's Cursor fixes, nothing else. For a private install on his Mac (his line of 07:01, the lead's reading: it covers the fixes to the build he asked for); on npm only on a separate line from him.
+
+**On for everyone, one line each:**
+- Control Web, the Sessions dock with the keyboard up: **the request card is truly hidden** together with Approve and every passkey send, wherever the card sits (in 7.0.56 the card stayed drawn behind the reply row at 382 and 951 px); with the keyboard down it comes back whole. (W1, X1)
+- **Enter cannot approve a hidden card:** a keyboard submit approves only when the request card and its Approve are both drawn; otherwise it sends a plain message. (W1, X1)
+- **Full draws as Middle while a card he must read is up:** a request card whose Approve can be tapped, or this session's question card while the session is not working. A line under the working line says "Answer the request to open the full view." (or "the question"); Full comes back when the card goes or the session starts working; the typed text and focus stay as they are. (W1, F1 probe 6)
+- COS thread, Cursor: **an ask is no longer cut off at 3 minutes while a sub-agent works.** A started tool call that has not finished counts as activity. The 15-minute wall clock still ends a stuck one, and then the ask fails with "Cursor stopped after 15 minutes while it was still working. Ask again." and keeps what came through, never passing an interim line off as the answer. (S1; job 59a4413f; Codex)
+- **A failed ask says why** in plain words, in place of "This ask did not finish." when the job gave a reason, for example "Cursor stopped after 3 minutes with no progress while it was waiting on a sub-agent. Ask again." Ask again stays. (S1 server, W1 page)
+- A failed ask keeps every character of its partial answer (the last moment of text was dropped before). (S1)
+- The Cursor run ledger is kept in the data folder, so it survives an install like Codex's. (S1)
+
+**Not covered, said plainly:**
+- A question card's foot needs a scroll in Middle at 382 and 951 px (F1 probe 7, class B).
+- The thread cannot read a live meeting yet; a context block for that is a cost decision for Miles (S1's half page), not in this build.
+- With the keyboard up the dock is checked in a browser model; his phone and Duo are the test.
+
 ## 7.0.56 - The Sessions dock on phones and small touch screens
 
 2026-11-18. 7.0.55 (on npm since 2026-11-17) plus W1's Sessions dock (claude/sessions-dock-7056), nothing else. Built from A1's approved mock (Miles, 2026-11-17 18:3x: "yup this design is it."). For a private install on Miles's Mac (his line of 2026-11-18 07:01); on npm only on a separate line from him.
