@@ -767,8 +767,10 @@ export class CosThread {
     const text = typeof end.text === 'string' ? end.text : ''
     const prior = this.answers.get(end.clientJobId)
     // 7.0.57 (the lead's 09:5x ruling): no reason backfill. The boot re-projects every retained terminal job; an identical
-    // end (same generation, status and length) is skipped HERE, before any reason is read, so a failed chat recorded
-    // before 7.0.57 never gains one and keeps the page's fixed words. Pinned in cos-thread-failure-reason.test.ts.
+    // end (same generation, status and length) is skipped HERE, so re-projection appends no second row, and apply() runs
+    // the same supersededBy check on every row it applies, so even a row that did get written could not replace the
+    // recorded end. Either way a failed chat recorded before 7.0.57 never gains a reason and keeps the page's fixed
+    // words. Pinned in cos-thread-failure-reason.test.ts (no reason, and exactly one answer row in the ledger).
     if (prior && supersededBy(prior, { generation: end.generation, status, answerChars: text.length }) === false) return
     const at = this.iso()
     let ref: AnswerRef | undefined

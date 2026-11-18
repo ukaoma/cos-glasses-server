@@ -2,7 +2,7 @@
 // "This ask did not finish."). Same harness as cos-thread-jobs.test.ts; bounded inputs only.
 
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { CosThread, REASON_CHARS, failureReason } from './cos-thread.js'
@@ -14,7 +14,7 @@ function harness() {
   const root = mkdtempSync(join(tmpdir(), 'cos-thread-reason-')); roots.push(root)
   const dir = join(root, 'cos-thread')
   const make = () => new CosThread({ dir, now: () => T0, context: () => ({ found: true, tokens: 1000 }) })
-  return { make }
+  return { make, dir }
 }
 const job = (n: number) =>
   ({ clientJobId: `dddddddd-0000-4000-8000-${String(n).padStart(12, '0')}`, generation: 1, sessionId: 'thread01', query: `question ${n}` })
@@ -72,6 +72,9 @@ describe('the thread store keeps a failed chat\'s reason', () => {
     expect(t.historyPage({ limit: 5 }).entries[0]).toMatchObject({ status: 'failed', answer: 'part' })
     expect(t.historyPage({ limit: 5 }).entries[0]).not.toHaveProperty('reason')
     expect(h.make().historyPage({ limit: 5 }).entries[0]).not.toHaveProperty('reason')
+    // The record-side skip: the re-projection appended no second answer row (apply's own check would hide one).
+    const rows = readFileSync(join(h.dir, 'ledger.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
+    expect(rows.filter(r => r.kind === 'answer' && r.clientId === job(1).clientJobId)).toHaveLength(1)
   })
 
   it('a later generation that completes replaces the failed one, reason and all', () => {
