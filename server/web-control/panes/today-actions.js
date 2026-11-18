@@ -1499,7 +1499,8 @@
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
       // 6.99.29: "Working right now" only while the card's one state says so.
       // QA 7.0.0: files in this sheet's box wait for the turn end, so the note says so (app.js sxParkLine).
-      if (K.feed.parkNoteShows(r)) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider, r, !!(filesOn() && filesState(filesBox(r)) !== 'none'))) + '</p>';
+      // 7.0.56: with the passkey composer on, its note is the one note (app.js phoneBusyApply), so this one is not drawn.
+      if (K.feed.parkNoteShows(r) && !(typeof K.paOn === 'function' && K.paOn(r))) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider, r, !!(filesOn() && filesState(filesBox(r)) !== 'none'))) + '</p>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = '<div class="sx-box refusal" role="status"><p>' + esc(v.reasonCopy) + '</p></div>';
     } else if (v && v.caution) {

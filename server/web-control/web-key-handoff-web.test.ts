@@ -156,17 +156,19 @@ describe('flag off: the composer is exactly as before', () => {
 })
 
 describe('flag on with an enrolled phone key', () => {
-  // 7.0.51 (Miles's go 07:08 on F1's design): one verified primary beside the words, once; the form's own Send is
-  // the quiet Send as message only. Was: "Approve on this phone" beside Send.
-  it('puts the verified Send beside the words, once, and the form\'s Send becomes Send as message only', async () => {
+  // 7.0.56 (Miles 18:3x "Yes, same everywhere"; was 7.0.51's verified primary beside the words): with no request card
+  // up, the plain Send is the filled primary beside the words and Send with passkey sits, once, where Send was.
+  it('puts the plain Send beside the words and Send with passkey, once, in the quiet row', async () => {
     const h = harness({ signer: 1 })
     h.paintWebKeyOffer(h.r)
     h.paintWebKeyOffer(h.r)
     await flush()
     const b = h.form.querySelector('[data-action="approve-on-phone"]')
     expect(b?.className).toBe('pa-go')
-    expect(h.form.children.map(c => c.attrs['data-action'] ?? c.id ?? c.tag)).toEqual(['session-input', 'approve-on-phone', ''])
-    expect(h.send.textContent).toBe('Send as message only')
+    expect(h.form.children.map(c => c.attrs['data-action'] ?? c.id ?? c.tag)).toEqual(['session-input', 'session-send', ''])
+    expect(b?.parentNode?.children.map(c => c.attrs['data-action'] ?? c.id)).toEqual(['approve-on-phone'])
+    expect(h.send.textContent).toBe('Send')
+    expect(h.form.classList.contains('pa-req')).toBe(false)
     expect(h.form.classList.contains('pa-on')).toBe(true)
     expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(1)
   })
@@ -369,7 +371,7 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       const h = harness({ signer: 1, prefix, packets: [] })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       expect(card(h)).toBeUndefined()
-      expect(h.form.querySelector('[data-phone-offer]')!.getAttribute('aria-label')).toBe('Send, confirmed with this phone')
+      expect(h.form.querySelector('[data-phone-offer]')!.getAttribute('aria-label')).toBe('Send with passkey, confirmed with this phone')
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
       expect(h.requests.find(q => q.path === '/api/web-key/handoff')!.body).not.toHaveProperty('packetSha256')
     })
@@ -381,13 +383,32 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       expect([prevented, stopped]).toEqual([0, 0])
       expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
     })
-    it(`${prefix}: Enter (a submit with no submitter) takes the verified primary`, async () => {
+    // 7.0.56 (Miles 18:3x): Enter takes the plain send, the form's own submit; the passkey path is never taken.
+    it(`${prefix}: Enter (a submit with no submitter) takes the plain send, not the passkey`, async () => {
       const h = harness({ signer: 1, prefix })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       let prevented = 0, stopped = 0
       h.form.listeners.submit({ submitter: null, preventDefault: () => { prevented++ }, stopImmediatePropagation: () => { stopped++ } }); await flush()
+      expect([prevented, stopped]).toEqual([0, 0])
+      expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
+    })
+    // The lead 18:5x: the request-card state is not flipped. Enter there still takes Approve and send, as today.
+    it(`${prefix}: with a request card up, Enter still takes Approve and send (unchanged)`, async () => {
+      const h = harness({ signer: 1, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.classList.contains('pa-req')).toBe(true)
+      let prevented = 0, stopped = 0
+      h.form.listeners.submit({ submitter: null, preventDefault: () => { prevented++ }, stopImmediatePropagation: () => { stopped++ } }); await flush()
       expect([prevented, stopped]).toEqual([1, 1])
       expect(h.requests.filter(q => q.path === '/api/web-key/handoff')).toHaveLength(1)
+    })
+    it(`${prefix}: with a request card up, Approve and send keeps its place beside the words and the quiet send its words (unchanged)`, async () => {
+      const h = harness({ signer: 1, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      const go = h.form.querySelector('[data-phone-offer]')!
+      if (prefix !== 'rr') expect(h.input.nextSibling).toBe(go)
+      expect(go.innerHTML).toContain('Approve and send')
+      expect(h.send.textContent).toBe('Send as message only')
     })
   }
   for (const prefix of ['session', 'ta'] as const) {
@@ -1128,18 +1149,22 @@ describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about i
       expect(go(h).disabled).toBe(false)
       expect(note(h)).toBeNull()
       expect(go(h).getAttribute('aria-describedby')).toBe(null)
-      expect(h.send.textContent).toBe('Send as message only')
+      expect(h.send.textContent).toBe('Send as message only')   // the request card is still up: today's words (lead 18:5x)
       expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
     })
-    it(`${prefix}: with no request it is Send that waits, and Codex is named as Codex`, async () => {
+    // 7.0.56: with no request it is Send with passkey that waits, in the one note (its middle sentence, sxParkLine's own
+    // form, comes from outside this block: sessions-dock-web.test.ts pins all five); the plain send queues.
+    it(`${prefix}: with no request it is Send with passkey that waits, Codex is named as Codex, and the plain send says Queue message`, async () => {
       const h = harness({ signer: 1, prefix })
       h.r.provider = 'codex'; h.r.live = { working: true }
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
-      expect(note(h).textContent).toBe('Codex is working. Send opens when it stops, so your passkey is not spent on a refusal.')
+      expect(note(h).textContent).toBe('Codex is working. Send with passkey opens when it stops.')
+      expect(go(h).disabled).toBe(true)
+      expect(h.send.textContent).toBe('Queue message')
     })
     for (const [name, set, line] of [
-      ['a message held for after the reply', (r: any) => { r.held = [{ text: 'x', key: 'k1' }] }, 'A message is waiting to go after this reply. Send opens once it has gone.'],
-      ['the write gate busy (the server said so)', (r: any) => { r.gate = { busy: true, at: Date.now() } }, 'Claude is working. Send opens when it stops, so your passkey is not spent on a refusal.'],
+      ['a message held for after the reply', (r: any) => { r.held = [{ text: 'x', key: 'k1' }] }, 'A message is waiting to go after this reply. Send with passkey opens once it has gone.'],
+      ['the write gate busy (the server said so)', (r: any) => { r.gate = { busy: true, at: Date.now() } }, 'Claude is working. Send with passkey opens when it stops.'],
     ] as const) {
       it(`${prefix}: ${name}: the phone send waits with its reason, the quiet send is unchanged`, async () => {
         const h = harness({ signer: 1, prefix })
@@ -1148,7 +1173,7 @@ describe('7.0.51 item 3: what the plain Send parks, holds, wraps or asks about i
         expect(go(h).disabled).toBe(true)
         expect(note(h).textContent).toBe(line)
         // Working (the gate busy) can wait in line; a hold or a question cannot.
-        expect(h.send.textContent).toBe(name.startsWith('the write gate') ? 'Queue as message only' : 'Send as message only')
+        expect(h.send.textContent).toBe(name.startsWith('the write gate') ? 'Queue message' : 'Send')
         expect(await h.approveOnPhone(h.viewOpts)).toBe('waits')
         expect(h.requests.some(q => /\/attach|\/web-key\/handoff/.test(q.path))).toBe(false)
       })
@@ -1306,7 +1331,8 @@ describe('7.0.53: the phone trip from the COS thread\'s Answer box (W1; X1: from
     expect(go.getAttribute('data-cos')).toBe('rr-phone')
     expect(go.getAttribute('data-action')).toBeNull()
     expect(go.getAttribute('data-ta')).toBeNull()
-    expect(h.send.textContent).toBe('Send as message only')
+    expect(h.send.textContent).toBe('Send')   // 7.0.56: the plain send, the Answer box's primary (no request card up)
+    expect(h.send.nextSibling).toBe(go)       // and the passkey send just after it, the secondary
     for (const [prefix, attr, value] of [['session', 'data-action', 'approve-on-phone'], ['ta', 'data-ta', 'approve-phone']] as const) {
       const o = harness({ signer: 1, prefix, text: 'x' }); o.paintWebKeyOffer(o.r, o.viewOpts); await flush()
       expect(o.form.querySelector('[data-phone-offer]')!.getAttribute(attr)).toBe(value)

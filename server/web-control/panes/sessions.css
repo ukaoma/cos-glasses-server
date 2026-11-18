@@ -664,6 +664,78 @@ html.sx-frame.kb-up .sx-dock #session-form { margin-top: 0; }
   html.sx-frame .sx-foot .cx-btn, html.sx-frame .rail-settings { min-height: 44px; }
 }
 
+/* ── 7.0.56: the Sessions dock, Direction 2 (A1's mock wk47_2026/sessions_dock_mocks; app.js SX_DOCK) ──────────────
+   Only under .sx-docked (app.js sxDockPaint: a coarse pointer, and under 600 px wide or at most 720 tall); every other
+   screen keeps today's dock, and these parts are not drawn there. data-dock is his height: focus (the thread and the
+   working line, 68 px), middle (plus the reply row, 126 px), full (the reader less 48 px of thread, never under 126).
+   No transition: a height change is his own tap or drag, and it lands at once. */
+.sx-dock-handle, .sx-dock-acts, .sx-x2, .sx-x2-note, .sx-stop-row { display: none; }
+html.sx-frame .sx-docked .sx-dock { max-height: none; padding-top: 0; }
+.sx-docked .sx-dock-handle { position: relative; display: flex; align-items: center; justify-content: center; flex: none; width: 100%; height: 20px;
+  margin: 0; padding: 0; border: 0; background: none; cursor: grab; touch-action: none; }
+.sx-docked .sx-dock-handle > span { width: 36px; height: 4px; border-radius: 2px; background: var(--sub); opacity: 0.55; }
+/* 44 px to touch, 20 px to see: the reach goes up into the last line of the thread, never down onto the working line. */
+.sx-docked .sx-dock-handle::before { content: ''; position: absolute; left: 0; right: 0; top: -24px; bottom: 0; }
+.sx-docked .sx-dock-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The working line: the state, its time and what it is doing, then the chat bubble and expand. No Stop here. */
+.sx-docked .sx-wline { display: flex; align-items: center; gap: 8px; flex: none; min-height: 44px; }
+html.sx-frame .sx-docked .sx-wline > .sx-activity { flex: 1 1 auto; min-width: 0; min-height: 0; max-height: none; overflow: hidden; }
+.sx-docked .sx-act-label, .sx-docked .sx-act-prompt, .sx-docked .sx-act-stop, .sx-docked .sx-act-tail { display: none; }
+.sx-docked .sx-act-state { height: 44px; margin-top: 0; }
+.sx-docked .sx-act-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sx-docked .sx-dock-acts { display: flex; flex: none; gap: 8px; }
+.sx-docked .sx-dock-btn { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: none; color: var(--ink); cursor: pointer; }
+.sx-docked .sx-dock-btn[aria-pressed='true'] { background: var(--qopen); color: var(--accent); }
+.sx-docked .sx-dock-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sx-dock-ico { width: 22px; height: 22px; }
+/* Full also shows the two newest tool lines under the working line. */
+.sx-docked[data-dock='full'] .sx-act-tail { display: block; }
+.sx-docked[data-dock='full'] .sx-act-tail > :not(:nth-last-child(-n+2)), .sx-docked[data-dock='full'] .sx-act-prose { display: none; }
+/* The reply part, on one grid: the request card and the working note, the extras (passkey send, camera and attach;
+   Fork with this message and Copy session with its note), Stop, then the files and the reply row (the words and the
+   plain send, fixed at 140 px so the field never moves when the label changes). */
+.sx-docked #session-form { display: grid; grid-template-columns: auto auto minmax(0, 1fr) 140px; column-gap: 6px; row-gap: 8px; align-items: center;
+  grid-template-areas: 'card card card card' 'note note note note' 'pk clip . .' 'x2 x2 x2 x2' 'x2n x2n x2n x2n' 'stop stop stop stop' 'files files files files' 'input input input send'; }
+.sx-docked #session-form .composer-actions { display: contents; }
+.sx-docked #session-form > .pa-card { grid-area: card; margin: 0; }
+.sx-docked #session-form > .pa-note { grid-area: note; margin: 0; }
+.sx-docked #session-form .pa-go { grid-area: pk; }
+.sx-docked #session-clip { grid-area: clip; }
+.sx-docked #session-form .sx-fork-small { display: none; }
+.sx-docked #session-form > .sx-x2 { grid-area: x2; display: flex; flex-wrap: wrap; gap: 8px; }
+.sx-docked #session-form > .sx-x2 .cx-btn { min-height: 44px; }
+.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 0; font: 400 12.5px/1.35 var(--body); color: var(--sub); }
+.sx-docked #session-form > .sx-stop-row { grid-area: stop; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sx-docked #session-files { grid-area: files; }
+.sx-docked #session-input { grid-area: input; width: auto; min-height: 44px; }
+.sx-docked #session-send { grid-area: send; width: 140px; min-height: 44px; }
+/* A request card up (a permission or a plan): Approve and send keeps its primary place in the reply row, as today. */
+.sx-docked #session-form.pa-req .pa-go { grid-area: send; width: 140px; }
+.sx-docked #session-form.pa-req #session-send { grid-area: pk; width: auto; }
+/* Stop: the first tap asks. Keep working is the filled default, at the left where Stop was and wide enough to cover it;
+   Stop moves to the right. */
+.sx-docked .sx-stop-ask, .sx-docked .sx-stop-keep, .sx-docked .sx-stop-go { min-height: 44px; }
+.sx-docked .sx-stop-q { flex: 1 1 100%; margin: 0; font: 600 14px/1.35 var(--body); color: var(--ink); }
+.sx-docked .sx-stop-keep { min-width: 55%; }
+.sx-docked .sx-stop-go { margin-left: auto; }
+/* Copy session lives in full; the conversation's own foot line is not drawn while docked. */
+.sx-docked .sx-foot { display: none; }
+/* MIDDLE: the reply row and what answers a send (a refusal, the status line, the queue); the working note and every
+   extra only in full. With a request card up the message-only send is an extra too. */
+.sx-docked:not([data-dock='full']) #session-form > .pa-note, .sx-docked:not([data-dock='full']) #session-form .pa-go,
+.sx-docked:not([data-dock='full']) #session-clip, .sx-docked:not([data-dock='full']) #session-form > .sx-x2,
+.sx-docked:not([data-dock='full']) #session-form > .sx-x2-note, .sx-docked:not([data-dock='full']) #session-form > .sx-stop-row,
+.sx-docked:not([data-dock='full']) #session-verdict .sx-park { display: none; }
+.sx-docked[data-dock='middle'] #session-form.pa-req .pa-go { display: inline-flex; }
+.sx-docked[data-dock='middle'] #session-form.pa-req #session-send { display: none; }
+/* FULL: one Fork. The busy box's own Fork (renderVerdict) is not drawn beside the one in the extras. */
+.sx-docked[data-dock='full'] #session-verdict [data-action='fork-session'] { display: none; }
+html.sx-frame .sx-docked[data-dock='full'] .sx-body { flex: 0 0 48px; }
+html.sx-frame .sx-docked[data-dock='full'] .sx-dock { flex: 1 1 auto; min-height: 126px; }
+/* FOCUS: the thread and the working line; no reply box. */
+.sx-docked[data-dock='focus'] #session-verdict, .sx-docked[data-dock='focus'] #session-form, .sx-docked[data-dock='focus'] #session-status,
+.sx-docked[data-dock='focus'] #session-caution, .sx-docked[data-dock='focus'] #session-queue { display: none; }
+
 /* ── the list (7.0.23, step 2b-1; DESIGN_PLAN v2 "The list", the 23:33 mock) ─────────────────────────────────────────
    The list's own head (the Sessions menu, Search, one quiet line, the sort menu), then groups with plain headings and
    rows divided by hairlines (no boxed cards). A row's state is on its left edge and always in words too; the open row

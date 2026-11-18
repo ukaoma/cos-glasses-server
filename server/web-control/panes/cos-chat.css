@@ -356,6 +356,12 @@ html.kb-reply .cx-reply-form { bottom: var(--vv-below, 0px); padding-bottom: 8px
 .composer.pa-on .composer-actions .btn { min-height: 36px; padding: 0 2px; border: 0; background: none; box-shadow: none; color: var(--sub); font: 500 14px/1.2 var(--body); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--hairline); position: relative; }
 @media (pointer: coarse) { .composer.pa-on .composer-actions .btn::before { content: ''; position: absolute; left: -6px; right: -6px; top: 50%; height: 44px; transform: translateY(-50%); } }
 .pa-note { margin: 2px 2px 6px; font: 400 13px/1.35 var(--body); color: var(--ink); }
+/* 7.0.56 (Miles 18:3x "Yes, same everywhere"; app.js phoneArrange): with no request card up, the plain send is the
+   filled primary beside the words and the passkey send is the outlined secondary in the quiet row; the Answer box keeps
+   its one actions row, plain send first. A request card (.pa-req) keeps today's order and weight. */
+.composer.pa-on:not(.pa-req) > .btn.primary { flex: none; min-height: 44px; }
+.composer.pa-on:not(.pa-req) .pa-go, .rr-answer.pa-on:not(.pa-req) .pa-go { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+.rr-answer.pa-on:not(.pa-req) #rr-send { background: var(--accent); color: var(--on-accent); border-color: var(--accent); min-height: 44px; }
 /* The request: fully readable, never behind a disclosure. F1's final numbers (07:3x). Phones (under 600 px): three
    lines above the words, about 72 px. Docked (600 px up, the reader under 560): two lines, about 53 px. Beside (the
    reader 560 px up): 300 px wide next to the conversation. */

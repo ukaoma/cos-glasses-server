@@ -4681,6 +4681,7 @@
       }
       if (act === 'clear') { var input = $('sessions-q'); input.value = ''; searchSessions(); input.focus(); return; }
       if (act === 'copy-session') return copySessionBrief();
+      if (/^dock-/.test(act)) return sxDockClick(act);
       if (act === 'full') { if (SX_SPLIT) SX_SPLIT.toggleFull(); return; }
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
       if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); if (rd.cautionVia === 'phone') { rd.cautionVia = null; return approveOnPhone(); } return sendSessionTurn(false); }
@@ -4689,6 +4690,8 @@
       if (act === 'usage-clear') { SX.uTool = 'All tools'; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
       if (act === 'usage-range') return uOpenRange(t, true);
     });
+    sxPane.addEventListener('keydown', sxDockKey);
+    sxPane.addEventListener('pointerdown', sxDockDown);
     sxPane.addEventListener('input', function (e) {
       if (e.target.id !== 'sessions-q') return;
       clearTimeout(SX.searchTimer);
@@ -5083,16 +5086,26 @@
         '</div>' +
         // The dock, fixed at the bottom of the reader: what it is doing now (with Stop), the Mac's question, then the
         // verdict, the reply box, its status and the queue, all as before.
+        // 7.0.56 (Direction 2): on a phone or the Duo (.sx-docked) the dock opens with the handle and the working line,
+        // whose two buttons change its height; everywhere else these three are not drawn (CSS).
         '<div class="sx-dock" id="session-dock">' +
-        '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
+        '<button type="button" class="sx-dock-handle" id="session-handle" data-sx="dock-handle" aria-valuetext="middle"><span aria-hidden="true"></span></button>' +
+        '<div class="sx-wline"><div class="sx-activity" id="session-live" aria-live="polite"></div>' +
+          '<span class="sx-dock-acts"><button type="button" class="sx-dock-btn" data-sx="dock-full" aria-pressed="false" aria-label="Show all actions">' + SX_BUBBLE_SVG + '</button>' +
+          '<button type="button" class="sx-dock-btn" data-sx="dock-focus" aria-label="Expand the thread">' + SX_EXPAND_SVG + '</button></span></div>' +
         '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
         '<div class="sx-chat">' +
           '<div id="session-verdict"></div>' +
           '<form class="composer att-composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
             '<div class="cc-chips att-files hidden" id="session-files"></div>' +
             '<textarea id="session-input" rows="1" placeholder="Continue this session…" enterkeyhint="send" aria-label="Continue this session"></textarea>' +
-            '<div class="composer-actions"><span id="session-clip" class="att-clip"></span><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
+            '<div class="composer-actions"><span id="session-clip" class="att-clip"></span><button type="button" class="btn small sx-fork-small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
             '<button type="submit" class="btn primary small" id="session-send">Send</button></div>' +
+            // 7.0.56: full only (.sx-docked): one Fork (the same fork-session), Copy session with its note, and Stop.
+            '<div class="sx-x2"><button type="button" class="cx-btn quiet" data-action="fork-session" title="Runs your message in a copy of this thread. The original is untouched.">Fork with this message</button>' +
+              '<button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button></div>' +
+            '<p class="sx-x2-note">Kickstart brief for another agent. Not a Claude Code resume.</p>' +
+            '<div class="sx-stop-row" id="session-stop-row"></div>' +
           '</form><div class="status-line" id="session-status"></div>' +
           '<p class="sx-caution hidden" id="session-caution"></p>' +
           '<div id="session-queue"></div>' +
@@ -5103,6 +5116,7 @@
       readerImagesMount($('session-turns'), r);
       if (typeof unsentRestore === 'function') unsentRestore(r);
       var si0 = $('session-input'); if (si0 && !si0.value && typeof autoGrow === 'function') autoGrow(si0);
+      SX_DOCK.stopAsk = false; sxDockHook(); sxDockPaint();
       sxNoteList(r, d);
       setLive({});
       if (typeof readerMacPaint === 'function') readerMacPaint(r, sxState(d) === 'waiting');
@@ -5326,6 +5340,121 @@
   // lines and prose came and went): a label row with the counters, a state row with the clock and
   // Stop, one prompt line, and a tail of the newest tool lines and reply text, fixed in height and
   // anchored to its bottom, so the newest line shows and older lines slide out of view above it.
+  // ── 7.0.56: the Sessions dock, Direction 2 (A1's mock, wk47_2026/sessions_dock_mocks; Miles 18:3x "yup this design
+  // is it."; the lead's OK on W1's plan, 18:5x) ──
+  // Where: a coarse pointer, and under 600 px wide or at most 720 px tall (SHORT_TOUCH_MQ's numbers): phones and both
+  // Duo postures, the open Duo at 951x539 and at 1119x634 (85 percent) included, a tablet taller than 720 px not. Every
+  // other screen keeps today's dock: no rule below reaches it (everything keys on .sx-docked).
+  // What: the dock takes one of three heights, kept per device: focus (the thread and the working line), middle (plus
+  // the reply row), full (everything). The ONLY writers of the height are his own: the handle (a drag snaps to the
+  // nearest height, a tap steps to the next, the arrow keys), the chat bubble and expand. No render, live frame, send,
+  // verdict, keyboard or route changes it.
+  var SX_DOCK_KEY = 'cos.sxDock', SX_DOCK_HEIGHTS = ['focus', 'middle', 'full'];
+  var SX_DOCK_MQ = '(pointer: coarse) and (max-width: 599px), (pointer: coarse) and (max-height: 720px)';
+  // The mock's arithmetic (README, Measurements): focus 68 px, middle 126; full leaves 48 px of thread, never under 126.
+  var SX_DOCK_PX = { focus: 68, middle: 126, keep: 48 }, SX_DOCK_DRAG_PX = 6;
+  var SX_DOCK = { h: null, drag: null, dragged: false, stopAsk: false, hooked: false };
+  var SX_BUBBLE_SVG = '<svg class="sx-dock-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H11l-4 3.5V15h0.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
+  var SX_EXPAND_SVG = '<svg class="sx-dock-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+  var SX_DOCK_WORDS = { focus: 'the thread', middle: 'the thread and the reply box', full: 'every action' };
+  function sxDockRead() {
+    try { var v = window.localStorage ? window.localStorage.getItem(SX_DOCK_KEY) : null; return SX_DOCK_HEIGHTS.indexOf(v) >= 0 ? v : 'middle'; }
+    catch (_e) { return 'middle'; }
+  }
+  function sxDockHeight() { if (!SX_DOCK.h) SX_DOCK.h = sxDockRead(); return SX_DOCK.h; }
+  function sxDockApplies() { try { return !!(window.matchMedia && window.matchMedia(SX_DOCK_MQ).matches); } catch (_e) { return false; } }
+  /** His choice, from the handle, the bubble or expand: the one writer of the height. */
+  function sxDockSet(h) {
+    if (SX_DOCK_HEIGHTS.indexOf(h) < 0) return;
+    SX_DOCK.h = h; SX_DOCK.stopAsk = false;
+    try { if (window.localStorage) window.localStorage.setItem(SX_DOCK_KEY, h); } catch (_e) { /* this page still keeps it */ }
+    sxDockPaint();
+  }
+  /** The next height for a tap on the handle: focus, middle, full, then focus again. */
+  function sxDockNext(h) { return SX_DOCK_HEIGHTS[(SX_DOCK_HEIGHTS.indexOf(h) + 1) % SX_DOCK_HEIGHTS.length]; }
+  /** One arrow step: up is a taller dock (less thread), down a shorter one; it stops at the ends. */
+  function sxDockStep(h, up) { var i = SX_DOCK_HEIGHTS.indexOf(h) + (up ? 1 : -1); return SX_DOCK_HEIGHTS[Math.max(0, Math.min(SX_DOCK_HEIGHTS.length - 1, i))]; }
+  /** Where a drag lets go: the nearest of the three heights (fullPx is this reader's full height). */
+  function sxDockSnap(px, fullPx) {
+    var full = Math.max(SX_DOCK_PX.middle, fullPx || 0), best = 'focus', d = Infinity;
+    [['focus', SX_DOCK_PX.focus], ['middle', SX_DOCK_PX.middle], ['full', full]].forEach(function (c) { var x = Math.abs(px - c[1]); if (x < d) { d = x; best = c[0]; } });
+    return best;
+  }
+  function sxDockFullPx() {
+    var rd = $('session-reader'), head = rd && rd.querySelector ? rd.querySelector('.sx-reader-head') : null;
+    return rd ? Math.max(SX_DOCK_PX.middle, (rd.clientHeight || 0) - (head ? head.offsetHeight || 0 : 0) - SX_DOCK_PX.keep) : SX_DOCK_PX.middle;
+  }
+  /** Draw the stored height on the reader. It never chooses one. */
+  function sxDockPaint() {
+    var rd = $('session-reader'); if (!rd || !rd.classList) return;
+    var on = sxDockApplies(), h = sxDockHeight();
+    rd.classList.toggle('sx-docked', on);
+    if (on) rd.setAttribute('data-dock', h); else rd.removeAttribute('data-dock');
+    var handle = $('session-handle');
+    if (handle) { handle.setAttribute('aria-valuetext', h); handle.setAttribute('aria-label', 'Showing ' + SX_DOCK_WORDS[h] + '. Drag, tap or use the arrow keys to change what the dock shows'); }
+    var full = rd.querySelector ? rd.querySelector('[data-sx="dock-full"]') : null, focus = rd.querySelector ? rd.querySelector('[data-sx="dock-focus"]') : null;
+    if (full) { full.setAttribute('aria-pressed', h === 'full' ? 'true' : 'false'); full.setAttribute('aria-label', h === 'full' ? 'Show fewer actions' : 'Show all actions'); }
+    if (focus) focus.setAttribute('aria-label', h === 'focus' ? 'Show the reply box' : 'Expand the thread');
+    sxStopPaint(state.reading);
+  }
+  /** Stop, in full only, and only while it works. The first tap asks; Keep working is the filled, focused answer, where
+   *  Stop was, so a second stray tap keeps the session going. No hold gesture. */
+  function sxStopPaint(r) {
+    var row = $('session-stop-row'); if (!row) return;
+    var working = !!(r && state.reading === r && r.live && r.live.working);
+    if (!working) { SX_DOCK.stopAsk = false; row.innerHTML = ''; return; }
+    if (SX_DOCK.stopAsk) {
+      row.innerHTML = '<p class="sx-stop-q" id="session-stop-q">Stop this session?</p>' +
+        '<button type="button" class="cx-btn primary sx-stop-keep" data-sx="dock-stop-keep" aria-describedby="session-stop-q">Keep working</button>' +
+        '<button type="button" class="cx-btn danger sx-stop-go" data-action="stop-session">Stop</button>';
+      var keep = row.querySelector ? row.querySelector('[data-sx="dock-stop-keep"]') : null;
+      if (keep && keep.focus) { try { keep.focus({ preventScroll: true }); } catch (_e) { keep.focus(); } }
+    } else row.innerHTML = '<button type="button" class="cx-btn quiet sx-stop-ask" data-sx="dock-stop">Stop</button>';
+  }
+  function sxDockClick(act) {
+    var h = sxDockHeight();
+    if (act === 'dock-handle') { if (SX_DOCK.dragged) { SX_DOCK.dragged = false; return; } return sxDockSet(sxDockNext(h)); }
+    if (act === 'dock-full') return sxDockSet(h === 'full' ? 'middle' : 'full');
+    if (act === 'dock-focus') return sxDockSet(h === 'focus' ? 'middle' : 'focus');
+    if (act === 'dock-stop') { SX_DOCK.stopAsk = true; return sxStopPaint(state.reading); }
+    if (act === 'dock-stop-keep') { SX_DOCK.stopAsk = false; return sxStopPaint(state.reading); }
+  }
+  function sxDockKey(e) {
+    if (!e || !e.target || e.target.id !== 'session-handle' || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    if (e.preventDefault) e.preventDefault();
+    sxDockSet(sxDockStep(sxDockHeight(), e.key === 'ArrowUp'));
+  }
+  function sxDockDown(e) {
+    var handle = e && e.target && e.target.closest ? e.target.closest('#session-handle') : null, dock = $('session-dock');
+    if (!handle || !dock || !dock.getBoundingClientRect) return;
+    SX_DOCK.drag = { y: e.clientY, h0: dock.getBoundingClientRect().height, full: sxDockFullPx() }; SX_DOCK.dragged = false;
+    try { if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId); } catch (_e) {}
+  }
+  function sxDockMove(e) {
+    var d = SX_DOCK.drag, dock = $('session-dock'); if (!d || !dock || !dock.style) return;
+    var dy = d.y - e.clientY;
+    if (Math.abs(dy) >= SX_DOCK_DRAG_PX) SX_DOCK.dragged = true;
+    if (SX_DOCK.dragged) dock.style.height = Math.round(Math.max(SX_DOCK_PX.focus, Math.min(d.full, d.h0 + dy))) + 'px';
+  }
+  function sxDockUp(e) {
+    var d = SX_DOCK.drag, dock = $('session-dock'); SX_DOCK.drag = null; if (!d) return;
+    if (dock && dock.style) dock.style.height = '';
+    if (SX_DOCK.dragged) sxDockSet(sxDockSnap(Math.max(SX_DOCK_PX.focus, Math.min(d.full, d.h0 + (d.y - e.clientY))), d.full));
+  }
+  function sxDockHook() {
+    if (SX_DOCK.hooked) return;
+    SX_DOCK.hooked = true;
+    try {
+      var mq = window.matchMedia && window.matchMedia(SX_DOCK_MQ);
+      if (mq && mq.addEventListener) mq.addEventListener('change', sxDockPaint); else if (mq && mq.addListener) mq.addListener(sxDockPaint);
+    } catch (_e) {}
+    if (window.addEventListener) {
+      window.addEventListener('resize', sxDockPaint);
+      window.addEventListener('pointermove', sxDockMove, { passive: true });
+      window.addEventListener('pointerup', sxDockUp);
+      window.addEventListener('pointercancel', sxDockUp);
+    }
+  }
   function paintActivity(r) {
     var box = $('session-live');
     if (!box || state.reading !== r) return;
@@ -5349,6 +5478,7 @@
       html += '<p class="sx-act-fallback">' + esc(f.fallback ? sxFallbackLine(f.fallback) : 'Connecting to the live feed…') + '</p>';
     }
     box.innerHTML = html;
+    if (typeof sxStopPaint === 'function') sxStopPaint(r);
     // The clock ticks only while the session works or waits (Control 0.5.337). A Working that only the write gate
     // says is re-asked even with no live feed (QA 6.99.29), so it cannot stand forever once the feed is lost.
     clearInterval(r.feedTimer); r.feedTimer = null;
@@ -5573,6 +5703,20 @@
   // QA 7.0.0: a message with files never goes in mid-turn (the drain steers words only; a row with files waits for the
   // turn end, and the park answer says landsAt turn_end). With files in the box the note says so.
   var SX_PARK_FILES = 'Working right now. A message with files waits and lands when this turn ends.';
+  // 7.0.56 (Direction 2, README "The working note"): ONE note while working, replacing today's two (the park line and
+  // the passkey's "Send opens when it stops"). Its middle is sxParkLine's own form: at its next step only where the
+  // session takes a message mid-turn, else waits for the turn end (with files too), or the Codex and Cursor forms. The
+  // passkey sentence only where the passkey button exists (passkey true).
+  /** This session's passkey composer is on somewhere it is shown (the reader, the Answer box or Today's sheet). */
+  function sxPaOn(r) {
+    return !!(r && typeof WEB_KEY === 'object' && WEB_KEY && (WEB_KEY.views || []).some(function (e) {
+      return e && e.r === r && e.view && e.view.form && e.view.form.classList && e.view.form.classList.contains('pa-on');
+    }));
+  }
+  function sxWorkNote(r, passkey, hasFiles) {
+    var line = sxParkLine(r, hasFiles), mid = line === SX_PARK_MIDTURN ? 'Queue message lands at its next step.' : line.replace(/^Working right now\. /, '');
+    return phoneEngine(r) + ' is working. ' + mid + (passkey ? ' Send with passkey opens when it stops.' : '');
+  }
   // `hasFiles`: a view (Today's sheet) says whether its own box holds files; the reader's box is read here.
   function sxParkLine(r, hasFiles) {
     if (!(r.verdict && r.verdict.midTurn === true)) return SX_PARK[sxProvider(r.provider)];
@@ -5612,7 +5756,11 @@
         (f.fork ? (f.changed ? '<button type="button" class="cx-btn quiet" data-action="fork-session" title="Runs your message in a copy of this thread. The original is untouched.">Send to a copy</button>' : forkBtn) : ''));
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
       // 6.99.29: "Working right now" only while the one state says so.
-      if (sxParkNoteShows(r)) html = '<div class="sx-park"><p>' + esc(sxParkLine(r)) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
+      // 7.0.56: the one note. Where the passkey button is drawn its note carries it (phoneBusyApply), so this one is not.
+      // Off the ts.net name (no passkey composer) the note keeps today's words: its Send says Send while working.
+      var paOn = sxPaOn(r);
+      if (sxParkNoteShows(r) && !paOn) html = '<div class="sx-park"><p>' + esc(sxParkLine(r)) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
+      else if (sxParkNoteShows(r) && /fork/i.test(v.reasonCopy)) html = '<div class="sx-park"><div class="sx-box-actions">' + forkBtn + '</div></div>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = refusalBox(v.reasonCopy, sxSupplement(v.reason), /fork/i.test(v.reasonCopy) ? forkBtn : '');
     }
@@ -6039,6 +6187,7 @@
     var reader = view.prefix === 'session' ? $('session-reader') : null;
     if (reader && reader.classList) reader.classList.remove('pa-beside');
     form.__paCard = null;
+    phoneSendHome(view);
     r.phonePackets = {}; r.phonePacketSha256 = '';
   }
   function refreshWebKeyOffers() {
@@ -6262,8 +6411,9 @@
   // to that session is delivered (server/routes/turn-verified-key-route.test.ts, test B). It goes as his exact words,
   // with no question id and no contract words; the card closes as it does today when the session moves on.
   function phoneBusyWhy(r, view) {
-    var what = view.form.__paCard ? 'Approve' : 'Send';
-    if ((r.live && r.live.working) || (r.gate && r.gate.busy)) return { copy: phoneEngine(r) + ' is working. ' + what + ' opens when it stops, so your passkey is not spent on a refusal.', queue: true };
+    var req = !!view.form.__paCard, what = req ? 'Approve' : 'Send with passkey';
+    // 7.0.56: with a request card up, today's words and weight exactly (the lead 18:5x); otherwise the one note.
+    if ((r.live && r.live.working) || (r.gate && r.gate.busy)) return { copy: req ? phoneEngine(r) + ' is working. Approve opens when it stops, so your passkey is not spent on a refusal.' : (typeof sxWorkNote === 'function' ? sxWorkNote(r, true) : phoneEngine(r) + ' is working. Send with passkey opens when it stops.'), queue: true };
     if (r.held && r.held.some(function (h) { return h && !h.cancelled; })) return { copy: 'A message is waiting to go after this reply. ' + what + ' opens once it has gone.', queue: false };
     return null;
   }
@@ -6282,15 +6432,49 @@
       if (note && note.parentNode) note.parentNode.removeChild(note);
       go.removeAttribute('aria-describedby');
     }
-    view.send.textContent = why && why.queue ? 'Queue as message only' : 'Send as message only';
+    if (view.form.__paCard) view.send.textContent = why && why.queue ? 'Queue as message only' : 'Send as message only';
+    else view.send.textContent = why && why.queue ? 'Queue message' : 'Send';
+    phoneArrange(view);
+    // The reader's park note gives way to this one (renderVerdict reads sxPaOn), drawn again now the composer is on.
+    if (view.prefix === 'session' && state.reading === r && typeof renderVerdict === 'function') renderVerdict(r);
+  }
+  // 7.0.56 (Miles 18:3x "Yes, same everywhere"): the plain send is the filled primary, where the passkey send was (beside
+  // the words), and the passkey send is the secondary, where the plain send was. A request card (permission or plan)
+  // keeps today's order and weight: a plain message does not answer it, so Approve and send stays the primary there.
+  // The Answer box has no beside-the-words place: its two stay in its actions row, the plain one first.
+  function phoneArrange(view) {
+    var form = view.form, go = form.querySelector('[data-phone-offer]'), send = view.send, input = view.input;
+    if (!go || !go.classList || !go.classList.contains('pa-go') || !send) return;
+    var req = !!form.__paCard;
+    if (form.classList) form.classList.toggle('pa-req', req);
+    if (!form.__paSendHome) form.__paSendHome = { parent: send.parentNode, next: send.nextSibling };
+    var home = form.__paSendHome;
+    if (view.prefix === 'rr') {
+      if (req) { if (input && input.parentNode === form && input.nextSibling !== go) form.insertBefore(go, input.nextSibling); }
+      else if (send.parentNode && send.nextSibling !== go) send.parentNode.insertBefore(go, send.nextSibling);
+      return;
+    }
+    if (req) {
+      if (send.parentNode !== home.parent) home.parent.insertBefore(send, home.next && home.next.parentNode === home.parent ? home.next : null);
+      if (input && input.parentNode === form && input.nextSibling !== go) form.insertBefore(go, input.nextSibling);
+    } else {
+      if (input && input.parentNode === form && input.nextSibling !== send) form.insertBefore(send, input.nextSibling);
+      if (go.parentNode !== home.parent) home.parent.insertBefore(go, home.next && home.next.parentNode === home.parent ? home.next : null);
+    }
+  }
+  /** The plain send back in its own place (clearPhoneOffer: the form is 7.0.50's again). */
+  function phoneSendHome(view) {
+    var form = view.form, home = form.__paSendHome, send = view.send;
+    if (home && send && send.parentNode !== home.parent) home.parent.insertBefore(send, home.next && home.next.parentNode === home.parent ? home.next : null);
+    form.__paSendHome = null; if (form.classList) form.classList.remove('pa-req');
   }
   /** Called when a session's working flag changes (sxSettle): repaint its phone action wherever it is shown. */
   function phoneBusyPaint(r) {
     WEB_KEY.views.forEach(function (e) { if (e.r === r && phoneApprovalViewLive(e.view) && e.view.form.classList && e.view.form.classList.contains('pa-on')) phoneBusyApply(r, e.view); });
   }
   function phoneGoLabel(go, withReq) {
-    go.innerHTML = PHONE_KEY_SVG + (withReq ? '<span class="pa-short">Approve</span><span class="pa-long">Approve and send</span>' : '<span>Send</span>');
-    go.setAttribute('aria-label', withReq ? 'Approve the request and send, confirmed with this phone' : 'Send, confirmed with this phone');
+    go.innerHTML = PHONE_KEY_SVG + (withReq ? '<span class="pa-short">Approve</span><span class="pa-long">Approve and send</span>' : '<span>Send with passkey</span>');
+    go.setAttribute('aria-label', withReq ? 'Approve the request and send, confirmed with this phone' : 'Send with passkey, confirmed with this phone');
   }
   function phoneComposerOn(r, view, opts) {
     var form = view.form;
@@ -6306,10 +6490,10 @@
     if (view.input && view.input.parentNode === form) form.insertBefore(go, view.input.nextSibling); else form.appendChild(go);
     form.__paEntry = { r: r, opts: opts };   // the quiet label and the reason come from phoneBusyApply, called right after
     if (!form.__paSubmit) {
-      // Enter (requestSubmit with no submitter) takes the primary; the quiet Send as message only is the form's own
-      // submit button and goes to 7.0.50's handler untouched.
+      // 7.0.56: Enter (requestSubmit with no submitter) takes the plain send, the form's own submit (Miles 18:3x). Only
+      // with a request card up does it still take the primary, Approve and send, as today (the lead 18:5x).
       form.__paSubmit = function (e) {
-        if (!form.classList.contains('pa-on')) return;
+        if (!form.classList.contains('pa-on') || !form.__paCard) return;
         if (e.submitter && e.submitter.id === view.prefix + '-send') return;
         e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
         var cur = form.__paEntry; if (cur) approveOnPhone(Object.assign({}, cur.opts || {}, { r: cur.r }));
@@ -6694,7 +6878,8 @@
       return box(f.copy, f.supplement, (f.changed ? '<button type="button" class="cx-btn quiet" data-gate="send-anyway"' + at + '>' + esc(GATE_COPY.sendAnyway) + '</button>' : '') +
         (f.retry ? '<button type="button" class="cx-btn quiet" data-gate="retry"' + at + '>' + esc(GATE_COPY.retry) + '</button>' : '') + (f.fork ? open : ''));
     }
-    if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) return sxParkNoteShows(r) ? '<div class="sx-park"><p>' + esc(sxParkLine(r, false)) + '</p></div>' : '';
+    // 7.0.56: where the passkey composer is on, its note is the one note (phoneBusyApply), so this one is not drawn.
+    if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) return sxParkNoteShows(r) && !sxPaOn(r) ? '<div class="sx-park"><p>' + esc(sxParkLine(r, false)) + '</p></div>' : '';
     if (v && v.attachable === false && v.reasonCopy) return box(v.reasonCopy, sxSupplement(v.reason), /fork/i.test(v.reasonCopy) ? open : '');
     return '';
   }
@@ -9515,7 +9700,7 @@
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
     gates: { send: gateSend, watch: gateWatch, stop: gateStop, verdictHtml: gateVerdictHtml, caution: gateCaution, action: gateAction, copy: GATE_COPY, watchMs: GATE_WATCH_MS },
-    parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
+    parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, paOn: sxPaOn, providerLabel: sxProviderLabel, markdown: sxMd
   };
 
   // ── focus mode (7.0.53; Miles 11/16 13:19; F1's direction A, the lead's 23:5x: A on the folded Duo and the phone) ──
