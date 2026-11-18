@@ -23,6 +23,7 @@ function between(src: string, from: string, to: string): string {
 const DOCK = between(APP, '  // ── 7.0.56: the Sessions dock, Direction 2', '  function paintActivity(r) {')
 const NOTE = between(APP, '  var SX_PARK = {', "  /** The composer's \"Working right now\" note")
 const DOCKCSS = between(CSS, '/* ── 7.0.56: the Sessions dock, Direction 2', '/* ── the list (7.0.23, step 2b-1;')
+const PLAIN = new Function('return ' + between(APP, '  function plain(text) {', '\n').trim())()
 
 // ── a page of fakes ───────────────────────────────────────────────────────────────────────────────────────────────
 class El {
@@ -48,9 +49,23 @@ class El {
   setPointerCapture() {}
   clientHeight = 0; offsetHeight = 0
 }
-interface Opts { docked?: boolean; stored?: string | null; storageThrows?: boolean; working?: boolean; card?: 'enabled' | 'disabled'; question?: boolean }
+interface Opts { docked?: boolean; stored?: string | null; storageThrows?: boolean; working?: boolean; card?: 'enabled' | 'disabled'; question?: boolean
+  w?: number; h?: number; pointer?: 'coarse' | 'fine'; drawn?: Record<string, number> }
+// A real media query against the page's size and pointer (7.0.58: so a size or pointer gate put back is seen): comma
+// is or, "and" joins; pointer, min- and max-width and -height. Anything else does not match.
+function mediaMatches(q: string, w: number, h: number, pointer: string): boolean {
+  return q.split(',').some(part => part.trim().split(/\s+and\s+/).every(c => {
+    const m = /^\(\s*([a-z-]+)\s*:\s*([a-z0-9.]+)\s*\)$/.exec(c.trim()); if (!m) return false
+    const n = parseFloat(m[2])
+    return m[1] === 'pointer' ? m[2] === pointer : m[1] === 'max-width' ? w <= n : m[1] === 'min-width' ? w >= n
+      : m[1] === 'max-height' ? h <= n : m[1] === 'min-height' ? h >= n : false
+  }))
+}
 function page(o: Opts = {}) {
   const reader = new El('session-reader'), handle = new El('session-handle'), dock = new El('session-dock', 126), stop = new El('session-stop-row')
+  // The dock as the page draws it at each height (7.0.58, F1 probe 9): by default the mock's 68, 126 and 378 (382x557).
+  const drawn: Record<string, number> = o.drawn ?? { focus: 68, middle: 126, full: 378 }
+  dock.getBoundingClientRect = () => { const v = drawn[reader.attrs['data-dock']]; return { height: v != null ? v : dock.h, top: 0 } }
   reader.kids.full = new El('full'); reader.kids.focus = new El('focus'); reader.kids.head = Object.assign(new El('head'), { offsetHeight: 37 })
   reader.clientHeight = 463
   const input: any = Object.assign(new El('session-input'), { phLong: 'Continue this session…' }), fits: unknown[] = []
@@ -70,17 +85,19 @@ function page(o: Opts = {}) {
     setItem: (k: string, v: string) => { if (o.storageThrows) throw new Error('QuotaExceeded'); store[k] = v; writes.push(v) },
   }
   const r: any = { live: { working: o.working !== false } }
+  const mqCalls: string[] = []; let mqListen = 0
   const ctx: Record<string, unknown> = {
-    window: { localStorage, matchMedia: (q: string) => ({ matches: !!o.docked && q.includes('pointer: coarse'), addEventListener: () => {} }),
+    window: { localStorage, innerWidth: o.w ?? 382, innerHeight: o.h ?? 557,
+      matchMedia: (q: string) => { mqCalls.push(q); return { matches: mediaMatches(q, o.w ?? 382, o.h ?? 557, o.pointer ?? 'coarse'), addEventListener: () => { mqListen++ }, addListener: () => { mqListen++ } } },
       addEventListener: (t: string, f: (e: unknown) => void) => { (listeners[t] ||= []).push(f) } },
-    $: (id: string) => ids[id] ?? null, state: { reading: r }, Math, Infinity, sxPlaceholderFit: (b: unknown) => { fits.push(b) },
+    $: (id: string) => ids[id] ?? null, state: { reading: r }, Math, Infinity, sxPlaceholderFit: (b: unknown) => { fits.push(b) }, plain: PLAIN,
   }
   vm.createContext(ctx)
   vm.runInContext(DOCK + `
-;this.api = { SX_DOCK: SX_DOCK, SX_DOCK_PX: SX_DOCK_PX, SX_DOCK_MQ: SX_DOCK_MQ, height: sxDockHeight, set: sxDockSet, next: sxDockNext, step: sxDockStep, snap: sxDockSnap,
+;this.api = { SX_DOCK: SX_DOCK, SX_DOCK_PX: SX_DOCK_PX, measure: sxDockMeasure, applies: sxDockApplies, plainLine: sxPlainLine, cancel: sxDockCancel, height: sxDockHeight, set: sxDockSet, next: sxDockNext, step: sxDockStep, snap: sxDockSnap,
   paint: sxDockPaint, apply: sxDockApply, hold: sxDockHold, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
   const api = (ctx as { api: any }).api
-  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits, form, go, qs, why, body }
+  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits, form, go, qs, why, body, mqCalls, mqListen: () => mqListen, drawn }
 }
 
 describe('the height: one value per device, Middle when nothing is stored (the lead 18:5x)', () => {
@@ -135,17 +152,52 @@ describe('only his drag, tap or keys change it', () => {
     p.api.key({ target: p.handle, key: 'Enter', preventDefault() {} }); expect(p.api.height()).toBe('middle')
     p.api.key({ target: p.dock, key: 'ArrowUp', preventDefault() {} }); expect(p.api.height()).toBe('middle')   // not the handle
   })
-  it('a drag lets go at the nearest height (68, 126, or full: the reader less 48, never under 126)', () => {
-    const p = page()
-    expect(p.api.snap(70, 378)).toBe('focus')
-    expect(p.api.snap(96, 378)).toBe('focus')
-    expect(p.api.snap(98, 378)).toBe('middle')
-    expect(p.api.snap(250, 378)).toBe('middle')
-    expect(p.api.snap(253, 378)).toBe('full')
-    // A tiny reader: full is never under 126, so it sits at middle's height and a drag lands on middle (the bubble
-    // and a tap still reach full).
-    expect(p.api.snap(400, 40)).toBe('middle')
-    expect(p.api.snap(40, 40)).toBe('focus')   // full is not taken at the tiny reader's own 40
+  // 7.0.58 (F1 probe 9, the lead 13:2x): the nearest of the three heights as drawn, never a written step; the drawn
+  // numbers F1 measured: Middle 188 and Full 412 at 382x557, Focus 102, Middle 165 and Full 358 at 1440x900.
+  const DRAWN: Array<[string, Record<string, number>]> = [['382x557', { focus: 112, middle: 188, full: 412 }], ['1440x900', { focus: 102, middle: 165, full: 358 }]]
+  for (const [size, H] of DRAWN) {
+    it(`${size}: a 12 px nudge either way keeps every height; a release at a drawn height lands on it`, () => {
+      const p = page()
+      for (const k of ['focus', 'middle', 'full']) {
+        expect(p.api.snap(H[k] + 12, H[k], H, k), k + ' +12').toBe(k)
+        expect(p.api.snap(H[k] - 12, H[k], H, k), k + ' -12').toBe(k)
+        for (const to of ['focus', 'middle', 'full']) expect(p.api.snap(H[to], H[k], H, k), k + ' to ' + to).toBe(to)
+      }
+    })
+    it(`${size}: either side of each midpoint goes to the nearer drawn height`, () => {
+      const p = page(), fm = (H.focus + H.middle) / 2, mf = (H.middle + H.full) / 2
+      expect(p.api.snap(fm + 1, H.middle, H, 'middle')).toBe('middle'); expect(p.api.snap(fm - 1, H.middle, H, 'middle')).toBe('focus')
+      expect(p.api.snap(mf - 1, H.middle, H, 'middle')).toBe('middle'); expect(p.api.snap(mf + 1, H.middle, H, 'middle')).toBe('full')
+      expect(p.api.snap(mf + 1, H.full, H, 'full')).toBe('full'); expect(p.api.snap(mf - 1, H.full, H, 'full')).toBe('middle')
+      expect(p.api.snap(fm - 1, H.focus, H, 'focus')).toBe('focus'); expect(p.api.snap(fm + 1, H.focus, H, 'focus')).toBe('middle')
+    })
+    it(`${size}: a release never lands further the other way than the finger went (every px, every start)`, () => {
+      const p = page()
+      for (const k of ['focus', 'middle', 'full']) for (let px = H.focus - 40; px <= H.full + 40; px++) {
+        const got = H[p.api.snap(px, H[k], H, k)]
+        if (px > H[k]) expect(got, `${k} up to ${px}`).toBeGreaterThanOrEqual(H[k])
+        if (px < H[k]) expect(got, `${k} down to ${px}`).toBeLessThanOrEqual(H[k])
+      }
+    })
+  }
+  it('a tie keeps the height it began at (keyboard up: Middle and Full draw the same)', () => {
+    const p = page(), K = { focus: 12, middle: 90, full: 90 }
+    expect(p.api.snap(120, 90, K, 'middle')).toBe('middle'); expect(p.api.snap(51, 90, K, 'middle')).toBe('middle')
+    expect(p.api.snap(51, 12, K, 'focus')).toBe('focus')
+  })
+  it('the snap reads only the heights it is given: no height written in it', () => {
+    const snap = between(APP, '  function sxDockSnap(px, h0, heights, start) {', '  /** The dock\'s height at each of the three')
+    expect(snap).not.toMatch(/SX_DOCK_PX|\b\d{2,}\b|\bhalf\b/)
+  })
+  it('the drawn heights are measured at the drag\'s start and the page is put back: its height and the thread\'s scroll', () => {
+    const p = page({ stored: 'middle', drawn: { focus: 102, middle: 165, full: 358 } }); p.api.paint()
+    const set = p.reader.setAttribute.bind(p.reader)
+    p.reader.setAttribute = (k: string, v: string) => { set(k, v); if (k === 'data-dock' && v === 'focus') p.body.scrollTop = 0 }   // the thread clamps
+    expect(p.api.measure()).toEqual({ focus: 102, middle: 165, full: 358 })
+    expect(p.reader.attrs['data-dock']).toBe('middle'); expect(p.body.scrollTop).toBe(812)
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' })
+    expect(p.api.SX_DOCK.drag.heights).toEqual({ focus: 102, middle: 165, full: 358 })
+    expect(p.reader.attrs['data-dock']).toBe('middle'); expect(p.body.scrollTop).toBe(812)
   })
   it('the drag itself: the dock follows the finger, lets go at the nearest height, and the click after it is not a tap', () => {
     const p = page({ stored: 'middle' })
@@ -189,25 +241,118 @@ describe('only his drag, tap or keys change it', () => {
   })
 })
 
-describe('where it applies: phones and both Duo postures only (the lead 18:5x)', () => {
-  it('the gate is a coarse pointer and under 600 px wide or at most 720 px tall (SHORT_TOUCH_MQ\'s numbers)', () => {
-    expect(page().api.SX_DOCK_MQ).toBe('(pointer: coarse) and (max-width: 599px), (pointer: coarse) and (max-height: 720px)')
-    expect(APP).toContain("var SHORT_TOUCH_MQ = '(pointer: coarse) and (max-height: 720px)';")
+describe('7.0.58: the dock is the reader\'s at every size and every pointer (Miles 12:27, "EVERYWHERE")', () => {
+  const SIZES: Array<[number, number]> = [[1119, 787], [1119, 634], [951, 539], [1280, 800], [1440, 900], [1920, 1080], [382, 557], [449, 655]]
+  for (const [w, h] of SIZES) for (const pointer of ['coarse', 'fine'] as const) {
+    it(`${w}x${h}, ${pointer} pointer: docked, Middle with nothing stored, and the handle is there`, () => {
+      const p = page({ w, h, pointer }); p.api.paint()
+      expect(p.api.applies()).toBe(true)
+      expect(p.reader.cls.has('sx-docked')).toBe(true)
+      expect(p.reader.getAttribute('data-dock')).toBe('middle')
+      expect(p.handle.attrs['aria-valuetext']).toBe('middle')
+    })
+  }
+  it('no media query, width, height or pointer test anywhere in the dock (a gate put back is caught)', () => {
+    const p = page({ w: 1440, h: 900, pointer: 'fine' }); p.api.paint(); p.api.hook()
+    expect(p.mqCalls).toEqual([]); expect(p.mqListen()).toBe(0)
+    const code = DOCK.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n')
+    expect(code).not.toMatch(/matchMedia|SHORT_TOUCH_MQ|SIDE_RAIL_MQ|isPhone\(|sideRail\(|pointer\s*:\s*(coarse|fine)|max-width|min-width|max-height|min-height|innerWidth|innerHeight|clientWidth/)
+    expect(DOCKCSS, 'no media query around a dock rule').not.toMatch(/@media/)
   })
-  it('off the gate (a desktop, a tall tablet): no .sx-docked, no data-dock, today\'s dock', () => {
-    const p = page({ docked: false, stored: 'full' }); p.api.paint()
-    expect(p.reader.cls.has('sx-docked')).toBe(false); expect(p.reader.getAttribute('data-dock')).toBeNull()
-  })
-  it('every dock rule keys on .sx-docked, but the one that hides the new parts everywhere else', () => {
+  it('every dock rule keys on .sx-docked, but the one that hides the new parts where the reader is not drawn', () => {
     const rules = DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.split('{')[0].trim()).filter(Boolean)
     const off = rules.filter(sel => !sel.split(',').every(part => /\.sx-docked/.test(part)))
     expect(off).toEqual(['.sx-dock-handle, .sx-dock-acts, .sx-x2, .sx-x2-note, .sx-stop-row', '.sx-dock-ico'])
-    expect(DOCKCSS).toContain('.sx-dock-handle, .sx-dock-acts, .sx-x2, .sx-x2-note, .sx-stop-row { display: none; }')
   })
-  it('the gate is read again on a fold or a resize (it repaints; the height stays his)', () => {
+  it('a fine pointer: the handle says it resizes, never selects text, shows its focus, and a click steps', () => {
+    expect(DOCKCSS).toContain('cursor: ns-resize; touch-action: none; user-select: none; -webkit-user-select: none; }')
+    expect(DOCKCSS).toContain('.sx-docked .sx-dock-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }')
+    expect(DOCKCSS).not.toContain('cursor: grab')
+    const p = page({ w: 1440, h: 900, pointer: 'fine', stored: 'middle' }); p.api.click('dock-handle')
+    expect(p.api.height()).toBe('full')
+  })
+  it('a drag that cannot finish (the window loses focus, pointercancel) ends where it began; the next release sets nothing', () => {
+    const p = page({ w: 1440, h: 900, pointer: 'fine', stored: 'middle' }); p.api.hook()
+    p.api.down({ target: p.handle, clientY: 500, pointerId: 1 }); p.api.move({ clientY: 300 })
+    expect(p.dock.style.height).not.toBe('')
+    p.listeners.blur[0]({}); expect(p.dock.style.height).toBe('')
+    p.api.up({ clientY: 0 }); expect(p.api.height()).toBe('middle'); expect(p.writes).toEqual([])
+    p.api.down({ target: p.handle, clientY: 500, pointerId: 1 }); p.api.move({ clientY: 300 }); p.listeners.pointercancel[0]({})
+    expect(p.writes, 'a cancelled drag stores no height').toEqual([]); expect(p.api.height()).toBe('middle')
+    expect(p.dock.style.height).toBe(''); p.api.click('dock-handle'); expect(p.api.height()).toBe('full')   // a tap after it still steps
+    expect(p.listeners.blur).toHaveLength(1); expect(p.listeners.pointercancel).toHaveLength(1)
+  })
+  it('the dock is hooked once to resize and the pointer (it repaints; the height stays his)', () => {
     const p = page(); p.api.hook(); p.api.hook()
     expect(p.listeners.resize).toHaveLength(1)
     expect(p.listeners.pointermove).toHaveLength(1); expect(p.listeners.pointerup).toHaveLength(1)
+  })
+})
+
+describe('7.0.58: a desk drag knows the drawn heights, and one pointer drives it (Q1 12:59, F1 probe 9)', () => {
+  const DESK = { focus: 102, middle: 165, full: 358 }
+  const desk = (stored: string, drawn: Record<string, number> = DESK) => { const p = page({ w: 1440, h: 900, pointer: 'fine', stored, drawn }); p.reader.clientHeight = 836; p.api.paint(); return p }
+  it('from Middle, a release at Full\'s drawn height is Full and the preview never passes it; 12 px up stays Middle', () => {
+    const p = desk('middle')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' })
+    p.api.move({ clientY: 100, pointerId: 1, buttons: 1 }); expect(p.dock.style.height).toBe('358px')   // not the 751 cap
+    p.api.up({ clientY: 407, pointerId: 1 }); expect(p.api.height()).toBe('full')                       // 165 + 193 = 358
+    const q = desk('middle')
+    q.api.down({ target: q.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); q.api.move({ clientY: 588, pointerId: 1, buttons: 1 })
+    q.api.up({ clientY: 588, pointerId: 1 }); expect(q.api.height()).toBe('middle')                    // F1: this went to Full
+  })
+  it('F1\'s case at a desk: a release 9 px above Focus as drawn (54 px down from Middle) lands on Focus (N9)', () => {
+    const p = desk('middle')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 654, pointerId: 1, buttons: 1 })
+    p.api.up({ clientY: 654, pointerId: 1 })                              // 165 - 54 = 111: 9 from Focus's 102, 54 from Middle
+    expect(p.api.height()).toBe('focus')                                  // with the written 68 and 126 it was Middle
+  })
+  it('the preview never goes under Focus as drawn, and never past the reader less the floor', () => {
+    const p = desk('middle')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 900, pointerId: 1, buttons: 1 })
+    expect(p.dock.style.height).toBe('102px')
+    const q = desk('middle', { focus: 102, middle: 165, full: 900 })
+    q.api.down({ target: q.handle, clientY: 900, pointerId: 1, pointerType: 'mouse' }); q.api.move({ clientY: 0, pointerId: 1, buttons: 1 })
+    expect(q.dock.style.height).toBe((836 - 37 - q.api.SX_DOCK_PX.keep) + 'px')
+  })
+  it('a repaint during a drag (a stream event) does not change the heights the drag measured at its start', () => {
+    const p = desk('full')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 700, pointerId: 1, buttons: 1 })
+    p.drawn.full = 180; p.api.apply()
+    p.api.up({ clientY: 600, pointerId: 1 }); expect(p.api.height()).toBe('full')
+  })
+  it('a second finger moves and releases nothing; the first one finishes the drag', () => {
+    const p = page({ stored: 'middle' })
+    p.api.down({ target: p.handle, clientY: 500, pointerId: 1, pointerType: 'touch' }); p.api.move({ clientY: 400, pointerId: 1 })
+    const h1 = p.dock.style.height
+    p.api.move({ clientY: 0, pointerId: 2 }); expect(p.dock.style.height).toBe(h1)
+    p.api.up({ clientY: 0, pointerId: 2 }); expect(p.api.height()).toBe('middle'); expect(p.dock.style.height).toBe(h1)
+    p.api.up({ clientY: 300, pointerId: 1 }); expect(p.api.height()).toBe('full'); expect(p.dock.style.height).toBe('')   // 126 + 200 = 326, nearer 378
+  })
+  it('a mouse moving with no button down missed its release: the drag ends where it began and stores nothing', () => {
+    const p = desk('middle')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 400, pointerId: 1, buttons: 1 })
+    expect(p.dock.style.height).not.toBe('')
+    p.api.move({ clientY: 300, pointerId: 1, buttons: 0 })
+    expect(p.dock.style.height).toBe(''); expect(p.api.SX_DOCK.drag).toBeNull()
+    p.api.up({ clientY: 300, pointerId: 1 }); expect(p.api.height()).toBe('middle'); expect(p.writes).toEqual([])
+  })
+})
+
+describe('7.0.58: the working line and the activity excerpt are plain text (Miles 12:27)', () => {
+  it('bold, code, headings, bullets, quotes and link brackets come out; the words stay, on one line', () => {
+    const p = page()
+    expect(p.api.plainLine('last reply: **What is on your Mac right now:**')).toBe('last reply: What is on your Mac right now:')
+    expect(p.api.plainLine('`npm test` passed with *no* failures')).toBe('npm test passed with no failures')
+    expect(p.api.plainLine('## Plan\n- one step\n> a quote with [a link](https://x.test/a)\n2. two')).toBe('Plan one step a quote with a link two')
+    expect(p.api.plainLine(null)).toBe('')
+    // A lone star is not emphasis: a path keeps it (Q1 12:59); a star bullet goes.
+    expect(p.api.plainLine('edited src/*.ts and 2 * 3')).toBe('edited src/*.ts and 2 * 3')
+    expect(p.api.plainLine('* first\n* second')).toBe('first second')
+  })
+  it('paintActivity draws both through it, escaped after', () => {
+    expect(APP).toContain("'<span class=\"sx-act-detail\">' + esc(sxPlainLine(detail)) + '</span>' +")
+    expect(APP).toContain("'<div class=\"sx-act-prose\">' + esc(sxPlainLine(String(live.prose).slice(-600))) + '</div>'")
   })
 })
 
@@ -309,13 +454,11 @@ describe('7.0.57: a card he must read holds Full at Middle (F1 probe 6; the lead
     q.qs.children = []; q.qs.textContent = ''; q.api.apply()
     expect(q.reader.attrs['data-dock']).toBe('full'); expect(q.why.hidden).toBe(true)
   })
-  it('the reason line only while it holds: never at Middle or Focus, never off the dock, never with no card', () => {
+  it('the reason line only while it holds: never at Middle or Focus, never with no card', () => {
     for (const stored of ['middle', 'focus']) {
       const p = page({ docked: true, stored, working: false, card: 'enabled' }); p.api.paint()
       expect(p.reader.attrs['data-dock']).toBe(stored); expect(p.why.hidden).toBe(true)
     }
-    const off = page({ docked: false, stored: 'full', working: false, card: 'enabled' }); off.api.paint()
-    expect(off.why.hidden).toBe(true)
     const none = page({ docked: true, stored: 'full', working: false }); none.api.paint()
     expect(none.reader.attrs['data-dock']).toBe('full'); expect(none.why.hidden).toBe(true)
   })
@@ -495,8 +638,8 @@ describe('the markup and the CSS', () => {
   it('every height keeps the floor: the thread never under it, the dock gives way and scrolls, so Middle is never taller than Full', () => {
     expect(DOCKCSS).toContain('html.sx-frame .sx-docked .sx-body { min-height: var(--sx-floor); }')
     expect(DOCKCSS).toContain('html.sx-frame .sx-docked .sx-dock { flex: 0 1 auto; min-height: 0; }')
-    expect(DOCKCSS).toContain("html.sx-frame .sx-docked[data-dock='full'] .sx-body { flex: 0 0 var(--sx-floor); }")
-    expect(DOCKCSS).toContain("html.sx-frame .sx-docked[data-dock='full'] .sx-dock { flex: 1 1 auto; min-height: 0; }")
+    // 7.0.58: Full is its content's height under the same cap; no rule gives Full's dock or thread a size of its own.
+    expect(DOCKCSS).not.toMatch(/\[data-dock='full'\] \.sx-(body|dock) \{/)
     const rules = DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '')
     expect(rules, 'no px thread height: the floor is the one constant').not.toMatch(/sx-body \{[^}]*\d+px/)
     expect(rules, 'no dock minimum that could beat the floor').not.toMatch(/\.sx-dock \{[^}]*min-height: [1-9]/)
@@ -516,11 +659,8 @@ describe('the markup and the CSS', () => {
     // The one-line status (Sent, Not sent) above the field, before the form's order 10 (Q1 07:48).
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }')
     expect(CSS).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
-    // Full is Middle's size while it is up, so the field is never pushed under the keyboard by the extras.
-    expect(DOCKCSS).toContain("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }")
-    expect(DOCKCSS).toContain("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }")
-    // The keyboard rules come after the Full rules they override (same selectors plus .kb-up).
-    expect(DOCKCSS.indexOf("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body")).toBeGreaterThan(DOCKCSS.indexOf("html.sx-frame .sx-docked[data-dock='full'] .sx-body"))
+    // Full is its content's height at every size (7.0.58), so with the keyboard up the extras cannot push the field under it.
+    expect(DOCKCSS).not.toMatch(/kb-up \.sx-docked\[data-dock='full'\] \.sx-(body|dock)/)
   })
   it('the working line stays one line: a dropped-feed note is cut, not wrapped (F1: Focus grew to 180 px)', () => {
     expect(DOCKCSS).toContain('.sx-docked .sx-act-fallback { height: 44px; padding-top: 0; line-height: 44px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }')
