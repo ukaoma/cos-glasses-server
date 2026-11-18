@@ -115,6 +115,11 @@ describe('7.0.59 every mail field is scrubbed: no URL and no email address reach
     expect(scrubMailText('x'.repeat(500), 160).length).toBeLessThanOrEqual(160)
     expect(scrubMailText('He said "go"', 40)).toBe("He said 'go'")
   })
+  it('an address the email rule cannot take whole (no dot after the @) still leaves no @', () => {
+    const s = scrubMailText('Write to ops@localhost or @miles today', 80)
+    expect(s).not.toContain('@')
+    expect(s).toContain('today')
+  })
   it('an address cut by the bound can never leave half of itself: addresses go before the cut', () => {
     const s = scrubMailText('Ask ' + 'a'.repeat(20) + '@longdomain-example.example now', 22)
     expect(s).not.toContain('@')
@@ -142,6 +147,10 @@ describe('7.0.59 mail in the inputs and the fingerprint', () => {
     expect(todayBriefFingerprint(withMail(base(), changed))).not.toBe(todayBriefFingerprint(withMail(base(), first)))
     expect(todayBriefFingerprint(withMail(base(), { items: [], unavailable: MAIL_UNAVAILABLE.failed }))).not.toBe(todayBriefFingerprint(withMail(base(), first)))
     expect(todayBriefFingerprint(withMail(base(), first))).not.toBe(todayBriefFingerprint(base()))
+    // Unavailable is not the same news as a scan that ranked nothing, and each reason is its own news.
+    const fp = (m: BriefMail) => todayBriefFingerprint(withMail(base(), m))
+    expect(fp({ items: [], unavailable: MAIL_UNAVAILABLE.stale })).not.toBe(fp({ items: [] }))
+    expect(fp({ items: [], unavailable: MAIL_UNAVAILABLE.stale })).not.toBe(fp({ items: [], unavailable: MAIL_UNAVAILABLE.failed }))
 
     // And the brief itself: the second ask, on the next scan with the same items, calls no model.
     const prompts: string[] = []
