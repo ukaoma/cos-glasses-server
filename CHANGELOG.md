@@ -1,3 +1,19 @@
+## 7.0.58 - The Sessions dock at every size and pointer
+
+2026-11-18. 7.0.57 (ffaaf666, never installed, never published) plus W1's hotfix, nothing else. For a private install on his Mac (his line of 12:27: "That drag functionality should be EVERYWHERE including the desktop and larger window sizes."); on npm only on a separate line from him. The Mac runs 7.0.56, so everything in 7.0.57 below arrives with it.
+
+**On for everyone, one line each:**
+- Control Web, Sessions: **7.0.56 and 7.0.57 drew the dock only on phones and short touch screens (a coarse pointer and at most 599 px wide or 720 px tall); 7.0.58 draws it at every size and pointer**, the open Duo and desk windows included. Same handle (Focus, Middle, Full), Middle when nothing is kept, the height kept per device. (W1; Miles 12:27)
+- **The Stop rule now holds at desk sizes too:** no Stop outside Full, and in Full one confirm ("Stop this session?", with "Keep working" first). The plain send is the filled button there as on a phone. (W1)
+- **At a desk, Full is as tall as its content**, never past the floor that keeps the thread in view. On a phone it measures as before. (W1)
+- **With a mouse or trackpad** the handle shows a resize cursor and never selects text; a click steps, a drag snaps, the arrow keys move it; a drag the window loses goes back to the kept height and keeps nothing. (W1)
+- **The working line and its activity line are plain text:** bold, code, headings, bullets, quotes and link brackets are taken out, the words kept on one line. (W1)
+
+**Not covered, said plainly:**
+- The dock at his real sizes (the open Duo at 1119 px with Safari at 0.85, his desk) is checked in a browser model; his Duo and desk are the test.
+- Touch only: a second finger pressing the handle during a drag takes the drag over, and the drag does not finish. Fixed in the next build. (Codex)
+- 7.0.57's notes below still hold.
+
 ## 7.0.57 - The dock hides the request card with the keyboard up, and a Cursor ask is not cut off while a sub-agent works
 
 2026-11-18. 7.0.56 (ce39e1ee, installed on Miles's Mac 09:05) plus W1's dock fixes and S1's Cursor fixes, nothing else. For a private install on his Mac (his line of 07:01, the lead's reading: it covers the fixes to the build he asked for); on npm only on a separate line from him.
