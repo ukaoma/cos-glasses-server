@@ -228,6 +228,42 @@ describe('7.0.39 thread candidate 2: the four job states in the history', () => 
   })
 })
 
+describe('7.0.57 (S1 ef1de8c9): a failed chat says the job\'s own reason when it has one', () => {
+  const REASON = 'Cursor stopped after 3 minutes with no progress while it was waiting on a sub-agent. Ask again.'
+  const with_ = (extra: Record<string, unknown>) => load({ [H]: page([
+    entry('fail1', { status: 'failed', answer: 'Partial words', answerChars: 5000, full: false, clientJobId: 'fail1', generation: 1, ...extra }),
+    entry('fail2', { status: 'failed', answer: '', answerChars: null, full: false, clientJobId: 'fail2', generation: 1, ...extra }),
+  ]) })
+  it('with a reason: its words in place of the fixed ones, with and without a partial answer; Ask again stays', async () => {
+    const h = with_({ reason: REASON })
+    h.chat._loadHistory(); await flush()
+    const html = h.feed.innerHTML
+    expect(html).toContain('<span class="cc-fine">' + REASON + '</span>')
+    expect(html).toContain('<span class="cc-wait">' + REASON + '</span>')
+    expect(html).not.toContain('This ask did not finish.')
+    expect(html).toContain('data-cos="hist-again" data-id="t:fail1"')
+    expect(html).toContain('data-cos="hist-again" data-id="t:fail2"')
+  })
+  it('no reason, an empty one or not a string: the fixed words, as before', async () => {
+    for (const extra of [{}, { reason: '' }, { reason: '   ' }, { reason: 42 }]) {
+      const h = with_(extra)
+      h.chat._loadHistory(); await flush()
+      expect(h.feed.innerHTML).toContain('<span class="cc-fine">This ask did not finish.</span>')
+      expect(h.feed.innerHTML).toContain('<span class="cc-wait">This ask did not finish.</span>')
+    }
+  })
+  it('the reason is text, never markup, and at most 300 characters', async () => {
+    const h = with_({ reason: '<img src=x onerror=alert(1)> ' + 'a'.repeat(400) })
+    h.chat._loadHistory(); await flush()
+    const html = h.feed.innerHTML
+    expect(html).not.toContain('<img src=x')
+    expect(html).toContain('&lt;img src=x onerror=alert(1)')   // escaped by W.esc (this harness's copy escapes & < ")
+    const shown = html.match(/<span class="cc-wait">([^<]*)<\/span>/)![1]
+    expect(shown.replace(/&lt;|&gt;/g, '_').length).toBe(300)
+    expect(shown.endsWith('\u2026')).toBe(true)
+  })
+})
+
 describe('7.0.39 thread candidate 2: Ask again is the next generation of the same chat', () => {
   it('from a history card: the same clientJobId, generation + 1, cosThread, no sessionId, one entry, polled at that generation', async () => {
     let body: any = null

@@ -3818,6 +3818,7 @@
   // the conversation, where they are, is out of view (the person scrolled up). Read on the body's scroll, its size
   // changes and the cards' redraws.
   function sxGoQuestionPaint() {
+    if (typeof sxDockApply === 'function') sxDockApply();   // a question card came or went
     var line = $('session-goq'), body = $('session-body'), q = $('session-questions');
     if (!line) return false;
     var has = !!(q && q.children && q.children.length && String(q.textContent || '').trim());
@@ -5093,6 +5094,7 @@
         '<div class="sx-wline"><div class="sx-activity" id="session-live" aria-live="polite"></div>' +
           '<span class="sx-dock-acts"><button type="button" class="sx-dock-btn" data-sx="dock-full" aria-pressed="false" aria-label="Show all actions">' + SX_BUBBLE_SVG + '</button>' +
           '<button type="button" class="sx-dock-btn" data-sx="dock-focus" aria-label="Expand the thread">' + SX_EXPAND_SVG + '</button></span></div>' +
+        '<p class="sx-dock-why" id="session-dock-why" role="status" hidden></p>' +
         '<div class="sx-mac-q" id="session-mac-q" role="status" hidden></div>' +
         '<div class="sx-chat">' +
           '<div id="session-verdict"></div>' +
@@ -5385,19 +5387,43 @@
     var rd = $('session-reader'), head = rd && rd.querySelector ? rd.querySelector('.sx-reader-head') : null;
     return rd ? Math.max(SX_DOCK_PX.middle, (rd.clientHeight || 0) - (head ? head.offsetHeight || 0 : 0) - SX_DOCK_PX.keep) : SX_DOCK_PX.middle;
   }
-  /** Draw the stored height on the reader. It never chooses one. */
-  function sxDockPaint() {
+  // 7.0.57 (F1 probe 6, the lead 09:3x and 09:4x): docked, Full is drawn as Middle while a card he must read before he
+  // acts on it is up, in both of its mounts: a request card whose Approve can be tapped, or this session's question
+  // card while the session is not working. In Full the thread is a 48 px strip, so the card's title sat out of view while
+  // Approve was whole (951x539, list hidden). While the session works Approve is disabled (phoneBusyApply) and Full
+  // stays, so Stop is reachable. The stored height is untouched: Full comes back the moment the card goes or the session
+  // starts working, and the working line says why meanwhile.
+  var SX_DOCK_HOLD_WORDS = { request: 'Answer the request to open the full view.', question: 'Answer the question to open the full view.' };
+  function sxDockHold() {
+    var r = state.reading, form = $('session-form');
+    var go = form && form.querySelector ? form.querySelector('[data-phone-offer]') : null;
+    if (form && form.__paCard && go && !go.disabled) return 'request';
+    var q = $('session-questions'), working = !!(r && r.live && r.live.working);
+    if (!working && q && q.children && q.children.length && String(q.textContent || '').trim()) return 'question';
+    return '';
+  }
+  /** The height drawn: the stored one, except Full while a card holds it (Middle then). */
+  function sxDockShown(h, hold) { return h === 'full' && hold ? 'middle' : h; }
+  /** The reader's dock state, the buttons' words and the hold's reason line, from the stored height and the cards. */
+  function sxDockApply() {
     var rd = $('session-reader'); if (!rd || !rd.classList) return;
-    var on = sxDockApplies(), h = sxDockHeight();
+    var on = sxDockApplies(), h = sxDockHeight(), hold = on ? sxDockHold() : '', shown = sxDockShown(h, hold);
     rd.classList.toggle('sx-docked', on);
-    if (on) rd.setAttribute('data-dock', h); else rd.removeAttribute('data-dock');
-    // The thread floor (F1 07:17): sessions.css keeps the thread at least this tall at every height and in every state.
-    if (rd.style && rd.style.setProperty) rd.style.setProperty('--sx-floor', SX_DOCK_PX.keep + 'px');
+    if (on) { if (rd.getAttribute('data-dock') !== shown) rd.setAttribute('data-dock', shown); } else rd.removeAttribute('data-dock');
+    var why = $('session-dock-why'), words = on && h === 'full' && hold ? SX_DOCK_HOLD_WORDS[hold] : '';
+    if (why) { if (why.textContent !== words) why.textContent = words; why.hidden = !words; }
     var handle = $('session-handle');
     if (handle) { handle.setAttribute('aria-valuetext', h); handle.setAttribute('aria-label', 'Showing ' + SX_DOCK_WORDS[h] + '. Drag, tap or use the arrow keys to change what the dock shows'); }
     var full = rd.querySelector ? rd.querySelector('[data-sx="dock-full"]') : null, focus = rd.querySelector ? rd.querySelector('[data-sx="dock-focus"]') : null;
-    if (full) { full.setAttribute('aria-pressed', h === 'full' ? 'true' : 'false'); full.setAttribute('aria-label', h === 'full' ? 'Show fewer actions' : 'Show all actions'); }
+    if (full) { full.setAttribute('aria-pressed', shown === 'full' ? 'true' : 'false'); full.setAttribute('aria-label', shown === 'full' ? 'Show fewer actions' : 'Show all actions'); }
     if (focus) focus.setAttribute('aria-label', h === 'focus' ? 'Show the reply box' : 'Expand the thread');
+  }
+  /** Draw the stored height on the reader. It never chooses one. */
+  function sxDockPaint() {
+    var rd = $('session-reader'); if (!rd || !rd.classList) return;
+    sxDockApply();
+    // The thread floor (F1 07:17): sessions.css keeps the thread at least this tall at every height and in every state.
+    if (rd.style && rd.style.setProperty) rd.style.setProperty('--sx-floor', SX_DOCK_PX.keep + 'px');
     sxStopPaint(state.reading);
     // The field's width changes with the dock, so its placeholder is fitted again (two lines when its words need them).
     var box = $('session-input'); if (box && box.phLong && typeof sxPlaceholderFit === 'function') sxPlaceholderFit(box);
@@ -5427,7 +5453,8 @@
   function sxDockClick(act) {
     var h = sxDockHeight();
     if (act === 'dock-handle') { if (SX_DOCK.dragged) { SX_DOCK.dragged = false; return; } return sxDockSet(sxDockNext(h)); }
-    if (act === 'dock-full') return sxDockSet(h === 'full' ? 'middle' : 'full');
+    // The bubble acts on what is drawn: with a card holding Full it asks for Full again, and the working line says why.
+    if (act === 'dock-full') return sxDockSet(sxDockShown(h, sxDockApplies() ? sxDockHold() : '') === 'full' ? 'middle' : 'full');
     if (act === 'dock-focus') return sxDockSet(h === 'focus' ? 'middle' : 'focus');
     if (act === 'dock-stop') { SX_DOCK.stopAsk = true; sxStopPaint(state.reading); return sxStopFocusKeep(); }
     if (act === 'dock-stop-keep') { SX_DOCK.stopAsk = false; return sxStopPaint(state.reading); }
@@ -5493,6 +5520,7 @@
     }
     box.innerHTML = html;
     if (typeof sxStopPaint === 'function') sxStopPaint(r);
+    if (typeof sxDockApply === 'function') sxDockApply();   // the working flag decides whether a card holds Full
     // The clock ticks only while the session works or waits (Control 0.5.337). A Working that only the write gate
     // says is re-asked even with no live feed (QA 6.99.29), so it cannot stand forever once the feed is lost.
     clearInterval(r.feedTimer); r.feedTimer = null;
@@ -6202,6 +6230,7 @@
     if (reader && reader.classList) reader.classList.remove('pa-beside');
     form.__paCard = null;
     phoneSendHome(view);
+    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();   // the card is gone: Full comes back
     r.phonePackets = {}; r.phonePacketSha256 = '';
   }
   function refreshWebKeyOffers() {
@@ -6449,6 +6478,7 @@
     if (view.form.__paCard) view.send.textContent = why && why.queue ? 'Queue as message only' : 'Send as message only';
     else view.send.textContent = why && why.queue ? 'Queue message' : 'Send';
     phoneArrange(view);
+    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();   // Approve enabled or not decides the hold
     // The reader's park note gives way to this one (renderVerdict reads sxPaOn), drawn again now the composer is on.
     if (view.prefix === 'session' && state.reading === r && typeof renderVerdict === 'function') renderVerdict(r);
   }
@@ -6508,6 +6538,12 @@
       // with a request card up does it still take the primary, Approve and send, as today (the lead 18:5x).
       form.__paSubmit = function (e) {
         if (!form.classList.contains('pa-on') || !form.__paCard) return;
+        // Enter approves only what he can see (the lead 08:3x, X1 08:3x; the 7.0.56 known issue): the card AND its Approve
+        // must both be drawn. Docked with the soft keyboard up the dock hides them; a submit is then the plain send, a
+        // message and not an answer. (Zero client rects: display none on it or an ancestor, or not in the page.)
+        // An element with no getClientRects counts as drawn, failing toward today's behaviour; every browser COS supports has it.
+        var drawn = function (el) { return !!el && (!el.getClientRects || el.getClientRects().length > 0); };
+        if (!drawn(form.__paCard) || !drawn(form.querySelector('[data-phone-offer]'))) return;
         if (e.submitter && e.submitter.id === view.prefix + '-send') return;
         e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
         var cur = form.__paEntry; if (cur) approveOnPhone(Object.assign({}, cur.opts || {}, { r: cur.r }));

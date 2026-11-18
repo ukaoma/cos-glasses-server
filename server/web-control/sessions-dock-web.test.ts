@@ -48,13 +48,20 @@ class El {
   setPointerCapture() {}
   clientHeight = 0; offsetHeight = 0
 }
-interface Opts { docked?: boolean; stored?: string | null; storageThrows?: boolean; working?: boolean }
+interface Opts { docked?: boolean; stored?: string | null; storageThrows?: boolean; working?: boolean; card?: 'enabled' | 'disabled'; question?: boolean }
 function page(o: Opts = {}) {
   const reader = new El('session-reader'), handle = new El('session-handle'), dock = new El('session-dock', 126), stop = new El('session-stop-row')
   reader.kids.full = new El('full'); reader.kids.focus = new El('focus'); reader.kids.head = Object.assign(new El('head'), { offsetHeight: 37 })
   reader.clientHeight = 463
   const input: any = Object.assign(new El('session-input'), { phLong: 'Continue this session…' }), fits: unknown[] = []
-  const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop, 'session-input': input }
+  const go: any = Object.assign(new El('go'), { disabled: o.card === 'disabled' })
+  const form: any = Object.assign(new El('session-form'), { __paCard: o.card ? new El('session-phone-card') : null })
+  form.querySelector = (sel: string) => (sel === '[data-phone-offer]' && o.card ? go : null)
+  const qs: any = Object.assign(new El('session-questions'), { children: o.question ? [new El('q')] : [], textContent: o.question ? 'Which branch should I use?' : '' })
+  const why: any = Object.assign(new El('session-dock-why'), { hidden: true, textContent: '' })
+  const body: any = Object.assign(new El('session-body'), { scrollTop: 812 })
+  const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop, 'session-input': input,
+    'session-form': form, 'session-questions': qs, 'session-dock-why': why, 'session-body': body }
   const store: Record<string, string> = o.stored == null ? {} : { 'cos.sxDock': o.stored }
   const writes: string[] = []
   const listeners: Record<string, Array<(e: unknown) => void>> = {}
@@ -71,9 +78,9 @@ function page(o: Opts = {}) {
   vm.createContext(ctx)
   vm.runInContext(DOCK + `
 ;this.api = { SX_DOCK: SX_DOCK, SX_DOCK_PX: SX_DOCK_PX, SX_DOCK_MQ: SX_DOCK_MQ, height: sxDockHeight, set: sxDockSet, next: sxDockNext, step: sxDockStep, snap: sxDockSnap,
-  paint: sxDockPaint, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
+  paint: sxDockPaint, apply: sxDockApply, hold: sxDockHold, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
   const api = (ctx as { api: any }).api
-  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits }
+  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits, form, go, qs, why, body }
 }
 
 describe('the height: one value per device, Middle when nothing is stored (the lead 18:5x)', () => {
@@ -273,6 +280,95 @@ describe('Stop: full only, never one tap, Keep working the default', () => {
   })
 })
 
+describe('7.0.57: a card he must read holds Full at Middle (F1 probe 6; the lead 09:3x, 09:4x)', () => {
+  const REQ = 'Answer the request to open the full view.', QN = 'Answer the question to open the full view.'
+  it('a request card whose Approve can be tapped: Full is drawn as Middle and the working line says why', () => {
+    const p = page({ docked: true, stored: 'full', working: false, card: 'enabled' }); p.api.paint()
+    expect(p.reader.attrs['data-dock']).toBe('middle')
+    expect([p.why.hidden, p.why.textContent]).toEqual([false, REQ])
+    expect(p.reader.kids.full.attrs['aria-pressed']).toBe('false')
+    expect(p.api.height()).toBe('full')                               // his choice is kept
+    expect(p.writes).toEqual([])
+  })
+  it('while the session works Approve is disabled and Full stays, so Stop is reachable', () => {
+    const p = page({ docked: true, stored: 'full', working: true, card: 'disabled' }); p.api.paint()
+    expect(p.reader.attrs['data-dock']).toBe('full'); expect(p.why.hidden).toBe(true)
+    expect(p.stop.innerHTML).toContain('data-sx="dock-stop"')
+  })
+  it('this session\'s question card while it is not working: Middle and its own words; working: Full', () => {
+    const p = page({ docked: true, stored: 'full', working: false, question: true }); p.api.paint()
+    expect(p.reader.attrs['data-dock']).toBe('middle'); expect([p.why.hidden, p.why.textContent]).toEqual([false, QN])
+    p.r.live.working = true; p.api.apply()
+    expect(p.reader.attrs['data-dock']).toBe('full'); expect(p.why.hidden).toBe(true)
+  })
+  it('Full comes back the moment the card goes; the line goes with it', () => {
+    const p = page({ docked: true, stored: 'full', working: false, card: 'enabled' }); p.api.paint()
+    p.form.__paCard = null; p.api.apply()
+    expect(p.reader.attrs['data-dock']).toBe('full'); expect([p.why.hidden, p.why.textContent]).toEqual([true, ''])
+    const q = page({ docked: true, stored: 'full', working: false, question: true }); q.api.paint()
+    q.qs.children = []; q.qs.textContent = ''; q.api.apply()
+    expect(q.reader.attrs['data-dock']).toBe('full'); expect(q.why.hidden).toBe(true)
+  })
+  it('the reason line only while it holds: never at Middle or Focus, never off the dock, never with no card', () => {
+    for (const stored of ['middle', 'focus']) {
+      const p = page({ docked: true, stored, working: false, card: 'enabled' }); p.api.paint()
+      expect(p.reader.attrs['data-dock']).toBe(stored); expect(p.why.hidden).toBe(true)
+    }
+    const off = page({ docked: false, stored: 'full', working: false, card: 'enabled' }); off.api.paint()
+    expect(off.why.hidden).toBe(true)
+    const none = page({ docked: true, stored: 'full', working: false }); none.api.paint()
+    expect(none.reader.attrs['data-dock']).toBe('full'); expect(none.why.hidden).toBe(true)
+  })
+  it('the bubble and a drag to Full are not dead: Full is stored, Middle drawn, the reason shown', () => {
+    const p = page({ docked: true, stored: 'middle', working: false, card: 'enabled' }); p.api.paint()
+    p.api.click('dock-full')
+    expect(p.api.height()).toBe('full'); expect(p.reader.attrs['data-dock']).toBe('middle'); expect(p.why.textContent).toBe(REQ)
+    p.api.click('dock-full')                                          // again: still asks for Full, not back to Middle
+    expect(p.api.height()).toBe('full'); expect(p.why.hidden).toBe(false)
+    const d = page({ docked: true, stored: 'middle', working: false, card: 'enabled' }); d.api.paint()
+    d.api.down({ target: d.handle, clientY: 500, pointerId: 1 }); d.api.move({ clientY: 0 }); d.api.up({ clientY: 0 })
+    expect(d.api.height()).toBe('full'); expect(d.reader.attrs['data-dock']).toBe('middle'); expect(d.why.textContent).toBe(REQ)
+  })
+  // The lead 09:5x: the switch happens by itself, so it must move nothing he holds.
+  it('the switch by itself (the session stops and Approve opens; the card goes) keeps his focus, his draft and his reading place', () => {
+    const p = page({ docked: true, stored: 'full', working: true, card: 'disabled' })
+    p.input.value = 'half a sentence he is still writing'
+    p.api.paint(); const fits0 = p.fits.length
+    expect(p.reader.attrs['data-dock']).toBe('full')
+    p.r.live.working = false; p.go.disabled = false; p.api.apply()     // phoneBusyApply's call when it stops
+    expect(p.reader.attrs['data-dock']).toBe('middle')
+    p.form.__paCard = null; p.api.apply()                               // clearPhoneOffer's call when the card goes
+    expect(p.reader.attrs['data-dock']).toBe('full')
+    expect(p.input.value).toBe('half a sentence he is still writing')
+    expect([p.input.focused, p.handle.focused, p.why.focused, p.go.focused]).toEqual([0, 0, 0, 0])
+    expect(p.body.scrollTop).toBe(812)
+    expect(p.fits.length, 'the light apply never refits the box').toBe(fits0)
+    expect(p.writes).toEqual([])
+    const apply = between(APP, '  function sxDockApply() {', '  /** Draw the stored height on the reader.')
+    expect(apply).not.toMatch(/focus\(|scrollTop|scrollTo|scrollIntoView|\.value\b|sxPlaceholderFit|sxDockSet/)
+  })
+  it('Approve never shows enabled under Full for even one paint: its one writer sets it, then the dock applies, in the same call', () => {
+    expect(APP.match(/go\.disabled\s*=[^=]/g)).toHaveLength(1)
+    const busy = between(APP, '  function phoneBusyApply(r, view) {', '  function phoneArrange(view) {')
+    const set = busy.indexOf('    go.disabled = !!why;'), dock = busy.indexOf("    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();")
+    expect(set).toBeGreaterThan(-1); expect(dock).toBeGreaterThan(set)
+    // Synchronous between the two: no timer, frame, promise or await can let the browser paint in the middle.
+    expect(busy.slice(set, dock)).not.toMatch(/setTimeout|requestAnimationFrame|\.then\(|await|queueMicrotask/)
+    expect(busy).not.toMatch(/setTimeout\(sxDockApply|requestAnimationFrame\(sxDockApply/)
+  })
+  it('both mounts: the hold reads the form\'s carried card, never where it is mounted; the hooks that change a card call it', () => {
+    const hold = between(APP, '  function sxDockHold() {', '  /** The height drawn:')
+    expect(hold).toContain('form && form.__paCard && go && !go.disabled')
+    expect(hold).not.toMatch(/parentNode|session-body|sx-chat/)
+    expect(APP).toContain("    if (typeof sxDockApply === 'function') sxDockApply();   // the working flag decides whether a card holds Full\n")
+    expect(APP).toContain("    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();   // Approve enabled or not decides the hold\n")
+    expect(APP).toContain("    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();   // the card is gone: Full comes back\n")
+    expect(APP).toContain("  function sxGoQuestionPaint() {\n    if (typeof sxDockApply === 'function') sxDockApply();   // a question card came or went\n")
+    expect(APP).toContain('\'<p class="sx-dock-why" id="session-dock-why" role="status" hidden></p>\' +')
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock-why { display: none; }')
+  })
+})
+
 describe('the one note (README "The working note")', () => {
   function note(o: { provider?: string; midTurn?: boolean; files?: boolean; passkey?: boolean }) {
     const ctx: Record<string, unknown> = {
@@ -330,17 +426,27 @@ describe('the markup and the CSS', () => {
   // Miles 08:2x ("Hidden is fine"), F1 08:2x class A: Approve is never drawn while the request card is not.
   it('THE INVARIANT: with the keyboard up the request card and every passkey send share one rule, and nothing else touches them', () => {
     const rules = DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.trim()).filter(Boolean).map(r => ({ sels: r.split('{')[0].split(',').map(s => s.trim()), body: r.split('{')[1] }))
-    const kbPa = rules.filter(r => r.sels.some(s => s.includes('.kb-up') && /\.pa-card|\.pa-go/.test(s)))
+    const kbPa = rules.filter(r => r.sels.some(s => s.includes('.kb-up') && /\.pa-card|#session-phone-card|\.pa-go/.test(s)))
     expect(kbPa).toHaveLength(1)
-    expect(kbPa[0].sels).toEqual(['html.sx-frame.kb-up .sx-docked #session-form > .pa-card', 'html.sx-frame.kb-up .sx-docked #session-form .pa-go'])
+    expect(kbPa[0].sels).toEqual(['html.sx-frame.kb-up .sx-docked #session-phone-card', 'html.sx-frame.kb-up .sx-docked #session-form .pa-go'])
+    // ...and the selector names the element the code really draws, wherever it puts it (X1 08:3x: the card is never in the
+    // form, so '#session-form > .pa-card' matched nothing at dcddf408).
+    expect(APP).toContain("card.className = 'pa-card'; card.id = view.prefix + '-phone-card';")
+    const place = between(APP, '  function phoneCardPlace(view, card) {', '    if (reader && !reader.__paRo')
+    expect(place).toContain('if (wide) { if (card.parentNode !== body) body.insertBefore(card, body.firstChild); }')
+    expect(place).toContain('else if (chat && card.parentNode !== chat) chat.insertBefore(card, chat.firstChild);')
+    expect(DOCKCSS, 'no rule may select the card as a child of the form').not.toContain('#session-form > .pa-card')
     expect(kbPa[0].body.trim()).toBe('display: none;')
     // It outranks every rule that draws either one (specificity: ids, then classes/attributes/pseudo-classes, then types).
     const spec = (s: string) => [(s.match(/#[\w-]+/g) || []).length, (s.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+/g) || []).length, (s.match(/(^|\s)[a-z]+(?=[.#\[:\s]|$)/g) || []).length]
     const beats = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
-    const shows = rules.filter(r => /display:\s*(?!none\b)[a-z]/.test(r.body) && r.sels.some(s => /\.pa-card|\.pa-go/.test(s)))
+    const shows = rules.filter(r => /display:\s*(?!none\b)[a-z]/.test(r.body) && r.sels.some(s => /\.pa-card|#session-phone-card|\.pa-go/.test(s)))
     expect(shows.length).toBeGreaterThan(0)
-    for (const r of shows) for (const s of r.sels.filter(x => /\.pa-card|\.pa-go/.test(x)))
-      for (const inv of kbPa[0].sels) expect(beats(spec(inv), spec(s)), inv + ' over ' + s).toBeGreaterThan(0)
+    // Each against the rules that draw the same thing: the card's against the card's, Approve's against Approve's.
+    for (const r of shows) for (const s of r.sels.filter(x => /\.pa-card|#session-phone-card|\.pa-go/.test(x))) {
+      const inv = /\.pa-go/.test(s) ? kbPa[0].sels[1] : kbPa[0].sels[0]
+      expect(beats(spec(inv), spec(s)), inv + ' over ' + s).toBeGreaterThan(0)
+    }
   })
   it('with a request card up and the keyboard up, the plain send (a message, not an answer) is the reply row\'s send', () => {
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: inline-flex; grid-area: send; width: 140px; margin-bottom: 0; }')
@@ -354,13 +460,12 @@ describe('the markup and the CSS', () => {
   it('F1 08:02: the docked form has no row gap, so its empty template rows add nothing; the 8 px sits under what is drawn', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-form { display: grid; grid-template-columns: auto auto minmax(0, 1fr) 140px; column-gap: 6px; row-gap: 0; align-items: center;')
     expect(DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/#session-form \{[^}]*row-gap: [1-9]/)
-    const sel = between(DOCKCSS, '.sx-docked #session-form > .pa-card, .sx-docked #session-form > .pa-note,', '{ margin-bottom: 8px; }')
-    for (const part of ['#session-form > .pa-card', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-stop-row', '#session-files:not(.hidden)', '#session-clip', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
+    const sel = between(DOCKCSS, '.sx-docked #session-form > .pa-note, .sx-docked #session-form > .sx-x2,', '{ margin-bottom: 8px; }')
+    for (const part of ['#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-stop-row', '#session-files:not(.hidden)', '#session-clip', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
       expect(sel.split(',').map(x => x.trim()).filter(Boolean), part).toContain('.sx-docked ' + part)
     // The reply row itself carries no margin: it is the form's last row and its foot.
     expect(sel).not.toMatch(/#session-input|#session-send,|\.pa-req \.pa-go/)
     expect(DOCKCSS).toContain('.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 8px;')
-    expect(DOCKCSS).toContain('.sx-docked #session-form > .pa-card { grid-area: card; margin: 0 0 8px; }')   // after the margin list, so it keeps the 8 px
   })
   it('the plain send keeps 140 px for both its labels, so the field never moves', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-send { grid-area: send; width: 140px; min-height: 44px; }')

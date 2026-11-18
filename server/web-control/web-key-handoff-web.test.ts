@@ -412,6 +412,24 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       expect([prevented, stopped]).toEqual([1, 1])
       expect(h.requests.filter(q => q.path === '/api/web-key/handoff')).toHaveLength(1)
     })
+    for (const hidden of ['card', 'approve'] as const) {
+      it(`${prefix}: with the ${hidden === 'card' ? 'request card' : 'Approve button'} not drawn, Enter is the plain send and approves nothing`, async () => {
+        const h = harness({ signer: 1, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
+        h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+        const el: any = hidden === 'card' ? (h.form as any).__paCard : h.form.querySelector('[data-phone-offer]')
+        expect(el).toBeTruthy()
+        el.getClientRects = () => []                                  // display: none, as the dock's keyboard-up rule draws it
+        let prevented = 0, stopped = 0
+        const submit = () => h.form.listeners.submit({ submitter: null, preventDefault: () => { prevented++ }, stopImmediatePropagation: () => { stopped++ } })
+        submit(); await flush()
+        expect([prevented, stopped]).toEqual([0, 0])
+        expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
+        el.getClientRects = () => [{ top: 0, height: 40 }]           // drawn again: Enter approves, as today
+        submit(); await flush()
+        expect([prevented, stopped]).toEqual([1, 1])
+        expect(h.requests.filter(q => q.path === '/api/web-key/handoff')).toHaveLength(1)
+      })
+    }
     it(`${prefix}: with a request card up, Approve and send keeps its place beside the words and the quiet send its words (unchanged)`, async () => {
       const h = harness({ signer: 1, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()

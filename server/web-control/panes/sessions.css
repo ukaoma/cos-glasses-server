@@ -700,10 +700,9 @@ html.sx-frame .sx-docked .sx-wline > .sx-activity { flex: 1 1 auto; min-width: 0
 /* No row gap (F1 08:02, keyboard up at 382: the field started 63 px under the form's top): the template's empty rows
    (the hidden card, note, extras, Stop) took a gap each, 7 of 8 px, so the form was about 141 px in a 123 px dock and
    slid over the handle and the status. The 8 px sits under each part that is drawn instead. */
-.sx-docked #session-form > .pa-card, .sx-docked #session-form > .pa-note, .sx-docked #session-form > .sx-x2, .sx-docked #session-form > .sx-stop-row,
+.sx-docked #session-form > .pa-note, .sx-docked #session-form > .sx-x2, .sx-docked #session-form > .sx-stop-row,
 .sx-docked #session-files:not(.hidden), .sx-docked #session-clip, .sx-docked #session-form:not(.pa-req) .pa-go,
 .sx-docked #session-form.pa-req #session-send { margin-bottom: 8px; }
-.sx-docked #session-form > .pa-card { grid-area: card; margin: 0 0 8px; }
 .sx-docked #session-form > .pa-note { grid-area: note; margin: 0; }
 .sx-docked #session-form .pa-go { grid-area: pk; }
 .sx-docked #session-clip { grid-area: clip; }
@@ -767,8 +766,9 @@ html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }
    Approve and send stayed whole, so he could approve what he could not read): the request card and every passkey send
    share this ONE rule, so Approve is never drawn while the card is not, at every docked size. With the keyboard up he
    writes his note; he reads the card and approves once it goes down. The plain send stays in the reply row, a message
-   and not an answer, as its placeholder says. */
-html.sx-frame.kb-up .sx-docked #session-form > .pa-card, html.sx-frame.kb-up .sx-docked #session-form .pa-go { display: none; }
+   and not an answer, as its placeholder says. The card is #session-phone-card, which phoneCardPlace puts at the top of
+   .sx-chat (narrow) or of #session-body (560 px and wider), never inside the form (X1 08:3x). */
+html.sx-frame.kb-up .sx-docked #session-phone-card, html.sx-frame.kb-up .sx-docked #session-form .pa-go { display: none; }
 html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: inline-flex; grid-area: send; width: 140px; margin-bottom: 0; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }
@@ -776,6 +776,9 @@ html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }
    its reach still goes 32 px up into the thread, so it stays a 44 px target. */
 html.sx-frame.kb-up .sx-docked .sx-dock-handle { height: 12px; }
 html.sx-frame.kb-up .sx-docked .sx-dock-handle::before { top: -32px; }
+/* The reason a card holds Full at Middle (app.js sxDockApply): one quiet line under the working line, only while it holds. */
+.sx-docked .sx-dock-why { margin: 0; padding: 0 2px 6px; font: 400 12.5px/1.35 var(--body); color: var(--sub); }
+html.sx-frame.kb-up .sx-docked .sx-dock-why { display: none; }
 /* FOCUS: the thread and the working line; no reply box. */
 .sx-docked[data-dock='focus'] #session-verdict, .sx-docked[data-dock='focus'] #session-form, .sx-docked[data-dock='focus'] #session-status,
 .sx-docked[data-dock='focus'] #session-caution, .sx-docked[data-dock='focus'] #session-queue { display: none; }
