@@ -149,17 +149,13 @@ describe('only his drag, tap or keys change it', () => {
     p.api.key({ target: p.handle, key: 'Enter', preventDefault() {} }); expect(p.api.height()).toBe('middle')
     p.api.key({ target: p.dock, key: 'ArrowUp', preventDefault() {} }); expect(p.api.height()).toBe('middle')   // not the handle
   })
-  it('a drag lets go at the nearest height (68, 126, or full: the reader less 48, never under 126)', () => {
+  it('a drag lets go by steps (Focus, Middle, Full), whatever Full\'s own height', () => {
     const p = page()
-    expect(p.api.snap(70, 378)).toBe('focus')
-    expect(p.api.snap(96, 378)).toBe('focus')
-    expect(p.api.snap(98, 378)).toBe('middle')
-    expect(p.api.snap(250, 378)).toBe('middle')
-    expect(p.api.snap(253, 378)).toBe('full')
-    // A tiny reader: full is never under 126, so it sits at middle's height and a drag lands on middle (the bubble
-    // and a tap still reach full).
-    expect(p.api.snap(400, 40)).toBe('middle')
-    expect(p.api.snap(40, 40)).toBe('focus')   // full is not taken at the tiny reader's own 40
+    // 7.0.58 (Q1 12:59): by steps, at every size: under 97 (the Focus to Middle midpoint) Focus, under 155 (Middle plus
+    // half that gap) Middle, else Full; Full's own height never decides it.
+    expect([70, 96].map(x => p.api.snap(x))).toEqual(['focus', 'focus'])
+    expect([97, 126, 154].map(x => p.api.snap(x))).toEqual(['middle', 'middle', 'middle'])
+    expect([155, 380, 800].map(x => p.api.snap(x))).toEqual(['full', 'full', 'full'])
   })
   it('the drag itself: the dock follows the finger, lets go at the nearest height, and the click after it is not a tap', () => {
     const p = page({ stored: 'middle' })
@@ -251,6 +247,41 @@ describe('7.0.58: the dock is the reader\'s at every size and every pointer (Mil
   })
 })
 
+describe('7.0.58 (Q1 12:59): a desk drag knows Full\'s drawn height, and one pointer drives it', () => {
+  const desk = (stored: string) => { const p = page({ w: 1440, h: 900, pointer: 'fine', stored }); p.reader.clientHeight = 836; return p }
+  it('Full\'s drawn height is kept while Full is drawn; a release there is Full, and the preview never passes it', () => {
+    const p = desk('full'); p.dock.h = 380; p.api.paint()
+    expect(p.api.SX_DOCK.fullSeen).toBe(380)
+    p.api.set('middle'); p.dock.h = 126
+    expect(p.api.SX_DOCK.fullSeen).toBe(380)                              // Middle does not overwrite it
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' })
+    p.api.move({ clientY: 100, pointerId: 1, buttons: 1 }); expect(p.dock.style.height).toBe('380px')   // not the 751 cap
+    p.api.up({ clientY: 346, pointerId: 1 })                                // released at 126 + 254 = 380
+    expect(p.api.height()).toBe('full')
+  })
+  it('never in Full yet: the preview stops at the reader less the floor', () => {
+    const p = desk('middle'); p.api.paint()
+    p.api.down({ target: p.handle, clientY: 900, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 0, pointerId: 1, buttons: 1 })
+    expect(p.dock.style.height).toBe((836 - 37 - p.api.SX_DOCK_PX.keep) + 'px')
+  })
+  it('a second finger moves and releases nothing; the first one finishes the drag', () => {
+    const p = page({ stored: 'middle' })
+    p.api.down({ target: p.handle, clientY: 500, pointerId: 1, pointerType: 'touch' }); p.api.move({ clientY: 400, pointerId: 1 })
+    const h1 = p.dock.style.height
+    p.api.move({ clientY: 0, pointerId: 2 }); expect(p.dock.style.height).toBe(h1)
+    p.api.up({ clientY: 0, pointerId: 2 }); expect(p.api.height()).toBe('middle'); expect(p.dock.style.height).toBe(h1)
+    p.api.up({ clientY: 400, pointerId: 1 }); expect(p.api.height()).toBe('full'); expect(p.dock.style.height).toBe('')   // 126 + 100 = 226, past 155
+  })
+  it('a mouse moving with no button down missed its release: the drag ends where it began and stores nothing', () => {
+    const p = desk('middle')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 400, pointerId: 1, buttons: 1 })
+    expect(p.dock.style.height).not.toBe('')
+    p.api.move({ clientY: 300, pointerId: 1, buttons: 0 })
+    expect(p.dock.style.height).toBe(''); expect(p.api.SX_DOCK.drag).toBeNull()
+    p.api.up({ clientY: 300, pointerId: 1 }); expect(p.api.height()).toBe('middle'); expect(p.writes).toEqual([])
+  })
+})
+
 describe('7.0.58: the working line and the activity excerpt are plain text (Miles 12:27)', () => {
   it('bold, code, headings, bullets, quotes and link brackets come out; the words stay, on one line', () => {
     const p = page()
@@ -258,6 +289,9 @@ describe('7.0.58: the working line and the activity excerpt are plain text (Mile
     expect(p.api.plainLine('`npm test` passed with *no* failures')).toBe('npm test passed with no failures')
     expect(p.api.plainLine('## Plan\n- one step\n> a quote with [a link](https://x.test/a)\n2. two')).toBe('Plan one step a quote with a link two')
     expect(p.api.plainLine(null)).toBe('')
+    // A lone star is not emphasis: a path keeps it (Q1 12:59); a star bullet goes.
+    expect(p.api.plainLine('edited src/*.ts and 2 * 3')).toBe('edited src/*.ts and 2 * 3')
+    expect(p.api.plainLine('* first\n* second')).toBe('first second')
   })
   it('paintActivity draws both through it, escaped after', () => {
     expect(APP).toContain("'<span class=\"sx-act-detail\">' + esc(sxPlainLine(detail)) + '</span>' +")
