@@ -2024,6 +2024,15 @@
     });
     return out;
   }
+  // 7.0.57 (S1 ef1de8c9): a failed chat's history entry may carry the job's own reason ("Cursor stopped after 3 minutes
+  // with no progress ... Ask again."). It is shown as text in place of the fixed words, one line, at most
+  // COS_REASON_CHARS: the server's REASON_CHARS (cos-thread.ts), which already cuts it there; this is the page's own cap.
+  var COS_REASON_CHARS = 300, COS_FAILED_WORDS = 'This ask did not finish.';
+  function failedWords(e) {
+    var r = typeof e.reason === 'string' ? e.reason.replace(/\s+/g, ' ').trim() : '';
+    if (!r) return COS_FAILED_WORDS;
+    return esc(r.length > COS_REASON_CHARS ? r.slice(0, COS_REASON_CHARS - 1) + '\u2026' : r);
+  }
   /** One chat from the history: his words with their time, and COS's answer (its preview, or all of it once read). */
   function histHtml(e) {
     var whole = Object.prototype.hasOwnProperty.call(C.hist.full, e.id);
@@ -2037,14 +2046,14 @@
     // the chat had is quiet text beside the time ("#12"), so he can match it to Recent. None is drawn when there is none.
     var no = Number.isInteger(e.messageNo) && e.messageNo > 0 ? '<span class="cc-hist-no">#' + e.messageNo + '</span> ' : '';
     var body = text ? W.md(W.structureLensAnswer(text))
-      : '<span class="cc-wait">' + (e.status === 'running' ? 'COS is answering.' : e.status === 'failed' ? 'This ask did not finish.'
+      : '<span class="cc-wait">' + (e.status === 'running' ? 'COS is answering.' : e.status === 'failed' ? failedWords(e)
         : e.status === 'interrupted' ? 'This ask was stopped before it finished.' : 'This answer was not kept.') + '</span>';
     var acts = fs === 'gone' ? '<span class="cc-fine">Only the start of this answer was kept.</span>' : more ? '<button type="button" class="link-btn cc-text-btn" data-cos="hist-full" data-id="' + esc(e.id) + '"' + (fs === 'loading' ? ' disabled' : '') + '>' +
       (fs === 'loading' ? 'Loading the rest…' : 'Show all of it') + '</button>' + (fs === 'error' ? '<span class="cc-fine warn">Couldn’t load the rest.</span>' : '') : '';
     // A failed or stopped chat shows what came through, says it did not finish, and (from its job) offers Ask again: the
     // next generation of the same chat, so it stays one entry (S1's contract).
     if (e.status === 'failed' || e.status === 'interrupted') {
-      if (text) acts = '<span class="cc-fine">' + (e.status === 'failed' ? 'This ask did not finish.' : 'This ask was stopped before it finished.') + '</span>' + acts;
+      if (text) acts = '<span class="cc-fine">' + (e.status === 'failed' ? failedWords(e) : 'This ask was stopped before it finished.') + '</span>' + acts;
       if (retryableEntry(e)) {
         var busy = !!C.hist.retrying[e.clientJobId], why = C.hist.retryErr[e.clientJobId];
         acts += '<button type="button" class="cx-btn primary" data-cos="hist-again" data-id="' + esc(e.id) + '"' + (busy ? ' disabled' : '') + '>' + (busy ? 'Asking again…' : 'Ask again') + '</button>' +
