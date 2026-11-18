@@ -59,8 +59,9 @@ function page(o: Opts = {}) {
   form.querySelector = (sel: string) => (sel === '[data-phone-offer]' && o.card ? go : null)
   const qs: any = Object.assign(new El('session-questions'), { children: o.question ? [new El('q')] : [], textContent: o.question ? 'Which branch should I use?' : '' })
   const why: any = Object.assign(new El('session-dock-why'), { hidden: true, textContent: '' })
+  const body: any = Object.assign(new El('session-body'), { scrollTop: 812 })
   const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop, 'session-input': input,
-    'session-form': form, 'session-questions': qs, 'session-dock-why': why }
+    'session-form': form, 'session-questions': qs, 'session-dock-why': why, 'session-body': body }
   const store: Record<string, string> = o.stored == null ? {} : { 'cos.sxDock': o.stored }
   const writes: string[] = []
   const listeners: Record<string, Array<(e: unknown) => void>> = {}
@@ -79,7 +80,7 @@ function page(o: Opts = {}) {
 ;this.api = { SX_DOCK: SX_DOCK, SX_DOCK_PX: SX_DOCK_PX, SX_DOCK_MQ: SX_DOCK_MQ, height: sxDockHeight, set: sxDockSet, next: sxDockNext, step: sxDockStep, snap: sxDockSnap,
   paint: sxDockPaint, apply: sxDockApply, hold: sxDockHold, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
   const api = (ctx as { api: any }).api
-  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits, form, go, qs, why }
+  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits, form, go, qs, why, body }
 }
 
 describe('the height: one value per device, Middle when nothing is stored (the lead 18:5x)', () => {
@@ -327,6 +328,33 @@ describe('7.0.57: a card he must read holds Full at Middle (F1 probe 6; the lead
     const d = page({ docked: true, stored: 'middle', working: false, card: 'enabled' }); d.api.paint()
     d.api.down({ target: d.handle, clientY: 500, pointerId: 1 }); d.api.move({ clientY: 0 }); d.api.up({ clientY: 0 })
     expect(d.api.height()).toBe('full'); expect(d.reader.attrs['data-dock']).toBe('middle'); expect(d.why.textContent).toBe(REQ)
+  })
+  // The lead 09:5x: the switch happens by itself, so it must move nothing he holds.
+  it('the switch by itself (the session stops and Approve opens; the card goes) keeps his focus, his draft and his reading place', () => {
+    const p = page({ docked: true, stored: 'full', working: true, card: 'disabled' })
+    p.input.value = 'half a sentence he is still writing'
+    p.api.paint(); const fits0 = p.fits.length
+    expect(p.reader.attrs['data-dock']).toBe('full')
+    p.r.live.working = false; p.go.disabled = false; p.api.apply()     // phoneBusyApply's call when it stops
+    expect(p.reader.attrs['data-dock']).toBe('middle')
+    p.form.__paCard = null; p.api.apply()                               // clearPhoneOffer's call when the card goes
+    expect(p.reader.attrs['data-dock']).toBe('full')
+    expect(p.input.value).toBe('half a sentence he is still writing')
+    expect([p.input.focused, p.handle.focused, p.why.focused, p.go.focused]).toEqual([0, 0, 0, 0])
+    expect(p.body.scrollTop).toBe(812)
+    expect(p.fits.length, 'the light apply never refits the box').toBe(fits0)
+    expect(p.writes).toEqual([])
+    const apply = between(APP, '  function sxDockApply() {', '  /** Draw the stored height on the reader.')
+    expect(apply).not.toMatch(/focus\(|scrollTop|scrollTo|scrollIntoView|\.value\b|sxPlaceholderFit|sxDockSet/)
+  })
+  it('Approve never shows enabled under Full for even one paint: its one writer sets it, then the dock applies, in the same call', () => {
+    expect(APP.match(/go\.disabled\s*=[^=]/g)).toHaveLength(1)
+    const busy = between(APP, '  function phoneBusyApply(r, view) {', '  function phoneArrange(view) {')
+    const set = busy.indexOf('    go.disabled = !!why;'), dock = busy.indexOf("    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();")
+    expect(set).toBeGreaterThan(-1); expect(dock).toBeGreaterThan(set)
+    // Synchronous between the two: no timer, frame, promise or await can let the browser paint in the middle.
+    expect(busy.slice(set, dock)).not.toMatch(/setTimeout|requestAnimationFrame|\.then\(|await|queueMicrotask/)
+    expect(busy).not.toMatch(/setTimeout\(sxDockApply|requestAnimationFrame\(sxDockApply/)
   })
   it('both mounts: the hold reads the form\'s carried card, never where it is mounted; the hooks that change a card call it', () => {
     const hold = between(APP, '  function sxDockHold() {', '  /** The height drawn:')
