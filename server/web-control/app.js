@@ -6508,6 +6508,12 @@
       // with a request card up does it still take the primary, Approve and send, as today (the lead 18:5x).
       form.__paSubmit = function (e) {
         if (!form.classList.contains('pa-on') || !form.__paCard) return;
+        // Enter approves only what he can see (the lead 08:3x, X1 08:3x; the 7.0.56 known issue): the card AND its Approve
+        // must both be drawn. Docked with the soft keyboard up the dock hides them; a submit is then the plain send, a
+        // message and not an answer. (Zero client rects: display none on it or an ancestor, or not in the page.)
+        // An element with no getClientRects counts as drawn, failing toward today's behaviour; every browser COS supports has it.
+        var drawn = function (el) { return !!el && (!el.getClientRects || el.getClientRects().length > 0); };
+        if (!drawn(form.__paCard) || !drawn(form.querySelector('[data-phone-offer]'))) return;
         if (e.submitter && e.submitter.id === view.prefix + '-send') return;
         e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
         var cur = form.__paEntry; if (cur) approveOnPhone(Object.assign({}, cur.opts || {}, { r: cur.r }));
