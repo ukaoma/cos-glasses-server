@@ -364,6 +364,23 @@ describe('the markup and the CSS', () => {
     expect(CSS).toContain('html.sx-frame .sx-dock { overflow-y: auto; overscroll-behavior: contain; }')
     expect(CSS).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
   })
+  it('keyboard up (F1 07:41, Q1 07:42): the dock is the handle and the reply row at every height; what answers a send sits under it', () => {
+    const hide = between(DOCKCSS, "html.sx-frame.kb-up .sx-docked .sx-wline,", '{ display: none; }')
+    for (const part of ['.sx-wline', '#session-queue', '#session-clip', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-x2-note',
+      '#session-form > .sx-stop-row', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
+      expect(hide, part).toContain('html.sx-frame.kb-up .sx-docked ' + part)
+    // Approve and send stays in the reply row with a request card up, and the field itself is never hidden.
+    expect(hide).not.toMatch(/\.pa-req \.pa-go|#session-input|#session-send,|#session-form,/)
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }')
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 12; }')
+    expect(CSS).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }')
+    // Full is Middle's size while it is up, so the field is never pushed under the keyboard by the extras.
+    expect(DOCKCSS).toContain("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }")
+    expect(DOCKCSS).toContain("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }")
+    // The keyboard rules come after the Full rules they override (same selectors plus .kb-up).
+    expect(DOCKCSS.indexOf("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body")).toBeGreaterThan(DOCKCSS.indexOf("html.sx-frame .sx-docked[data-dock='full'] .sx-body"))
+  })
   it('the working line stays one line: a dropped-feed note is cut, not wrapped (F1: Focus grew to 180 px)', () => {
     expect(DOCKCSS).toContain('.sx-docked .sx-act-fallback { height: 44px; padding-top: 0; line-height: 44px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }')
   })

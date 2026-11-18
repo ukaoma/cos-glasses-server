@@ -744,6 +744,21 @@ html.sx-frame .sx-docked .sx-dock { flex: 0 1 auto; min-height: 0; }
    takes two lines when its words need them (autoGrow sizes it to the placeholder), not the frame's 10%-of-screen cap. */
 html.sx-frame .sx-docked .sx-dock #session-input { max-height: 140px; }
 html.sx-frame.kb-up .sx-docked .sx-dock #session-input { max-height: 4.5em; }
+/* KEYBOARD UP (F1 07:41, Q1 07:42): at 382 the dock has about 116 px above the floor, and the handle, the working line
+   and a two-line reply row need 142, so the sticky form slid over the handle and Send fell under the keyboard; in Full
+   the field was off-screen below the extras. While the keyboard is up the dock is the handle and the reply row at every
+   height: the working line, the extras, the note, Stop and the queue come back when it goes down. What answers a send
+   (the busy box, a refusal) and the Mac's question card sit under the form, so the box he types in stays whole; a
+   request card above the field scrolls inside a capped height. Full is Middle's size while it is up. */
+html.sx-frame.kb-up .sx-docked .sx-wline, html.sx-frame.kb-up .sx-docked #session-queue, html.sx-frame.kb-up .sx-docked #session-clip,
+html.sx-frame.kb-up .sx-docked #session-form > .pa-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-x2,
+html.sx-frame.kb-up .sx-docked #session-form > .sx-x2-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-stop-row,
+html.sx-frame.kb-up .sx-docked #session-form:not(.pa-req) .pa-go, html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: none; }
+html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }
+html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 12; }
+html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }
+html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }
+html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }
 /* FOCUS: the thread and the working line; no reply box. */
 .sx-docked[data-dock='focus'] #session-verdict, .sx-docked[data-dock='focus'] #session-form, .sx-docked[data-dock='focus'] #session-status,
 .sx-docked[data-dock='focus'] #session-caution, .sx-docked[data-dock='focus'] #session-queue { display: none; }
