@@ -5357,7 +5357,7 @@
   // The mock's arithmetic (README, Measurements): focus 68 px, middle 126; full leaves 48 px of thread, never under 126.
   // keep is the thread floor at every height and in every state (F1 07:17: extras had pushed the thread to 8 px).
   var SX_DOCK_PX = { focus: 68, middle: 126, keep: 48 }, SX_DOCK_DRAG_PX = 6;
-  var SX_DOCK = { h: null, drag: null, dragged: false, stopAsk: false, hooked: false, fullSeen: 0 };
+  var SX_DOCK = { h: null, drag: null, dragged: false, stopAsk: false, hooked: false };
   var SX_BUBBLE_SVG = '<svg class="sx-dock-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H11l-4 3.5V15h0.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
   var SX_EXPAND_SVG = '<svg class="sx-dock-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
   var SX_DOCK_WORDS = { focus: 'the thread', middle: 'the thread and the reply box', full: 'every action' };
@@ -5380,12 +5380,32 @@
   /** One arrow step: up is a taller dock (less thread), down a shorter one; it stops at the ends. */
   function sxDockStep(h, up) { var i = SX_DOCK_HEIGHTS.indexOf(h) + (up ? 1 : -1); return SX_DOCK_HEIGHTS[Math.max(0, Math.min(SX_DOCK_HEIGHTS.length - 1, i))]; }
   /** Where a drag lets go: the nearest of the three heights (fullPx is this reader's full height). */
-  // 7.0.58 (Q1 12:59): by steps, not by Full's height, which is its content's at every size (about 380 px at a desk,
-  // against a cap near 800): under the Focus to Middle midpoint lands on Focus, up to Middle plus half that gap on Middle,
-  // past it on Full. So a release at Full's drawn height is Full at every size.
-  function sxDockSnap(px) {
-    var f = SX_DOCK_PX.focus, m = SX_DOCK_PX.middle, half = (m - f) / 2;
-    return px < f + half ? 'focus' : px < m + half ? 'middle' : 'full';
+  // 7.0.58 (F1 probe 9, the lead 13:2x): a release lands on the NEAREST of the three heights as they are drawn at that
+  // moment (sxDockMeasure, at the drag's start), never on a height written here: the step sizes had Middle drawn at 165
+  // (188 at 382x557) past their own Middle to Full line, so a 12 px nudge either way went to Full. And it never lands
+  // further the other way than the finger went: a move up never ends lower than it began, a move down never higher. That
+  // holds by construction: the height it began at (h0, heights[start]) is a candidate at the move's own distance, and any
+  // height on the other side of h0 is farther, so the strict "nearer" never picks it. A tie keeps the height it began at.
+  // (Under SX_DOCK_DRAG_PX it is a tap, which steps; sxDockClick.)
+  function sxDockSnap(px, h0, heights, start) {
+    var best = start, d = Math.abs(px - h0);
+    SX_DOCK_HEIGHTS.forEach(function (k) {
+      var v = heights[k];
+      if (!(v > 0)) return;
+      var x = Math.abs(px - v); if (x < d) { d = x; best = k; }
+    });
+    return best;
+  }
+  /** The dock's height at each of the three, as drawn now: each is set in turn and read within one synchronous layout,
+   *  so nothing is painted, then the drawn height and the thread's scroll are put back. Null without a reader. */
+  function sxDockMeasure() {
+    var rd = $('session-reader'), dock = $('session-dock'), body = $('session-body');
+    if (!rd || !dock || !dock.getBoundingClientRect || !rd.setAttribute) return null;
+    var was = rd.getAttribute('data-dock'), top = body ? body.scrollTop : 0, out = {};
+    SX_DOCK_HEIGHTS.forEach(function (k) { rd.setAttribute('data-dock', k); out[k] = dock.getBoundingClientRect().height; });
+    if (was == null) rd.removeAttribute('data-dock'); else rd.setAttribute('data-dock', was);
+    if (body && body.scrollTop !== top) body.scrollTop = top;
+    return out;
   }
   function sxDockFullPx() {
     var rd = $('session-reader'), head = rd && rd.querySelector ? rd.querySelector('.sx-reader-head') : null;
@@ -5414,8 +5434,6 @@
     var on = sxDockApplies(), h = sxDockHeight(), hold = on ? sxDockHold() : '', shown = sxDockShown(h, hold);
     rd.classList.toggle('sx-docked', on);
     if (on) { if (rd.getAttribute('data-dock') !== shown) rd.setAttribute('data-dock', shown); } else rd.removeAttribute('data-dock');
-    // Full's drawn height, for the drag's preview (Q1 12:59): read while Full is drawn and no drag sets an inline height.
-    if (shown === 'full' && !SX_DOCK.drag) { var dk = $('session-dock'), fh = dk && dk.getBoundingClientRect ? dk.getBoundingClientRect().height : 0; if (fh > 0) SX_DOCK.fullSeen = fh; }
     var why = $('session-dock-why'), words = on && h === 'full' && hold ? SX_DOCK_HOLD_WORDS[hold] : '';
     if (why) { if (why.textContent !== words) why.textContent = words; why.hidden = !words; }
     var handle = $('session-handle');
@@ -5475,9 +5493,13 @@
   function sxDockDown(e) {
     var handle = e && e.target && e.target.closest ? e.target.closest('#session-handle') : null, dock = $('session-dock');
     if (!handle || !dock || !dock.getBoundingClientRect) return;
-    // The preview stops at Full's last drawn height (sxDockApply keeps it), never past the reader less the floor.
-    SX_DOCK.drag = { y: e.clientY, h0: dock.getBoundingClientRect().height, full: Math.min(sxDockFullPx(), SX_DOCK.fullSeen || Infinity),
-      id: e.pointerId, mouse: e.pointerType === 'mouse' }; SX_DOCK.dragged = false;
+    // The three heights as drawn now; the preview stays between Focus's and Full's (never past the reader less the floor).
+    var rd = $('session-reader'), start = (rd && rd.getAttribute && rd.getAttribute('data-dock')) || sxDockHeight();
+    var h0 = dock.getBoundingClientRect().height, heights = sxDockMeasure() || {};
+    heights[start] = h0;
+    SX_DOCK.drag = { y: e.clientY, h0: h0, heights: heights, start: start, min: Math.min(h0, heights.focus || h0),
+      full: Math.max(h0, Math.min(sxDockFullPx(), heights.full || Infinity)), id: e.pointerId, mouse: e.pointerType === 'mouse' };
+    SX_DOCK.dragged = false;
   }
   function sxDockMove(e) {
     var d = SX_DOCK.drag, dock = $('session-dock'); if (!d || !dock || !dock.style) return;
@@ -5486,14 +5508,14 @@
     if (d.mouse && e.buttons === 0) return sxDockCancel();
     var dy = d.y - e.clientY;
     if (Math.abs(dy) >= SX_DOCK_DRAG_PX) SX_DOCK.dragged = true;
-    if (SX_DOCK.dragged) dock.style.height = Math.round(Math.max(SX_DOCK_PX.focus, Math.min(d.full, d.h0 + dy))) + 'px';
+    if (SX_DOCK.dragged) dock.style.height = Math.round(Math.max(d.min, Math.min(d.full, d.h0 + dy))) + 'px';
   }
   function sxDockUp(e) {
     var d = SX_DOCK.drag, dock = $('session-dock'); if (!d) return;
     if (d.id != null && e && e.pointerId != null && e.pointerId !== d.id) return;   // another finger lifting
     SX_DOCK.drag = null;
     if (dock && dock.style) dock.style.height = '';
-    if (SX_DOCK.dragged) sxDockSet(sxDockSnap(Math.max(SX_DOCK_PX.focus, Math.min(d.full, d.h0 + (d.y - e.clientY)))));
+    if (SX_DOCK.dragged) sxDockSet(sxDockSnap(Math.max(d.min, Math.min(d.full, d.h0 + (d.y - e.clientY))), d.h0, d.heights, d.start));
   }
   /** A drag that cannot finish (pointercancel, the window losing focus): the dock goes back to his stored height. */
   function sxDockCancel() {
