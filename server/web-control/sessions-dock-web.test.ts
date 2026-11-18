@@ -301,6 +301,12 @@ describe('7.0.58: a desk drag knows the drawn heights, and one pointer drives it
     q.api.down({ target: q.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); q.api.move({ clientY: 588, pointerId: 1, buttons: 1 })
     q.api.up({ clientY: 588, pointerId: 1 }); expect(q.api.height()).toBe('middle')                    // F1: this went to Full
   })
+  it('F1\'s case at a desk: a release 9 px above Focus as drawn (54 px down from Middle) lands on Focus (N9)', () => {
+    const p = desk('middle')
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 654, pointerId: 1, buttons: 1 })
+    p.api.up({ clientY: 654, pointerId: 1 })                              // 165 - 54 = 111: 9 from Focus's 102, 54 from Middle
+    expect(p.api.height()).toBe('focus')                                  // with the written 68 and 126 it was Middle
+  })
   it('the preview never goes under Focus as drawn, and never past the reader less the floor', () => {
     const p = desk('middle')
     p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 900, pointerId: 1, buttons: 1 })
