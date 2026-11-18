@@ -16,6 +16,12 @@
 - The thread cannot read a live meeting yet; a context block for that is a cost decision for Miles (S1's half page), not in this build.
 - With the keyboard up the dock is checked in a browser model; his phone and Duo are the test.
 
+**Tested on this build** (the counted run on 23a9c862; this commit adds only these lines):
+- **Pre-suite and counted run, alone, swift-slot lease held start to end (10:14 to 10:31):** the web set 2596 passed (2596); the 16 server tests that read web source, the key-lane, spawn and Cursor censuses, hazard invariants and route suites 3215 passed (3215); type check exit 0; `npm test` 997 passed | 2 skipped (999); 18440 passed | 6 skipped (18446); exit 0. Stamp: script 6f4eba5161068ffa, commit 23a9c862af9b8adfd7e6da4f3d44f0d71885d39a, tracked-files 41d5895df5000cb1, node_modules -> /Users/ukaoma/cos-worktrees/server-candidate-7032/node_modules.
+- **F1's WebKit verdicts for this head (on the commits named):** dock probe 7 on W1's 4e657bef, no class A found (10:04), and its rerun with the live stream reaching the ts.net page, no class A, items 6 and 7 PASS (10:06): working keeps Full with Approve disabled, the stop switch goes to Middle with the reason line. Known: a question card's foot needs a scroll in Middle at 382 and 951 (class B). The keyed layout sweep on the final head is owed before npm.
+- **Reviews and gates (on the commits named):** W1's head 4e657bef GREEN 10:00 (focused 420, 81 of 81 mutants, web set 2,596, readers 242, tsc 0). S1's Cursor commits: Codex's independent source read of ef1de8c9 (sound; its two points applied in cb77af53); S1's slot on cb77af53 154 of 154, tsc 0, 18 of 19 mutants, the survivor closed by the test-only 72cecb59 (19 of 19). No Q1 read of the Cursor commits is recorded.
+- **Every changed file is byte-identical to the reviewed commit that last set it**, except CHANGELOG.md, package.json and package-lock.json, which the release commit sets (release-7.0.57/merges.txt).
+
 ## 7.0.56 - The Sessions dock on phones and small touch screens
 
 2026-11-18. 7.0.55 (on npm since 2026-11-17) plus W1's Sessions dock (claude/sessions-dock-7056), nothing else. Built from A1's approved mock (Miles, 2026-11-17 18:3x: "yup this design is it."). For a private install on Miles's Mac (his line of 2026-11-18 07:01); on npm only on a separate line from him.
