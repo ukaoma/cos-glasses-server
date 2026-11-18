@@ -776,6 +776,9 @@ html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }
    its reach still goes 32 px up into the thread, so it stays a 44 px target. */
 html.sx-frame.kb-up .sx-docked .sx-dock-handle { height: 12px; }
 html.sx-frame.kb-up .sx-docked .sx-dock-handle::before { top: -32px; }
+/* The reason a card holds Full at Middle (app.js sxDockApply): one quiet line under the working line, only while it holds. */
+.sx-docked .sx-dock-why { margin: 0; padding: 0 2px 6px; font: 400 12.5px/1.35 var(--body); color: var(--sub); }
+html.sx-frame.kb-up .sx-docked .sx-dock-why { display: none; }
 /* FOCUS: the thread and the working line; no reply box. */
 .sx-docked[data-dock='focus'] #session-verdict, .sx-docked[data-dock='focus'] #session-form, .sx-docked[data-dock='focus'] #session-status,
 .sx-docked[data-dock='focus'] #session-caution, .sx-docked[data-dock='focus'] #session-queue { display: none; }

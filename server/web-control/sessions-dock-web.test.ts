@@ -48,13 +48,19 @@ class El {
   setPointerCapture() {}
   clientHeight = 0; offsetHeight = 0
 }
-interface Opts { docked?: boolean; stored?: string | null; storageThrows?: boolean; working?: boolean }
+interface Opts { docked?: boolean; stored?: string | null; storageThrows?: boolean; working?: boolean; card?: 'enabled' | 'disabled'; question?: boolean }
 function page(o: Opts = {}) {
   const reader = new El('session-reader'), handle = new El('session-handle'), dock = new El('session-dock', 126), stop = new El('session-stop-row')
   reader.kids.full = new El('full'); reader.kids.focus = new El('focus'); reader.kids.head = Object.assign(new El('head'), { offsetHeight: 37 })
   reader.clientHeight = 463
   const input: any = Object.assign(new El('session-input'), { phLong: 'Continue this session…' }), fits: unknown[] = []
-  const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop, 'session-input': input }
+  const go: any = Object.assign(new El('go'), { disabled: o.card === 'disabled' })
+  const form: any = Object.assign(new El('session-form'), { __paCard: o.card ? new El('session-phone-card') : null })
+  form.querySelector = (sel: string) => (sel === '[data-phone-offer]' && o.card ? go : null)
+  const qs: any = Object.assign(new El('session-questions'), { children: o.question ? [new El('q')] : [], textContent: o.question ? 'Which branch should I use?' : '' })
+  const why: any = Object.assign(new El('session-dock-why'), { hidden: true, textContent: '' })
+  const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop, 'session-input': input,
+    'session-form': form, 'session-questions': qs, 'session-dock-why': why }
   const store: Record<string, string> = o.stored == null ? {} : { 'cos.sxDock': o.stored }
   const writes: string[] = []
   const listeners: Record<string, Array<(e: unknown) => void>> = {}
@@ -71,9 +77,9 @@ function page(o: Opts = {}) {
   vm.createContext(ctx)
   vm.runInContext(DOCK + `
 ;this.api = { SX_DOCK: SX_DOCK, SX_DOCK_PX: SX_DOCK_PX, SX_DOCK_MQ: SX_DOCK_MQ, height: sxDockHeight, set: sxDockSet, next: sxDockNext, step: sxDockStep, snap: sxDockSnap,
-  paint: sxDockPaint, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
+  paint: sxDockPaint, apply: sxDockApply, hold: sxDockHold, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
   const api = (ctx as { api: any }).api
-  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits }
+  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits, form, go, qs, why }
 }
 
 describe('the height: one value per device, Middle when nothing is stored (the lead 18:5x)', () => {
@@ -270,6 +276,68 @@ describe('Stop: full only, never one tap, Keep working the default', () => {
     // The working line's two buttons only change the height.
     const p = page({ stored: 'middle' }); p.api.click('dock-full'); p.api.click('dock-focus')
     expect(p.stop.innerHTML).not.toContain('stop-session')
+  })
+})
+
+describe('7.0.57: a card he must read holds Full at Middle (F1 probe 6; the lead 09:3x, 09:4x)', () => {
+  const REQ = 'Answer the request to open the full view.', QN = 'Answer the question to open the full view.'
+  it('a request card whose Approve can be tapped: Full is drawn as Middle and the working line says why', () => {
+    const p = page({ docked: true, stored: 'full', working: false, card: 'enabled' }); p.api.paint()
+    expect(p.reader.attrs['data-dock']).toBe('middle')
+    expect([p.why.hidden, p.why.textContent]).toEqual([false, REQ])
+    expect(p.reader.kids.full.attrs['aria-pressed']).toBe('false')
+    expect(p.api.height()).toBe('full')                               // his choice is kept
+    expect(p.writes).toEqual([])
+  })
+  it('while the session works Approve is disabled and Full stays, so Stop is reachable', () => {
+    const p = page({ docked: true, stored: 'full', working: true, card: 'disabled' }); p.api.paint()
+    expect(p.reader.attrs['data-dock']).toBe('full'); expect(p.why.hidden).toBe(true)
+    expect(p.stop.innerHTML).toContain('data-sx="dock-stop"')
+  })
+  it('this session\'s question card while it is not working: Middle and its own words; working: Full', () => {
+    const p = page({ docked: true, stored: 'full', working: false, question: true }); p.api.paint()
+    expect(p.reader.attrs['data-dock']).toBe('middle'); expect([p.why.hidden, p.why.textContent]).toEqual([false, QN])
+    p.r.live.working = true; p.api.apply()
+    expect(p.reader.attrs['data-dock']).toBe('full'); expect(p.why.hidden).toBe(true)
+  })
+  it('Full comes back the moment the card goes; the line goes with it', () => {
+    const p = page({ docked: true, stored: 'full', working: false, card: 'enabled' }); p.api.paint()
+    p.form.__paCard = null; p.api.apply()
+    expect(p.reader.attrs['data-dock']).toBe('full'); expect([p.why.hidden, p.why.textContent]).toEqual([true, ''])
+    const q = page({ docked: true, stored: 'full', working: false, question: true }); q.api.paint()
+    q.qs.children = []; q.qs.textContent = ''; q.api.apply()
+    expect(q.reader.attrs['data-dock']).toBe('full'); expect(q.why.hidden).toBe(true)
+  })
+  it('the reason line only while it holds: never at Middle or Focus, never off the dock, never with no card', () => {
+    for (const stored of ['middle', 'focus']) {
+      const p = page({ docked: true, stored, working: false, card: 'enabled' }); p.api.paint()
+      expect(p.reader.attrs['data-dock']).toBe(stored); expect(p.why.hidden).toBe(true)
+    }
+    const off = page({ docked: false, stored: 'full', working: false, card: 'enabled' }); off.api.paint()
+    expect(off.why.hidden).toBe(true)
+    const none = page({ docked: true, stored: 'full', working: false }); none.api.paint()
+    expect(none.reader.attrs['data-dock']).toBe('full'); expect(none.why.hidden).toBe(true)
+  })
+  it('the bubble and a drag to Full are not dead: Full is stored, Middle drawn, the reason shown', () => {
+    const p = page({ docked: true, stored: 'middle', working: false, card: 'enabled' }); p.api.paint()
+    p.api.click('dock-full')
+    expect(p.api.height()).toBe('full'); expect(p.reader.attrs['data-dock']).toBe('middle'); expect(p.why.textContent).toBe(REQ)
+    p.api.click('dock-full')                                          // again: still asks for Full, not back to Middle
+    expect(p.api.height()).toBe('full'); expect(p.why.hidden).toBe(false)
+    const d = page({ docked: true, stored: 'middle', working: false, card: 'enabled' }); d.api.paint()
+    d.api.down({ target: d.handle, clientY: 500, pointerId: 1 }); d.api.move({ clientY: 0 }); d.api.up({ clientY: 0 })
+    expect(d.api.height()).toBe('full'); expect(d.reader.attrs['data-dock']).toBe('middle'); expect(d.why.textContent).toBe(REQ)
+  })
+  it('both mounts: the hold reads the form\'s carried card, never where it is mounted; the hooks that change a card call it', () => {
+    const hold = between(APP, '  function sxDockHold() {', '  /** The height drawn:')
+    expect(hold).toContain('form && form.__paCard && go && !go.disabled')
+    expect(hold).not.toMatch(/parentNode|session-body|sx-chat/)
+    expect(APP).toContain("    if (typeof sxDockApply === 'function') sxDockApply();   // the working flag decides whether a card holds Full\n")
+    expect(APP).toContain("    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();   // Approve enabled or not decides the hold\n")
+    expect(APP).toContain("    if (view.prefix === 'session' && typeof sxDockApply === 'function') sxDockApply();   // the card is gone: Full comes back\n")
+    expect(APP).toContain("  function sxGoQuestionPaint() {\n    if (typeof sxDockApply === 'function') sxDockApply();   // a question card came or went\n")
+    expect(APP).toContain('\'<p class="sx-dock-why" id="session-dock-why" role="status" hidden></p>\' +')
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock-why { display: none; }')
   })
 })
 
