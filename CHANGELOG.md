@@ -1,3 +1,21 @@
+## 7.0.56 - The Sessions dock on phones and small touch screens
+
+2026-11-18. 7.0.55 (on npm since 2026-11-17) plus W1's Sessions dock (claude/sessions-dock-7056), nothing else. Built from A1's approved mock (Miles, 2026-11-17 18:3x: "yup this design is it."). For a private install on Miles's Mac (his line of 2026-11-18 07:01); on npm only on a separate line from him.
+
+**On for everyone, one line each:**
+- Control Web, a session's reader, on phones and small touch screens only: **the reply area is a dock with a handle and three heights.** Focus shows the thread and the working line; Middle adds the reply row; Full shows everything. Drag the handle and it snaps to the nearest height; a tap steps to the next one; the arrow keys move it too. The height is kept per device; with nothing kept it opens at Middle.
+- The working line shows the status, how long it has been working and the latest activity, with two buttons: the chat bubble opens Full, and expand goes to Focus (in Focus it reads "Show the reply box"). There is no Stop on the working line.
+- **Stop is in Full only, behind one confirm:** the first tap asks "Stop this session?", and "Keep working" is the filled, first button. No hold gestures.
+- **The plain send is the main button** wherever the passkey composer runs (the session reader, Today's sheet and the Answer box): the filled button reads "Send" ("Queue message" while the session works), and Enter sends it. "Send with passkey" is the outlined, secondary button and is disabled while the session works. With a request card up, "Approve and send" stays the main button, as before.
+- Fork and "Fork with this message" are one control; the camera, attach and the passkey send sit in Full.
+- **Who gets the dock:** a coarse pointer (touch) and a screen no wider than 599 px or no taller than 720 px. That is phones and the open Duo; a taller tablet and every desktop keep the reader as in 7.0.55.
+
+**Unchanged:** the passkey send's fresh request check at Send and its refusal of files; off the Tailscale name no passkey button is drawn and the labels are as before; the COS thread box never carries an install or publish request.
+
+**Not covered, said plainly:**
+- The dock is checked in a browser model; how it feels on his phone and Duo is his test this morning.
+- This build does not change the folded side buttons and makes no claim about keeping his reading place.
+
 ## 7.0.55 - Live glass on Today's Running rows, Claude usage in Claude orange, links to the live meeting, and the folded strip recorded
 
 2026-11-17. 7.0.54 (262b2510, installed on Miles's Mac since 10:29) plus the changes below, merged source-only on claude/server-7055. The public server of the combined release with Control 0.5.402 (the lead's PLAN X, GO 12:2x); on npm only on a line Miles types.
