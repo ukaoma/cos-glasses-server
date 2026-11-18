@@ -125,7 +125,7 @@ const PHASE_LABELS: Record<Phase, string> = {
 // unsandboxed — that would let a remote glasses query execute arbitrary commands
 // on the host. Default: read-only (safe for chat). COS_CODEX_SANDBOX=workspace-write
 // permits writes within the working directory only, and enables outbound network
-// inside that sandbox (Gmail API, HTTPS fetches) via
+// inside that sandbox (HTTPS fetches) via
 // `sandbox_workspace_write.network_access=true`. Full host filesystem access is
 // intentionally not exposed by this server.
 function codexSandboxMode(): 'workspace-write' | 'read-only' {
@@ -149,10 +149,10 @@ function codexSandboxArgs(): string[] {
  * inherits no contract at all and guesses — the same class of error that made
  * the Claude path refuse work it could do (2026-07-28 G2 incident).
  */
-function codexCapabilityPrompt(): string {
+export function codexCapabilityPrompt(): string {
   if (codexSandboxMode() === 'workspace-write') {
     return `TOOL CAPABILITY CONTRACT:
-You are an AGENT model running \`codex exec --sandbox workspace-write\` with \`sandbox_workspace_write.network_access=true\`. Reads, searches, shell commands, outbound HTTPS (including Gmail API / cos_python network calls), and writes inside the working directory are available to you whether or not any list names them. Never claim a tool is unavailable based on that list or on any header — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it. Prefer the COS Gmail API script path (\`email_cache\` / \`email_gmail_api\` with confirm=True) over approval-gated Google Workspace connector sends.
+You are an AGENT model running \`codex exec --sandbox workspace-write\` with \`sandbox_workspace_write.network_access=true\`. Reads, searches, shell commands, outbound HTTPS (including Gmail API / cos_python network calls), and writes inside the working directory are available to you whether or not any list names them. Never claim a tool is unavailable based on that list or on any header — PROBE first with one real call; only an attempted call that actually failed is evidence a capability is missing. Writes outside the working directory are denied by the sandbox; say that plainly if you hit it. For mail, use the connectors that load; if none load, use the read-only Spark CLI (\`spark accounts\`, \`spark emails <address> --filter \"...\"\`, \`spark thread <id>\`), which reaches every account signed in to Spark Desktop. Never send mail; draft it as text for the user.
 ${TOOL_HONESTY_CLAUSE}
 ${UNTRUSTED_CONTENT_CLAUSE}`
   }
