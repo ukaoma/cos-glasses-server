@@ -330,17 +330,27 @@ describe('the markup and the CSS', () => {
   // Miles 08:2x ("Hidden is fine"), F1 08:2x class A: Approve is never drawn while the request card is not.
   it('THE INVARIANT: with the keyboard up the request card and every passkey send share one rule, and nothing else touches them', () => {
     const rules = DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.trim()).filter(Boolean).map(r => ({ sels: r.split('{')[0].split(',').map(s => s.trim()), body: r.split('{')[1] }))
-    const kbPa = rules.filter(r => r.sels.some(s => s.includes('.kb-up') && /\.pa-card|\.pa-go/.test(s)))
+    const kbPa = rules.filter(r => r.sels.some(s => s.includes('.kb-up') && /\.pa-card|#session-phone-card|\.pa-go/.test(s)))
     expect(kbPa).toHaveLength(1)
-    expect(kbPa[0].sels).toEqual(['html.sx-frame.kb-up .sx-docked #session-form > .pa-card', 'html.sx-frame.kb-up .sx-docked #session-form .pa-go'])
+    expect(kbPa[0].sels).toEqual(['html.sx-frame.kb-up .sx-docked #session-phone-card', 'html.sx-frame.kb-up .sx-docked #session-form .pa-go'])
+    // ...and the selector names the element the code really draws, wherever it puts it (X1 08:3x: the card is never in the
+    // form, so '#session-form > .pa-card' matched nothing at dcddf408).
+    expect(APP).toContain("card.className = 'pa-card'; card.id = view.prefix + '-phone-card';")
+    const place = between(APP, '  function phoneCardPlace(view, card) {', '    if (reader && !reader.__paRo')
+    expect(place).toContain('if (wide) { if (card.parentNode !== body) body.insertBefore(card, body.firstChild); }')
+    expect(place).toContain('else if (chat && card.parentNode !== chat) chat.insertBefore(card, chat.firstChild);')
+    expect(DOCKCSS, 'no rule may select the card as a child of the form').not.toContain('#session-form > .pa-card')
     expect(kbPa[0].body.trim()).toBe('display: none;')
     // It outranks every rule that draws either one (specificity: ids, then classes/attributes/pseudo-classes, then types).
     const spec = (s: string) => [(s.match(/#[\w-]+/g) || []).length, (s.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+/g) || []).length, (s.match(/(^|\s)[a-z]+(?=[.#\[:\s]|$)/g) || []).length]
     const beats = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
-    const shows = rules.filter(r => /display:\s*(?!none\b)[a-z]/.test(r.body) && r.sels.some(s => /\.pa-card|\.pa-go/.test(s)))
+    const shows = rules.filter(r => /display:\s*(?!none\b)[a-z]/.test(r.body) && r.sels.some(s => /\.pa-card|#session-phone-card|\.pa-go/.test(s)))
     expect(shows.length).toBeGreaterThan(0)
-    for (const r of shows) for (const s of r.sels.filter(x => /\.pa-card|\.pa-go/.test(x)))
-      for (const inv of kbPa[0].sels) expect(beats(spec(inv), spec(s)), inv + ' over ' + s).toBeGreaterThan(0)
+    // Each against the rules that draw the same thing: the card's against the card's, Approve's against Approve's.
+    for (const r of shows) for (const s of r.sels.filter(x => /\.pa-card|#session-phone-card|\.pa-go/.test(x))) {
+      const inv = /\.pa-go/.test(s) ? kbPa[0].sels[1] : kbPa[0].sels[0]
+      expect(beats(spec(inv), spec(s)), inv + ' over ' + s).toBeGreaterThan(0)
+    }
   })
   it('with a request card up and the keyboard up, the plain send (a message, not an answer) is the reply row\'s send', () => {
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: inline-flex; grid-area: send; width: 140px; margin-bottom: 0; }')
@@ -354,13 +364,12 @@ describe('the markup and the CSS', () => {
   it('F1 08:02: the docked form has no row gap, so its empty template rows add nothing; the 8 px sits under what is drawn', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-form { display: grid; grid-template-columns: auto auto minmax(0, 1fr) 140px; column-gap: 6px; row-gap: 0; align-items: center;')
     expect(DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/#session-form \{[^}]*row-gap: [1-9]/)
-    const sel = between(DOCKCSS, '.sx-docked #session-form > .pa-card, .sx-docked #session-form > .pa-note,', '{ margin-bottom: 8px; }')
-    for (const part of ['#session-form > .pa-card', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-stop-row', '#session-files:not(.hidden)', '#session-clip', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
+    const sel = between(DOCKCSS, '.sx-docked #session-form > .pa-note, .sx-docked #session-form > .sx-x2,', '{ margin-bottom: 8px; }')
+    for (const part of ['#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-stop-row', '#session-files:not(.hidden)', '#session-clip', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
       expect(sel.split(',').map(x => x.trim()).filter(Boolean), part).toContain('.sx-docked ' + part)
     // The reply row itself carries no margin: it is the form's last row and its foot.
     expect(sel).not.toMatch(/#session-input|#session-send,|\.pa-req \.pa-go/)
     expect(DOCKCSS).toContain('.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 8px;')
-    expect(DOCKCSS).toContain('.sx-docked #session-form > .pa-card { grid-area: card; margin: 0 0 8px; }')   // after the margin list, so it keeps the 8 px
   })
   it('the plain send keeps 140 px for both its labels, so the field never moves', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-send { grid-area: send; width: 140px; min-height: 44px; }')
