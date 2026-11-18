@@ -837,8 +837,9 @@ export class QueryJobCoordinator {
   private async failActive(active: ActiveRun, error: unknown): Promise<boolean> {
     try {
       if (active.terminalPersisted || active.persistenceFailed) return false
-      if (active.partialTimer) clearTimeout(active.partialTimer)
-      active.partialTimer = null
+      // 7.0.57: flush the pending partial before failing, instead of dropping it with its timer, so a failed job keeps
+      // every character that arrived (the thread shows a failed chat's partial answer). flushPartial clears the timer.
+      await this.flushPartial(active).catch(() => {})
       await active.callbackTail.catch(() => {})
       if (active.persistenceFailed) return false
       const snapshot = await this.store.getSnapshot(active.jobId)

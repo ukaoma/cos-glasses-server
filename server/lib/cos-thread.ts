@@ -155,11 +155,16 @@ export interface CosThreadChatEntry {
   /** Present on a chat the server recorded from its job: the job's identity, for reattach and Retry. */
   clientJobId?: string
   generation?: number
+  /** 7.0.57: on a failed chat, the job's own plain reason ("Cursor stopped after 3 minutes with no progress ... Ask again."),
+   * at most REASON_CHARS, control characters removed. Absent when the job gave none and on every other status. */
+  reason?: string
 }
 export type CosThreadChatStatus = 'running' | 'completed' | 'failed' | 'interrupted'
 /** What the job runtime hands the thread at a job's start and end (lib/query-job-runtime.ts). */
 export interface CosThreadJobInput { clientJobId: string; generation: number; sessionId: string; query: string; provider?: string }
-export interface CosThreadJobEnd extends CosThreadJobInput { status: 'completed' | 'failed' | 'canceled' | 'interrupted'; text: string }
+export interface CosThreadJobEnd extends CosThreadJobInput { status: 'completed' | 'failed' | 'canceled' | 'interrupted'; text: string; reason?: string }
+/** 7.0.57: the longest failure reason a chat keeps. */
+export const REASON_CHARS = 300
 /** A running chat with no end recorded this long after it started reads 'interrupted' (its job is long gone). */
 export const RUNNING_STALE_MS = 6 * 60 * 60_000
 /** A page of history: entries oldest to newest. `older` reads further back (null: this is the start). `newest` is the
@@ -249,10 +254,10 @@ interface TurnRow {
 /** 7.0.39: a job's end for a thread chat. The whole answer of a completed one is in answers/<YYYY-MM>.jsonl at `ref`. */
 interface AnswerRow {
   kind: 'answer'; clientId: string; generation: number; at: string; status: CosThreadChatStatus
-  answerHead: string; answerChars: number; ref?: AnswerRef
+  answerHead: string; answerChars: number; ref?: AnswerRef; reason?: string
 }
 interface AnswerRef { file: string; offset: number; length: number; sha256: string }
-interface AnswerState { seq: number; generation: number; status: CosThreadChatStatus; answerHead: string; answerChars: number; ref?: AnswerRef }
+interface AnswerState { seq: number; generation: number; status: CosThreadChatStatus; answerHead: string; answerChars: number; ref?: AnswerRef; reason?: string }
 interface RolloverRow { kind: 'rollover'; threadId: string; at: string; reason: NextReason; fromSessionId: string | null; digest: string | null }
 interface CloseRow { kind: 'close'; threadId: string; at: string; reason: string }
 type LedgerRow = ThreadRow | TurnRow | RolloverRow | CloseRow | AnswerRow
@@ -607,6 +612,7 @@ export class CosThread {
       this.answers.set(row.clientId, {
         seq: this.answerSeq, generation: row.generation, status: row.status, answerHead: row.answerHead, answerChars: row.answerChars,
         ...(row.ref ? { ref: row.ref } : {}),
+        ...(typeof row.reason === 'string' && row.reason ? { reason: row.reason.slice(0, REASON_CHARS) } : {}),
       })
     }
   }
@@ -764,7 +770,8 @@ export class CosThread {
     const at = this.iso()
     let ref: AnswerRef | undefined
     if (status === 'completed' && text.length > ANSWER_HEAD_CHARS) ref = this.writeAnswer(end.clientJobId, end.generation, at, text)
-    this.append({ kind: 'answer', clientId: end.clientJobId, generation: end.generation, at, status, answerHead: text.slice(0, ANSWER_HEAD_CHARS), answerChars: text.length, ...(ref ? { ref } : {}) })
+    const reason = status === 'failed' ? failureReason(end.reason) : ''
+    this.append({ kind: 'answer', clientId: end.clientJobId, generation: end.generation, at, status, answerHead: text.slice(0, ANSWER_HEAD_CHARS), answerChars: text.length, ...(ref ? { ref } : {}), ...(reason ? { reason } : {}) })
   }
 
   /** The whole answer, appended to this month's answer file (0600, folder 0700); where it is and its hash. */
@@ -982,7 +989,8 @@ export class CosThread {
         return { ...base, answer: '', answerChars: null, full: false, status: stale ? 'interrupted' : 'running', ...job }
       }
       const whole = ended.status === 'completed' && ended.answerChars === ended.answerHead.length
-      return { ...base, answer: this.projectAnswer(ended.answerHead), answerChars: ended.answerChars, full: whole, status: ended.status, ...job }
+      return { ...base, answer: this.projectAnswer(ended.answerHead), answerChars: ended.answerChars, full: whole, status: ended.status, ...job,
+        ...(ended.reason ? { reason: ended.reason } : {}) }
     }
     // The ledger keeps the first ANSWER_HEAD_CHARS of the answer. Shorter than that, it is the whole answer; at the cap
     // or empty (a turn recorded without its answer), the whole one has to be looked up (entry()).
@@ -1117,6 +1125,12 @@ function supersededBy(prior: { generation: number; status: CosThreadChatStatus; 
   return next.status !== prior.status || next.answerChars !== prior.answerChars
 }
 
+/** 7.0.57: a failure reason the thread may show: one line, control characters removed, at most REASON_CHARS. */
+export function failureReason(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const line = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return line.length > REASON_CHARS ? line.slice(0, REASON_CHARS - 1) + '\u2026' : line
+}
 const chatTie = (i: number) => `t${String(i).padStart(9, '0')}`
 /** A chat entry cut for the look-back. */
 function lookbackChat(e: CosThreadChatEntry): LookbackChatEntry {

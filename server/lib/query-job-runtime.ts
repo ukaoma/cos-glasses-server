@@ -309,6 +309,8 @@ function recordCosThreadEnd(job: QueryJobSnapshot, request: QueryJobRequest): vo
     // The store sets `response` only when a job completes (query-job-store.ts complete()); any other end keeps what
     // arrived in `partialText`.
     text: (job.status === 'completed' ? job.response : job.partialText) ?? '',
+    // 7.0.57: a failed job's own plain reason, for the thread to show beside the partial (cos-thread.ts failureReason bounds it).
+    ...(job.status === 'failed' && job.error?.message ? { reason: job.error.message } : {}),
   })
 }
 

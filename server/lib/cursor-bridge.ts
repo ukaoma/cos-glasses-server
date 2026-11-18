@@ -157,6 +157,45 @@ export function extractCursorToolActivity(event: any): {
   }
 }
 
+/** 7.0.57: what each Cursor tool is doing, in plain words for the thread's reason line. */
+const CURSOR_WORK_WORDS: Record<string, string> = {
+  taskToolCall: 'waiting on a sub-agent',
+  readToolCall: 'reading files',
+  lsToolCall: 'reading files',
+  grepToolCall: 'searching files',
+  globToolCall: 'searching files',
+  shellToolCall: 'running a command',
+  bashToolCall: 'running a command',
+  terminalToolCall: 'running a command',
+  editToolCall: 'editing a file',
+  mcpToolCall: 'using a tool',
+}
+
+/**
+ * 7.0.57 (job 59a4413f, 2026-11-18): the tool calls Cursor has started and not yet completed, keyed by call_id. A
+ * sub-agent (taskToolCall) sends the parent no stream events while it works, so the inactivity timer killed a delegated
+ * read exactly 180 s after it began. An open call now counts as activity. Returns the tool's key for a tool_call event
+ * (for the reason line), else undefined. Events without a call_id are not tracked, so they can never hold a run open.
+ */
+export function trackCursorToolCall(open: Map<string, string>, event: any): string | undefined {
+  if (event?.type !== 'tool_call') return undefined
+  const call = event?.tool_call && typeof event.tool_call === 'object' ? event.tool_call : {}
+  const kind = Object.keys(call).find(key => key.endsWith('ToolCall')) ?? 'tool'
+  const id = typeof event?.call_id === 'string' && event.call_id ? event.call_id : null
+  if (!id) return kind
+  const subtype = String(event?.subtype ?? '')
+  if (subtype === 'started') open.set(id, kind)
+  else open.delete(id)
+  return kind
+}
+
+/** 7.0.57: the thread's plain reason for an inactivity kill: how long there was no progress and, when known, what it was doing. */
+export function cursorInactivityReason(quietMs: number, lastKind?: string): string {
+  const minutes = Math.max(1, Math.round(quietMs / 60_000))
+  const doing = lastKind ? CURSOR_WORK_WORDS[lastKind] : undefined
+  return `Cursor stopped after ${minutes} minute${minutes === 1 ? '' : 's'} with no progress${doing ? ` while it was ${doing}` : ''}. Ask again.`
+}
+
 function buildCursorPrompt(systemPrompt: string, fullQuery: string): string {
   return [
     'SYSTEM INSTRUCTIONS',
@@ -385,6 +424,8 @@ export async function callCursorStreaming(
   let terminalTextError: string | null = null
   let resultText: string | null = null
   let sawCursorWrite = false
+  const openToolCalls = new Map<string, string>()
+  let lastToolKind: string | undefined
 
   function cleanupImages() {
     cleanupModelImageInputs(imageInputs)
@@ -567,7 +608,7 @@ export async function callCursorStreaming(
     notifyExchange(sid, query, text)
   }
 
-  async function finalizeError(msg: string, exitCode?: number | null, status: Exclude<CursorRunStatus, 'running'> = 'failed') {
+  async function finalizeError(msg: string, exitCode?: number | null, status: Exclude<CursorRunStatus, 'running'> = 'failed', userMessage?: string) {
     if (finalized) return
     finalized = true
     cleanup()
@@ -582,7 +623,7 @@ export async function callCursorStreaming(
       exitCode,
     })
     try {
-      await callbacks.onError(safeCursorUserError(msg))
+      await callbacks.onError(userMessage ?? safeCursorUserError(msg))
     } catch (error) {
       console.error('[cursor-bridge] terminal error callback failed:', error)
     }
@@ -599,19 +640,32 @@ export async function callCursorStreaming(
     callbacks.onToolStatus?.(PHASE_LABELS[phase] ?? 'Processing...')
   }, HEARTBEAT_INTERVAL_MS)
 
-  let inactivityTimer = setTimeout(() => {
+  // 7.0.57: one inactivity handler. A started tool call that has not completed (a sub-agent sends nothing while it works)
+  // is activity: the handler re-arms and waits. It stops in one of three ways: an event or output arms it again, the run
+  // ends (cleanup clears it), or the wall timer below (WALL_MAX_MS, armed once and never re-armed) kills the run and its
+  // cleanup clears this timer, so a hung sub-agent still ends at the wall clock. A kill gives the thread a plain reason;
+  // the text already streamed is in the job's partial answer.
+  function onInactivity() {
+    if (finalized) return
+    if (openToolCalls.size > 0) {
+      armInactivity()
+      return
+    }
     proc.kill('SIGTERM')
     const elapsed = Math.round((Date.now() - startTime) / 1000)
-    finalizeError(`No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Cursor process killed.`)
-  }, INACTIVITY_MS)
+    finalizeError(`No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Cursor process killed.`, undefined, 'failed',
+      cursorInactivityReason(INACTIVITY_MS, lastToolKind))
+  }
+
+  let inactivityTimer = setTimeout(onInactivity, INACTIVITY_MS)
+
+  function armInactivity() {
+    clearTimeout(inactivityTimer)
+    inactivityTimer = setTimeout(onInactivity, INACTIVITY_MS)
+  }
 
   function resetInactivity() {
-    clearTimeout(inactivityTimer)
-    inactivityTimer = setTimeout(() => {
-      proc.kill('SIGTERM')
-      const elapsed = Math.round((Date.now() - startTime) / 1000)
-      finalizeError(`No output for ${INACTIVITY_MS / 1000}s (${elapsed}s total). Cursor process killed.`)
-    }, INACTIVITY_MS)
+    armInactivity()
   }
 
   const wallTimer = setTimeout(() => {
@@ -642,6 +696,8 @@ export async function callCursorStreaming(
       )
     }
 
+    const toolKind = trackCursorToolCall(openToolCalls, event)
+    if (toolKind) lastToolKind = toolKind
     const toolActivity = extractCursorToolActivity(event)
     if (toolActivity.isWrite) sawCursorWrite = true
     if (toolActivity.status) callbacks.onToolStatus?.(toolActivity.status)

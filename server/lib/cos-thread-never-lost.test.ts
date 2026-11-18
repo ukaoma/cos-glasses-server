@@ -187,4 +187,20 @@ describe('a cosThread chat is never lost', () => {
     const e = await second.until(second.entry, v => v?.status === 'completed', 'the thread answer after reboot')
     expect(e).toMatchObject({ id: `t:${ask.clientJobId}`, question: 'asked while the store could not open', answer: ANSWER })
   })
+  // 7.0.57 (job 59a4413f): a failed chat shows what came through and the job's own plain reason, through the real runtime.
+  it('(z) a failed chat carries its partial answer and the job\'s plain reason', async () => {
+    const REASON = 'Cursor stopped after 3 minutes with no progress while it was waiting on a sub-agent. Ask again.'
+    const fails = async (_q: string, sessionId: string, c: Callbacks) => {
+      await c.onStart?.('opus', sessionId, undefined, { claudeRunId: 'run-z' })
+      c.onChunk?.('Reading the meeting now.')
+      await c.onError?.(REASON)
+      return sessionId
+    }
+    const app = await boot(fails)
+    cleanup.push(app.shutdown)
+    const ask = threadAsk('what is happening in the live meeting')
+    expect((await app.post('/query-jobs', ask)).status).toBe(202)
+    const e = await app.until(app.entry, v => v?.status === 'failed', 'the failed chat')
+    expect(e).toMatchObject({ id: `t:${ask.clientJobId}`, status: 'failed', answer: 'Reading the meeting now.', reason: REASON })
+  })
 })
