@@ -242,6 +242,14 @@ describe('Stop: full only, never one tap, Keep working the default', () => {
     p.r.live.working = false; p.api.stop(p.r); expect([p.stop.attrs['data-stop'], p.stop.innerHTML]).toEqual(['none', ''])
     p.r.live.working = true; p.api.stop(p.r); expect(p.stop.innerHTML).toContain('data-sx="dock-stop"')   // asked was forgotten
   })
+  it('a turn that ends forgets the question: the next turn shows the one Stop, not "Stop this session?" (S4)', () => {
+    const p = page({ stored: 'full' })
+    p.api.stop(p.r); p.api.click('dock-stop')                   // asked, and he leaves it
+    p.r.live.working = false; p.api.stop(p.r)                  // the turn ends
+    p.r.live.working = true; p.api.stop(p.r)                   // the next turn starts
+    expect(p.stop.attrs['data-stop']).toBe('ask')
+    expect(p.stop.innerHTML).toBe('<button type="button" class="cx-btn quiet sx-stop-ask" data-sx="dock-stop">Stop</button>')
+  })
   it('only his tap of Stop moves focus: the painters never call focus', () => {
     expect(between(APP, '  function sxStopPaint(r) {', '  function sxStopFocusKeep() {')).not.toContain('focus(')
     expect(between(APP, '  function paintActivity(r) {', '\n  }\n')).toContain("if (typeof sxStopPaint === 'function') sxStopPaint(r);")
