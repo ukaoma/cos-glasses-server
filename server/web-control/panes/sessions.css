@@ -703,7 +703,7 @@ html.sx-frame .sx-docked .sx-wline > .sx-activity { flex: 1 1 auto; min-width: 0
 .sx-docked #session-form > .pa-card, .sx-docked #session-form > .pa-note, .sx-docked #session-form > .sx-x2, .sx-docked #session-form > .sx-stop-row,
 .sx-docked #session-files:not(.hidden), .sx-docked #session-clip, .sx-docked #session-form:not(.pa-req) .pa-go,
 .sx-docked #session-form.pa-req #session-send { margin-bottom: 8px; }
-.sx-docked #session-form > .pa-card { grid-area: card; margin: 0; }
+.sx-docked #session-form > .pa-card { grid-area: card; margin: 0 0 8px; }
 .sx-docked #session-form > .pa-note { grid-area: note; margin: 0; }
 .sx-docked #session-form .pa-go { grid-area: pk; }
 .sx-docked #session-clip { grid-area: clip; }
@@ -755,15 +755,21 @@ html.sx-frame.kb-up .sx-docked .sx-dock #session-input { max-height: 4.5em; }
    the field was off-screen below the extras. While the keyboard is up the dock is the handle and the reply row at every
    height: the working line, the extras, the note, Stop and the queue come back when it goes down. What answers a send
    (the busy box) and the Mac's question card sit under the form, so the box he types in stays whole, with the one-line
-   status above it; a request card above the field scrolls inside a capped height. Full is Middle's size while it is up. */
+   status above it. The request card and its passkey send are hidden too (the invariant below). Full is Middle's size
+   while it is up. */
 html.sx-frame.kb-up .sx-docked .sx-wline, html.sx-frame.kb-up .sx-docked #session-queue, html.sx-frame.kb-up .sx-docked #session-clip,
 html.sx-frame.kb-up .sx-docked #session-form > .pa-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-x2,
-html.sx-frame.kb-up .sx-docked #session-form > .sx-x2-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-stop-row,
-html.sx-frame.kb-up .sx-docked #session-form:not(.pa-req) .pa-go, html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: none; }
+html.sx-frame.kb-up .sx-docked #session-form > .sx-x2-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-stop-row { display: none; }
 html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }
 /* The one-line status ("Sent", "Not sent") stays above the field, so the answer to a send is in view (Q1 07:48). */
 html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }
-html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }
+/* THE INVARIANT (Miles 08:2x "Hidden is fine"; F1 08:2x, class A: at 382 a long card was covered by the reply row while
+   Approve and send stayed whole, so he could approve what he could not read): the request card and every passkey send
+   share this ONE rule, so Approve is never drawn while the card is not, at every docked size. With the keyboard up he
+   writes his note; he reads the card and approves once it goes down. The plain send stays in the reply row, a message
+   and not an answer, as its placeholder says. */
+html.sx-frame.kb-up .sx-docked #session-form > .pa-card, html.sx-frame.kb-up .sx-docked #session-form .pa-go { display: none; }
+html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: inline-flex; grid-area: send; width: 140px; margin-bottom: 0; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }
 /* The handle is 12 px to see while the keyboard is up (8 px back for the field and the status at 382, the lead 08:0x);

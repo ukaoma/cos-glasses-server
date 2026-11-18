@@ -327,6 +327,26 @@ describe('the markup and the CSS', () => {
     expect(DOCKCSS).toContain('height: 20px;')
     expect(DOCKCSS).toContain(".sx-docked .sx-dock-handle::before { content: ''; position: absolute; left: 0; right: 0; top: -24px; bottom: 0; }")
   })
+  // Miles 08:2x ("Hidden is fine"), F1 08:2x class A: Approve is never drawn while the request card is not.
+  it('THE INVARIANT: with the keyboard up the request card and every passkey send share one rule, and nothing else touches them', () => {
+    const rules = DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.trim()).filter(Boolean).map(r => ({ sels: r.split('{')[0].split(',').map(s => s.trim()), body: r.split('{')[1] }))
+    const kbPa = rules.filter(r => r.sels.some(s => s.includes('.kb-up') && /\.pa-card|\.pa-go/.test(s)))
+    expect(kbPa).toHaveLength(1)
+    expect(kbPa[0].sels).toEqual(['html.sx-frame.kb-up .sx-docked #session-form > .pa-card', 'html.sx-frame.kb-up .sx-docked #session-form .pa-go'])
+    expect(kbPa[0].body.trim()).toBe('display: none;')
+    // It outranks every rule that draws either one (specificity: ids, then classes/attributes/pseudo-classes, then types).
+    const spec = (s: string) => [(s.match(/#[\w-]+/g) || []).length, (s.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+/g) || []).length, (s.match(/(^|\s)[a-z]+(?=[.#\[:\s]|$)/g) || []).length]
+    const beats = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
+    const shows = rules.filter(r => /display:\s*(?!none\b)[a-z]/.test(r.body) && r.sels.some(s => /\.pa-card|\.pa-go/.test(s)))
+    expect(shows.length).toBeGreaterThan(0)
+    for (const r of shows) for (const s of r.sels.filter(x => /\.pa-card|\.pa-go/.test(x)))
+      for (const inv of kbPa[0].sels) expect(beats(spec(inv), spec(s)), inv + ' over ' + s).toBeGreaterThan(0)
+  })
+  it('with a request card up and the keyboard up, the plain send (a message, not an answer) is the reply row\'s send', () => {
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: inline-flex; grid-area: send; width: 140px; margin-bottom: 0; }')
+    // And Middle's request-state rule that hides it is outranked (2 ids and 4 classes plus html, against 2 and 3).
+    expect(DOCKCSS).toContain(".sx-docked[data-dock='middle'] #session-form.pa-req #session-send { display: none; }")
+  })
   it('keyboard up: the handle is 12 px to see and still 44 to touch (12 + 32 of reach)', () => {
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock-handle { height: 12px; }')
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock-handle::before { top: -32px; }')
@@ -340,6 +360,7 @@ describe('the markup and the CSS', () => {
     // The reply row itself carries no margin: it is the form's last row and its foot.
     expect(sel).not.toMatch(/#session-input|#session-send,|\.pa-req \.pa-go/)
     expect(DOCKCSS).toContain('.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 8px;')
+    expect(DOCKCSS).toContain('.sx-docked #session-form > .pa-card { grid-area: card; margin: 0 0 8px; }')   // after the margin list, so it keeps the 8 px
   })
   it('the plain send keeps 140 px for both its labels, so the field never moves', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-send { grid-area: send; width: 140px; min-height: 44px; }')
@@ -383,14 +404,13 @@ describe('the markup and the CSS', () => {
     // Whole selectors, never a substring: '#session-form > .sx-x2' is inside '... > .sx-x2-note' (mutant K2 survived that).
     const sels = hide.split(',').map(x => x.trim()).filter(Boolean)
     expect(sels).toEqual(['.sx-wline', '#session-queue', '#session-clip', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-x2-note',
-      '#session-form > .sx-stop-row', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'].map(p => 'html.sx-frame.kb-up .sx-docked ' + p))
-    // Approve and send stays in the reply row with a request card up, and the field itself is never hidden.
+      '#session-form > .sx-stop-row'].map(p => 'html.sx-frame.kb-up .sx-docked ' + p))
+    // The field itself is never hidden.
     expect(hide).not.toMatch(/\.pa-req \.pa-go|#session-input|#session-send,|#session-form,/)
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }')
     // The one-line status (Sent, Not sent) above the field, before the form's order 10 (Q1 07:48).
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }')
     expect(CSS).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
-    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }')
     // Full is Middle's size while it is up, so the field is never pushed under the keyboard by the extras.
     expect(DOCKCSS).toContain("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }")
     expect(DOCKCSS).toContain("html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }")
