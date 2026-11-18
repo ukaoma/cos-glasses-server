@@ -5424,11 +5424,12 @@
     if (e.preventDefault) e.preventDefault();
     sxDockSet(sxDockStep(sxDockHeight(), e.key === 'ArrowUp'));
   }
+  // No pointer capture: a touch pointer is captured to the handle by the browser, and the moves are read on window
+  // (sxDockHook). splitKit keeps the one drag implementation (split-panes-web).
   function sxDockDown(e) {
     var handle = e && e.target && e.target.closest ? e.target.closest('#session-handle') : null, dock = $('session-dock');
     if (!handle || !dock || !dock.getBoundingClientRect) return;
     SX_DOCK.drag = { y: e.clientY, h0: dock.getBoundingClientRect().height, full: sxDockFullPx() }; SX_DOCK.dragged = false;
-    try { if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId); } catch (_e) {}
   }
   function sxDockMove(e) {
     var d = SX_DOCK.drag, dock = $('session-dock'); if (!d || !dock || !dock.style) return;

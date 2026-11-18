@@ -228,7 +228,7 @@ describe('production reader and Today hook coverage', () => {
     const t = load(), render = turnRenderer(t), reader = t.document.createElement('section'); t.document.ids.set('session-reader', reader)
     const turns = [{ role: 'user', text: 'Make an image' }, { role: 'assistant', text: '', outputImages: [DTO] }]
     const noop = () => {}, state: any = {}
-    const deps = { window: t.window, document: t.document, state, $: t.document.getElementById, clearInterval: noop, readStore: () => ({}), HELD_KEY: 'held',
+    const deps = { window: t.window, document: t.document, state, $: t.document.getElementById, clearInterval: noop, readStore: () => ({}), HELD_KEY: 'held', SX_BUBBLE_SVG: '', SX_EXPAND_SVG: '', SX_DOCK: {}, sxDockHook: noop, sxDockPaint: noop,
       newFeed: () => ({}), SX: { view: 'sessions', rows: [] }, sxSave: noop, paintSessionsHero: noop, sxSame: () => false, sxKey: () => '',
       skeletonRows: () => '', api: async () => ({ recent_turns: turns }), sessionPath: () => '/session', SX_TURNS: 40, sxTitle: () => 'Images', sxTruncNote: () => '',
       sxBadge: () => '', sxFullButton: () => '', esc, sxSubtitle: () => '', renderTurns: render.render, readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,
@@ -316,7 +316,7 @@ describe('7.0.38: reopening a session settles a held answer before it is drawn o
     const held = [{ text: PREFIX + 'Yes, build it', key: 'k-ans', since: 1 }, { text: 'Check the Duo', key: 'k-msg', since: 1 }]
     const noop = () => {}, state: any = {}
     const settled: string[] = [], drawn: string[][] = [], timed: number[] = []
-    const deps = { window: t.window, document: t.document, state, $: t.document.getElementById, clearInterval: noop, readStore: () => ({ 'codex|session-one': held }), HELD_KEY: 'held',
+    const deps = { window: t.window, document: t.document, state, $: t.document.getElementById, clearInterval: noop, readStore: () => ({ 'codex|session-one': held }), HELD_KEY: 'held', SX_BUBBLE_SVG: '', SX_EXPAND_SVG: '', SX_DOCK: {}, sxDockHook: noop, sxDockPaint: noop,
       newFeed: () => ({}), SX: { view: 'sessions', rows: [] }, sxSave: noop, paintSessionsHero: noop, sxSame: () => false, sxKey: () => '',
       skeletonRows: () => '', api: async () => ({ recent_turns: [] }), sessionPath: () => '/session', SX_TURNS: 40, sxTitle: () => 'S', sxTruncNote: () => '',
       sxBadge: () => '', sxFullButton: () => '', esc, sxSubtitle: () => '', renderTurns: () => '', readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,
@@ -342,7 +342,7 @@ describe('7.0.38: reopening a session settles a held answer before it is drawn o
     const late = region(APP, '  function settleLateAnswer(r, h) {', '  // Ends one held message')
     // The reader draws its own composer (a fresh textarea, empty as a real one is): this fake El has no value until set.
     const $ = (id: string) => { const e = t.document.getElementById(id); if (e && id === 'session-input' && e.value === undefined) e.value = ''; return e }
-    const deps: any = { window: t.window, document: t.document, state, $, clearInterval: noop, readStore: () => store, HELD_KEY: 'held',
+    const deps: any = { window: t.window, document: t.document, state, $, clearInterval: noop, readStore: () => store, HELD_KEY: 'held', SX_BUBBLE_SVG: '', SX_EXPAND_SVG: '', SX_DOCK: {}, sxDockHook: noop, sxDockPaint: noop,
       newFeed: () => ({}), SX: { view: 'sessions', rows: [] }, sxSave: noop, paintSessionsHero: noop, sxSame: () => false, sxKey: () => '',
       skeletonRows: () => '', api: async () => ({ recent_turns: [] }), sessionPath: () => '/session', SX_TURNS: 40, sxTitle: () => 'S', sxTruncNote: () => '',
       sxBadge: () => '', sxFullButton: () => '', esc, sxSubtitle: () => '', renderTurns: () => '', readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,

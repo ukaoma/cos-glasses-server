@@ -138,12 +138,19 @@ describe('flag off: the composer is exactly as before', () => {
     expect(h.form.querySelector('[data-action="approve-on-phone"]')).toBeNull()
     expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
   })
-  it('the composer markup is the 6.99.29 markup, byte for byte', () => {
+  // 7.0.56: 6.99.29's composer plus the dock's parts (the small Fork's class, the full-only extras and the Stop row);
+  // the flag still adds nothing to it.
+  it('the composer markup is 7.0.56\'s (6.99.29\'s plus the dock), byte for byte', () => {
     const PINNED = `'<form class="composer att-composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
             '<div class="cc-chips att-files hidden" id="session-files"></div>' +
             '<textarea id="session-input" rows="1" placeholder="Continue this session…" enterkeyhint="send" aria-label="Continue this session"></textarea>' +
-            '<div class="composer-actions"><span id="session-clip" class="att-clip"></span><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
+            '<div class="composer-actions"><span id="session-clip" class="att-clip"></span><button type="button" class="btn small sx-fork-small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
             '<button type="submit" class="btn primary small" id="session-send">Send</button></div>' +
+            // 7.0.56: full only (.sx-docked): one Fork (the same fork-session), Copy session with its note, and Stop.
+            '<div class="sx-x2"><button type="button" class="cx-btn quiet" data-action="fork-session" title="Runs your message in a copy of this thread. The original is untouched.">Fork with this message</button>' +
+              '<button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button></div>' +
+            '<p class="sx-x2-note">Kickstart brief for another agent. Not a Claude Code resume.</p>' +
+            '<div class="sx-stop-row" id="session-stop-row"></div>' +
           '</form>`
     expect(APP.split(PINNED).length - 1).toBe(1)
     // The only button the composer markup can ever carry for phone approval is added by paintWebKeyOffer.
@@ -406,7 +413,7 @@ describe('the request card (7.0.51; was the explicit packet selection)', () => {
       const h = harness({ signer: 1, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] })
       h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
       const go = h.form.querySelector('[data-phone-offer]')!
-      if (prefix !== 'rr') expect(h.input.nextSibling).toBe(go)
+      expect(h.input.nextSibling).toBe(go)
       expect(go.innerHTML).toContain('Approve and send')
       expect(h.send.textContent).toBe('Send as message only')
     })

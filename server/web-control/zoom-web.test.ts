@@ -27,8 +27,8 @@ describe('7.0.17: double-tap zoom is off, and the stricter touch rules are untou
   it('the splitter keeps touch-action: none and the charts keep pan-y (touch-action narrows down the tree)', () => {
     const all = CSS + '\n' + PANE_CSS
     // none: the Sessions splitter in app.css and sessions.css, the Today sheet's scrim and its ::before; pan-y: the usage
-    // chart and the speakers bar. The same counts as d2de7ee.
-    expect(all.match(/touch-action: none/g)?.length).toBe(4)
+    // chart and the speakers bar. The same counts as d2de7ee, plus 7.0.56's dock handle (sessions.css .sx-dock-handle).
+    expect(all.match(/touch-action: none/g)?.length).toBe(5)
     expect(all.match(/touch-action: pan-y/g)?.length).toBe(2)
     expect(all.match(/touch-action: manipulation/g)?.length, 'only on the root').toBe(1)
   })
