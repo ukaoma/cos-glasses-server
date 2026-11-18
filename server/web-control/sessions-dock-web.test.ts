@@ -327,6 +327,20 @@ describe('the markup and the CSS', () => {
     expect(DOCKCSS).toContain('height: 20px;')
     expect(DOCKCSS).toContain(".sx-docked .sx-dock-handle::before { content: ''; position: absolute; left: 0; right: 0; top: -24px; bottom: 0; }")
   })
+  it('keyboard up: the handle is 12 px to see and still 44 to touch (12 + 32 of reach)', () => {
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock-handle { height: 12px; }')
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock-handle::before { top: -32px; }')
+  })
+  it('F1 08:02: the docked form has no row gap, so its empty template rows add nothing; the 8 px sits under what is drawn', () => {
+    expect(DOCKCSS).toContain('.sx-docked #session-form { display: grid; grid-template-columns: auto auto minmax(0, 1fr) 140px; column-gap: 6px; row-gap: 0; align-items: center;')
+    expect(DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/#session-form \{[^}]*row-gap: [1-9]/)
+    const sel = between(DOCKCSS, '.sx-docked #session-form > .pa-card, .sx-docked #session-form > .pa-note,', '{ margin-bottom: 8px; }')
+    for (const part of ['#session-form > .pa-card', '#session-form > .pa-note', '#session-form > .sx-x2', '#session-form > .sx-stop-row', '#session-files:not(.hidden)', '#session-clip', '#session-form:not(.pa-req) .pa-go', '#session-form.pa-req #session-send'])
+      expect(sel.split(',').map(x => x.trim()).filter(Boolean), part).toContain('.sx-docked ' + part)
+    // The reply row itself carries no margin: it is the form's last row and its foot.
+    expect(sel).not.toMatch(/#session-input|#session-send,|\.pa-req \.pa-go/)
+    expect(DOCKCSS).toContain('.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 8px;')
+  })
   it('the plain send keeps 140 px for both its labels, so the field never moves', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-send { grid-area: send; width: 140px; min-height: 44px; }')
     expect(DOCKCSS).toContain("grid-template-columns: auto auto minmax(0, 1fr) 140px;")

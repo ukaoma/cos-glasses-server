@@ -694,9 +694,15 @@ html.sx-frame .sx-docked .sx-wline > .sx-activity { flex: 1 1 auto; min-width: 0
 /* The reply part, on one grid: the request card and the working note, the extras (passkey send, camera and attach;
    Fork with this message and Copy session with its note), Stop, then the files and the reply row (the words and the
    plain send, fixed at 140 px so the field never moves when the label changes). */
-.sx-docked #session-form { display: grid; grid-template-columns: auto auto minmax(0, 1fr) 140px; column-gap: 6px; row-gap: 8px; align-items: center;
+.sx-docked #session-form { display: grid; grid-template-columns: auto auto minmax(0, 1fr) 140px; column-gap: 6px; row-gap: 0; align-items: center;
   grid-template-areas: 'card card card card' 'note note note note' 'pk clip . .' 'x2 x2 x2 x2' 'x2n x2n x2n x2n' 'stop stop stop stop' 'files files files files' 'input input input send'; }
 .sx-docked #session-form .composer-actions { display: contents; }
+/* No row gap (F1 08:02, keyboard up at 382: the field started 63 px under the form's top): the template's empty rows
+   (the hidden card, note, extras, Stop) took a gap each, 7 of 8 px, so the form was about 141 px in a 123 px dock and
+   slid over the handle and the status. The 8 px sits under each part that is drawn instead. */
+.sx-docked #session-form > .pa-card, .sx-docked #session-form > .pa-note, .sx-docked #session-form > .sx-x2, .sx-docked #session-form > .sx-stop-row,
+.sx-docked #session-files:not(.hidden), .sx-docked #session-clip, .sx-docked #session-form:not(.pa-req) .pa-go,
+.sx-docked #session-form.pa-req #session-send { margin-bottom: 8px; }
 .sx-docked #session-form > .pa-card { grid-area: card; margin: 0; }
 .sx-docked #session-form > .pa-note { grid-area: note; margin: 0; }
 .sx-docked #session-form .pa-go { grid-area: pk; }
@@ -704,7 +710,7 @@ html.sx-frame .sx-docked .sx-wline > .sx-activity { flex: 1 1 auto; min-width: 0
 .sx-docked #session-form .sx-fork-small { display: none; }
 .sx-docked #session-form > .sx-x2 { grid-area: x2; display: flex; flex-wrap: wrap; gap: 8px; }
 .sx-docked #session-form > .sx-x2 .cx-btn { min-height: 44px; }
-.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 0; font: 400 12.5px/1.35 var(--body); color: var(--sub); }
+.sx-docked #session-form > .sx-x2-note { grid-area: x2n; display: block; margin: -4px 0 8px; font: 400 12.5px/1.35 var(--body); color: var(--sub); }
 .sx-docked #session-form > .sx-stop-row { grid-area: stop; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .sx-docked #session-files { grid-area: files; }
 .sx-docked #session-input { grid-area: input; width: auto; min-height: 44px; }
@@ -760,6 +766,10 @@ html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }
 html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }
+/* The handle is 12 px to see while the keyboard is up (8 px back for the field and the status at 382, the lead 08:0x);
+   its reach still goes 32 px up into the thread, so it stays a 44 px target. */
+html.sx-frame.kb-up .sx-docked .sx-dock-handle { height: 12px; }
+html.sx-frame.kb-up .sx-docked .sx-dock-handle::before { top: -32px; }
 /* FOCUS: the thread and the working line; no reply box. */
 .sx-docked[data-dock='focus'] #session-verdict, .sx-docked[data-dock='focus'] #session-form, .sx-docked[data-dock='focus'] #session-status,
 .sx-docked[data-dock='focus'] #session-caution, .sx-docked[data-dock='focus'] #session-queue { display: none; }
