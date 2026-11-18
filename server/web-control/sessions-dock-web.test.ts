@@ -259,6 +259,14 @@ describe('7.0.58 (Q1 12:59): a desk drag knows Full\'s drawn height, and one poi
     p.api.up({ clientY: 346, pointerId: 1 })                                // released at 126 + 254 = 380
     expect(p.api.height()).toBe('full')
   })
+  it('a repaint during a drag from Full (a stream event) does not take the preview as Full\'s height (Q4)', () => {
+    const p = desk('full'); p.dock.h = 380; p.api.paint()
+    p.api.down({ target: p.handle, clientY: 600, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 800, pointerId: 1, buttons: 1 })
+    p.dock.h = 180; p.api.apply()                                       // drawn at the preview's 180 while he drags
+    expect(p.api.SX_DOCK.fullSeen).toBe(380)
+    p.api.up({ clientY: 600, pointerId: 1 })                            // back where it began: still Full
+    expect(p.api.height()).toBe('full')
+  })
   it('never in Full yet: the preview stops at the reader less the floor', () => {
     const p = desk('middle'); p.api.paint()
     p.api.down({ target: p.handle, clientY: 900, pointerId: 1, pointerType: 'mouse' }); p.api.move({ clientY: 0, pointerId: 1, buttons: 1 })
