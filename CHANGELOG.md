@@ -18,6 +18,12 @@
 - This build does not change the folded side buttons and makes no claim about keeping his reading place.
 - With the keyboard up and a request waiting, at 382 and 951 px the request card is still drawn behind the reply row with its title cut, the draft's third line is cut at the box's foot while the box scrolls, and the only send drawn is the quiet "Send as message only" link (F1's probe 5, B1, B2 and C1; they hold the npm decision, not this install).
 
+**Tested on this build** (the counted run on 92c06964; this commit adds only these lines):
+- **Pre-suite and counted run, alone, swift-slot lease held start to end (08:31 to 08:49):** the web set 2580 passed (2580); the 16 server tests that read web source, the key-lane, spawn and Cursor censuses, hazard invariants and route suites 3215 passed (3215); type check exit 0; `npm test` 993 passed | 2 skipped (995); 18393 passed | 6 skipped (18399); exit 0. Stamp: script 973bc5057d3a5352, commit 92c069644b18856ddb0738a38b1fb83bdf855ba1, tracked-files a2d255df9e3cce21, node_modules -> /Users/ukaoma/cos-worktrees/server-candidate-7032/node_modules.
+- **F1's WebKit verdict on this head:** dock probe 5 on dcddf408, no class A (08:30): Approve is never visible while its card is not, keyboard up handle, box and Send whole and on top, keyboard down brings the card back whole with the draft kept; known B1 (the card drawn behind the row at 382 and 951), B2 (the draft's third line cut at the box's foot), C1 (only the quiet Send as message only link drawn). The lead's 08:2x ruling: no class A passes for the private install; B and C hold the npm decision; F1's keyed layout sweep on the final head is owed before npm.
+- **Q1:** source reads with no runs: e4bc9c97 one FAIL (07:15), cleared on fd05c06e by reading (07:18); 63e6ab17 one FAIL (07:42), cleared on a551018f by reading (07:48). Q1's read of 2370c3fc, b0735abd and dcddf408 is not recorded at the kit; W1's GREEN slot 5 on dcddf408 killed 59 of 59 mutants.
+- **Every changed file is byte-identical to the reviewed commit that last set it**, except CHANGELOG.md (release-7.0.56/merges.txt).
+
 ## 7.0.55 - Live glass on Today's Running rows, Claude usage in Claude orange, links to the live meeting, and the folded strip recorded
 
 2026-11-17. 7.0.54 (262b2510, installed on Miles's Mac since 10:29) plus the changes below, merged source-only on claude/server-7055. The public server of the combined release with Control 0.5.402 (the lead's PLAN X, GO 12:2x); on npm only on a line Miles types.
