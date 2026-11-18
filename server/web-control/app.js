@@ -5352,6 +5352,7 @@
   var SX_DOCK_KEY = 'cos.sxDock', SX_DOCK_HEIGHTS = ['focus', 'middle', 'full'];
   var SX_DOCK_MQ = '(pointer: coarse) and (max-width: 599px), (pointer: coarse) and (max-height: 720px)';
   // The mock's arithmetic (README, Measurements): focus 68 px, middle 126; full leaves 48 px of thread, never under 126.
+  // keep is the thread floor at every height and in every state (F1 07:17: extras had pushed the thread to 8 px).
   var SX_DOCK_PX = { focus: 68, middle: 126, keep: 48 }, SX_DOCK_DRAG_PX = 6;
   var SX_DOCK = { h: null, drag: null, dragged: false, stopAsk: false, hooked: false };
   var SX_BUBBLE_SVG = '<svg class="sx-dock-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H11l-4 3.5V15h0.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>';
@@ -5390,12 +5391,16 @@
     var on = sxDockApplies(), h = sxDockHeight();
     rd.classList.toggle('sx-docked', on);
     if (on) rd.setAttribute('data-dock', h); else rd.removeAttribute('data-dock');
+    // The thread floor (F1 07:17): sessions.css keeps the thread at least this tall at every height and in every state.
+    if (rd.style && rd.style.setProperty) rd.style.setProperty('--sx-floor', SX_DOCK_PX.keep + 'px');
     var handle = $('session-handle');
     if (handle) { handle.setAttribute('aria-valuetext', h); handle.setAttribute('aria-label', 'Showing ' + SX_DOCK_WORDS[h] + '. Drag, tap or use the arrow keys to change what the dock shows'); }
     var full = rd.querySelector ? rd.querySelector('[data-sx="dock-full"]') : null, focus = rd.querySelector ? rd.querySelector('[data-sx="dock-focus"]') : null;
     if (full) { full.setAttribute('aria-pressed', h === 'full' ? 'true' : 'false'); full.setAttribute('aria-label', h === 'full' ? 'Show fewer actions' : 'Show all actions'); }
     if (focus) focus.setAttribute('aria-label', h === 'focus' ? 'Show the reply box' : 'Expand the thread');
     sxStopPaint(state.reading);
+    // The field's width changes with the dock, so its placeholder is fitted again (two lines when its words need them).
+    var box = $('session-input'); if (box && box.phLong && typeof sxPlaceholderFit === 'function') sxPlaceholderFit(box);
   }
   /** Stop, in full only, and only while it works. The first tap asks; Keep working is the filled, focused answer, where
    *  Stop was, so a second stray tap keeps the session going. No hold gesture. */

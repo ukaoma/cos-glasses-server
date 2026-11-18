@@ -26,7 +26,7 @@ const DOCKCSS = between(CSS, '/* ── 7.0.56: the Sessions dock, Direction 2',
 
 // ── a page of fakes ───────────────────────────────────────────────────────────────────────────────────────────────
 class El {
-  attrs: Record<string, string> = {}; cls = new Set<string>(); style: Record<string, string> = {}; focused = 0; writes = 0; html = ''
+  attrs: Record<string, string> = {}; cls = new Set<string>(); style: any = { setProperty(this: any, k: string, v: string) { this[k] = v } }; focused = 0; writes = 0; html = ''
   get innerHTML() { return this.html }
   set innerHTML(v: string) { this.html = v; this.writes++ }
   constructor(public id = '', public h = 0) {}
@@ -53,7 +53,8 @@ function page(o: Opts = {}) {
   const reader = new El('session-reader'), handle = new El('session-handle'), dock = new El('session-dock', 126), stop = new El('session-stop-row')
   reader.kids.full = new El('full'); reader.kids.focus = new El('focus'); reader.kids.head = Object.assign(new El('head'), { offsetHeight: 37 })
   reader.clientHeight = 463
-  const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop }
+  const input: any = Object.assign(new El('session-input'), { phLong: 'Continue this session…' }), fits: unknown[] = []
+  const ids: Record<string, El> = { 'session-reader': reader, 'session-handle': handle, 'session-dock': dock, 'session-stop-row': stop, 'session-input': input }
   const store: Record<string, string> = o.stored == null ? {} : { 'cos.sxDock': o.stored }
   const writes: string[] = []
   const listeners: Record<string, Array<(e: unknown) => void>> = {}
@@ -65,14 +66,14 @@ function page(o: Opts = {}) {
   const ctx: Record<string, unknown> = {
     window: { localStorage, matchMedia: (q: string) => ({ matches: !!o.docked && q.includes('pointer: coarse'), addEventListener: () => {} }),
       addEventListener: (t: string, f: (e: unknown) => void) => { (listeners[t] ||= []).push(f) } },
-    $: (id: string) => ids[id] ?? null, state: { reading: r }, Math, Infinity,
+    $: (id: string) => ids[id] ?? null, state: { reading: r }, Math, Infinity, sxPlaceholderFit: (b: unknown) => { fits.push(b) },
   }
   vm.createContext(ctx)
   vm.runInContext(DOCK + `
 ;this.api = { SX_DOCK: SX_DOCK, SX_DOCK_PX: SX_DOCK_PX, SX_DOCK_MQ: SX_DOCK_MQ, height: sxDockHeight, set: sxDockSet, next: sxDockNext, step: sxDockStep, snap: sxDockSnap,
   paint: sxDockPaint, stop: sxStopPaint, click: sxDockClick, key: sxDockKey, down: sxDockDown, move: sxDockMove, up: sxDockUp, hook: sxDockHook };`, ctx)
   const api = (ctx as { api: any }).api
-  return { api, reader, handle, dock, stop, store, writes, r, listeners }
+  return { api, reader, handle, dock, stop, store, writes, r, listeners, input, fits }
 }
 
 describe('the height: one value per device, Middle when nothing is stored (the lead 18:5x)', () => {
@@ -334,17 +335,37 @@ describe('the markup and the CSS', () => {
     expect(DOCKCSS).toContain('.sx-docked #session-form.pa-req .pa-go { grid-area: send; width: 140px; }')
     expect(DOCKCSS).toContain(".sx-docked[data-dock='middle'] #session-form.pa-req .pa-go { display: inline-flex; }")
   })
-  it('full: 48 px of thread stay; the dock never under 126', () => {
-    expect(DOCKCSS).toContain("html.sx-frame .sx-docked[data-dock='full'] .sx-body { flex: 0 0 48px; }")
-    expect(DOCKCSS).toContain("html.sx-frame .sx-docked[data-dock='full'] .sx-dock { flex: 1 1 auto; min-height: 126px; }")
+  // F1 07:17 (382x557, 3 queued and Not sent): Middle grew to 691 px and left 8 px of thread, Full left 48. This
+  // harness has no layout engine, so the heights themselves are F1's probe; here: the floor is one constant
+  // (SX_DOCK_PX.keep, read from the code, never restated), the paint sets it, and every height's CSS is held to it.
+  it('the thread floor is SX_DOCK_PX.keep: the paint sets --sx-floor from it', () => {
+    const p = page({ docked: true }), keep = p.api.SX_DOCK_PX.keep
+    p.api.paint()
+    expect(p.reader.style['--sx-floor']).toBe(keep + 'px')
+    expect(keep).toBeGreaterThan(0)
   })
-  it('keyboard up in middle at 382x557 (the mock\'s arithmetic): the reply row fits and the thread keeps 47 px', () => {
-    // README "Keyboard up, folded": 291 pt leaves 266 px; the top bar 48, the workspace 12 and a 33 px header stay.
-    const visible = 266, chrome = 48 + 12 + 33, middle = page().api.SX_DOCK_PX.middle
-    expect(middle).toBe(126)
-    expect(visible - chrome - middle).toBeGreaterThanOrEqual(47)
-    // The middle dock is the handle 20, the working line 44 and the reply row: nothing else is drawn there.
-    expect(DOCKCSS).toContain('.sx-docked .sx-wline { display: flex; align-items: center; gap: 8px; flex: none; min-height: 44px; }')
+  it('every height keeps the floor: the thread never under it, the dock gives way and scrolls, so Middle is never taller than Full', () => {
+    expect(DOCKCSS).toContain('html.sx-frame .sx-docked .sx-body { min-height: var(--sx-floor); }')
+    expect(DOCKCSS).toContain('html.sx-frame .sx-docked .sx-dock { flex: 0 1 auto; min-height: 0; }')
+    expect(DOCKCSS).toContain("html.sx-frame .sx-docked[data-dock='full'] .sx-body { flex: 0 0 var(--sx-floor); }")
+    expect(DOCKCSS).toContain("html.sx-frame .sx-docked[data-dock='full'] .sx-dock { flex: 1 1 auto; min-height: 0; }")
+    const rules = DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(rules, 'no px thread height: the floor is the one constant').not.toMatch(/sx-body \{[^}]*\d+px/)
+    expect(rules, 'no dock minimum that could beat the floor').not.toMatch(/\.sx-dock \{[^}]*min-height: [1-9]/)
+    // The frame scrolls the dock and pins the reply row at its foot (7.0.55), which the floor relies on.
+    expect(CSS).toContain('html.sx-frame .sx-dock { overflow-y: auto; overscroll-behavior: contain; }')
+    expect(CSS).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
+  })
+  it('the working line stays one line: a dropped-feed note is cut, not wrapped (F1: Focus grew to 180 px)', () => {
+    expect(DOCKCSS).toContain('.sx-docked .sx-act-fallback { height: 44px; padding-top: 0; line-height: 44px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }')
+  })
+  it('the placeholder is whole: the empty field takes two lines when its words need them, keyboard up too (F1 07:17 at 382)', () => {
+    expect(DOCKCSS).toContain('html.sx-frame .sx-docked .sx-dock #session-input { max-height: 140px; }')
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-input { max-height: 4.5em; }')
+    // autoGrow sizes an empty box to its placeholder; the dock paint fits it again when the dock changes the width.
+    expect(APP).toContain("if (!ta.value && ta.id === 'session-input' && ta.placeholder) h = Math.max(h, placeholderHeight(ta, ta.placeholder));")
+    const p = page({ docked: true }); p.api.paint()
+    expect(p.fits).toEqual([p.input])
   })
   it('no motion on a height change (reduced motion is respected by having none)', () => {
     expect(DOCKCSS.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/transition|animation/)

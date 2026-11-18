@@ -730,8 +730,20 @@ html.sx-frame .sx-docked .sx-wline > .sx-activity { flex: 1 1 auto; min-width: 0
 .sx-docked[data-dock='middle'] #session-form.pa-req #session-send { display: none; }
 /* FULL: one Fork. The busy box's own Fork (renderVerdict) is not drawn beside the one in the extras. */
 .sx-docked[data-dock='full'] #session-verdict [data-action='fork-session'] { display: none; }
-html.sx-frame .sx-docked[data-dock='full'] .sx-body { flex: 0 0 48px; }
-html.sx-frame .sx-docked[data-dock='full'] .sx-dock { flex: 1 1 auto; min-height: 126px; }
+html.sx-frame .sx-docked[data-dock='full'] .sx-body { flex: 0 0 var(--sx-floor); }
+html.sx-frame .sx-docked[data-dock='full'] .sx-dock { flex: 1 1 auto; min-height: 0; }
+/* The thread floor (F1 07:17, Middle had grown to 691 px and left 8): at every height and in every state the thread
+   keeps --sx-floor (app.js sxDockPaint sets it from SX_DOCK_PX.keep). The dock gives way instead: what it holds beyond
+   its height (the queue, Not sent, the question card, the notes) scrolls inside it with the reply row pinned at its
+   foot, so Middle is never taller than Full, with the keyboard up too. */
+html.sx-frame .sx-docked .sx-body { min-height: var(--sx-floor); }
+html.sx-frame .sx-docked .sx-dock { flex: 0 1 auto; min-height: 0; }
+/* The working line is one line: a dropped-feed note is cut, never wrapped to four (F1: Focus grew to 180 px). */
+.sx-docked .sx-act-fallback { height: 44px; padding-top: 0; line-height: 44px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The reply field shows its placeholder whole (F1 07:17: at 382 the strip leaves the field about 126 px): the empty box
+   takes two lines when its words need them (autoGrow sizes it to the placeholder), not the frame's 10%-of-screen cap. */
+html.sx-frame .sx-docked .sx-dock #session-input { max-height: 140px; }
+html.sx-frame.kb-up .sx-docked .sx-dock #session-input { max-height: 4.5em; }
 /* FOCUS: the thread and the working line; no reply box. */
 .sx-docked[data-dock='focus'] #session-verdict, .sx-docked[data-dock='focus'] #session-form, .sx-docked[data-dock='focus'] #session-status,
 .sx-docked[data-dock='focus'] #session-caution, .sx-docked[data-dock='focus'] #session-queue { display: none; }
