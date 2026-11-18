@@ -11,6 +11,7 @@ import {
   resolveCursorModelOption,
 } from './cursor-model-catalog.js'
 import { getCodexExecutionCwd } from './codex-run-ledger.js'
+import { dataPath } from './data-dir.js'
 
 const DEFAULT_MAX_RUNS = 100
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60_000
@@ -105,8 +106,12 @@ export function getCursorRunConfig(): CursorRunConfig {
   }
 }
 
+/**
+ * 7.0.57 (X1, 2026-11-18): the data folder, like Codex's ledger. It lived next to the code, inside each installed
+ * generation, so every install started it empty. COS_CURSOR_RUN_LEDGER_FILE still wins.
+ */
 export function getCursorLedgerPath(): string {
-  return resolve(process.env.COS_CURSOR_RUN_LEDGER_FILE || resolve(import.meta.dirname, '..', 'data', 'cursor-runs.jsonl'))
+  return resolve(process.env.COS_CURSOR_RUN_LEDGER_FILE || dataPath('cursor-runs.jsonl'))
 }
 
 function getMaxRuns(): number {
