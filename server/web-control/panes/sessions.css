@@ -748,14 +748,15 @@ html.sx-frame.kb-up .sx-docked .sx-dock #session-input { max-height: 4.5em; }
    and a two-line reply row need 142, so the sticky form slid over the handle and Send fell under the keyboard; in Full
    the field was off-screen below the extras. While the keyboard is up the dock is the handle and the reply row at every
    height: the working line, the extras, the note, Stop and the queue come back when it goes down. What answers a send
-   (the busy box, a refusal) and the Mac's question card sit under the form, so the box he types in stays whole; a
-   request card above the field scrolls inside a capped height. Full is Middle's size while it is up. */
+   (the busy box) and the Mac's question card sit under the form, so the box he types in stays whole, with the one-line
+   status above it; a request card above the field scrolls inside a capped height. Full is Middle's size while it is up. */
 html.sx-frame.kb-up .sx-docked .sx-wline, html.sx-frame.kb-up .sx-docked #session-queue, html.sx-frame.kb-up .sx-docked #session-clip,
 html.sx-frame.kb-up .sx-docked #session-form > .pa-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-x2,
 html.sx-frame.kb-up .sx-docked #session-form > .sx-x2-note, html.sx-frame.kb-up .sx-docked #session-form > .sx-stop-row,
 html.sx-frame.kb-up .sx-docked #session-form:not(.pa-req) .pa-go, html.sx-frame.kb-up .sx-docked #session-form.pa-req #session-send { display: none; }
 html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }
-html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 12; }
+/* The one-line status ("Sent", "Not sent") stays above the field, so the answer to a send is in view (Q1 07:48). */
+html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }
 html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-body { flex: 1 1 0; }
 html.sx-frame.kb-up .sx-docked[data-dock='full'] .sx-dock { flex: 0 1 auto; }

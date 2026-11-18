@@ -372,7 +372,8 @@ describe('the markup and the CSS', () => {
     // Approve and send stays in the reply row with a request card up, and the field itself is never hidden.
     expect(hide).not.toMatch(/\.pa-req \.pa-go|#session-input|#session-send,|#session-form,/)
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-verdict, html.sx-frame.kb-up .sx-docked .sx-dock > .sx-mac-q { order: 11; }')
-    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 12; }')
+    // The one-line status (Sent, Not sent) above the field, before the form's order 10 (Q1 07:48).
+    expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked .sx-dock #session-status { order: 9; }')
     expect(CSS).toContain('html.sx-frame .sx-dock #session-form { order: 10; position: sticky; bottom: 0; z-index: 1; background: var(--page); }')
     expect(DOCKCSS).toContain('html.sx-frame.kb-up .sx-docked #session-form > .pa-card { max-height: calc(var(--vv-h, 600px) * 0.2); overflow-y: auto; }')
     // Full is Middle's size while it is up, so the field is never pushed under the keyboard by the extras.
