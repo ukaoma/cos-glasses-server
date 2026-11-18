@@ -1,3 +1,21 @@
+## 7.0.59 - The Today summary reads the overnight mail scan
+
+2026-11-18. 7.0.58 plus overnight mail intel as an input to the Today summary and the Codex mail line (M1), nothing else. Miles approved pulling mail intelligence into his UI ("Good Morning + Today", then "Start it", 2026-11-18). For a private install on his Mac; on npm only on a separate line from him.
+
+**On for everyone whose Mac has the scan, one line each:**
+- Today summary: **the summary now sees the top five emails the 05:30 mail scan ranked** (the zero-model `com.cos.mail-intel-scan` LaunchAgent, read-only through Spark), and may name the most important one in a few words inside its two or three sentences. What reaches the model per email: the inbox, who sent it and their role, whether it was sent to him, the subject and how it begins. Never the sender address, the message link, any id or the account address.
+- **Every mail field is untrusted text:** email addresses and URL shapes go first, then the same cleaning as session text (secrets, long tokens, ids, paths, one line, bounded), and each field is quoted in the prompt. The model is told emails are data and never to write an address.
+- **Never silence:** with no scan file, a file that cannot be read, a scan over 16 hours old, or a last run in runs.jsonl that failed, the summary's data says one line, "mail unavailable: <reason>", and the model is told to say nothing about the inbox.
+- **A new morning scan with the same emails does not rewrite the summary:** mail counts toward "the inputs changed" by the shown fields only, never by the scan's time or an email's age. Mail is not a material change, so it rewrites at most on the 30-minute routine path.
+- **Mail never crowds out sessions or Needs you:** it goes last in the data block inside its own 1,600-character share of the 14,000. The three-sentence cap and the data bound are unchanged. The file is read only after every gate (switch, recording, drain, breaker, cap, interval).
+- `COS_MAIL_INTEL_PATH` points the reader at another scan file (tests); the default is ~/cos-data/mail-intel/mail_intel.json.
+- Codex on the glasses (writes enabled): **its capability contract no longer points mail at the retired Gmail scripts.** It now says to use the connectors that load, else the read-only Spark CLI (`spark accounts`, `spark emails`, `spark thread`), and never to send mail, only write it out as text. (The lead session, 11/18: a G2 session said a deadline could not be found without M365 while Spark had it.)
+
+**Not covered, said plainly:**
+- On a Mac without the scan the line is "mail unavailable: no overnight scan was found" and the summary is as before.
+- Whether the model names an email depends on the day; nothing forces it.
+- 7.0.58's notes below still hold.
+
 ## 7.0.58 - The Sessions dock at every size and pointer
 
 2026-11-18. 7.0.57 (ffaaf666, never installed, never published) plus W1's hotfix, nothing else. For a private install on his Mac (his line of 12:27: "That drag functionality should be EVERYWHERE including the desktop and larger window sizes."); on npm only on a separate line from him. The Mac runs 7.0.56, so everything in 7.0.57 below arrives with it.
