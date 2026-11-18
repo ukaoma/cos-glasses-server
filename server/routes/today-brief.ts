@@ -13,6 +13,8 @@
  *                                   7.0.5: `"reason": "reconnect"` says the client's read just recovered from a failed
  *                                   one: that start skips the 10-minute interval, at most once per 10 minutes. The
  *                                   "inputs unchanged" check, the breaker, the switch and the daily cap still apply.
+                                   7.0.59: after every gate, the overnight mail scan (lib/today-mail-intel.ts), at most
+                                   five cleaned emails or one "mail unavailable" reason, never from the body.
  * - GET  /api/today/brief/settings  the switch and what set it.
  * - POST /api/today/brief/settings  { enabled: boolean }, the Settings toggle. COS_TODAY_BRIEF_LLM, when set, still wins.
  * - GET  /api/today/brief/settings/cap   7.0.5 "Summaries per day": { dailyCap, min: 1, max: 100, default: 100, usedToday }.
@@ -34,8 +36,9 @@ import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/mainte
 import { isRecordingLive } from '../lib/stt-runtime.js'
 import {
   TODAY_BRIEF_BODY_MAX_BYTES, TODAY_BRIEF_EFFORT, TODAY_BRIEF_SETTINGS_FILE, TODAY_BRIEF_STATE_FILE, TODAY_BRIEF_TIMEOUT_MS,
-  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, sessionContextLookups, todayBriefFingerprint, withCalendar, withRecentActivity, withSubagents, type BriefWork, type CalendarReading, type SubagentReading, type TodayBrief,
+  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, sessionContextLookups, todayBriefFingerprint, withCalendar, withMail, withRecentActivity, withSubagents, type BriefMail, type BriefWork, type CalendarReading, type SubagentReading, type TodayBrief,
 } from '../lib/today-brief.js'
+import { MAIL_UNAVAILABLE } from '../lib/today-mail-intel.js'
 
 export interface TodayBriefRouterDeps {
   brief: TodayBrief
@@ -49,6 +52,9 @@ export interface TodayBriefRouterDeps {
   /** Today round 2: today's calendar (lib/calendar-source.ts calendarToday). Read with the session reads, inside the
    *  same wait; a failed, slow or unconnected read means no calendar in the prompt. */
   calendar?: () => Promise<CalendarReading | null>
+  /** 7.0.59: the overnight mail scan (lib/today-mail-intel.ts readMailIntel), a small local file read after the gates.
+   *  Absent: no mail section. A read that throws is "the scan file could not be read", never silence. */
+  mail?: () => BriefMail | null
   now?: () => number
 }
 
@@ -204,8 +210,10 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
       const [rows] = await Promise.all([deps.board().catch(() => null), reads])
       // A snapshot: a read still running after the wait cannot change the inputs under the call.
       const agents = new Map(context.agents), recent = new Map(context.recent), calendar = cal.value
+      let mail: BriefMail | null = null
+      if (deps.mail) { try { mail = deps.mail() } catch { mail = { items: [], unavailable: MAIL_UNAVAILABLE.unreadable } } }
       let inputs = normalizeTodayBriefInputs(body, workInProgress(rows, now))
-      inputs = withCalendar(withRecentActivity(withSubagents(inputs, agents, now), recent, now), calendar, now)
+      inputs = withMail(withCalendar(withRecentActivity(withSubagents(inputs, agents, now), recent, now), calendar, now), mail)
       res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs), { force, reconnect }))
     } catch (error) {
       if (error instanceof TodayBriefInputError) return res.status(400).json({ error: { code: error.code, message: 'That is not a Today summary request.' } })

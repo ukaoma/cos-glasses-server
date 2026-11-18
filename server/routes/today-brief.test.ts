@@ -27,6 +27,9 @@ let recentAnswer: (keys: string[]) => Map<string, any> = () => new Map()
 // Today round 2: the calendar the route reads with the sessions. undefined: no calendar dependency at all.
 let calendarAnswer: (() => Promise<any>) | undefined
 let calendarCalls = 0
+// 7.0.59: the overnight mail reader. undefined: no mail dependency at all.
+let mailAnswer: (() => any) | undefined
+let mailCalls = 0
 async function start(enabled: boolean | null) {
   dir = mkdtempSync(join(tmpdir(), 'today-brief-route-'))
   if (enabled !== null) writeFileSync(join(dir, 's.json'), JSON.stringify({ schema: 1, enabled }))
@@ -42,7 +45,8 @@ async function start(enabled: boolean | null) {
     // Recent activity lands first, then the sub-agents, as the real reader writes each as it is read.
     for (const [k, v] of recentAnswer(keys)) into.recent.set(k, v)
     for (const [k, v] of await subagentAnswer(keys)) into.agents.set(k, v)
-  }, ...(calendarAnswer ? { calendar: () => { calendarCalls++; return calendarAnswer!() } } : {}), now: () => Date.parse('2026-11-07T13:00:00Z') }))
+  }, ...(calendarAnswer ? { calendar: () => { calendarCalls++; return calendarAnswer!() } } : {}),
+  ...(mailAnswer ? { mail: () => { mailCalls++; return mailAnswer!() } } : {}), now: () => Date.parse('2026-11-07T13:00:00Z') }))
   server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`
 }
@@ -51,7 +55,7 @@ afterEach(async () => {
   server = null
   rmSync(dir, { recursive: true, force: true })
 })
-beforeEach(() => { board = []; subagentAnswer = async () => new Map(); recentAnswer = () => new Map(); calendarAnswer = undefined; calendarCalls = 0 })
+beforeEach(() => { board = []; subagentAnswer = async () => new Map(); recentAnswer = () => new Map(); calendarAnswer = undefined; calendarCalls = 0; mailAnswer = undefined; mailCalls = 0 })
 
 const post = (path: string, body: unknown) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 const ASK = { sessions: [{ title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 5, waiting: 'Wants to run npm publish' }], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false }
@@ -374,5 +378,39 @@ describe('Today round 2: the calendar on the ask', () => {
     expect(calendarCalls).toBe(1)
     await post('/today/brief', { ...ASK, sessions: [{ ...ASK.sessions[0], minutes: 400 }] })
     expect(calendarCalls).toBe(1)
+  })
+})
+
+// 7.0.59: the overnight mail scan reaches the prompt through the route's own reader, after every gate.
+describe('7.0.59: overnight mail on the ask', () => {
+  const ITEM = { inbox: 'quilt', who: 'Jordan Lee', role: 'Chief Financial Officer', addressed: 'to', subject: 'Q4 forecast sign-off', snippet: 'Can you confirm the numbers' }
+  it('the reader\u2019s items reach the prompt as quoted rows, and the basis counts them', async () => {
+    mailAnswer = () => ({ items: [ITEM] })
+    await start(true)
+    const v = await (await post('/today/brief', ASK)).json()
+    expect(v.basis).toBe('1 session and 1 email')
+    expect(mailCalls).toBe(1)
+    expect(prompts[0]).toContain('- In the "quilt" inbox, from "Jordan Lee" ("Chief Financial Officer"), sent to the person: subject "Q4 forecast sign-off"')
+  })
+  it('a reader that throws is one "mail unavailable" line, never silence and never a failed ask', async () => {
+    mailAnswer = () => { throw new Error('EACCES /Users/someone/cos-data') }
+    await start(true)
+    const v = await (await post('/today/brief', ASK)).json()
+    expect(v.state).toBe('fresh')
+    expect(prompts[0]).toContain('mail unavailable: the scan file could not be read')
+    expect(prompts[0]).not.toContain('EACCES')
+  })
+  it('switched off or gated, the mail file is not read', async () => {
+    mailAnswer = () => ({ items: [ITEM] })
+    await start(null)
+    await post('/today/brief', ASK)
+    expect(mailCalls).toBe(0)
+    await new Promise(r => server!.close(r)); server = null; rmSync(dir, { recursive: true, force: true })
+    await start(true)
+    await post('/today/brief', ASK)
+    expect(mailCalls).toBe(1)
+    // Changed rows inside the 10-minute interval: a gated ask, answered from the page, reads no mail.
+    await post('/today/brief', { ...ASK, sessions: [{ ...ASK.sessions[0], title: 'Release QA two' }] })
+    expect(mailCalls).toBe(1)
   })
 })

@@ -143,6 +143,7 @@ import { handoffsRouter } from './routes/handoffs.js'
 import { recoveryRouter } from './routes/recovery.js'
 import { promptEditRouter } from './routes/prompt-edit.js'
 import { createTodayBriefRouter, defaultTodayBrief, readSessionContext } from './routes/today-brief.js'
+import { readMailIntel } from './lib/today-mail-intel.js'
 import { calendarToday } from './lib/calendar-source.js'
 import { liveCosAskRouter } from './routes/live-cos-ask.js'
 import { meetingAskRouter } from './routes/meeting-ask.js'
@@ -1113,7 +1114,7 @@ app.use('/api', createWorkHandoffRequestsRouter({ store: workHandoffRequestStore
 // The Today summary for COS Control Web (6.99.26 candidate): Haiku, off unless switched on, with its own caps and breaker.
 // 2026-11-09: the brief reads the DATED board (when each card last moved), through its own bounded, shared reader.
 const datedWorkBoardReader = createWorkBoardReader(() => listBoardWithDates())
-app.use('/api', createTodayBriefRouter({ brief: defaultTodayBrief(), board: () => datedWorkBoardReader.read(60_000, 3_000).catch(() => null), context: (keys, into) => readSessionContext(keys, into), calendar: () => calendarToday() }))
+app.use('/api', createTodayBriefRouter({ brief: defaultTodayBrief(), board: () => datedWorkBoardReader.read(60_000, 3_000).catch(() => null), context: (keys, into) => readSessionContext(keys, into), calendar: () => calendarToday(), mail: () => readMailIntel() }))
 // Work intake (6.57.0): meeting-derived suggestions, asks and review items. Optional: a bad journal never blocks boot.
 const workIntakeStore = createOptionalWorkIntakeStore(() => new WorkIntakeStore(dataPath('work-intake')))
 app.use('/api', createWorkIntakeRouter({ store: workIntakeStore }))
