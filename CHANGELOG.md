@@ -8,6 +8,7 @@
 - **Stop is in Full only, behind one confirm:** the first tap asks "Stop this session?", and "Keep working" is the filled, first button. No hold gestures.
 - **The plain send is the main button** wherever the passkey composer runs (the session reader, Today's sheet and the Answer box): the filled button reads "Send" ("Queue message" while the session works), and Enter sends it. "Send with passkey" is the outlined, secondary button and is disabled while the session works. With a request card up, "Approve and send" stays the main button, as before.
 - Fork and "Fork with this message" are one control; the camera, attach and the passkey send sit in Full.
+- **With the keyboard up the handle and the reply row are on top and whole,** and Approve is never shown while its request card is not; the card, Approve and the other extras come back whole when the keyboard goes down, with the typed draft kept. The send status shows above the field.
 - **Who gets the dock:** a coarse pointer (touch) and a screen no wider than 599 px or no taller than 720 px. That is phones and the open Duo; a taller tablet and every desktop keep the reader as in 7.0.55.
 
 **Unchanged:** the passkey send's fresh request check at Send and its refusal of files; off the Tailscale name no passkey button is drawn and the labels are as before; the COS thread box never carries an install or publish request.
@@ -15,6 +16,7 @@
 **Not covered, said plainly:**
 - The dock is checked in a browser model; how it feels on his phone and Duo is his test this morning.
 - This build does not change the folded side buttons and makes no claim about keeping his reading place.
+- With the keyboard up and a request waiting, at 382 and 951 px the request card is still drawn behind the reply row with its title cut, the draft's third line is cut at the box's foot while the box scrolls, and the only send drawn is the quiet "Send as message only" link (F1's probe 5, B1, B2 and C1; they hold the npm decision, not this install).
 
 ## 7.0.55 - Live glass on Today's Running rows, Claude usage in Claude orange, links to the live meeting, and the folded strip recorded
 
