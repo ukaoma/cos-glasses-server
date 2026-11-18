@@ -104,7 +104,7 @@ vi.mock('./provider-process-lifecycle.js', () => ({
   terminateProviderProcess: vi.fn(async () => ({ closed: true, escalated: false, code: null, signal: 'SIGTERM' })),
 }))
 
-import { callCursorStreaming, cursorInactivityReason, trackCursorToolCall } from './cursor-bridge.js'
+import { callCursorStreaming, cursorInactivityReason, cursorWallReason, trackCursorToolCall } from './cursor-bridge.js'
 
 const INACTIVITY = 180_000
 const WALL = 900_000
@@ -151,6 +151,13 @@ describe('cursorInactivityReason', () => {
   })
 })
 
+describe('cursorWallReason', () => {
+  it('names the wall clock in minutes, derived from the constant', () => {
+    expect(cursorWallReason(WALL)).toBe('Cursor stopped after 15 minutes while it was still working. Ask again.')
+    expect(cursorWallReason(60_000)).toBe('Cursor stopped after 1 minute while it was still working. Ask again.')
+  })
+})
+
 describe('the Cursor bridge inactivity timer, by execution (fake time)', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
@@ -189,9 +196,8 @@ describe('the Cursor bridge inactivity timer, by execution (fake time)', () => {
     expect(child.kill).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(2_000)
     expect(child.kill).toHaveBeenCalledWith('SIGTERM')
-    // The wall path's own words (the mocked ledger classifies every error as cursor.error), never the inactivity reason.
-    expect(errors()).toHaveLength(1)
-    expect(errors()[0]).not.toMatch(/stopped after/)
+    // An open call at the wall clock fails with the wall's plain reason (Codex's read of ef1de8c9), not the inactivity one.
+    expect(errors()).toEqual(['Cursor stopped after 15 minutes while it was still working. Ask again.'])
   })
 
   it('with no open call, 180 s of quiet kills the run and gives the thread a plain reason', async () => {
@@ -215,6 +221,29 @@ describe('the Cursor bridge inactivity timer, by execution (fake time)', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     expect(child.kill).toHaveBeenCalledTimes(1)
     expect(errors()).toEqual(['Cursor stopped after 3 minutes with no progress while it was waiting on a sub-agent. Ask again.'])
+  })
+
+  it('an interim line and a sub-agent still open at the wall clock: the ask FAILS with the wall reason, never completes', async () => {
+    const { child, send, errors, calls } = await start()
+    send({ type: 'assistant', timestamp_ms: 1, message: { content: [{ type: 'text', text: 'Reading...' }] } })
+    send(started('t1', 'taskToolCall'))
+    await vi.advanceTimersByTimeAsync(WALL)
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(errors()).toEqual(['Cursor stopped after 15 minutes while it was still working. Ask again.'])
+    expect(calls.some(([name]) => name === 'onDone' || name === 'onAnswerReady')).toBe(false)
+    // The interim line was already streamed, so the job keeps it as the partial the thread shows under the reason.
+    expect(calls.filter(([name]) => name === 'onChunk').map(([, args]) => args[0]).join('')).toBe('Reading...')
+  })
+
+  it('with no open call and text kept current to the wall clock, the text is the answer, completed as before', async () => {
+    const { send, errors, calls } = await start()
+    for (let i = 0; i < 9; i++) {
+      send({ type: 'assistant', timestamp_ms: i + 1, message: { content: [{ type: 'text', text: `part ${i}. ` }] } })
+      await vi.advanceTimersByTimeAsync(100_000)
+    }
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(errors()).toEqual([])
+    expect(calls.some(([name]) => name === 'onDone')).toBe(true)
   })
 
   it('the text already streamed reaches the job before the kill (the job keeps it as the partial answer)', async () => {

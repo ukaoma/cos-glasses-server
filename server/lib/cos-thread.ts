@@ -766,6 +766,9 @@ export class CosThread {
     const status: CosThreadChatStatus = end.status === 'completed' ? 'completed' : end.status === 'failed' ? 'failed' : 'interrupted'
     const text = typeof end.text === 'string' ? end.text : ''
     const prior = this.answers.get(end.clientJobId)
+    // 7.0.57 (the lead's 09:5x ruling): no reason backfill. The boot re-projects every retained terminal job; an identical
+    // end (same generation, status and length) is skipped HERE, before any reason is read, so a failed chat recorded
+    // before 7.0.57 never gains one and keeps the page's fixed words. Pinned in cos-thread-failure-reason.test.ts.
     if (prior && supersededBy(prior, { generation: end.generation, status, answerChars: text.length }) === false) return
     const at = this.iso()
     let ref: AnswerRef | undefined

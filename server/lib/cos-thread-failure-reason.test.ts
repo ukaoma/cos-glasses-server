@@ -62,6 +62,18 @@ describe('the thread store keeps a failed chat\'s reason', () => {
     const entry = h.make().historyPage({ limit: 5 }).entries[0]!
     expect(entry.reason).toHaveLength(REASON_CHARS)
   })
+  // The lead's 09:5x ruling: no backfill. A failed chat recorded without a reason (before 7.0.57) is re-projected at every
+  // boot with the same generation, status and length; that identical end is skipped before any reason is read.
+  it('a re-projection never backfills a reason onto a failed chat recorded without one', () => {
+    const h = harness()
+    h.make().recordJobEnd({ ...job(1), status: 'failed', text: 'part' })
+    const t = h.make()
+    t.recordJobEnd({ ...job(1), status: 'failed', text: 'part', reason: REASON })
+    expect(t.historyPage({ limit: 5 }).entries[0]).toMatchObject({ status: 'failed', answer: 'part' })
+    expect(t.historyPage({ limit: 5 }).entries[0]).not.toHaveProperty('reason')
+    expect(h.make().historyPage({ limit: 5 }).entries[0]).not.toHaveProperty('reason')
+  })
+
   it('a later generation that completes replaces the failed one, reason and all', () => {
     const h = harness(); const t = h.make()
     t.recordJobEnd({ ...job(1), status: 'failed', text: '', reason: REASON })

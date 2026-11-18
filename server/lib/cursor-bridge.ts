@@ -189,6 +189,12 @@ export function trackCursorToolCall(open: Map<string, string>, event: any): stri
   return kind
 }
 
+/** 7.0.57 (Codex's read of ef1de8c9): the thread's plain reason when the wall clock ends a run whose tool call or sub-agent is still open. */
+export function cursorWallReason(wallMs: number): string {
+  const minutes = Math.max(1, Math.round(wallMs / 60_000))
+  return `Cursor stopped after ${minutes} minute${minutes === 1 ? '' : 's'} while it was still working. Ask again.`
+}
+
 /** 7.0.57: the thread's plain reason for an inactivity kill: how long there was no progress and, when known, what it was doing. */
 export function cursorInactivityReason(quietMs: number, lastKind?: string): string {
   const minutes = Math.max(1, Math.round(quietMs / 60_000))
@@ -670,7 +676,14 @@ export async function callCursorStreaming(
 
   const wallTimer = setTimeout(() => {
     proc.kill('SIGTERM')
-    if (fullText || resultText) {
+    // 7.0.57 (Codex's read of ef1de8c9): an open tool call now outlives the inactivity timer, so a run can reach the wall
+    // clock with only an interim line ("Reading...") streamed and its sub-agent still working. That is not an answer: it
+    // FAILS with a plain reason, and the streamed text stays in the job's partial answer for the thread to show under it.
+    // With no open call, any text is the answer, completed as before.
+    if (openToolCalls.size > 0) {
+      finalizeError(`Wall clock limit reached (${WALL_MAX_MS / 1000}s) with ${openToolCalls.size} tool call(s) open. Cursor process killed.`,
+        undefined, 'failed', cursorWallReason(WALL_MAX_MS))
+    } else if (fullText || resultText) {
       void finalize(resultText || fullText)
     } else {
       finalizeError(`Wall clock limit reached (${WALL_MAX_MS / 1000}s). Cursor process killed.`)
